@@ -6,6 +6,22 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.3] — 2026-03-28
+
+### Added
+
+- **Wider `NodeChild` / `NodeChildren` types** — `NodeChild` now accepts `boolean`; `NodeChildren` accepts nested arrays and full reactive functions. Conditional patterns like `condition && element` work without `as any` casts. Boolean values are filtered out in `appendChildren`, `bindChildNode`, `Fragment()`, `htm.ts`, and `resolveChild`.
+- **`onCleanup()` lifecycle hook** — `onCleanup(callback, element)` registers teardown logic (closing sockets, clearing timers, removing listeners) tied to an element's disposal. Integrates with the existing `dispose()` system so cleanup runs automatically when `when()`, `match()`, or `each()` swap content.
+- **`query()` `select` option** — Optional `select` function that transforms cached data before returning it to consumers. Raw response stays in cache; `select` runs on read, enabling derived views without extra signals.
+- **`formatNumber()` and `formatCurrency()`** — `Intl`-based formatting utilities exported from `sibujs/browser`. `formatNumber` wraps `Intl.NumberFormat`; `formatCurrency` is a convenience shorthand that sets `style: "currency"`.
+
+### Fixed
+
+- **Boolean values no longer render as text** — `false`, `true` are filtered in all rendering paths (`tagFactory`, `bindChildNode`, `Fragment`, `htm.ts`, `resolveChild`) preventing visible `"false"` text nodes.
+- **Lint fixes** — Resolved unused variable in `router.basic.test.ts` and formatting issues flagged by Biome.
+
+---
+
 ## [1.0.2] — 2026-03-27
 
 ### Fixed
