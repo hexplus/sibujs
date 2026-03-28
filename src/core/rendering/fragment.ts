@@ -23,10 +23,11 @@ export function Fragment(nodes: NodeChildren[]): DocumentFragment {
   const frag = document.createDocumentFragment();
 
   for (const child of nodes) {
-    if (child == null) continue;
+    if (child == null || typeof child === "boolean") continue;
 
     if (Array.isArray(child)) {
       for (const nested of child) {
+        if (nested == null || typeof nested === "boolean") continue;
         frag.appendChild(resolveChild(nested));
       }
     } else {

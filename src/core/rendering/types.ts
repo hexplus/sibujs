@@ -1,2 +1,12 @@
-export type NodeChild = Node | Element | Text | Comment | string | number | (() => NodeChild) | null | undefined;
-export type NodeChildren = NodeChild | NodeChild[] | (() => string);
+export type NodeChild =
+  | Node
+  | Element
+  | Text
+  | Comment
+  | string
+  | number
+  | boolean
+  | (() => NodeChild)
+  | null
+  | undefined;
+export type NodeChildren = NodeChild | NodeChild[] | NodeChild[][] | (() => NodeChild | NodeChild[]);
