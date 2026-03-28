@@ -16,3 +16,4 @@ export * from "./src/browser/clipboard";
 export * from "./src/browser/dragDrop";
 export * from "./src/browser/title";
 export * from "./src/browser/colorScheme";
+export * from "./src/browser/format";

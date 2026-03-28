@@ -367,11 +367,11 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
             const item = val[j];
             if (item instanceof Node) {
               el.appendChild(item);
-            } else if (item != null) {
+            } else if (item != null && typeof item !== "boolean") {
               el.appendChild(document.createTextNode(String(item)));
             }
           }
-        } else if (val != null) {
+        } else if (val != null && typeof val !== "boolean") {
           el.appendChild(document.createTextNode(String(val)));
         }
         break;
@@ -428,11 +428,11 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Eleme
             const item = val[j];
             if (item instanceof Node) {
               wrapper.appendChild(item);
-            } else if (item != null) {
+            } else if (item != null && typeof item !== "boolean") {
               wrapper.appendChild(document.createTextNode(String(item)));
             }
           }
-        } else if (val != null) {
+        } else if (val != null && typeof val !== "boolean") {
           wrapper.appendChild(document.createTextNode(String(val)));
         }
         break;

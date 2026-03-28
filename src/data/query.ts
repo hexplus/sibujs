@@ -28,6 +28,8 @@ export interface QueryOptions<T> {
   onError?: (error: Error) => void;
   /** Called on fetch settle (success or error) */
   onSettled?: () => void;
+  /** Transform fetched data before returning to consumers. Cache stores raw data. */
+  select?: (data: T) => T;
 }
 
 export interface QueryResult<T> {
@@ -95,6 +97,7 @@ export function query<T>(
     onSuccess,
     onError,
     onSettled,
+    select,
   } = options;
 
   const resolveKey = typeof key === "function" ? key : () => key;
@@ -159,8 +162,9 @@ export function query<T>(
       entry.dataUpdatedAt = Date.now();
       entry.error = undefined;
 
+      const selected = select ? select(result as T) : (result as T);
       batch(() => {
-        setData(result as T);
+        setData(selected);
         setIsFetching(false);
         setError(undefined);
       });
@@ -198,8 +202,10 @@ export function query<T>(
       });
       return;
     }
+    const raw = entry.data as T | undefined;
+    const selected = raw !== undefined && select ? select(raw) : raw;
     batch(() => {
-      setData(entry.data as T | undefined);
+      setData(selected);
       setError(entry.error);
       if (!entry.promise) setIsFetching(false);
     });
@@ -232,8 +238,10 @@ export function query<T>(
     entry.refetchers.add(doFetch);
 
     if (entry.data !== undefined) {
+      const raw = entry.data as T;
+      const selected = select ? select(raw) : raw;
       batch(() => {
-        setData(entry.data as T);
+        setData(selected);
         setError(entry.error);
       });
     }

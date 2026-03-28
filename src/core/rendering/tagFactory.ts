@@ -115,6 +115,10 @@ function appendChildren(el: Element, nodes: NodeChildren) {
     el.textContent = String(nodes);
     return;
   }
+  // Filter booleans (false from `condition && element` patterns, true is harmless)
+  if (typeof nodes === "boolean" || nodes == null) {
+    return;
+  }
   if (typeof nodes === "function") {
     const ph = document.createComment("");
     el.appendChild(ph);
@@ -143,11 +147,11 @@ function appendChildren(el: Element, nodes: NodeChildren) {
             registerDisposer(el, bindChildNode(ph, inner as () => NodeChild));
           } else if (inner instanceof Node) {
             el.appendChild(inner);
-          } else if (inner != null) {
+          } else if (inner != null && typeof inner !== "boolean") {
             el.appendChild(document.createTextNode(String(inner)));
           }
         }
-      } else if (c != null) {
+      } else if (c != null && typeof c !== "boolean") {
         el.appendChild(document.createTextNode(String(c)));
       }
     }

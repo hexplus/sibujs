@@ -21,6 +21,7 @@
  */
 
 import { devWarn } from "../dev";
+import { registerDisposer } from "./dispose";
 
 type CleanupFn = () => void;
 
@@ -110,4 +111,26 @@ export function onUnmount(callback: CleanupFn, element: HTMLElement): void {
       return undefined;
     }, element);
   }
+}
+
+/**
+ * Register a cleanup callback that runs when the given element is disposed.
+ * Integrates with `when()`, `match()`, and `each()` which call `dispose()`
+ * on removed nodes, triggering all registered cleanup functions.
+ *
+ * @param callback Cleanup function (close sockets, clear intervals, etc.)
+ * @param element The component's root node to attach cleanup to
+ *
+ * @example
+ * ```ts
+ * function RealtimeBar(siteId: string) {
+ *   const ws = new WebSocket(`/ws/sites/${siteId}/realtime`);
+ *   const root = div({ nodes: "Realtime data..." });
+ *   onCleanup(() => ws.close(), root);
+ *   return root;
+ * }
+ * ```
+ */
+export function onCleanup(callback: CleanupFn, element: Node): void {
+  registerDisposer(element, callback);
 }

@@ -30,7 +30,7 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       if (node.parentNode) node.parentNode.removeChild(node);
     }
 
-    if (result == null) {
+    if (result == null || typeof result === "boolean") {
       lastNodes.length = 0;
       return;
     }
@@ -48,6 +48,7 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       if (lastNodes.length < result.length) lastNodes = new Array(result.length);
       for (let i = 0; i < result.length; i++) {
         const item = result[i];
+        if (item == null || typeof item === "boolean") continue;
         const node = item instanceof Node ? item : document.createTextNode(String(item));
         parent.insertBefore(node, anchor);
         lastNodes[count++] = node;
