@@ -256,6 +256,31 @@ describe("query", () => {
     });
   });
 
+  describe("select", () => {
+    it("transforms data with select option", async () => {
+      const q = query("select-basic", async () => ({ items: [1, 2, 3], total: 3 }), {
+        select: (data) => ({ ...data, items: data.items.filter((n) => n > 1) }),
+      });
+      await tick();
+      expect(q.data()?.items).toEqual([2, 3]);
+      q.dispose();
+    });
+
+    it("applies select when syncing from cache", async () => {
+      const q = query("select-cache", async () => ({ count: 10 }), {
+        select: (data) => ({ count: data.count * 2 }),
+        staleTime: 60_000,
+      });
+      await tick();
+      expect(q.data()?.count).toBe(20);
+
+      // Second subscriber with different select still gets its own transform
+      setQueryData("select-cache", { count: 5 });
+      expect(q.data()?.count).toBe(10);
+      q.dispose();
+    });
+  });
+
   describe("callbacks", () => {
     it("calls onSuccess and onSettled on success", async () => {
       const onSuccess = vi.fn();
