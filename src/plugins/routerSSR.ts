@@ -3,6 +3,7 @@
 // Server-side route resolution with client-side hydration continuity.
 // ============================================================================
 
+import type { TrustedHTML } from "../platform/ssr";
 import { renderToString } from "../platform/ssr";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
@@ -358,7 +359,7 @@ export function renderRouteToDocument(
     meta?: Record<string, string>[];
     links?: Record<string, string>[];
     scripts?: string[];
-    headExtra?: string;
+    headExtra?: TrustedHTML;
   },
 ): string {
   const { html, state } = renderRouteToString(url, routes, options);
@@ -493,7 +494,7 @@ export function createSSRRouter(routes: SSRRouteDef[]): {
       meta?: Record<string, string>[];
       links?: Record<string, string>[];
       scripts?: string[];
-      headExtra?: string;
+      headExtra?: TrustedHTML;
     },
   ) => string;
 } {
