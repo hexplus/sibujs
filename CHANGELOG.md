@@ -6,6 +6,38 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.4] — 2026-03-28
+
+### Added
+
+- **`bindField()` helper** (`sibujs/ui`) — One-liner to wire a `FormField` to any input, select, or checkbox. Handles `value`, `input`, `change`, and `blur` events automatically. Accepts extra props (placeholder, class, etc.) as a second argument.
+- **Toast severity shortcuts** — `toast()` now returns `.info()`, `.success()`, `.error()`, and `.warning()` convenience methods alongside the existing `.show()`.
+- **`KeepAliveRoute()` component** (`sibujs/plugins`) — Route outlet that caches rendered components using LRU eviction, preserving signals, form state, and scroll position across navigations. Configurable via `RouterOptions.keepAlive` (boolean, string[], or number) or per-outlet options.
+- **`RouterOptions.keepAlive`** — New router option to enable route-level KeepAlive caching. Accepts `true` (cache all), a string array of route names, or a number (max cache size).
+- **`copyOnClick` action** — Copies element text (or custom getter value) to clipboard on click. Usage: `action(el, copyOnClick)`.
+- **`autoResize` action** — Auto-grows a textarea to fit its content on input. Usage: `action(el, autoResize)`.
+
+### Changed
+
+- **`show()` accepts `Element`** — Signature widened from `show(condition, element: HTMLElement): HTMLElement` to `show<T extends Element>(condition, element: T): T`. Eliminates the `as HTMLElement` cast required on every call since tag factories return `Element`.
+- **`contentEditable` uses modern Selection/Range API** — Replaced deprecated `document.execCommand()` with `range.surroundContents()` for bold/italic/underline. Supports toggle (unwrap) when already formatted. The `execCommand` method has been removed from the public API.
+- **`renderToDocument()` `headExtra` requires `TrustedHTML`** — Now accepts a branded `TrustedHTML` type instead of plain `string`. Use `trustHTML()` to wrap developer-controlled HTML. Prevents accidental injection of unsanitized user input at compile time. Same change applied to `routerSSR`.
+
+### Security
+
+- **`scopedStyle()` CSS sanitization** — Strips `url()`, `@import`, `expression()`, `-moz-binding`, and `behavior` from CSS before injection. Prevents data exfiltration via attribute selectors and network requests.
+- **`persisted()` encryption docs** — Removed misleading `btoa()`/`atob()` example (Base64 is encoding, not encryption). Updated guidance to recommend `crypto.subtle` / AES-GCM.
+- **`TrustedHTML` branded type** — New `TrustedHTML` type and `trustHTML()` factory exported from `sibujs/ssr`. Enforces type-level safety for raw HTML injection points.
+
+### Fixed
+
+- **`bindField()` extras no longer clobber event handlers** — Passing `{ on: { click: handler } }` as extras now merges with the field's `input`/`change`/`blur` handlers instead of replacing them. Extras `value` is also ignored to prevent overriding the field getter.
+- **`KeepAliveRoute` memory leak** — Evicted nodes are now properly `dispose()`d. Non-cached routes are disposed when navigating away. Cleanup function disposes all cached nodes.
+- **`contentEditable` selection restore** — After unwrap, selection now targets the actual unwrapped content range instead of the parent container. After wrap, selection targets the wrapper's contents instead of `document.body`.
+- **`sanitizeCSS` `url()` bypass** — Regex now handles quoted strings (`url("...")`, `url('...')`) as opaque tokens, preventing bypass via closing paren inside quotes.
+
+---
+
 ## [1.0.3] — 2026-03-28
 
 ### Added

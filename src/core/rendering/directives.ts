@@ -16,9 +16,9 @@ import type { NodeChild } from "./types";
  * div({ nodes: [show(() => visible(), span({ nodes: "I toggle!" }))] });
  * ```
  */
-export function show(condition: () => boolean, element: HTMLElement): HTMLElement {
+export function show<T extends Element>(condition: () => boolean, element: T): T {
   const update = () => {
-    element.style.display = condition() ? "" : "none";
+    (element as unknown as HTMLElement).style.display = condition() ? "" : "none";
   };
   track(update);
   return element;

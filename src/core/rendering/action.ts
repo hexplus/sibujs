@@ -108,6 +108,49 @@ export const longPress: ActionFn<LongPressOptions> = (element, options) => {
 };
 
 /**
+ * Copies the element's textContent to the clipboard on click.
+ * Optionally accepts a custom getter for the text to copy.
+ *
+ * @example
+ * ```ts
+ * // Copy element text
+ * action(el, copyOnClick);
+ *
+ * // Copy custom value
+ * action(el, copyOnClick, () => secretToken());
+ * ```
+ */
+export const copyOnClick: ActionFn<(() => string) | undefined> = (element, getText) => {
+  const handler = () => {
+    const text = typeof getText === "function" ? getText() : (element.textContent ?? "");
+    navigator.clipboard.writeText(text);
+  };
+  element.addEventListener("click", handler);
+  return () => element.removeEventListener("click", handler);
+};
+
+/**
+ * Auto-resizes a textarea to fit its content.
+ * Adjusts height on input and on initial attach.
+ *
+ * @example
+ * ```ts
+ * const ta = textarea({ placeholder: "Type here..." });
+ * action(ta, autoResize);
+ * ```
+ */
+export const autoResize: ActionFn<void> = (element) => {
+  const resize = () => {
+    element.style.overflow = "hidden";
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  };
+  resize();
+  element.addEventListener("input", resize);
+  return () => element.removeEventListener("input", resize);
+};
+
+/**
  * Traps keyboard focus within the element (Tab and Shift+Tab cycle).
  * Essential for accessible modals and dialogs.
  *
