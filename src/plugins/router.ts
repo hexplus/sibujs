@@ -1539,7 +1539,8 @@ export function RouterLink(props: {
 }): HTMLElement {
   if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
 
-  const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, ...attrs } = props;
+  const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, class: classAttr, ...attrs } = props;
+  const baseClass = typeof classAttr === "string" ? classAttr : "";
 
   const routeGetter = globalRouter.routeGetter;
   const href = globalRouter["resolvePath"](to);
@@ -1577,7 +1578,7 @@ export function RouterLink(props: {
       if (exactActiveClass) classes.push(exactActiveClass);
       else if (options.linkExactActiveClass) classes.push(options.linkExactActiveClass);
     }
-    link.className = classes.join(" ");
+    link.className = [baseClass, ...classes].filter(Boolean).join(" ");
   });
   registerDisposer(link, effectCleanup);
 

@@ -6,6 +6,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.6] — 2026-03-29
+
+### Fixed
+
+- **`RouterLink` preserves user `class` prop** — The `class` prop was being discarded because the reactive effect overwrote `className` with only the active/exact classes. Now the base class is captured from props and always prepended, so user classes persist and active classes are appended on top. When inactive, the element retains its original class instead of becoming an empty string.
+
+---
+
 ## [1.0.4] — 2026-03-28
 
 ### Added
