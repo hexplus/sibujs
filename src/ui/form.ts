@@ -107,6 +107,78 @@ export function custom<T>(fn: (value: T) => boolean, message: string): Validator
 // form HOOK
 // ============================================================================
 
+// ============================================================================
+// bindField HELPER
+// ============================================================================
+
+/**
+ * Props returned by bindField, ready to spread into an input tag factory.
+ */
+export interface BoundFieldProps {
+  value: () => unknown;
+  on: { input: (e: Event) => void; change: (e: Event) => void; blur: () => void };
+  [attr: string]: unknown;
+}
+
+/**
+ * Bind a FormField to an input element, eliminating the value/input/blur boilerplate.
+ *
+ * Works with text inputs (`input` event) and selects/checkboxes (`change` event).
+ *
+ * @param field A FormField from form().fields
+ * @param extras Additional props to merge (placeholder, class, disabled, etc.)
+ * @returns Props object ready to pass directly to a tag factory
+ *
+ * @example
+ * ```ts
+ * const f = form({ email: { initial: "", validators: [required(), email()] } });
+ *
+ * // Before — verbose
+ * input({ value: f.fields.email.value(), on: { input: e => f.fields.email.set(e.target.value), blur: () => f.fields.email.touch() } })
+ *
+ * // After — one-liner
+ * input(bindField(f.fields.email, { type: "email", placeholder: "Email" }))
+ * ```
+ */
+export function bindField<T>(field: FormField<T>, extras?: Record<string, unknown>): BoundFieldProps {
+  const fieldOn: BoundFieldProps["on"] = {
+    input: (e: Event) => {
+      const target = e.target as HTMLInputElement;
+      if (target.type === "checkbox") {
+        field.set(target.checked as unknown as T);
+      } else {
+        field.set(target.value as unknown as T);
+      }
+    },
+    change: (e: Event) => {
+      const target = e.target as HTMLInputElement | HTMLSelectElement;
+      if ("checked" in target && target.type === "checkbox") {
+        field.set(target.checked as unknown as T);
+      } else {
+        field.set(target.value as unknown as T);
+      }
+    },
+    blur: () => field.touch(),
+  };
+
+  // Merge extras.on with field handlers so extras can't accidentally clobber them
+  const { on: extraOn, value: _ignoreValue, ...restExtras } = (extras ?? {}) as Record<string, unknown>;
+  const mergedOn =
+    extraOn && typeof extraOn === "object"
+      ? { ...fieldOn, ...(extraOn as Record<string, (e: Event) => void>) }
+      : fieldOn;
+
+  return {
+    value: field.value as () => unknown,
+    on: mergedOn as BoundFieldProps["on"],
+    ...restExtras,
+  };
+}
+
+// ============================================================================
+// form HOOK
+// ============================================================================
+
 export function form<T extends Record<string, unknown>>(config: FormConfig<T>): FormReturn<T> {
   const fieldEntries = Object.entries(config) as [keyof T, FieldConfig][];
   const fieldMap = {} as { [K in keyof T]: FormField<T[K]> };

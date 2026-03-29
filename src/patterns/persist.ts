@@ -30,11 +30,17 @@ export interface PersistOptions<T = unknown> {
    * Encrypt the serialized value before writing to storage.
    * Paired with `decrypt` for reading. Use for sensitive data.
    *
+   * **Security:** Use a real encryption algorithm (e.g. AES-GCM via Web Crypto API).
+   * Do NOT use `btoa()`/`atob()` — Base64 is encoding, not encryption, and provides
+   * zero confidentiality.
+   *
    * @example
    * ```ts
+   * // Example using a simple XOR cipher for illustration — in production,
+   * // use crypto.subtle.encrypt() with AES-GCM or a proven library.
    * persisted("token", "", {
-   *   encrypt: (v) => btoa(v),   // or use Web Crypto API
-   *   decrypt: (v) => atob(v),
+   *   encrypt: (v) => myAesGcmEncrypt(v, secretKey),
+   *   decrypt: (v) => myAesGcmDecrypt(v, secretKey),
    * });
    * ```
    */

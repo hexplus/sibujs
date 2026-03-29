@@ -12,12 +12,22 @@ export interface Toast {
 
 let toastCounter = 0;
 
-export function toast(options?: { duration?: number; maxToasts?: number }): {
+export interface ToastInstance {
   toasts: () => Toast[];
   show: (message: string, type?: Toast["type"]) => string;
+  /** Show an info toast. */
+  info: (message: string) => string;
+  /** Show a success toast. */
+  success: (message: string) => string;
+  /** Show an error toast. */
+  error: (message: string) => string;
+  /** Show a warning toast. */
+  warning: (message: string) => string;
   dismiss: (id: string) => void;
   dismissAll: () => void;
-} {
+}
+
+export function toast(options?: { duration?: number; maxToasts?: number }): ToastInstance {
   const duration = options?.duration ?? 3000;
   const maxToasts = options?.maxToasts ?? Infinity;
   const [toasts, setToasts] = signal<Toast[]>([]);
@@ -70,5 +80,14 @@ export function toast(options?: { duration?: number; maxToasts?: number }): {
     }
   }
 
-  return { toasts, show, dismiss, dismissAll };
+  return {
+    toasts,
+    show,
+    info: (message: string) => show(message, "info"),
+    success: (message: string) => show(message, "success"),
+    error: (message: string) => show(message, "error"),
+    warning: (message: string) => show(message, "warning"),
+    dismiss,
+    dismissAll,
+  };
 }

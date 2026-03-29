@@ -75,4 +75,48 @@ describe("toast", () => {
     show("No type");
     expect(toasts()[0].type).toBeUndefined();
   });
+
+  // Severity shortcut tests
+  it("info() shows toast with type info", () => {
+    vi.useFakeTimers();
+    const t = toast({ duration: 0 });
+    const id = t.info("Info msg");
+    expect(id).toMatch(/^toast-/);
+    expect(t.toasts()[0].type).toBe("info");
+    expect(t.toasts()[0].message).toBe("Info msg");
+  });
+
+  it("success() shows toast with type success", () => {
+    vi.useFakeTimers();
+    const t = toast({ duration: 0 });
+    t.success("Saved!");
+    expect(t.toasts()[0].type).toBe("success");
+    expect(t.toasts()[0].message).toBe("Saved!");
+  });
+
+  it("error() shows toast with type error", () => {
+    vi.useFakeTimers();
+    const t = toast({ duration: 0 });
+    t.error("Failed!");
+    expect(t.toasts()[0].type).toBe("error");
+    expect(t.toasts()[0].message).toBe("Failed!");
+  });
+
+  it("warning() shows toast with type warning", () => {
+    vi.useFakeTimers();
+    const t = toast({ duration: 0 });
+    t.warning("Careful!");
+    expect(t.toasts()[0].type).toBe("warning");
+    expect(t.toasts()[0].message).toBe("Careful!");
+  });
+
+  it("severity shortcuts auto-dismiss like show()", () => {
+    vi.useFakeTimers();
+    const t = toast({ duration: 1000 });
+    t.success("Temp");
+    expect(t.toasts()).toHaveLength(1);
+
+    vi.advanceTimersByTime(1000);
+    expect(t.toasts()).toHaveLength(0);
+  });
 });

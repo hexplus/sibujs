@@ -1,4 +1,4 @@
-import { registerDisposer } from "../core/rendering/dispose";
+import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
@@ -64,6 +64,13 @@ export interface RouterOptions {
   readonly cacheSize?: number;
   readonly errorRetryDelay?: number;
   readonly preloadStrategy?: "none" | "hover" | "visible";
+  /**
+   * Enable KeepAlive caching for route components.
+   * - `true` — cache all routes
+   * - string[] — cache only named routes matching these names
+   * - number — cache all routes with this max cache size
+   */
+  readonly keepAlive?: boolean | string[] | number;
 }
 
 export type ScrollBehavior = (
@@ -1340,6 +1347,178 @@ export function Route(): Node {
 
   // Register cleanup for destroyRouter
   routeCleanups.push(cleanupNodes);
+
+  return anchor;
+}
+
+// ============================================================================
+// KEEP-ALIVE ROUTE COMPONENT
+// ============================================================================
+
+/**
+ * A route outlet that caches rendered components using KeepAlive.
+ * Routes are preserved in the DOM cache so signals, form state, and scroll
+ * position survive navigation.
+ *
+ * Uses the `keepAlive` option from RouterOptions if set, or accepts
+ * explicit options.
+ *
+ * @param options Optional: override the router-level keepAlive setting
+ *
+ * @example
+ * ```ts
+ * // Cache all routes (max 10)
+ * createRouter(routes, { keepAlive: 10 });
+ * mount(() => div({ nodes: [nav, KeepAliveRoute()] }), root);
+ *
+ * // Or cache specific routes by name
+ * createRouter(routes, { keepAlive: ["dashboard", "settings"] });
+ * mount(() => div({ nodes: [nav, KeepAliveRoute()] }), root);
+ *
+ * // Or override per-outlet
+ * KeepAliveRoute({ max: 5, include: ["dashboard"] })
+ * ```
+ */
+export function KeepAliveRoute(options?: { max?: number; include?: string[] }): Node {
+  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+
+  const anchor = document.createComment("keep-alive-route");
+  const cache = new Map<string, Node>();
+  const lruOrder: string[] = [];
+
+  // Resolve options from router config or explicit args
+  const routerOpts = globalRouter["options"];
+  const keepAliveOpt = routerOpts.keepAlive;
+  const maxCache = options?.max ?? (typeof keepAliveOpt === "number" ? keepAliveOpt : 20);
+  const includeNames = options?.include ?? (Array.isArray(keepAliveOpt) ? keepAliveOpt : undefined);
+
+  let currentNode: Node | null = null;
+  let currentKey = "";
+  let currentCached = false;
+  let isUpdating = false;
+  let pendingUpdate = false;
+
+  const update = async () => {
+    if (!globalRouter) return;
+    if (isUpdating) {
+      pendingUpdate = true;
+      return;
+    }
+
+    const route = globalRouter.currentRoute;
+    const match = globalRouter["matcher"].match(route.path);
+    if (!match) return;
+
+    const { route: routeDef } = match;
+    if ("redirect" in routeDef) {
+      const redirectPath = typeof routeDef.redirect === "function" ? routeDef.redirect(route) : routeDef.redirect;
+      queueMicrotask(() => globalRouter?.navigate(redirectPath));
+      return;
+    }
+
+    if (!("component" in routeDef)) return;
+
+    const cacheKey = route.path;
+
+    // Check if this route should be cached
+    const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
+
+    // Same route — skip
+    if (cacheKey === currentKey && currentNode) return;
+
+    isUpdating = true;
+    const parent = anchor.parentNode;
+    if (!parent) {
+      isUpdating = false;
+      return;
+    }
+
+    try {
+      // Detach current node — dispose if it wasn't cached
+      if (currentNode?.parentNode) {
+        parent.removeChild(currentNode);
+        if (!currentCached) {
+          dispose(currentNode);
+        }
+      }
+
+      if (shouldCache && cache.has(cacheKey)) {
+        // Retrieve from cache
+        currentNode = cache.get(cacheKey)!;
+        currentCached = true;
+        // Update LRU order
+        const idx = lruOrder.indexOf(cacheKey);
+        if (idx !== -1) {
+          lruOrder.splice(idx, 1);
+        }
+        lruOrder.push(cacheKey);
+      } else {
+        // Create new
+        const component = await globalRouter!.loadComponent(routeDef, route.path);
+        const node = component();
+
+        if (!node || route.path !== globalRouter!.currentRoute.path) {
+          isUpdating = false;
+          return;
+        }
+
+        currentNode = node;
+        currentCached = shouldCache;
+
+        if (shouldCache) {
+          cache.set(cacheKey, node);
+          lruOrder.push(cacheKey);
+
+          // Evict oldest if over max
+          while (lruOrder.length > maxCache) {
+            const evictKey = lruOrder.shift()!;
+            const evictNode = cache.get(evictKey);
+            if (evictNode) {
+              dispose(evictNode);
+              if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
+              cache.delete(evictKey);
+            }
+          }
+        }
+      }
+
+      currentKey = cacheKey;
+      if (currentNode) {
+        parent.insertBefore(currentNode, anchor.nextSibling);
+      }
+    } catch (error) {
+      console.error("[KeepAliveRoute] Component error:", error);
+    } finally {
+      isUpdating = false;
+      if (pendingUpdate) {
+        pendingUpdate = false;
+        update();
+      }
+    }
+  };
+
+  let initialized = false;
+  const wrappedUpdate = async () => {
+    await update();
+    initialized = true;
+  };
+  track(wrappedUpdate);
+  if (!initialized) {
+    queueMicrotask(() => {
+      if (!initialized && anchor.parentNode) wrappedUpdate();
+    });
+  }
+
+  routeCleanups.push(() => {
+    for (const node of cache.values()) {
+      dispose(node);
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }
+    cache.clear();
+    lruOrder.length = 0;
+    if (currentNode?.parentNode) currentNode.parentNode.removeChild(currentNode);
+    currentNode = null;
+  });
 
   return anchor;
 }

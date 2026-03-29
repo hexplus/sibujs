@@ -117,14 +117,37 @@ function hydrateNode(serverNode: HTMLElement | null, clientNode: HTMLElement): v
   }
 }
 
+// ─── Trusted HTML ────────────────────────────────────────────────────────────
+
+/**
+ * Branded type for raw HTML that has been explicitly marked as trusted.
+ * Use `trustHTML()` to create a value of this type. This prevents
+ * accidental injection of unsanitized user input into `headExtra`.
+ */
+export type TrustedHTML = string & { readonly __brand: "TrustedHTML" };
+
+/**
+ * Mark an HTML string as trusted for use in contexts that accept raw HTML
+ * (e.g. `renderToDocument({ headExtra })`). Only call this on
+ * developer-controlled strings — never on user input.
+ *
+ * @example
+ * ```ts
+ * const extra = trustHTML('<link rel="preconnect" href="https://fonts.googleapis.com">');
+ * renderToDocument(App, { headExtra: extra });
+ * ```
+ */
+export function trustHTML(html: string): TrustedHTML {
+  return html as TrustedHTML;
+}
+
 // ─── renderToDocument ───────────────────────────────────────────────────────
 
 /**
  * Renders a component to a full HTML document string.
  *
- * **Security warning:** `headExtra` is injected as raw HTML into the document head.
- * Never pass unsanitized user input to `headExtra` — it is intended for trusted,
- * developer-controlled content only (e.g. inline styles, custom meta tags).
+ * `headExtra` requires a `TrustedHTML` value created via `trustHTML()`.
+ * This prevents accidental injection of unsanitized user input.
  */
 export function renderToDocument(
   component: () => HTMLElement,
@@ -134,8 +157,11 @@ export function renderToDocument(
     links?: Record<string, string>[];
     scripts?: string[];
     bodyAttrs?: Record<string, string>;
-    /** Raw HTML injected into <head>. Must not contain unsanitized user input. */
-    headExtra?: string;
+    /**
+     * Raw HTML injected into `<head>`. Must be wrapped in `trustHTML()`
+     * to confirm the content is developer-controlled.
+     */
+    headExtra?: TrustedHTML;
   } = {},
 ): string {
   let content: string;
