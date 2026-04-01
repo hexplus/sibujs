@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.7] — 2026-04-01
+
+### Added
+
+- **Nested Route Protection** — `beforeEnter` guards now evaluate for every segment in the matched route chain. Previously, only the leaf route's guard was checked. This ensures that parent layout protection (e.g., `/dashboard`) is respected regardless of which nested child is accessed.
+- **Direct Access Protection** — The router now executes guard checks on initial page load and `popstate` events. Navigating directly to a protected URL will now trigger redirects before the component renders.
+
+### Improved
+
+- **Documentation Overhaul** — The `README.md` has been streamlined and now points to the official [sibujs.dev](https://sibujs.dev/) website.
+- **Authoring Guide** — Added a clear comparison of the three supported component authoring styles (Tag Factory, Shorthand, and HTML Templates).
+
+---
+
 ## [1.0.6] — 2026-03-29
 
 ### Fixed

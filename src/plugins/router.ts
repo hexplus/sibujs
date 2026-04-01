@@ -201,6 +201,7 @@ class NavigationController {
  */
 class RouteMatcher {
   private routeTrie = new Map<string, RouteDef>();
+  private parentChain = new Map<string, RouteDef[]>();
   private namedRoutes = new Map<string, RouteDef>();
   private compiledPatterns = new LRUCache<string, { regex: RegExp; keys: string[] }>(50);
 
@@ -208,12 +209,14 @@ class RouteMatcher {
     this.buildIndex(routes);
   }
 
-  private buildIndex(routes: RouteDef[], parentPath = ""): void {
+  private buildIndex(routes: RouteDef[], parentPath = "", ancestors: RouteDef[] = []): void {
     for (const route of routes) {
       const fullPath = parentPath + route.path;
+      const chain = [...ancestors, route];
 
       // Index by path
       this.routeTrie.set(fullPath, route);
+      this.parentChain.set(fullPath, chain);
 
       // Index by name
       if (route.name) {
@@ -225,12 +228,13 @@ class RouteMatcher {
         const aliases = Array.isArray(route.alias) ? route.alias : [route.alias];
         for (const alias of aliases) {
           this.routeTrie.set(parentPath + alias, route);
+          this.parentChain.set(parentPath + alias, chain);
         }
       }
 
       // Index children
       if (route.children?.length) {
-        this.buildIndex(route.children, fullPath);
+        this.buildIndex(route.children, fullPath, chain);
       }
     }
   }
@@ -239,14 +243,14 @@ class RouteMatcher {
     // Try exact match first
     const exactMatch = this.routeTrie.get(path);
     if (exactMatch) {
-      return { route: exactMatch, params: {}, matched: [exactMatch] };
+      return { route: exactMatch, params: {}, matched: this.parentChain.get(path) || [exactMatch] };
     }
 
     // Try pattern matching
     for (const [routePath, route] of this.routeTrie) {
       const match = this.matchPattern(path, routePath);
       if (match) {
-        return { route, params: match.params, matched: [route] };
+        return { route, params: match.params, matched: this.parentChain.get(routePath) || [route] };
       }
     }
 
@@ -323,6 +327,7 @@ class RouteMatcher {
 
   rebuild(routes: RouteDef[]): void {
     this.routeTrie.clear();
+    this.parentChain.clear();
     this.namedRoutes.clear();
     this.compiledPatterns.clear();
     this.buildIndex(routes);
@@ -330,17 +335,21 @@ class RouteMatcher {
 
   addRoute(route: RouteDef, parentPath = ""): void {
     const fullPath = parentPath + route.path;
+    const parentAncestors = this.parentChain.get(parentPath) || [];
+    const chain = [...parentAncestors, route];
     this.routeTrie.set(fullPath, route);
+    this.parentChain.set(fullPath, chain);
     if (route.name) {
       this.namedRoutes.set(route.name, route);
     }
     if (route.children?.length) {
-      this.buildIndex(route.children, fullPath);
+      this.buildIndex(route.children, fullPath, chain);
     }
   }
 
   removeRoute(path: string): void {
     this.routeTrie.delete(path);
+    this.parentChain.delete(path);
     this.compiledPatterns.clear();
     // Remove from named routes
     for (const [name, route] of this.namedRoutes) {
@@ -676,18 +685,18 @@ export class SibuRouter {
   private initialize(): void {
     // Set up event listeners
     if (this.options.mode === "history") {
-      const popstateHandler = () => this.handleLocationChange();
+      const popstateHandler = () => this.handleLocationChange(true);
       window.addEventListener("popstate", popstateHandler);
       this.cleanup.push(() => window.removeEventListener("popstate", popstateHandler));
     } else {
-      const hashHandler = () => this.handleLocationChange();
+      const hashHandler = () => this.handleLocationChange(true);
       window.addEventListener("hashchange", hashHandler);
       this.cleanup.push(() => window.removeEventListener("hashchange", hashHandler));
     }
 
     // Set initial route
     queueMicrotask(() => {
-      this.handleLocationChange();
+      this.handleLocationChange(true);
       this.isReadySetter(true);
     });
   }
@@ -703,10 +712,11 @@ export class SibuRouter {
     };
   }
 
-  private handleLocationChange(): void {
+  private handleLocationChange(skipHistory = true): void {
     const path = this.getCurrentPath();
-    const context = this.createRouteContext(path);
-    this.currentRouteSetter(context);
+    this.navigate(path, { replace: true, skipHistory }).catch((err) => {
+      console.error("[Router] Error during location change navigation:", err);
+    });
   }
 
   private getCurrentPath(): string {
@@ -732,7 +742,7 @@ export class SibuRouter {
     const match = this.matcher.match(path || "/");
     const params = match?.params || {};
     const meta = match?.route.meta || {};
-    const matched = match ? [match.route] : [];
+    const matched = match?.matched || [];
 
     return {
       path: path || "/",
@@ -747,7 +757,7 @@ export class SibuRouter {
   // Public API
   async navigate(
     to: NavigationTarget,
-    options: { replace?: boolean; state?: unknown } = {},
+    options: { replace?: boolean; state?: unknown; skipHistory?: boolean } = {},
   ): Promise<NavigationResult> {
     try {
       await this.navigator.navigate(async (signal) => {
@@ -786,7 +796,7 @@ export class SibuRouter {
   private async performNavigation(
     to: RouteContext,
     from: RouteContext,
-    options: { replace?: boolean; state?: unknown },
+    options: { replace?: boolean; state?: unknown; skipHistory?: boolean },
     signal: AbortSignal,
     depth = 0,
   ): Promise<void> {
@@ -809,17 +819,21 @@ export class SibuRouter {
       const { route } = match;
 
       // Run beforeEnter guards
-      if ("beforeEnter" in route && route.beforeEnter) {
-        const guards = Array.isArray(route.beforeEnter) ? route.beforeEnter : [route.beforeEnter];
-        for (const guard of guards) {
-          if (signal.aborted) throw new Error("Navigation aborted");
+      for (const matchedRoute of match.matched) {
+        if ("beforeEnter" in matchedRoute && matchedRoute.beforeEnter) {
+          const guards = Array.isArray(matchedRoute.beforeEnter)
+            ? matchedRoute.beforeEnter
+            : [matchedRoute.beforeEnter];
+          for (const guard of guards) {
+            if (signal.aborted) throw new Error("Navigation aborted");
 
-          const result = await guard(to, from);
-          if (result !== true) {
-            if (typeof result === "string") {
-              return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1);
+            const result = await guard(to, from);
+            if (result !== true) {
+              if (typeof result === "string") {
+                return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1);
+              }
+              throw new NavigationFailureError("aborted", from, to);
             }
-            throw new NavigationFailureError("aborted", from, to);
           }
         }
       }
@@ -847,7 +861,9 @@ export class SibuRouter {
     }
 
     // Update browser history
-    this.updateHistory(to, options);
+    if (!options.skipHistory) {
+      this.updateHistory(to, options);
+    }
 
     // Update current route
     this.currentRouteSetter(to);
@@ -1179,6 +1195,7 @@ export function Route(): Node {
   let errorNode: Node | null = null;
   let isUpdating = false;
   let currentPath = "";
+  let currentTopRoute: RouteDef | null = null;
 
   const cleanupNodes = () => {
     [currentNode, loadingNode, errorNode].forEach((node) => {
@@ -1268,21 +1285,29 @@ export function Route(): Node {
 
     const route = globalRouter.currentRoute;
 
-    // Avoid unnecessary updates
-    if (route.path === currentPath && currentNode) return;
-
-    isUpdating = true;
-    currentPath = route.path;
-
     try {
       const match = globalRouter["matcher"].match(route.path);
 
       if (!match) {
+        currentPath = route.path;
+        currentTopRoute = null;
         cleanupNodes();
         return;
       }
 
-      const { route: routeDef } = match;
+      // For nested routes, render the top-level parent (which uses Outlet for children).
+      // For flat routes, matched[0] is the route itself.
+      const routeDef = match.matched[0] || match.route;
+
+      // Skip re-render if the top-level route is the same (child routes handled by Outlet)
+      if (routeDef === currentTopRoute && currentNode) {
+        currentPath = route.path;
+        return;
+      }
+
+      isUpdating = true;
+      currentPath = route.path;
+      currentTopRoute = routeDef;
 
       // Handle redirect routes (should be handled by router, but safety check)
       if ("redirect" in routeDef) {
@@ -1813,7 +1838,9 @@ export function Outlet(): Node {
     if (!childRoute || !("component" in childRoute)) return;
 
     try {
-      const component = await globalRouter.loadComponent(childRoute, route.path);
+      // Use a composite cache key so parent and child don't collide
+      const cacheKey = `${route.path}\0${childRoute.path}`;
+      const component = await globalRouter.loadComponent(childRoute, cacheKey);
       const node = component();
 
       if (node && anchor.parentNode) {

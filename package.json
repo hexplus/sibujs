@@ -1,6 +1,6 @@
 {
   "name": "sibujs",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A lightweight, function-based frontend framework that combines the best of React, Svelte, and Vue — with zero VDOM and maximum simplicity. Designed for developers who want fine-grained reactivity and full control without compilation or magic.",
   "keywords": [
     "frontend",
