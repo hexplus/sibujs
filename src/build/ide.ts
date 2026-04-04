@@ -448,8 +448,8 @@ export function generateVSCodeSnippets(): Record<
       body: [
         "each(",
         "\t() => ${1:items}(),",
-        "\t(item, index) => {",
-        "\t\treturn ${2:div({ nodes: String(item) })};",
+        "\t(item) => {",
+        "\t\treturn ${2:div({ nodes: () => String(item()) })};",
         "\t},",
         "\t{ key: (item) => ${3:item.id} }",
         ")",

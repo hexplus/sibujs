@@ -228,7 +228,7 @@ describe("each large list stress tests", () => {
       getItems,
       (item) => {
         const li = document.createElement("li");
-        li.textContent = item.text;
+        li.textContent = item().text;
         return li;
       },
       { key: (item) => item.id },

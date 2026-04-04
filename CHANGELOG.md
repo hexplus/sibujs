@@ -6,6 +6,19 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.8] — 2026-04-03
+
+### Changed
+
+- **`each()` render callback receives reactive getters** (**BREAKING**) — The render function signature changed from `(item: T, index: number)` to `(item: () => T, index: () => number)`. When a keyed item's data changes but its key stays the same, the DOM is reused without re-calling render — so the old plain-value parameter was a stale snapshot. The new getters are backed by a `keyIndexMap` updated on every reconciliation pass, ensuring they always return fresh data from the current array. **Migration:** add `()` after the item/index parameter wherever it is accessed inside the render callback.
+
+### Added
+
+- **`hotkey()` string combo syntax** — Supports `hotkey("ctrl+shift+z", handler)` in addition to the existing explicit-flags style. Recognized modifiers: `ctrl`/`control`, `shift`, `alt`, `meta`/`cmd`/`command`.
+- **`hotkey()` `preventDefault` option** — `hotkey("ctrl+s", handler, { preventDefault: true })` calls `e.preventDefault()` automatically before invoking the handler.
+
+---
+
 ## [1.0.7] — 2026-04-01
 
 ### Added

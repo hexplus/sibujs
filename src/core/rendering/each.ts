@@ -85,14 +85,19 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
  * 4. Walk the new key list in reverse and insert/position each node,
  *    skipping DOM operations for nodes that are part of the LIS.
  *
+ * The render callback receives reactive getters `() => T` and `() => number`
+ * instead of plain values. This ensures the callback always reads fresh data
+ * when a keyed item's data changes but its key stays the same, since the DOM
+ * is reused without re-calling render.
+ *
  * @param getArray A reactive getter returning an array.
- * @param render A function that returns a NodeChild for each item.
+ * @param render A function that receives reactive item and index getters and returns a NodeChild.
  * @param options A key function for unique identity of items.
  * @returns A Comment node serving as the anchor for the list.
  */
 export function each<T>(
   getArray: () => T[],
-  render: (item: T, index: number) => NodeChild,
+  render: (item: () => T, index: () => number) => NodeChild,
   options: { key: (item: T) => string | number },
 ): Comment {
   devAssert(typeof getArray === "function", "each: first argument must be a function that returns an array.");
@@ -122,6 +127,9 @@ export function each<T>(
   const oldKeyIndex = new Map<string | number, number>();
   let reusedNewBuf: number[] = [];
   let reusedOldBuf: number[] = [];
+  // Per-key index tracking — maps key to its current index in the array,
+  // so item/index getters always return fresh data without re-rendering.
+  const keyIndexMap = new Map<string | number, number>();
 
   let initialized = false;
   let sentinelInserted = false;
@@ -160,6 +168,12 @@ export function each<T>(
     workMap.clear();
 
     // --- Phase 1: Build or reuse nodes by key ---
+    // Update key→index mapping so existing item/index getters read fresh data.
+    keyIndexMap.clear();
+    for (let i = 0; i < newLen; i++) {
+      keyIndexMap.set(newKeys[i], i);
+    }
+
     for (let i = 0; i < newLen; i++) {
       const key = newKeys[i];
       const existing = nodeMap.get(key);
@@ -167,8 +181,13 @@ export function each<T>(
       if (existing !== undefined) {
         node = existing;
       } else {
+        // Create stable getters that close over the key and always read
+        // from the latest array via keyIndexMap, making them reactive.
+        const itemKey = key;
+        const itemGetter = () => getArray()[keyIndexMap.get(itemKey)!];
+        const indexGetter = () => keyIndexMap.get(itemKey)!;
         try {
-          node = resolveNodeChild(render(arr[i], i));
+          node = resolveNodeChild(render(itemGetter, indexGetter));
         } catch (err) {
           if (_isDev) {
             devWarn(

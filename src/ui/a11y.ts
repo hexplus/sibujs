@@ -126,24 +126,51 @@ export function FocusTrap(
 /**
  * hotkey registers a keyboard shortcut handler.
  * Returns a cleanup function.
+ *
+ * Supports two calling styles:
+ * - String combo:   hotkey("ctrl+shift+z", handler)
+ * - Explicit flags: hotkey("z", handler, { ctrl: true, shift: true })
  */
 export function hotkey(
-  key: string,
+  combo: string,
   handler: (e: KeyboardEvent) => void,
-  options: { ctrl?: boolean; shift?: boolean; alt?: boolean; meta?: boolean; global?: boolean } = {},
+  options: {
+    ctrl?: boolean;
+    shift?: boolean;
+    alt?: boolean;
+    meta?: boolean;
+    global?: boolean;
+    preventDefault?: boolean;
+  } = {},
 ): () => void {
+  let key = combo;
+  let needCtrl = options.ctrl ?? false;
+  let needShift = options.shift ?? false;
+  let needAlt = options.alt ?? false;
+  let needMeta = options.meta ?? false;
+
+  // Parse "ctrl+shift+z" combo syntax
+  if (combo.includes("+")) {
+    const parts = combo.toLowerCase().split("+");
+    key = parts[parts.length - 1];
+    for (let i = 0; i < parts.length - 1; i++) {
+      const mod = parts[i];
+      if (mod === "ctrl" || mod === "control") needCtrl = true;
+      else if (mod === "shift") needShift = true;
+      else if (mod === "alt") needAlt = true;
+      else if (mod === "meta" || mod === "cmd" || mod === "command") needMeta = true;
+    }
+  }
+
   const listener = (e: Event) => {
     const ke = e as KeyboardEvent;
     if (ke.key.toLowerCase() !== key.toLowerCase()) return;
-    if (options.ctrl && !ke.ctrlKey) return;
-    if (!options.ctrl && ke.ctrlKey) return;
-    if (options.shift && !ke.shiftKey) return;
-    if (!options.shift && ke.shiftKey) return;
-    if (options.alt && !ke.altKey) return;
-    if (!options.alt && ke.altKey) return;
-    if (options.meta && !ke.metaKey) return;
-    if (!options.meta && ke.metaKey) return;
+    if (needCtrl !== ke.ctrlKey) return;
+    if (needShift !== ke.shiftKey) return;
+    if (needAlt !== ke.altKey) return;
+    if (needMeta !== ke.metaKey) return;
 
+    if (options.preventDefault) ke.preventDefault();
     handler(ke);
   };
 
