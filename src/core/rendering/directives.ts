@@ -42,10 +42,10 @@ export function show<T extends Element>(condition: () => boolean, element: T): T
  * );
  * ```
  */
-export function when(condition: () => boolean, thenBranch: () => NodeChild, elseBranch?: () => NodeChild): Comment {
+export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBranch?: () => NodeChild): Comment {
   const anchor = document.createComment("when");
   let currentNode: Node | null = null;
-  let lastCondition: boolean | undefined;
+  let lastCondition: T | undefined;
 
   let initialized = false;
 

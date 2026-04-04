@@ -6,6 +6,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.0.9] — 2026-04-03
+
+### Fixed
+
+- **`when()` condition type widened to generic `T`** — The runtime already uses `===` identity comparison to decide re-renders, supporting non-boolean values (e.g. string IDs, object references). The TypeScript signature now reflects this: `when<T>(condition: () => T, ...)` instead of `when(condition: () => boolean, ...)`. Removes the need for `as unknown as () => boolean` casts.
+
+### Changed
+
+- **Enforce LF line endings** — Added `.gitattributes` with `* text=auto eol=lf` to prevent CRLF formatting drift on Windows.
+
+---
+
 ## [1.0.8] — 2026-04-03
 
 ### Changed
