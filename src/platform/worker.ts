@@ -20,6 +20,15 @@ export interface UseWorkerReturn<TInput, TOutput> {
  * and should call `postMessage` to send results back. It is serialized
  * into a Blob URL, so it must be self-contained (no closures).
  *
+ * **CSP Warning:** This function serializes the provided function via `.toString()`
+ * and executes it inside a `blob:` URL Worker. This is equivalent to `eval()` and
+ * is incompatible with strict Content Security Policies that restrict
+ * `worker-src 'self'` or block `blob:` URLs. Additionally:
+ * - Minifiers may break captured variable references (closures silently fail).
+ * - Module-level imports are NOT accessible inside the worker.
+ * - Never pass user-controlled or dynamically constructed functions — this
+ *   would be equivalent to `eval()` on untrusted input.
+ *
  * @param workerFn The function body to run inside the worker.
  *                 It receives `self` as the worker global scope.
  * @returns An object with post, result, error, loading, and terminate.

@@ -1,6 +1,7 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { recordDependency, track, trackingSuspended } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import type { Accessor } from "./signal";
 
 /**
  * derived creates a derived reactive signal whose value updates when dependencies change.
@@ -12,7 +13,7 @@ import { devAssert } from "../dev";
  * - On re-evaluation, dependencies are re-tracked via track() so that
  *   derived-of-derived chains propagate correctly.
  */
-export function derived<T>(getter: () => T, options?: { name?: string }): () => T {
+export function derived<T>(getter: () => T, options?: { name?: string }): Accessor<T> {
   devAssert(typeof getter === "function", "derived: argument must be a getter function.");
   const debugName = options?.name;
   const cs: any = {};
@@ -78,5 +79,5 @@ export function derived<T>(getter: () => T, options?: { name?: string }): () => 
 
   if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
-  return computedGetter;
+  return computedGetter as Accessor<T>;
 }

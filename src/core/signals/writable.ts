@@ -1,5 +1,6 @@
 import { batch } from "../../reactivity/batch";
 import { derived } from "./derived";
+import type { Accessor } from "./signal";
 
 /**
  * Creates a writable computed value — a derived getter paired with
@@ -38,7 +39,7 @@ export function writable<T>(
   get: () => T,
   set: (value: T) => void,
   options?: { name?: string },
-): [() => T, (value: T) => void] {
+): [Accessor<T>, (value: T) => void] {
   const getter = derived(get, options);
 
   const setter = (value: T): void => {

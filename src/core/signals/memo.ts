@@ -1,4 +1,5 @@
 import { derived } from "./derived";
+import type { Accessor } from "./signal";
 
 /**
  * memo returns a memoized value that only recomputes when its
@@ -10,6 +11,6 @@ import { derived } from "./derived";
  * @param factory Function that computes the memoized value
  * @returns Getter function that returns the memoized value
  */
-export function memo<T>(factory: () => T): () => T {
+export function memo<T>(factory: () => T): Accessor<T> {
   return derived(factory);
 }

@@ -39,7 +39,14 @@ export function globalStore<
 
     const execute = () => {
       const current = getState();
-      const patch = actionFn(current, payload);
+      const rawPatch = actionFn(current, payload);
+      // Strip prototype-pollution keys before merging to prevent __proto__ / constructor attacks
+      const patch: Partial<S> = {};
+      for (const key of Object.keys(rawPatch)) {
+        if (key !== "__proto__" && key !== "constructor" && key !== "prototype") {
+          (patch as Record<string, unknown>)[key] = (rawPatch as Record<string, unknown>)[key];
+        }
+      }
       setState({ ...current, ...patch } as S);
       // Notify listeners
       const newState = getState();

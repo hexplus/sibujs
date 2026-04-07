@@ -3,8 +3,25 @@ import type { ReactiveSignal } from "../../reactivity/signal";
 import { notifySubscribers, recordDependency } from "../../reactivity/track";
 import { isDev } from "../dev";
 
+// Phantom brand symbol — exists only in the type system, never at runtime.
+declare const __accessor: unique symbol;
+
+/**
+ * A reactive signal getter returned by signal(), derived(), memo(), and similar primitives.
+ *
+ * Pass an Accessor directly into reactive prop positions — never call it there:
+ * ```ts
+ * const [count, setCount] = signal(0);
+ *
+ * div({ nodes: count })           // ✓ reactive — Accessor passed directly
+ * div({ nodes: () => count() })   // ✓ reactive — explicit arrow wrapper
+ * div({ nodes: count() })         // ✗ static  — evaluated once, not reactive
+ * ```
+ */
+export type Accessor<T> = (() => T) & { readonly [__accessor]?: never };
+
 type SetState<T> = (next: T | ((prev: T) => T)) => void;
-type StateTuple<T> = [() => T, SetState<T>];
+type StateTuple<T> = [Accessor<T>, SetState<T>];
 
 /** Options for signal */
 export interface SignalOptions<T = unknown> {
@@ -70,5 +87,5 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
     if (hook) hook.emit("signal:create", { signal: state, name: debugName, getter: get, initial });
   }
 
-  return [get, set];
+  return [get as Accessor<T>, set];
 }

@@ -1,6 +1,7 @@
 import { enqueueBatchedSignal } from "../../reactivity/batch";
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { notifySubscribers, recordDependency } from "../../reactivity/track";
+import type { Accessor } from "./signal";
 import { signal } from "./signal";
 
 /**
@@ -51,7 +52,7 @@ export interface ArrayActions<T> {
   clear(): void;
 }
 
-export function array<T>(initial: T[] = []): [() => T[], ArrayActions<T>] {
+export function array<T>(initial: T[] = []): [Accessor<T[]>, ArrayActions<T>] {
   const [arr, setArr] = signal<T[]>([...initial]);
 
   const actions: ArrayActions<T> = {
@@ -163,7 +164,7 @@ export function array<T>(initial: T[] = []): [() => T[], ArrayActions<T>] {
  * clear();          // []
  * ```
  */
-export function reactiveArray<T>(initial: T[] = []): [() => readonly T[], ArrayActions<T>] {
+export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, ArrayActions<T>] {
   // Mutable internal storage — never exposed directly
   let data: T[] = [...initial];
 

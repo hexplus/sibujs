@@ -1,4 +1,5 @@
 import { derived } from "./derived";
+import type { Accessor } from "./signal";
 
 /**
  * memoFn returns a memoized callback function that only updates
@@ -8,6 +9,6 @@ import { derived } from "./derived";
  * @param callback The callback function to memoize
  * @returns Getter that returns the current memoized callback
  */
-export function memoFn<T extends (...args: any[]) => any>(callback: () => T): () => T {
+export function memoFn<T extends (...args: any[]) => any>(callback: () => T): Accessor<T> {
   return derived(callback);
 }

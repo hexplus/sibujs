@@ -19,7 +19,7 @@ export function isDev(): boolean {
     ? !!(globalThis as any).__SIBU_DEV__
     : typeof __SIBU_DEV__ !== "undefined"
       ? __SIBU_DEV__
-      : true; // default to dev mode when no flag is set
+      : typeof process !== "undefined" && process.env?.NODE_ENV !== "production"; // safe default: off in browser, on in test/dev Node
 }
 
 // Cache dev mode at module load — avoids 3 typeof checks per call

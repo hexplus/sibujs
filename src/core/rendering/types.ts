@@ -1,3 +1,5 @@
+import type { Accessor } from "../signals/signal";
+
 export type NodeChild =
   | Node
   | Element
@@ -6,7 +8,13 @@ export type NodeChild =
   | string
   | number
   | boolean
-  | (() => NodeChild)
+  | Accessor<NodeChild> // reactive signal getter — pass directly, do not call
+  | (() => NodeChild) // explicit arrow wrapper — also reactive
   | null
   | undefined;
-export type NodeChildren = NodeChild | NodeChild[] | NodeChild[][] | (() => NodeChild | NodeChild[]);
+export type NodeChildren =
+  | NodeChild
+  | NodeChild[]
+  | NodeChild[][]
+  | Accessor<NodeChild | NodeChild[]>
+  | (() => NodeChild | NodeChild[]);
