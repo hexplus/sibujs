@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.1.0] — 2026-04-06
+
+### Added
+
+- **`Accessor<T>` brand type** — All reactive getters returned by `signal()`, `derived()`, `memo()`, `memoFn()`, `writable()`, `array()`, and `reactiveArray()` are now typed as `Accessor<T>` instead of the plain `() => T`. The brand is purely a compile-time phantom (zero runtime cost) and makes signal getters clearly distinguishable from regular functions in IDE hover tooltips and type signatures. `NodeChildren` and `NodeChild` have been updated to explicitly list `Accessor<NodeChild>` alongside the plain arrow-function form.
+
+### Fixed
+
+- **`isDev()` unsafe default** — The fallback when neither `globalThis.__SIBU_DEV__` nor the compile-time `__SIBU_DEV__` constant is set now evaluates `process.env.NODE_ENV !== "production"` instead of hard-coding `true`. In a browser environment without a Vite build (where `process` is undefined), this resolves to `false`, preventing DevTools from being silently active in production.
+- **Prototype pollution in `globalStore`** — The `dispatch()` function now strips `__proto__`, `constructor`, and `prototype` keys from the action patch before spreading it into state. Previously a malicious or malformed action could pollute `Object.prototype` via `{ "__proto__": { isAdmin: true } }`.
+- **`workerFn` / `worker()` CSP documentation** — Added a prominent JSDoc warning documenting that the inline worker pattern serializes functions via `.toString()` into a `blob:` URL (equivalent to `eval()`), is incompatible with strict `worker-src 'self'` CSP directives, and must never receive user-controlled or dynamically constructed function arguments.
+
+---
+
 ## [1.0.9] — 2026-04-03
 
 ### Fixed
