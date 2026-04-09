@@ -6,6 +6,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.2.0] — 2026-04-09
+
+### Added
+
+- **Inline lint disable comments** — The `no-direct-dom-mutation` rule (in both the build-system linter and `sibujs lint` CLI) now supports two inline disable forms:
+  - `// sibujs-disable-next-line no-direct-dom-mutation` on the line above
+  - `// sibujs-disable no-direct-dom-mutation` on the same line
+
+### Fixed
+
+- **Cached element DOM corruption in reactive `nodes`** — `bindChildNode` used a naive "remove all, insert all" strategy with no identity tracking. Returning the same `HTMLElement` instance from a reactive function across re-evaluations could cause duplicates or disappearing elements. The reconciler now builds a reuse set, skips removal of reused nodes, and computes the insertion anchor after cleanup to prevent stale references.
+- **Boolean `false` silently ignored in tag factory attributes** — Passing `false` for an attribute (e.g., `textarea({ spellcheck: false })`) was silently skipped instead of removing the attribute. Boolean handling now matches the reactive `bindAttribute` behavior: `true` sets an empty attribute, `false` calls `removeAttribute()`, and IDL properties (`checked`, `disabled`, `selected`) are set as DOM properties directly.
+
+---
+
 ## [1.1.0] — 2026-04-06
 
 ### Added

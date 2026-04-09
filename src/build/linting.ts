@@ -263,6 +263,21 @@ export const lintRules = {
         // Skip comments
         if (trimmed.startsWith("//") || trimmed.startsWith("*")) continue;
 
+        // Support inline disable: // sibujs-disable-next-line no-direct-dom-mutation
+        if (lineIdx > 0) {
+          const prevTrimmed = lines[lineIdx - 1].trim();
+          if (
+            prevTrimmed.includes("sibujs-disable-next-line") &&
+            (prevTrimmed.includes("no-direct-dom-mutation") ||
+              !prevTrimmed.includes(" ", prevTrimmed.indexOf("sibujs-disable-next-line") + 25))
+          ) {
+            continue;
+          }
+        }
+
+        // Support inline disable on same line: // sibujs-disable no-direct-dom-mutation
+        if (line.includes("sibujs-disable") && !line.includes("sibujs-disable-next-line")) continue;
+
         for (const { pattern, name, suggestion } of mutationPatterns) {
           pattern.lastIndex = 0;
           const match = pattern.exec(line);

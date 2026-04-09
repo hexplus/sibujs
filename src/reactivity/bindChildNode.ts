@@ -24,13 +24,12 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       return;
     }
 
-    // Remove previously inserted nodes
-    for (let i = 0; i < lastNodes.length; i++) {
-      const node = lastNodes[i];
-      if (node.parentNode) node.parentNode.removeChild(node);
-    }
-
     if (result == null || typeof result === "boolean") {
+      // Remove all previously inserted nodes
+      for (let i = 0; i < lastNodes.length; i++) {
+        const node = lastNodes[i];
+        if (node.parentNode) node.parentNode.removeChild(node);
+      }
       lastNodes.length = 0;
       return;
     }
@@ -40,27 +39,58 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       lastNodes.length = 0;
       return;
     }
-    const anchor = placeholder.nextSibling;
-    let count = 0;
 
+    // Build the new node list
+    let newNodes: Node[];
     if (Array.isArray(result)) {
-      // Reuse lastNodes array if large enough
-      if (lastNodes.length < result.length) lastNodes = new Array(result.length);
+      newNodes = [];
       for (let i = 0; i < result.length; i++) {
         const item = result[i];
         if (item == null || typeof item === "boolean") continue;
-        const node = item instanceof Node ? item : document.createTextNode(String(item));
-        parent.insertBefore(node, anchor);
-        lastNodes[count++] = node;
+        newNodes.push(item instanceof Node ? item : document.createTextNode(String(item)));
       }
     } else {
-      if (lastNodes.length < 1) lastNodes = [null as unknown as Node];
       const node = result instanceof Node ? result : document.createTextNode(String(result));
-      parent.insertBefore(node, anchor);
-      lastNodes[count++] = node;
+      newNodes = [node];
     }
 
-    lastNodes.length = count;
+    // Build a set of nodes that will be reused (present in both old and new lists)
+    const reused: Set<Node> | undefined = lastNodes.length > 0 && newNodes.length > 0 ? new Set<Node>() : undefined;
+    if (reused) {
+      for (let i = 0; i < newNodes.length; i++) {
+        for (let j = 0; j < lastNodes.length; j++) {
+          if (newNodes[i] === lastNodes[j]) {
+            reused.add(newNodes[i]);
+            break;
+          }
+        }
+      }
+    }
+
+    // Remove old nodes that are NOT reused
+    for (let i = 0; i < lastNodes.length; i++) {
+      const node = lastNodes[i];
+      if (reused?.has(node)) continue;
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }
+
+    // Compute anchor AFTER removal so it's not stale
+    const anchor = placeholder.nextSibling;
+
+    // Insert new nodes in order, skipping nodes already in the correct position
+    for (let i = 0; i < newNodes.length; i++) {
+      const node = newNodes[i];
+      if (reused?.has(node) && node.parentNode === parent) {
+        // Reused node: only move if not already before the anchor
+        if (node.nextSibling !== anchor) {
+          parent.insertBefore(node, anchor);
+        }
+      } else {
+        parent.insertBefore(node, anchor);
+      }
+    }
+
+    lastNodes = newNodes;
   }
 
   // Initial render and reactive subscription

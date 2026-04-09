@@ -228,12 +228,19 @@ export const tagFactory =
           continue; // already handled above / below
         default: {
           const value = props[key];
-          if (value == null || value === false) continue;
+          if (value == null) continue;
           if (key[0] === "o" && key[1] === "n") continue;
           if (typeof value === "function") {
             registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
-          } else if (value === true) {
-            el.setAttribute(key, "");
+          } else if (typeof value === "boolean") {
+            // For IDL properties (checked, disabled, selected), set the DOM property directly
+            if (key in el && (key === "checked" || key === "disabled" || key === "selected")) {
+              (el as unknown as Record<string, boolean>)[key] = value;
+            } else if (value) {
+              el.setAttribute(key, "");
+            } else {
+              el.removeAttribute(key);
+            }
           } else {
             const str = String(value);
             el.setAttribute(key, isUrlAttribute(key) ? sanitizeUrl(str) : str);
