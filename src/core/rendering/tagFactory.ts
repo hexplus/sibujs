@@ -160,6 +160,30 @@ function appendChildren(el: Element, nodes: NodeChildren) {
 
 /**
  * Factory for creating HTML or SVG elements with reactive props and nodes.
+ *
+ * Calling conventions:
+ *
+ *   tag()                         empty element
+ *   tag("text")                   element with text content
+ *   tag(42)                       element with numeric text content
+ *   tag([childA, childB])         element with children (array)
+ *   tag(node)                     element wrapping a single existing node
+ *   tag(getter)                   element with a reactive child
+ *   tag("className", children)    positional: class + children
+ *   tag({ ...props })             full props object (children via props.nodes)
+ *   tag({ ...props }, children)   props + children (no need for `nodes:` key!)
+ *
+ * The last form is the "deeply-nested shorthand" the codebase favours:
+ *
+ *   div({ class: "card" }, [
+ *     h1({ class: "title" }, "Hello"),
+ *     p({ class: "body" }, "World"),
+ *     div({ class: "row" }, [
+ *       span({ id: "x" }, "child"),
+ *     ]),
+ *   ])
+ *
+ * `children` overrides `props.nodes` when both are present.
  */
 export const tagFactory =
   (tag: string, ns?: string) =>
@@ -169,26 +193,34 @@ export const tagFactory =
     // Fast path: tag() — no arguments
     if (first === undefined) return el;
 
-    // Fast path: tag("text") — single string, no second arg
-    if (second === undefined && typeof first === "string") {
+    // String first arg — either `tag("text")` or `tag("className", children)`
+    if (typeof first === "string") {
+      if (second !== undefined) {
+        el.setAttribute("class", first);
+        appendChildren(el, second);
+        return el;
+      }
       el.textContent = first;
       return el;
     }
 
-    // Fast path: tag("className", nodes) — shorthand
-    if (second !== undefined) {
-      el.setAttribute("class", first as string);
-      appendChildren(el, second);
+    // Number first arg — treat as text content. This matches the
+    // `appendChildren` number branch so `p(42)` works.
+    if (typeof first === "number") {
+      el.textContent = String(first);
       return el;
     }
 
-    // Fast path: tag([children]) or tag(node)
-    if (Array.isArray(first) || first instanceof Node) {
+    // Array / Node / function first arg — children-only shorthand
+    // (`tag([children])`, `tag(existingNode)`, `tag(() => reactiveChild)`).
+    // The second arg is ignored in these forms.
+    if (Array.isArray(first) || first instanceof Node || typeof first === "function") {
       appendChildren(el, first as NodeChildren);
       return el;
     }
 
-    // Full props object: tag({ class, nodes, on, ... })
+    // Full props object: tag({ class, on, style, ... }) OR
+    //                    tag({ class, on, style, ... }, children)
     const props = first as TagProps;
 
     // Known-keys fast path: process common props via direct access,
@@ -199,7 +231,12 @@ export const tagFactory =
     const pId = props.id;
     if (pId != null) el.id = pId as string;
 
-    const pNodes = props.nodes;
+    // Children resolution: `second` (positional) beats `props.nodes`.
+    // This lets callers write the deeply-nested shorthand:
+    //   div({ class: "x" }, [ h1({ class: "t" }, "Hi") ])
+    // instead of
+    //   div({ class: "x", nodes: [ h1({ class: "t", nodes: "Hi" }) ] })
+    const pNodes = second !== undefined ? second : props.nodes;
     if (pNodes != null) appendChildren(el, pNodes);
 
     const pOn = props.on;

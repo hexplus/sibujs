@@ -1,8 +1,7 @@
-import { isDev } from "../core/dev";
-import { button, div, h3, p, pre, span, style } from "../core/rendering/html";
+import { div, span, style } from "../core/rendering/html";
+import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-
-const _isDev = isDev();
+import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryProps {
   /**
@@ -18,6 +17,23 @@ export interface ErrorBoundaryProps {
    * Called when an error is caught (sync or async).
    */
   onError?: (error: Error) => void;
+  /**
+   * A list of reactive getters. Whenever any of these values change
+   * after an error has been caught, the boundary automatically resets
+   * (clears the error and re-renders). Useful for recovering from a
+   * failed render after the user navigates, changes filters, or
+   * otherwise picks a new input that might not fail this time.
+   *
+   * @example
+   * ```ts
+   * const [route, setRoute] = signal("/");
+   * ErrorBoundary({
+   *   resetKeys: [route],
+   *   nodes: () => div({ nodes: riskyPageFor(route()) }),
+   * });
+   * ```
+   */
+  resetKeys?: Array<() => unknown>;
 }
 
 // CSS styles for ErrorBoundary
@@ -207,44 +223,8 @@ function getMemoizedFallback(
   return cache.get(key) as Element;
 }
 
-interface StackFrame {
-  fn: string;
-  loc: string;
-}
-
-function parseStack(err: Error): { source: string; frames: StackFrame[] } {
-  const stack = err.stack || "";
-  const lines = stack.split("\n");
-  const frames: StackFrame[] = [];
-  let source = "";
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    // Chrome/Edge: "at FunctionName (file:line:col)" or "at file:line:col"
-    const chromeMatch = trimmed.match(/^at\s+(?:(.+?)\s+\((.+)\)|(.+))$/);
-    if (chromeMatch) {
-      const fn = chromeMatch[1] || "(anonymous)";
-      const loc = chromeMatch[2] || chromeMatch[3] || "";
-      frames.push({ fn, loc });
-      if (!source && fn !== "(anonymous)" && !fn.startsWith("Object.") && !fn.startsWith("Module.")) {
-        source = fn;
-      }
-      continue;
-    }
-    // Firefox/Safari: "functionName@file:line:col"
-    const firefoxMatch = trimmed.match(/^(.+?)@(.+)$/);
-    if (firefoxMatch) {
-      const fn = firefoxMatch[1] || "(anonymous)";
-      const loc = firefoxMatch[2] || "";
-      frames.push({ fn, loc });
-      if (!source && fn !== "(anonymous)") {
-        source = fn;
-      }
-    }
-  }
-
-  return { source, frames };
-}
+// Stack parsing is now handled by ErrorDisplay. The helper used to
+// live here but was removed along with the inline legacy renderer.
 
 /**
  * ErrorBoundary component using SibuJS reactive pattern.
@@ -258,7 +238,7 @@ function parseStack(err: Error): { source: string; frames: StackFrame[] } {
  * - onError callback for logging/telemetry
  * - Improved CSS styling
  */
-export function ErrorBoundary({ nodes, fallback, onError }: ErrorBoundaryProps): Element {
+export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoundaryProps): Element {
   injectStyles();
 
   const [error, setError] = signal<Error | null>(null);
@@ -271,6 +251,29 @@ export function ErrorBoundary({ nodes, fallback, onError }: ErrorBoundaryProps):
     setError(null);
   };
 
+  // Wire `resetKeys` — when any listed getter changes after an error has
+  // been caught, clear the error and re-render. Skip the first run so we
+  // do not retry before an error has even occurred.
+  if (resetKeys && resetKeys.length > 0) {
+    let initialized = false;
+    effect(() => {
+      // Read every key so each one is tracked as a dependency
+      for (const k of resetKeys) {
+        try {
+          k();
+        } catch {
+          // A key getter that throws is still a valid dependency — we
+          // just ignore the value. Do not let it crash the effect.
+        }
+      }
+      if (!initialized) {
+        initialized = true;
+        return;
+      }
+      if (error() !== null) retry();
+    });
+  }
+
   const handleError = (e: unknown): Error => {
     const errorObj = e instanceof Error ? e : new Error(String(e));
     setError(errorObj);
@@ -278,117 +281,11 @@ export function ErrorBoundary({ nodes, fallback, onError }: ErrorBoundaryProps):
     return errorObj;
   };
 
-  const defaultFallback = (err: Error, retryFn: () => void) => {
-    if (!_isDev) {
-      return div({
-        class: "sibu-error-fallback",
-        nodes: [
-          div({
-            class: "sibu-error-header",
-            nodes: [h3({ nodes: "Something went wrong", class: "sibu-error-title" }) as Element],
-          }) as Element,
-          div({
-            class: "sibu-error-body",
-            nodes: [
-              p({ nodes: "An unexpected error occurred. Please try again.", class: "sibu-error-message" }) as Element,
-              div({
-                class: "sibu-error-actions",
-                nodes: [
-                  button({
-                    nodes: "Retry",
-                    class: "sibu-error-btn sibu-error-btn-retry",
-                    on: { click: retryFn },
-                  }) as Element,
-                  button({
-                    nodes: "Reload Page",
-                    class: "sibu-error-btn sibu-error-btn-reload",
-                    on: { click: () => location.reload() },
-                  }) as Element,
-                ],
-              }) as Element,
-            ],
-          }) as Element,
-        ],
-      }) as Element;
-    }
-
-    const { source, frames } = parseStack(err);
-
-    const fullText = `${err.message}\n\n${err.stack || ""}`;
-
-    const copyBtn = button({
-      nodes: "Copy",
-      class: "sibu-error-copy-btn",
-      on: {
-        click: () => {
-          navigator.clipboard.writeText(fullText).then(() => {
-            (copyBtn as HTMLElement).textContent = "Copied!";
-            setTimeout(() => {
-              (copyBtn as HTMLElement).textContent = "Copy";
-            }, 1500);
-          });
-        },
-      },
-    }) as Element;
-
-    const stackLines: Element[] = frames.map(
-      (f, i) =>
-        div({
-          nodes: [
-            span({ class: "sibu-line-num", nodes: String(i + 1) }) as Element,
-            span({ class: "sibu-stack-fn", nodes: f.fn }) as Element,
-            span({ class: "sibu-stack-loc", nodes: ` ${f.loc}` }) as Element,
-          ],
-        }) as Element,
-    );
-
-    return div({
-      class: "sibu-error-fallback",
-      nodes: [
-        div({
-          class: "sibu-error-header",
-          nodes: [
-            h3({ nodes: source ? `Error in ${source}` : "Something went wrong", class: "sibu-error-title" }) as Element,
-            ...(source ? [] : [span() as Element]),
-          ],
-        }) as Element,
-        div({
-          class: "sibu-error-body",
-          nodes: [
-            p({ nodes: err.message, class: "sibu-error-message" }) as Element,
-            ...(frames.length > 0
-              ? [
-                  div({
-                    class: "sibu-error-stack-container",
-                    nodes: [
-                      div({
-                        class: "sibu-error-stack-label",
-                        nodes: [span({ nodes: "Stack Trace" }) as Element, copyBtn],
-                      }) as Element,
-                      div({ class: "sibu-error-stack", nodes: [pre({ nodes: stackLines }) as Element] }) as Element,
-                    ],
-                  }) as Element,
-                ]
-              : []),
-            div({
-              class: "sibu-error-actions",
-              nodes: [
-                button({
-                  nodes: "Retry",
-                  class: "sibu-error-btn sibu-error-btn-retry",
-                  on: { click: retryFn },
-                }) as Element,
-                button({
-                  nodes: "Reload Page",
-                  class: "sibu-error-btn sibu-error-btn-reload",
-                  on: { click: () => location.reload() },
-                }) as Element,
-              ],
-            }) as Element,
-          ],
-        }) as Element,
-      ],
-    }) as Element;
+  const defaultFallback = (err: Error, retryFn: () => void): Element => {
+    // Delegate to the shared ErrorDisplay component. It handles the
+    // dev/prod split, copy-to-clipboard, stack parsing, Error.cause
+    // chain, metadata, and action buttons.
+    return ErrorDisplay({ error: err, severity: "error", onRetry: retryFn });
   };
 
   const tryRenderFallback = (err: Error): Element => {

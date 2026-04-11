@@ -2,6 +2,26 @@ import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
+import { sanitizeUrl } from "../utils/sanitize";
+
+// ─── Navigation protocol guard ──────────────────────────────────────────────
+//
+// Block `javascript:`, `data:`, `vbscript:`, and `blob:` URIs from ever
+// reaching `history.pushState`. Modern browsers do not execute a
+// `javascript:` URI stored via pushState directly — but any subsequent
+// render that copies `location.href` into an `<a href>` would turn it
+// into a live XSS vector. Same for reflected links that use `routeState.path`.
+//
+// The allowlist is "path-ish strings" — we accept anything that does NOT
+// look like a dangerous scheme. `sanitizeUrl` returns the empty string for
+// blocked schemes, so we can reuse it.
+function isSafeNavigationTarget(path: string): boolean {
+  // An empty string from `sanitizeUrl` means the input was unsafe.
+  // But an originally-empty input is also legitimate ("" → root relative),
+  // so treat those separately.
+  if (path === "") return true;
+  return sanitizeUrl(path) !== "";
+}
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -51,7 +71,18 @@ export interface RedirectRoute extends RouteBase {
   readonly redirect: string | ((to: RouteContext) => string);
 }
 
-export type RouteDef = ComponentRoute | AsyncRoute | RedirectRoute;
+/**
+ * A route whose component is loaded on first visit via a dynamic
+ * `import()`. This is the ergonomic shorthand for
+ * `{ component: lazy(() => import("./Page")) }`.
+ *
+ * The loader must return a module with a `default` Component export.
+ */
+export interface LazyRoute extends RouteBase {
+  readonly lazy: () => Promise<{ default: Component }>;
+}
+
+export type RouteDef = ComponentRoute | AsyncRoute | RedirectRoute | LazyRoute;
 
 export interface RouterOptions {
   readonly mode?: "history" | "hash";
@@ -762,6 +793,17 @@ export class SibuRouter {
     try {
       await this.navigator.navigate(async (signal) => {
         const targetPath = this.resolvePath(to);
+
+        // Security: refuse navigation targets that carry a dangerous
+        // protocol. `javascript:`, `data:`, `vbscript:`, and `blob:` URIs
+        // can otherwise end up stored in `history.state` and reflected
+        // into `<a href>` elements by downstream code.
+        if (!isSafeNavigationTarget(targetPath)) {
+          const from = this.currentRouteGetter();
+          const toContext = this.createRouteContext(targetPath);
+          throw new NavigationFailureError("aborted", from, toContext);
+        }
+
         const from = this.currentRouteGetter();
         const toContext = this.createRouteContext(targetPath);
 
@@ -808,6 +850,10 @@ export class SibuRouter {
     const beforeEachResult = await this.guards.runBeforeEach(to, from, signal);
     if (beforeEachResult !== true) {
       if (typeof beforeEachResult === "string") {
+        // Security: refuse guard-redirect targets with dangerous protocols.
+        if (!isSafeNavigationTarget(beforeEachResult)) {
+          throw new NavigationFailureError("aborted", from, to);
+        }
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1);
       }
       throw new NavigationFailureError("aborted", from, to);
@@ -830,6 +876,10 @@ export class SibuRouter {
             const result = await guard(to, from);
             if (result !== true) {
               if (typeof result === "string") {
+                // Security: refuse guard-redirect targets with dangerous protocols.
+                if (!isSafeNavigationTarget(result)) {
+                  throw new NavigationFailureError("aborted", from, to);
+                }
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1);
               }
               throw new NavigationFailureError("aborted", from, to);
@@ -847,6 +897,10 @@ export class SibuRouter {
             `[SibuJS Router] Redirect to absolute URL "${redirectPath}" detected. Use relative paths for safer redirects.`,
           );
         }
+        // Security: refuse redirect targets with dangerous protocols.
+        if (typeof redirectPath === "string" && !isSafeNavigationTarget(redirectPath)) {
+          throw new NavigationFailureError("aborted", from, to);
+        }
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1);
       }
     }
@@ -855,6 +909,10 @@ export class SibuRouter {
     const beforeResolveResult = await this.guards.runBeforeResolve(to, from, signal);
     if (beforeResolveResult !== true) {
       if (typeof beforeResolveResult === "string") {
+        // Security: refuse guard-redirect targets with dangerous protocols.
+        if (!isSafeNavigationTarget(beforeResolveResult)) {
+          throw new NavigationFailureError("aborted", from, to);
+        }
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1);
       }
       throw new NavigationFailureError("aborted", from, to);
@@ -1080,6 +1138,36 @@ class NavigationFailureError extends Error {
 
 let globalRouter: SibuRouter | null = null;
 
+/**
+ * Normalize a route tree so that any `{ lazy: () => import(...) }`
+ * shorthand is converted to the canonical `{ component: lazy(...) }`
+ * form used by the matcher. Runs recursively over `children`.
+ */
+function normalizeRoutes(routes: RouteDef[]): RouteDef[] {
+  return routes.map((route) => {
+    // Copy children first so we can rewrite them too
+    const normalizedChildren =
+      route.children && route.children.length > 0 ? normalizeRoutes(route.children as RouteDef[]) : route.children;
+
+    if ("lazy" in route && typeof (route as LazyRoute).lazy === "function") {
+      // Strip `lazy` and emit an AsyncRoute with `component: lazy(importFn)`
+      const { lazy: importFn, ...rest } = route as LazyRoute;
+      const asyncRoute: AsyncRoute = {
+        ...(rest as RouteBase),
+        component: lazy(importFn),
+        children: normalizedChildren,
+      };
+      return asyncRoute;
+    }
+
+    // Preserve existing route, but replace children with the normalized list
+    if (normalizedChildren !== route.children) {
+      return { ...route, children: normalizedChildren } as RouteDef;
+    }
+    return route;
+  });
+}
+
 export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, options: RouterOptions = {}): SibuRouter {
   if (globalRouter) {
     globalRouter.destroy();
@@ -1088,7 +1176,7 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
   // Handle overload: createRouter(options) without routes array
   let routes: RouteDef[];
   if (Array.isArray(routesOrOptions)) {
-    routes = routesOrOptions;
+    routes = normalizeRoutes(routesOrOptions);
   } else {
     options = routesOrOptions;
     routes = [];
@@ -1103,7 +1191,7 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
  */
 export function setRoutes(routes: RouteDef[]): void {
   if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.updateRoutes(routes);
+  globalRouter.updateRoutes(normalizeRoutes(routes));
 }
 
 // ============================================================================
