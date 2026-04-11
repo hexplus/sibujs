@@ -57,8 +57,6 @@ export * from "./src/core/signals/derived";
 export * from "./src/core/signals/watch";
 export * from "./src/core/signals/store";
 export * from "./src/core/signals/ref";
-export * from "./src/core/signals/memo";
-export * from "./src/core/signals/memoFn";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/deepSignal";
 export * from "./src/core/signals/writable";

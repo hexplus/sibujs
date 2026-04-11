@@ -1,14 +1,10 @@
 // ============================================================================
-// COMPOSABLES & COMPONENT PATTERNS
+// COMPONENT PATTERNS
 // ============================================================================
-
-/**
- * composable wraps a setup function to create reusable stateful logic.
- * Similar to Vue 3 composables — encapsulates reactive state and methods.
- */
-export function composable<T>(setup: () => T): () => T {
-  return setup;
-}
+//
+// Note: `composable()` was removed in 1.4.0 — it was an identity wrapper
+// (`return setup`) that added nothing over calling the setup function
+// directly. Plain functions are already composables in SibuJS.
 
 /**
  * RenderProp implements the render-prop pattern.

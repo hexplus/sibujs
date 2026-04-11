@@ -7,7 +7,7 @@ import { isDev } from "../dev";
 declare const __accessor: unique symbol;
 
 /**
- * A reactive signal getter returned by signal(), derived(), memo(), and similar primitives.
+ * A reactive signal getter returned by signal(), derived(), and similar primitives.
  *
  * Pass an Accessor directly into reactive prop positions — never call it there:
  * ```ts

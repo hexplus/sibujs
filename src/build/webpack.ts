@@ -16,7 +16,6 @@ export interface SibuWebpackPluginOptions {
 const PURE_FACTORIES = [
   "tagFactory",
   "context",
-  "composable",
   "defineComponent",
   "withProps",
   "withDefaults",

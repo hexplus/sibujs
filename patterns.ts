@@ -10,7 +10,6 @@ export * from "./src/patterns/persist";
 export * from "./src/patterns/optimistic";
 export * from "./src/patterns/timeTravel";
 export * from "./src/patterns/globalStore";
-export * from "./src/patterns/primitives";
 
 // Component patterns
 export * from "./src/patterns/hoc";
