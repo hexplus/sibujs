@@ -25,15 +25,10 @@ import { div, h1, button, signal, mount } from "sibujs";
 function Counter() {
   const [count, setCount] = signal(0);
 
-  return div({
-    nodes: [
-      h1({ nodes: () => `Count: ${count()}` }),
-      button({
-        nodes: "Increment",
-        on: { click: () => setCount(c => c + 1) }
-      })
-    ]
-  });
+  return div({ class: "counter" }, [
+    h1(() => `Count: ${count()}`),
+    button({ on: { click: () => setCount(c => c + 1) } }, "Increment"),
+  ]);
 }
 
 mount(Counter, document.getElementById("app"));
@@ -43,32 +38,41 @@ mount(Counter, document.getElementById("app"));
 
 SibuJS gives you maximum flexibility with three interoperable styles:
 
-#### 1. Tag Factory (Full Props)
-Maximum control with an explicit properties object. Perfect for complex elements.
+#### 1. Tag Factory
+The canonical form: a props object followed by children as a second
+positional argument. No `nodes:` key required at any level of the tree —
+children can be a string, a number, a single node, an array, or a
+reactive getter.
 
 ```javascript
-import { div, h1, button } from "sibujs";
+import { div, h1, label, input, button } from "sibujs";
 
-const [count, setCount] = signal(0);
-
-return div({
-  class: "counter",
-  nodes: [
-    h1({ nodes: () => `Count: ${count()}` }),
-    button({ nodes: "Increment", on: { click: () => setCount(c => c + 1) } })
-  ]
-});
+return div({ class: "counter" }, [
+  h1({ class: "title" }, () => `Count: ${count()}`),
+  label({ for: "amount" }, "Step"),
+  input({ id: "amount", type: "number", value: 1 }),
+  button(
+    { class: "primary", on: { click: () => setCount(c => c + 1) } },
+    "Increment",
+  ),
+]);
 ```
 
-#### 2. Shorthand API
-Concise and readable for common layouts. Class and children passed as positional arguments.
+All legacy forms — `tag({ class, nodes })`, `tag("className", children)`,
+`tag("text")`, `tag([children])`, `tag(node)`, `tag(() => reactive)` —
+continue to work unchanged. When both `props.nodes` and the positional
+second argument are present, the positional wins.
+
+#### 2. Positional Shorthand
+The tersest form. Class and children as positional arguments, for
+layouts with no event handlers or custom props.
 
 ```javascript
 import { div, h1, button } from "sibujs";
 
 return div("counter", [
   h1(() => `Count: ${count()}`),
-  button({ nodes: "Increment", on: { click: () => setCount(c => c + 1) } })
+  button({ on: { click: () => setCount(c => c + 1) } }, "Increment"),
 ]);
 ```
 
