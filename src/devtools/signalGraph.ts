@@ -50,7 +50,7 @@ export interface SignalNodeSnapshot {
   id: string;
   /** Debug name, if the caller tagged the signal. */
   name: string | null;
-  /** Runtime type tag: `"signal"`, `"derived"`, `"memo"`, `"effect"`. */
+  /** Runtime type tag: `"signal"`, `"derived"`, `"effect"`. */
   kind: string;
   /** Best-effort preview of the current value. */
   value: string;

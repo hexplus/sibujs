@@ -77,7 +77,6 @@ function injectPureAnnotations(code: string): string {
   const sibuFactories = [
     "tagFactory",
     "context",
-    "composable",
     "defineComponent",
     "withProps",
     "withDefaults",

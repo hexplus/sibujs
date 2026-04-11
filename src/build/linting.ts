@@ -45,7 +45,7 @@ export const lintRules = {
     description: "Signal functions should not be called inside conditionals, loops, or nested functions",
     check(source: string): LintViolation[] {
       const violations: LintViolation[] = [];
-      const hookNames = ["signal", "effect", "derived", "memo", "memoFn", "ref", "watch", "store"];
+      const hookNames = ["signal", "effect", "derived", "ref", "watch", "store"];
       const hookPattern = new RegExp(`\\b(${hookNames.join("|")})\\s*\\(`, "g");
       const lines = source.split("\n");
 

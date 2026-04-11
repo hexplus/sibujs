@@ -1,23 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { signal } from "../src/core/signals/signal";
-import { composable, createSlots, RenderProp, withBoundary } from "../src/patterns/composable";
+import { createSlots, RenderProp, withBoundary } from "../src/patterns/composable";
 
-describe("composable", () => {
-  it("should create reusable stateful logic", () => {
-    const counterSetup = composable(() => {
-      const [count, setCount] = signal(0);
-      return {
-        count,
-        increment: () => setCount((c) => c + 1),
-      };
-    });
-
-    const counter = counterSetup();
-    expect(counter.count()).toBe(0);
-    counter.increment();
-    expect(counter.count()).toBe(1);
-  });
-});
+// composable() was removed in 1.4.0 — it was an identity wrapper that added
+// nothing over calling the setup function directly. Plain functions are
+// already composables in SibuJS.
 
 describe("RenderProp", () => {
   it("should render using function-as-nodes pattern", () => {

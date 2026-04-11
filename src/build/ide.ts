@@ -69,31 +69,6 @@ export function getComponentMetadata(): ComponentMeta[] {
       ],
     },
     {
-      name: "memo",
-      description:
-        "Returns a memoized value that only recomputes when its reactive dependencies change. Alias for derived.",
-      props: [
-        {
-          name: "factory",
-          type: "() => T",
-          required: true,
-          description: "Function that computes the memoized value",
-        },
-      ],
-    },
-    {
-      name: "memoFn",
-      description: "Returns a memoized callback that only updates when its reactive dependencies change.",
-      props: [
-        {
-          name: "callback",
-          type: "() => T",
-          required: true,
-          description: "The callback factory function to memoize",
-        },
-      ],
-    },
-    {
       name: "ref",
       description:
         "Creates a mutable reference object that persists across renders. Updating a ref does NOT trigger re-renders.",
@@ -136,44 +111,6 @@ export function getComponentMetadata(): ComponentMeta[] {
           type: "T extends object",
           required: true,
           description: "Initial state object for the store",
-        },
-      ],
-    },
-
-    // ── SolidJS-style Primitives ─────────────────────────────────────
-    {
-      name: "createSignal",
-      description: "Creates a reactive signal. SolidJS-style alias for signal. Returns [getter, setter].",
-      props: [
-        {
-          name: "value",
-          type: "T",
-          required: true,
-          description: "Initial value",
-        },
-      ],
-    },
-    {
-      name: "createMemo",
-      description: "Creates a derived/computed reactive value. SolidJS-style alias for derived.",
-      props: [
-        {
-          name: "fn",
-          type: "() => T",
-          required: true,
-          description: "Computation function that reads other signals",
-        },
-      ],
-    },
-    {
-      name: "createEffect",
-      description: "Creates a reactive side effect. SolidJS-style alias for effect.",
-      props: [
-        {
-          name: "fn",
-          type: "() => void",
-          required: true,
-          description: "Effect function that reads reactive signals",
         },
       ],
     },
@@ -531,11 +468,6 @@ export function generateVSCodeSnippets(): Record<
       ],
       description: "Create a reactive form with validation",
     },
-    "SibuJS createSignal": {
-      prefix: "sibu-signal",
-      body: ["const [${1:value}, ${2:setValue}] = createSignal(${3:initialValue});"],
-      description: "Create a reactive signal (SolidJS-style alias for signal)",
-    },
   };
 }
 
@@ -583,12 +515,6 @@ export function generateTypeStubs(): Record<string, string> {
 
     derived: ["declare function derived<T>(getter: () => T): () => T;"].join("\n"),
 
-    memo: ["declare function memo<T>(factory: () => T): () => T;"].join("\n"),
-
-    memoFn: ["declare function memoFn<T extends (...args: unknown[]) => unknown>(callback: () => T): () => T;"].join(
-      "\n",
-    ),
-
     ref: [
       "interface Ref<T> { current: T; }",
       "declare function ref<T>(initial: T): Ref<T>;",
@@ -609,14 +535,6 @@ export function generateTypeStubs(): Record<string, string> {
       "}",
       "declare function store<T extends object>(initialState: T): [{ readonly [K in keyof T]: T[K] }, StoreActions<T>];",
     ].join("\n"),
-
-    createSignal: ["declare function createSignal<T>(value: T): [() => T, (next: T | ((prev: T) => T)) => void];"].join(
-      "\n",
-    ),
-
-    createMemo: ["declare function createMemo<T>(fn: () => T): () => T;"].join("\n"),
-
-    createEffect: ["declare function createEffect(fn: () => void): () => void;"].join("\n"),
 
     mount: [
       "declare function mount(component: (() => HTMLElement) | HTMLElement | Node, container: HTMLElement | null): { node: Node; unmount: () => void };",

@@ -11,8 +11,6 @@ import { array } from "../src/core/signals/array";
 import { deepSignal } from "../src/core/signals/deepSignal";
 import { derived } from "../src/core/signals/derived";
 import { effect } from "../src/core/signals/effect";
-import { memo } from "../src/core/signals/memo";
-import { memoFn } from "../src/core/signals/memoFn";
 import { ref } from "../src/core/signals/ref";
 import { signal } from "../src/core/signals/signal";
 import { store } from "../src/core/signals/store";
@@ -259,26 +257,6 @@ describe("deepSignal type inference", () => {
     });
 
     expect(get().x).toBe(4);
-  });
-});
-
-// ── memo / memoFn inference ──────────────────────────────────────────────
-
-describe("memo type inference", () => {
-  it("infers return type from factory", () => {
-    const [count] = signal(0);
-    const doubled = memo(() => count() * 2);
-    expectType<number>(doubled());
-    expect(doubled()).toBe(0);
-  });
-});
-
-describe("memoFn type inference", () => {
-  it("infers callback type", () => {
-    const handler = memoFn(() => (x: number) => x * 2);
-    const fn = handler();
-    expectType<number>(fn(5));
-    expect(fn(5)).toBe(10);
   });
 });
 
