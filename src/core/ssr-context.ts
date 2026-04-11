@@ -33,12 +33,18 @@ export function disableSSR(): void {
 /**
  * Run a function in SSR mode. Automatically enables/disables SSR around the callback.
  * Returns whatever the callback returns.
+ *
+ * Nesting-safe: saves the prior SSR flag and restores it in the `finally`
+ * block. A nested `withSSR(...)` call cannot prematurely flip the outer
+ * scope's SSR flag back to `false`, and an exception thrown inside `fn`
+ * still leaves the flag in its original state.
  */
 export function withSSR<T>(fn: () => T): T {
+  const wasSSR = ssrMode;
   enableSSR();
   try {
     return fn();
   } finally {
-    disableSSR();
+    if (!wasSSR) disableSSR();
   }
 }

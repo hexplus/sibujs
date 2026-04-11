@@ -170,6 +170,8 @@ export * from "./a11y";
 export * from "./adapters";
 // E2E testing utilities
 export * from "./e2e";
+// Extended queries: queryBy*, findBy*, waitForSignal, type()
+export * from "./queries";
 // Snapshot testing
 export * from "./snapshot";
 // Visual regression testing

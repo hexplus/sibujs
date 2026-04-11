@@ -12,3 +12,4 @@ export * from "./src/devtools/debugValue";
 export * from "./src/devtools/componentProfiler";
 export * from "./src/devtools/devtoolsOverlay";
 export * from "./src/devtools/introspect";
+export * from "./src/devtools/signalGraph";

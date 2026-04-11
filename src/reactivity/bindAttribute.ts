@@ -5,14 +5,38 @@ import { track } from "./track";
 const _isDev = isDev();
 
 /**
+ * Is this attribute an `on*` event handler? Event-handler attributes are
+ * always a XSS vector when set via `setAttribute` (they evaluate the
+ * value as JavaScript on event dispatch), so the framework refuses to
+ * bind to them. Use `on: { click: fn }` on the tag factory instead —
+ * that path uses `addEventListener` which is safe.
+ */
+function isEventHandlerAttr(name: string): boolean {
+  if (name.length < 3) return false;
+  const lower = name.toLowerCase();
+  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
+}
+
+/**
  * Bind a reactive getter to an element attribute.
  * Returns a teardown that stops all future updates.
  *
- * Sanitization: URL attributes (href, src, action, etc.) go through
- * protocol validation (blocks javascript:, data:, vbscript:).
- * All other attributes get HTML entity escaping.
+ * Sanitization:
+ *  - `on*` event-handler attributes are refused (defense-in-depth).
+ *  - URL attributes (href, src, action, etc.) go through protocol
+ *    validation (blocks javascript:, data:, vbscript:, blob:).
+ *  - All other attributes are passed through `setAttribute`, which is
+ *    XSS-safe — the browser stores the value as text, never code.
  */
 export function bindAttribute(el: HTMLElement, attr: string, getter: () => unknown): () => void {
+  if (isEventHandlerAttr(attr)) {
+    if (_isDev)
+      devWarn(
+        `bindAttribute: refusing to bind event-handler attribute "${attr}". Use on:{ ${attr.slice(2)}: fn } instead.`,
+      );
+    return () => {};
+  }
+
   function commit() {
     let value: unknown;
     try {

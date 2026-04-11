@@ -1,8 +1,30 @@
 import { signal } from "../core/signals/signal";
 
 /**
+ * Validate a WebSocket URL. Only `ws:` and `wss:` schemes are allowed —
+ * a `javascript:` or `data:` URI would not actually open a socket, but
+ * an attacker-controlled URL that reaches a non-WebSocket endpoint is
+ * still unwanted. The check is deliberately minimal: strip whitespace,
+ * lowercase, require the scheme. No host allowlist here — that is the
+ * caller's job (sibujs cannot know which hosts are trusted).
+ *
+ * Returns the trimmed URL if safe, or `null` if unsafe.
+ */
+function validateWsUrl(raw: string): string | null {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping chars browsers silently ignore during protocol parsing
+  const trimmed = raw.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith("ws://") || lower.startsWith("wss://")) return trimmed;
+  return null;
+}
+
+/**
  * socket provides a reactive WebSocket connection with auto-reconnect
  * and optional heartbeat support.
+ *
+ * Security: the URL is validated against `ws://` / `wss://` only —
+ * `javascript:` and similar schemes are refused (status stays `"closed"`).
  */
 export function socket(
   url: string | (() => string),
@@ -42,8 +64,15 @@ export function socket(
   function connect(): void {
     if (disposed) return;
 
+    const safeUrl = validateWsUrl(getUrl());
+    if (safeUrl === null) {
+      // Unsafe URL — stay closed and do not attempt a connection.
+      setStatus("closed");
+      return;
+    }
+
     setStatus("connecting");
-    ws = new WebSocket(getUrl(), protocols);
+    ws = new WebSocket(safeUrl, protocols);
 
     ws.onopen = () => {
       setStatus("open");

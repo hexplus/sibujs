@@ -30,4 +30,43 @@ describe("persisted", () => {
     expect(JSON.parse(sessionStorage.getItem("session-key") ?? "null")).toBe("b");
     expect(localStorage.getItem("session-key")).toBeNull();
   });
+
+  it("should sync across tabs via storage event", () => {
+    const [value] = persisted("shared", "initial");
+    expect(value()).toBe("initial");
+    // Simulate another tab writing to localStorage
+    const event = new StorageEvent("storage", {
+      key: "shared",
+      newValue: JSON.stringify("from-other-tab"),
+      oldValue: JSON.stringify("initial"),
+      storageArea: localStorage,
+    });
+    window.dispatchEvent(event);
+    expect(value()).toBe("from-other-tab");
+  });
+
+  it("should revert to initial when another tab clears the key", () => {
+    const [value, setValue] = persisted("cleared", "initial");
+    setValue("modified");
+    expect(value()).toBe("modified");
+    const event = new StorageEvent("storage", {
+      key: "cleared",
+      newValue: null,
+      oldValue: JSON.stringify("modified"),
+      storageArea: localStorage,
+    });
+    window.dispatchEvent(event);
+    expect(value()).toBe("initial");
+  });
+
+  it("should not sync cross-tab when syncTabs is false", () => {
+    const [value] = persisted("no-sync", "initial", { syncTabs: false });
+    const event = new StorageEvent("storage", {
+      key: "no-sync",
+      newValue: JSON.stringify("other-tab"),
+      storageArea: localStorage,
+    });
+    window.dispatchEvent(event);
+    expect(value()).toBe("initial");
+  });
 });

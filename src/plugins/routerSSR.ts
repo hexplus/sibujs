@@ -2,9 +2,18 @@
 // ROUTER SSR INTEGRATION
 // Server-side route resolution with client-side hydration continuity.
 // ============================================================================
+//
+// Security notes (see WORK_LOG.md § "SSR security hardening"):
+//
+//  - `params` and `query` objects are created with `Object.create(null)`
+//    and guarded against prototype-pollution keys (`__proto__`, `constructor`,
+//    `prototype`). A route like `/:__proto__` cannot poison `Object.prototype`.
+//  - `parseURL` wraps `decodeURIComponent` in try/catch so malformed
+//    percent-sequences do not crash server-side rendering (DoS vector).
+//  - `serializeRouteState` escapes `<`, `>`, `&`, `U+2028`, `U+2029` and
+//    supports an optional `nonce` for strict-CSP compatibility.
 
-import type { TrustedHTML } from "../platform/ssr";
-import { renderToString } from "../platform/ssr";
+import { escapeScriptJson, renderToString, type TrustedHTML } from "../platform/ssr";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
 
@@ -37,12 +46,46 @@ export interface SSRRouteDef {
 }
 
 // ============================================================================
+// INTERNAL: SECURITY HELPERS
+// ============================================================================
+
+/**
+ * Keys that must never be assigned to a params/query object because they
+ * would pollute `Object.prototype` or let an attacker override JS machinery.
+ *
+ * Even with `Object.create(null)` it is still worth blocking these — they
+ * prevent confusion in downstream code that does `params.constructor` etc.
+ */
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isForbiddenKey(key: string): boolean {
+  return FORBIDDEN_KEYS.has(key);
+}
+
+/** `decodeURIComponent` that never throws. Returns the raw input on malformed percent-sequences. */
+function safeDecode(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** Create a plain object without `Object.prototype` in its chain, for use as an untrusted-key map. */
+function nullObject(): Record<string, string> {
+  return Object.create(null) as Record<string, string>;
+}
+
+// ============================================================================
 // INTERNAL: URL PARSING (no browser APIs)
 // ============================================================================
 
 /**
  * Parse a URL string into its constituent parts without using any browser APIs.
  * Handles path, query string, and hash fragment.
+ *
+ * Security: resilient to malformed percent-sequences (never throws) and
+ * blocks prototype-pollution keys.
  */
 function parseURL(url: string): { path: string; query: Record<string, string>; hash: string } {
   let remaining = url;
@@ -67,20 +110,23 @@ function parseURL(url: string): { path: string; query: Record<string, string>; h
   const path = remaining || "/";
 
   // Parse query string into key=value pairs
-  const query: Record<string, string> = {};
+  const query = nullObject();
   if (queryString) {
     const pairs = queryString.split("&");
     for (const pair of pairs) {
       if (!pair) continue;
       const eqIndex = pair.indexOf("=");
+      let key: string;
+      let value: string;
       if (eqIndex === -1) {
-        // Key without value, e.g., "?flag"
-        query[decodeURIComponent(pair)] = "";
+        key = safeDecode(pair);
+        value = "";
       } else {
-        const key = decodeURIComponent(pair.slice(0, eqIndex));
-        const value = decodeURIComponent(pair.slice(eqIndex + 1));
-        query[key] = value;
+        key = safeDecode(pair.slice(0, eqIndex));
+        value = safeDecode(pair.slice(eqIndex + 1));
       }
+      if (isForbiddenKey(key)) continue;
+      query[key] = value;
     }
   }
 
@@ -171,6 +217,8 @@ interface MatchResult {
 /**
  * Match a path against a single route definition (and its children).
  * Returns the matched route, extracted params, and the chain of matched routes.
+ *
+ * Security: params object is prototype-free; forbidden keys are silently dropped.
  */
 function matchRoute(
   path: string,
@@ -195,10 +243,12 @@ function matchRoute(
     const match = path.match(compiled.regex);
 
     if (match) {
-      const params: Record<string, string> = {};
+      const params = nullObject();
       for (let i = 0; i < compiled.keys.length; i++) {
+        const key = compiled.keys[i];
+        if (isForbiddenKey(key)) continue;
         if (match[i + 1] !== undefined) {
-          params[compiled.keys[i]] = decodeURIComponent(match[i + 1]);
+          params[key] = safeDecode(match[i + 1]);
         }
       }
       return {
@@ -269,7 +319,7 @@ function resolveServerRouteInternal(
     return {
       route: {
         path: normalizedPath,
-        params: {},
+        params: nullObject(),
         query,
         hash,
         meta: {},
@@ -350,6 +400,11 @@ export function renderRouteToString(
 /**
  * Generate the full HTML document for a route including serialized state.
  * Uses renderToDocument pattern with embedded route state.
+ *
+ * Security: meta/link attribute names are validated against
+ * `SAFE_ATTR_NAME`, URL attributes are routed through `sanitizeUrl`,
+ * `title` is HTML-escaped, and the embedded state script escapes
+ * `U+2028` / `U+2029` plus the usual `<`/`>`/`&` trio.
  */
 export function renderRouteToDocument(
   url: string,
@@ -360,43 +415,49 @@ export function renderRouteToDocument(
     links?: Record<string, string>[];
     scripts?: string[];
     headExtra?: TrustedHTML;
+    nonce?: string;
   },
 ): string {
   const { html, state } = renderRouteToString(url, routes, options);
   const opts = options || {};
 
-  // Build meta tags
+  // Build meta tags — keys validated, values URL-sanitized when applicable.
   const metaTags = (opts.meta || [])
-    .map(
-      (attrs) =>
-        `<meta ${Object.entries(attrs)
-          .map(([k, v]) => `${k}="${escapeAttr(v)}"`)
-          .join(" ")} />`,
-    )
+    .map((attrs) => {
+      const pairs = buildSafeAttrString(attrs);
+      return pairs ? `<meta ${pairs} />` : "";
+    })
+    .filter(Boolean)
     .join("\n    ");
 
   // Build link tags
   const linkTags = (opts.links || [])
-    .map(
-      (attrs) =>
-        `<link ${Object.entries(attrs)
-          .map(([k, v]) => `${k}="${escapeAttr(v)}"`)
-          .join(" ")} />`,
-    )
+    .map((attrs) => {
+      const pairs = buildSafeAttrString(attrs);
+      return pairs ? `<link ${pairs} />` : "";
+    })
+    .filter(Boolean)
     .join("\n    ");
 
-  // Build script tags (external scripts)
-  const scriptTags = (opts.scripts || []).map((src) => `<script src="${escapeAttr(src)}"></script>`).join("\n    ");
+  // Build script tags (external scripts) — src is URL-sanitized.
+  const scriptTags = (opts.scripts || [])
+    .map((src) => {
+      const safe = sanitizeUrlLocal(String(src));
+      if (!safe) return "";
+      return `<script src="${escapeAttrLocal(safe)}"></script>`;
+    })
+    .filter(Boolean)
+    .join("\n    ");
 
   // Serialize route state for client pickup
-  const stateScript = serializeRouteState(state);
+  const stateScript = serializeRouteState(state, opts.nonce);
 
   return `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${opts.title ? `<title>${escapeHtml(opts.title)}</title>` : ""}
+    ${opts.title ? `<title>${escapeHtmlLocal(opts.title)}</title>` : ""}
     ${metaTags}
     ${linkTags}
     ${opts.headExtra || ""}
@@ -412,10 +473,15 @@ export function renderRouteToDocument(
 /**
  * Serialize route state for embedding in HTML.
  * Uses a specific key (__SIBU_ROUTE_STATE__) distinct from the generic SSR data key.
+ *
+ * Security: escapes `<`/`>`/`&` and the ES line-terminator pairs
+ * `U+2028` / `U+2029`. Supports an optional `nonce` attribute for
+ * strict-CSP compatibility.
  */
-export function serializeRouteState(state: SSRRouteState): string {
-  const json = JSON.stringify(state).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026");
-  return `<script>window.${SSR_ROUTE_STATE_KEY}=${json}</script>`;
+export function serializeRouteState(state: SSRRouteState, nonce?: string): string {
+  const json = escapeScriptJson(JSON.stringify(state));
+  const nonceAttr = nonce ? ` nonce="${escapeAttrLocal(nonce)}"` : "";
+  return `<script${nonceAttr}>window.${SSR_ROUTE_STATE_KEY}=${json}</script>`;
 }
 
 /**
@@ -453,12 +519,8 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
   //    to the server-known path with replace semantics. This synchronizes
   //    the router's internal state with the server's resolved route without
   //    causing a DOM update (since the content is already rendered).
-  //    The router's queueMicrotask-based initialization will pick up the
-  //    correct path from window.location, which should match serverState.path.
 
   // 4. Hydrate the existing DOM.
-  //    Find the container and the matching component, then run hydration
-  //    to attach event listeners and reactive bindings.
   const container = options?.container || document.getElementById("app");
   if (container && serverState.path) {
     // Find the component that the server rendered for this route
@@ -472,10 +534,6 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
       });
     }
   }
-
-  // 5. Client-side navigation is now enabled for future navigations.
-  //    The router is fully initialized and listening to popstate/hashchange events.
-  //    Subsequent navigate() calls will work as normal client-side transitions.
 }
 
 /**
@@ -495,6 +553,7 @@ export function createSSRRouter(routes: SSRRouteDef[]): {
       links?: Record<string, string>[];
       scripts?: string[];
       headExtra?: TrustedHTML;
+      nonce?: string;
     },
   ) => string;
 } {
@@ -514,13 +573,81 @@ export function createSSRRouter(routes: SSRRouteDef[]): {
 }
 
 // ============================================================================
-// INTERNAL HELPERS
+// INTERNAL HELPERS — mirrored from platform/ssr.ts to keep routerSSR
+// self-contained. They must stay in sync with the master implementations.
 // ============================================================================
 
-function escapeHtml(str: string): string {
+const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
+
+function isSafeAttrName(name: string): boolean {
+  return SAFE_ATTR_NAME.test(name);
+}
+
+function isEventHandlerAttr(name: string): boolean {
+  if (name.length < 3) return false;
+  const lower = name.toLowerCase();
+  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
+}
+
+const URL_ATTRS = new Set([
+  "href",
+  "src",
+  "action",
+  "formaction",
+  "cite",
+  "poster",
+  "background",
+  "srcset",
+  "ping",
+  "manifest",
+  "data",
+  "xlink:href",
+]);
+
+/** Minimal URL sanitizer local to this module. Mirrors `utils/sanitize.ts`. */
+function sanitizeUrlLocal(url: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars to prevent protocol bypass
+  const trimmed = url.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
+  if (!trimmed) return "";
+  const lower = trimmed.toLowerCase();
+  if (
+    lower.startsWith("javascript:") ||
+    lower.startsWith("data:") ||
+    lower.startsWith("vbscript:") ||
+    lower.startsWith("blob:")
+  ) {
+    return "";
+  }
+  return trimmed;
+}
+
+/** Build a validated `key="value"` pair string. */
+function buildSafeAttrString(attrs: Record<string, string>): string {
+  const out: string[] = [];
+  for (const rawKey of Object.keys(attrs)) {
+    if (!Object.hasOwn(attrs, rawKey)) continue;
+    if (!isSafeAttrName(rawKey)) continue;
+    if (isEventHandlerAttr(rawKey)) continue;
+    const lowerKey = rawKey.toLowerCase();
+    let value = String(attrs[rawKey]);
+    if (URL_ATTRS.has(lowerKey)) {
+      value = sanitizeUrlLocal(value);
+      if (!value) continue;
+    }
+    out.push(`${rawKey}="${escapeAttrLocal(value)}"`);
+  }
+  return out.join(" ");
+}
+
+function escapeHtmlLocal(str: string): string {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function escapeAttr(str: string): string {
-  return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function escapeAttrLocal(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

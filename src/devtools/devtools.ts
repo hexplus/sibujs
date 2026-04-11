@@ -1,7 +1,7 @@
 /**
  * Sibu DevTools Bridge
  *
- * Architecture (React DevTools style):
+ * Architecture (browser-extension bus style):
  *
  *   Sibu App                    Chrome Extension
  *   ┌──────────┐               ┌──────────────┐

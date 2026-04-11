@@ -10,6 +10,23 @@
 export * from "./src/core/rendering/html";
 export { tagFactory, SVG_NS } from "./src/core/rendering/tagFactory";
 export type { TagProps } from "./src/core/rendering/tagFactory";
+// Per-element typed prop interfaces for common form/media/link elements
+export type {
+  AnchorProps,
+  AudioProps,
+  ButtonProps,
+  FormProps,
+  ImgProps,
+  InputProps,
+  InputType,
+  LabelProps,
+  MediaProps,
+  OptionProps,
+  SelectProps,
+  TextareaProps,
+  TypedTagFunction,
+  VideoProps,
+} from "./src/core/rendering/tagPropTypes";
 
 // htm — tagged template literal for HTML-like syntax (no compiler)
 export { html } from "./src/core/rendering/htm";
@@ -28,6 +45,7 @@ export * from "./src/core/rendering/directives";
 export * from "./src/core/rendering/keepAlive";
 export * from "./src/core/rendering/action";
 export * from "./src/core/rendering/catch";
+export * from "./src/core/rendering/createId";
 
 // Disposal (reactive binding cleanup)
 export * from "./src/core/rendering/dispose";
@@ -44,16 +62,20 @@ export * from "./src/core/signals/memoFn";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/deepSignal";
 export * from "./src/core/signals/writable";
+export * from "./src/core/signals/asyncDerived";
 
 // Lifecycle & context
 export * from "./src/core/rendering/lifecycle";
 export * from "./src/core/rendering/context";
+export * from "./src/core/strict";
 
 // SSR context
 export * from "./src/core/ssr-context";
 
 // Reactivity primitives
 export * from "./src/reactivity/batch";
+export * from "./src/reactivity/nextTick";
+export * from "./src/reactivity/concurrent";
 export { untracked } from "./src/reactivity/track";
 export { bindDynamic } from "./src/reactivity/bindAttribute";
 
@@ -63,4 +85,5 @@ export type { SuspenseProps } from "./src/core/rendering/lazy";
 
 // Components
 export * from "./src/components/ErrorBoundary";
+export * from "./src/components/ErrorDisplay";
 export * from "./src/components/Loading";
