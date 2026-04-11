@@ -86,7 +86,7 @@ export const bundlerMetadata = {
   sideEffects: false as const,
   modules: {
     core: ["html", "mount", "each", "slots", "fragment", "catch", "portal", "directives"],
-    hooks: ["signal", "effect", "derived", "watch", "store", "ref", "memo", "memoFn", "array", "deepSignal"],
+    hooks: ["signal", "effect", "derived", "watch", "store", "ref", "array", "deepSignal"],
     plugins: ["router", "i18n"],
     components: ["ErrorBoundary", "Loading"],
     ssr: ["ssr"],

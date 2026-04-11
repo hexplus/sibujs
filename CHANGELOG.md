@@ -6,6 +6,54 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] — 2026-04-11
+
+Cleanup release. Removes six public aliases that contradicted the SibuJS philosophy — plain verbs, no framework ceremony, no redundant synonyms for the same primitive. All of the removed APIs were either one-line forwards to an existing primitive or identity wrappers; every existing example can be rewritten by deleting the wrapper and calling the underlying primitive directly.
+
+### Removed
+
+- **`createSignal`** — was `return signal(value)`. Use `signal()` directly.
+- **`createMemo`** — was `return derived(fn)`. Use `derived()` directly.
+- **`createEffect`** — was `return effect(fn)`. Use `effect()` directly.
+- **`memo`** — was `return derived(factory)`. Use `derived()` directly.
+- **`memoFn`** — was `return derived(callback)`. Use `derived()` directly.
+- **`composable`** — was `return setup` (identity function). Plain functions are already composables in SibuJS; just write one and call it.
+
+The three removed files (`src/patterns/primitives.ts`, `src/core/signals/memo.ts`, `src/core/signals/memoFn.ts`) are currently empty stubs exporting nothing — they can be deleted from disk in a follow-up commit without further code changes.
+
+### Migration
+
+```ts
+// before
+import { createSignal, createMemo, createEffect, memo, memoFn, composable } from "sibujs";
+
+const [count, setCount] = createSignal(0);
+const doubled = createMemo(() => count() * 2);
+const sorted = memo(() => items().slice().sort());
+const handler = memoFn(() => (e: Event) => process(e));
+createEffect(() => console.log(count()));
+const useCounter = composable(() => { /* … */ });
+
+// after
+import { signal, derived, effect } from "sibujs";
+
+const [count, setCount] = signal(0);
+const doubled = derived(() => count() * 2);
+const sorted = derived(() => items().slice().sort());
+const handler = derived(() => (e: Event) => process(e));
+effect(() => console.log(count()));
+function useCounter() { /* … */ }
+```
+
+### Also updated
+
+- `generateComponentMetadata`, `generateTypeStubs`, and the Vite/Webpack pure-annotation factory list in `sibujs/build` no longer mention the removed names.
+- Lint rule `no-signals-in-conditionals` no longer checks `memo` / `memoFn` (they don't exist).
+- `SignalNodeSnapshot.kind` comment updated to drop the `"memo"` tag.
+- Test suite: `tests/primitives.test.ts`, `tests/memo.test.ts`, `tests/memoFn.test.ts` reduced to placeholder stubs; `tests/types.test.ts` and `tests/ide.test.ts` updated to assert the aliases are gone. Suite: **2105/2105 passing** (down from 2113 by exactly the 8 deleted alias-specific tests).
+
+---
+
 ## [1.3.0] — 2026-04-11
 
 Large minor release. Adds **27 new reactive/DOM primitives**, a full **SSR + OWASP security hardening pass** (A01, A02, A03, A10 + CWE-1321 prototype pollution), **10 ergonomic features** that stay inside the SibuJS philosophy (No VDOM, No JSX, No compilation, Zero dependencies, fine-grained reactivity), **typed tag factory overloads** for common elements, and a new **`tag(props, children)` positional shorthand** that removes the need for the `nodes:` key at every level of the tree. Test suite grew from **1875 → 2113** passing tests (+238, **0 regressions**).

@@ -15,9 +15,11 @@ describe("getComponentMetadata", () => {
     expect(meta.length).toBeGreaterThan(0);
   });
 
-  it("returns at least 20 component definitions", () => {
+  it("returns at least 15 component definitions", () => {
     const meta = getComponentMetadata();
-    expect(meta.length).toBeGreaterThanOrEqual(20);
+    // Threshold lowered from 20 after removing memo, memoFn, createSignal,
+    // createMemo, createEffect in 1.4.0.
+    expect(meta.length).toBeGreaterThanOrEqual(15);
   });
 
   it("each entry has valid structure with name, description, and props", () => {
@@ -98,12 +100,13 @@ describe("getComponentMetadata", () => {
     expect(onUnmount).toBeDefined();
   });
 
-  it("includes SolidJS-style aliases (createSignal, createMemo, createEffect)", () => {
+  it("does NOT include removed SolidJS-style aliases", () => {
     const meta = getComponentMetadata();
     const names = meta.map((c) => c.name);
-    expect(names).toContain("createSignal");
-    expect(names).toContain("createMemo");
-    expect(names).toContain("createEffect");
+    // createSignal / createMemo / createEffect were removed in 1.4.0.
+    expect(names).not.toContain("createSignal");
+    expect(names).not.toContain("createMemo");
+    expect(names).not.toContain("createEffect");
   });
 
   it("all component names are unique", () => {
@@ -252,9 +255,11 @@ describe("generateTypeStubs", () => {
     expect(Object.keys(stubs).length).toBeGreaterThan(0);
   });
 
-  it("returns at least 18 type stubs", () => {
+  it("returns at least 15 type stubs", () => {
     const stubs = generateTypeStubs();
-    expect(Object.keys(stubs).length).toBeGreaterThanOrEqual(18);
+    // Threshold lowered from 18 after removing memo, memoFn, createSignal,
+    // createMemo, createEffect in 1.4.0.
+    expect(Object.keys(stubs).length).toBeGreaterThanOrEqual(15);
   });
 
   it("includes signal type stub", () => {
@@ -318,12 +323,13 @@ describe("generateTypeStubs", () => {
     expect(stubs["Suspense"]).toContain("declare function Suspense");
   });
 
-  it("includes SolidJS-style alias stubs", () => {
+  it("does NOT include stubs for removed SolidJS-style aliases", () => {
     const stubs = generateTypeStubs();
-    expect(stubs["createSignal"]).toBeDefined();
-    expect(stubs["createSignal"]).toContain("declare function createSignal");
-    expect(stubs["createMemo"]).toBeDefined();
-    expect(stubs["createEffect"]).toBeDefined();
+    expect(stubs["createSignal"]).toBeUndefined();
+    expect(stubs["createMemo"]).toBeUndefined();
+    expect(stubs["createEffect"]).toBeUndefined();
+    expect(stubs["memo"]).toBeUndefined();
+    expect(stubs["memoFn"]).toBeUndefined();
   });
 
   it("includes DynamicComponent and registerComponent stubs", () => {
