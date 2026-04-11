@@ -4,8 +4,6 @@ import { signal } from "../signals/signal";
  * Context API for SibuJS — provides dependency injection across
  * component trees without prop drilling.
  *
- * Inspired by React's Context and Vue's provide/inject patterns.
- *
  * @example
  * ```ts
  * // Create a context with a default value

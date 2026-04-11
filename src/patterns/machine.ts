@@ -83,10 +83,19 @@ export function machine<
       stateDef.exit(ctx);
     }
 
-    // Run transition action
+    // Run transition action. The returned patch is merged into context
+    // via a filtered loop rather than a raw spread to prevent prototype
+    // pollution: a patch of `{ __proto__: {...} }` parsed from JSON
+    // (where `__proto__` is an own enumerable key) can otherwise invoke
+    // the `Object.prototype` setter through object-spread semantics.
     if (action) {
-      const patch = action(ctx);
-      setContext({ ...ctx, ...patch } as C);
+      const rawPatch = action(ctx) as Record<string, unknown>;
+      const next: Record<string, unknown> = { ...ctx };
+      for (const key of Object.keys(rawPatch)) {
+        if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+        next[key] = rawPatch[key];
+      }
+      setContext(next as C);
     }
 
     // Transition to new state

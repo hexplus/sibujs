@@ -1,8 +1,24 @@
 import { signal } from "../core/signals/signal";
+import { sanitizeUrl } from "../utils/sanitize";
+
+/**
+ * Validate an EventSource URL. Only `http://`, `https://`, and relative
+ * paths are allowed — `javascript:`, `data:`, `blob:`, etc. are refused.
+ * Returns `null` on failure.
+ */
+function validateSseUrl(raw: string): string | null {
+  const safe = sanitizeUrl(raw);
+  if (!safe) return null;
+  return safe;
+}
 
 /**
  * stream provides reactive Server-Sent Events (SSE) integration.
  * Wraps the EventSource API with reactive state for data, event name, and connection status.
+ *
+ * Security: the URL is passed through `sanitizeUrl()` — `javascript:`,
+ * `data:`, `vbscript:`, and `blob:` URIs are refused and the stream
+ * stays in `"closed"` state.
  */
 export function stream(
   url: string,
@@ -30,8 +46,14 @@ export function stream(
   function connect(): void {
     if (disposed) return;
 
+    const safeUrl = validateSseUrl(url);
+    if (safeUrl === null) {
+      setStatus("closed");
+      return;
+    }
+
     setStatus("connecting");
-    source = new EventSource(url, {
+    source = new EventSource(safeUrl, {
       withCredentials: options?.withCredentials ?? false,
     });
 

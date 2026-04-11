@@ -6,6 +6,172 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — 2026-04-11
+
+Large minor release. Adds **27 new reactive/DOM primitives**, a full **SSR + OWASP security hardening pass** (A01, A02, A03, A10 + CWE-1321 prototype pollution), **10 ergonomic features** that stay inside the SibuJS philosophy (No VDOM, No JSX, No compilation, Zero dependencies, fine-grained reactivity), **typed tag factory overloads** for common elements, and a new **`tag(props, children)` positional shorthand** that removes the need for the `nodes:` key at every level of the tree. Test suite grew from **1875 → 2113** passing tests (+238, **0 regressions**).
+
+### Added
+
+#### Browser composables (`sibujs/browser`) — 20 new primitives
+
+- **`visibility()`** — Page Visibility API wrapper. Pause polling / animations while the tab is hidden.
+- **`network()`** — Network Information API reactive getters (`effectiveType`, `downlink`, `rtt`, `saveData`). Adapt image quality and prefetching to the real connection, not just online/offline.
+- **`mouse({ target?, touch? })`** — reactive pointer position with optional touch unification.
+- **`swipe(target, { threshold?, onSwipe? })`** — touch swipe detection with configurable threshold and direction callback.
+- **`windowSize()`** — reactive viewport dimensions via the `resize` event (complements the element-scoped `resize()`).
+- **`urlState()`** — reactive URL search params + hash with `setParams` / `setHash` backed by `history.pushState`/`replaceState` and `popstate` sync. Independent of `createRouter()`.
+- **`broadcast(channelName)`** — BroadcastChannel wrapper exposing a reactive `last` signal and a `post(message)` sender.
+- **`fullscreen()`** — Fullscreen API with reactive `isFullscreen` / `element` plus `enter` / `exit` / `toggle`.
+- **`wakeLock()`** — Screen Wake Lock API with auto re-acquire on `visibilitychange`.
+- **`animationFrame({ fpsLimit?, immediate? })`** — reactive `delta` / `elapsed` driven by `requestAnimationFrame`, with `pause` / `resume` / `dispose` and optional FPS limit.
+- **`mutationObserver(target, options)`** — reactive DOM MutationObserver wrapper. Escape hatch for reacting to DOM changes outside the reactive system.
+- **`bounds(target)`** — reactive `getBoundingClientRect()`. Updates on resize (ResizeObserver) AND on window scroll (capture-phase passive listener), so absolute top/left stay accurate for overlays.
+- **`keyboard({ target?, keys? })`** — reactive set of currently-pressed keys with optional filter. Clears on `window.blur` to avoid stuck modifiers.
+- **`speech()`** — Web Speech Synthesis wrapper with reactive `speaking` / `paused` and `speak(text, options)` supporting rate / pitch / volume / voice / lang.
+- **`gamepad()`** — Gamepad API as reactive snapshots. Auto-polls via `requestAnimationFrame` only when at least one pad is connected, and emits updates only when button or axis state actually changes (deep equality short-circuit).
+- **`pointerLock()`** — Pointer Lock API with reactive `locked` signal and `request(el)` / `exit()`.
+- **`vibrate(pattern)`** — thin Vibration API wrapper; returns `false` on unsupported platforms.
+- **`favicon(url)` / `svgFavicon(svg)`** — runtime favicon updater. Creates the `<link rel="icon">` if missing; `svgFavicon` encodes inline SVG to a data URI for notification-count badges.
+- **`textSelection()`** — reactive text-selection tracker (`text`, `rect`, `hasSelection`, `clear`) for building selection toolbars and citation tools. Syncs via `selectionchange` (mouse drag, Shift+arrow, touch select).
+- **`imageLoader(src)`** — reactive image-load status (`"pending"` | `"loaded"` | `"error"`) plus intrinsic `width` / `height`. Prevents CLS in lazy galleries. Gracefully aborts in-flight loads on `dispose()`.
+
+#### Reactivity / core primitives
+
+- **`defer(getter)`** — deferred mirror of a reactive getter. Converges to the source on a microtask + `requestAnimationFrame` so expensive derived views lag behind fast input.
+- **`transition()`** — `{ pending, start }` handle that schedules work on `requestIdleCallback` (with rAF / setTimeout fallback). `pending()` stays reactive for both sync and async bodies; exceptions reset the state cleanly.
+- **`nextTick()`** — await for DOM flush. Resolves on microtask + rAF so imperative code can read post-render state.
+- **`asyncDerived(factory, initial)`** — async counterpart of `derived()`. Reactive `value` / `loading` / `error` triple with stale-response cancellation and a `refresh()` trigger.
+- **`createId(prefix?)`** — stable unique id generator for a11y pairing (`aria-labelledby`, `for` + `id`). Exports `__resetIdCounter()` for deterministic tests and SSR.
+- **`strict(fn)` / `strictEffect(fn)`** — dev-only double-invocation helpers that surface cleanup bugs (missing disposers, duplicate listeners). No-op in production.
+- **`escapeScriptJson(json)`** — exported helper used internally by `serializeState` / `serializeRouteState` / `setStructuredData`. Escapes `<`, `>`, `&`, `U+2028`, `U+2029`.
+
+#### UI helpers (`sibujs/ui`)
+
+- **`interval(fn, ms)`** — declarative `setInterval` handle with `stop` / `pause` / `resume` / `isRunning`.
+- **`timeout(fn, ms)`** — declarative `setTimeout` handle with `cancel` / `isPending`.
+- **`hover(target)`** — reactive hover tracker using `pointerenter` / `pointerleave` (touch-friendly).
+- **`scrollLock()`** — stacked body scroll lock that compensates for scrollbar width. Multiple concurrent overlays each own a handle; only the last `unlock()` restores the original styles.
+- **`formAction(fn)`** — async form-action wrapper: reactive `pending` / `error` / `result` / `reset` / `onSubmit`. `onSubmit` is a ready-to-attach `<form>` handler that builds a `FormData` and invokes the action. Stale-response guard drops older in-flight calls on re-submit.
+- **`createFocusManager(container, options?)`** — headless focus walker (`focusFirst` / `focusLast` / `focusNext` / `focusPrev`) with optional loop wrap-around.
+- **`createListbox(container, options?)`** — full ARIA listbox wiring: `role="listbox"`, `aria-activedescendant`, Arrow / Home / End / Enter / Space keyboard navigation, click-to-select, multi-select. Stamps stable ids on every option via `createId()`.
+- **`createDialogAria(element, options?)`** — returns stable `titleId` / `descriptionId`, sets `role="dialog"` (or `"alertdialog"`), `aria-modal`, `aria-labelledby` / `aria-describedby`, `tabindex="-1"`. Intentionally decoupled from focus trap and Escape-to-close.
+
+#### Router
+
+- **`LazyRoute` shorthand** — `{ path: "/page", lazy: () => import("./Page") }` is now accepted as a route definition. `createRouter()` and `setRoutes()` normalize the route tree recursively, so nested children get the shorthand too.
+
+#### Hydration + SSR
+
+- **`hydrate(component, container, { diagnostics, onMismatch })`** — dev-mode tree walker that reports the first tag / attribute / child-count / missing-child mismatch. Internal markers (`data-sibu-ssr`, `data-sibu-hydrated`, `data-sibu-island`) are excluded. Stops after five findings to prevent log spam on a broken tree.
+- **`HydrateOptions`** and **`HydrationMismatch`** types exported from `sibujs/ssr`.
+- **`renderToSuspenseStream(element, pending, { nonce? })`** — new `nonce` option propagated to the swap scripts for strict-CSP compatibility.
+- **`serializeState(state, nonce?)`** / **`serializeRouteState(state, nonce?)`** — optional `nonce` argument for strict-CSP.
+
+#### Components
+
+- **`ErrorDisplay(props)`** — shared rich error UI with copy-to-clipboard (full message + stack + cause + metadata + env), colored severity header (`error` / `warning` / `info`), colored error-code badge (from `error.code` or `error.name`), parsed stack frames (Chrome/V8 + Firefox/Safari formats), `Error.cause` chain walked recursively, metadata + environment sections (URL, UA, ISO timestamp), optional retry + reload buttons. Dev/prod split — stack and metadata hidden in prod unless `alwaysShowDetails: true`.
+- **`ErrorBoundary`** — new `resetKeys: Array<() => unknown>` prop. When any listed reactive getter changes after an error has been caught, the boundary auto-resets and re-renders the subtree.
+
+#### Devtools
+
+- **`captureSignalGraph()`** — synchronous snapshot of every observed signal node (id, kind, value preview, subscribers, dependencies, eval count). Empty snapshot when devtools are not enabled so tests and production code can call it unconditionally.
+- **`diffSignalGraphs(before, after)`** — classifies nodes into `added` / `removed` / `reevaluated`. Useful for regression assertions like "navigating to /page X must not add more than N new signals".
+- **`createTraceProfiler()`** — subscribes to `effect:start` / `effect:end` / `signal:set` events and emits a Chrome tracing JSON blob via `stopTrace()`. Drop the output into `chrome://tracing` or `ui.perfetto.dev` for a flamegraph. Distinct from the existing `createProfiler()` in `componentProfiler.ts`, which tracks per-component render counts.
+
+#### Testing (`sibujs/testing`)
+
+- **`queryByText` / `queryByTestId` / `queryByRole` / `queryByLabel`** — non-throwing finders.
+- **`findByText` / `findByTestId` / `findByRole`** — async finders that poll until `timeout`.
+- **`waitForSignal(getter, predicate, { timeout })`** — signal-aware wait. Subscribes to the getter and resolves immediately when the predicate matches, instead of polling.
+- **`type(element, text)`** — dispatches one `InputEvent` per character + a final `change` event for realistic keyboard simulation.
+
+#### Tag factory ergonomics
+
+- **`tag(props, children)` positional shorthand** — every tag factory now accepts the children as an optional second argument. This removes the last reason to write `nodes:` in nested trees:
+
+  ```ts
+  div({ class: "page" }, [
+    h1({ class: "title" }, "Welcome"),
+    div({ class: "row" }, [
+      label({ for: "email" }, "Email"),
+      input({ id: "email", type: "email" }),
+      button({ class: "primary", type: "submit" }, "Submit"),
+    ]),
+  ])
+  ```
+
+  All legacy forms (`tag({...props})`, `tag("className", children)`, `tag("text")`, `tag([...])`, `tag(node)`, `tag(() => child)`) continue to work unchanged. When both `props.nodes` and the positional second-arg are present, the positional wins.
+- **Per-element typed prop overloads** — `a`, `input`, `img`, `button`, `form`, `select`, `textarea`, `label`, `option`, `video`, `audio` now have element-specific prop interfaces (`AnchorProps`, `InputProps`, `ButtonProps`, `FormProps`, `SelectProps`, `TextareaProps`, `LabelProps`, `OptionProps`, `ImgProps`, `VideoProps`, `AudioProps`, `MediaProps`, `InputType`) with full IDE autocomplete and typo detection. Runtime unchanged; the stronger typing is a zero-cost `TypedTagFunction<Props, El>` cast inside `html.ts`. The `[attr: string]: unknown` escape hatch is preserved for custom attributes.
+- **`TypedTagFunction<Props, El>`** type exported for building custom typed factories.
+
+#### Persistence
+
+- **`persisted(key, initial, options)`** — new `syncTabs` option (default `true` for localStorage). Listens to the `storage` event so changes in one tab propagate to others. Reentry-guarded against bounce-back. `null` newValue from another tab resets to `initial`.
+- The returned setter now carries a non-enumerable **`dispose()`** method that removes the cross-tab listener — previously there was no way to clean it up.
+
+### Changed
+
+- **Tag factory dispatch rewritten** — strings / numbers / arrays / nodes / functions each own an explicit branch, and the props-object path resolves children as `second ?? props.nodes`. Unblocks the `tag(props, children)` shorthand at every level of the tree. No hot-path regression — the fast paths for `tag()`, `tag("text")`, and `tag([...])` still short-circuit.
+- **`ErrorBoundary`**'s default fallback is now rendered by `ErrorDisplay`. The legacy inline renderer and its local stack parser were removed. Any `ErrorBoundary` without a custom `fallback` prop gets the richer UI automatically.
+- **`withSSR(fn)` is nesting-safe** — saves the prior SSR flag into `wasSSR` and only calls `disableSSR()` on exit when the outer scope was not already in SSR mode. A nested `withSSR(...)` call that throws no longer flips the outer scope's SSR flag back to `false`.
+- **`routerSSR.renderRouteToDocument`** delegates meta/link/bodyAttrs validation to the shared hardened helper from `platform/ssr.ts` — the hand-rolled duplicate escaping functions are removed.
+- **`tsconfig.json`** adds `"lib": ["ES2022", "DOM", "DOM.Iterable"]` so `Object.hasOwn` resolves while keeping `target: ES2020`.
+
+### Fixed
+
+- **`ErrorBoundary` `resetKeys` edge-cases** — a key-getter that throws is treated as a valid reactive dependency and does not crash the effect.
+- **`bindAttribute`** refuses `on*` event-handler attribute bindings with a dev-mode warning that suggests the safe `on: { click: fn }` prop instead. Previously, `bindAttribute(el, "onclick", () => "alert(1)")` would call `setAttribute("onclick", ...)` and turn the string into inline JS.
+- **`machine(...)` context merge** — replaced `{ ...ctx, ...patch }` with a filtered loop that drops `__proto__` / `constructor` / `prototype` keys. Prevents prototype pollution from action-returned patches parsed out of JSON.
+- **`scopedStyle()`** — CSS sanitizer now decodes CSS hex escapes (`\75 rl(` → `url(`) before the dangerous-pattern scan, closing the obfuscation bypass for `url()` / `expression()` / `@import` / `-moz-binding` / `behavior`.
+- **`persisted()`** — the cross-tab `storage` listener can now be cleaned up via a non-enumerable `dispose()` method on the returned setter.
+- **`routerSSR.parseURL`** — wraps `decodeURIComponent` in a try/catch so malformed percent-sequences no longer crash SSR (DoS vector). `params` and `query` now use `Object.create(null)` and filter forbidden keys.
+
+### Security
+
+A complete OWASP audit beyond the top 10 was performed, with three review passes and 74 dedicated security tests.
+
+**A01 Broken Access Control**
+
+- **Router `navigate()`** — refuses `javascript:`, `data:`, `vbscript:`, and `blob:` URIs at **every** entry: the top-level `navigate()` call, `beforeEach` guard redirects, `beforeEnter` guard redirects, `route.redirect`, and `beforeResolve` guard redirects. Previously these could land in `history.state` and be reflected into anchor hrefs.
+
+**A02 Cryptographic Failures**
+
+- **`persisted()`** JSDoc no longer references a "simple XOR cipher for illustration" — the example now clearly states that XOR and `btoa()` / `atob()` are NOT encryption and points to AES-GCM via the Web Crypto API.
+- **`persisted()`** cross-tab listener now cleanable (see Fixed).
+
+**A03 Injection (XSS / prototype pollution / CSS injection)**
+
+- **`renderToString` / `renderToStream`** — attribute names validated against `^[A-Za-z_:][-A-Za-z0-9_.:]*$`; `on*` event-handler attributes dropped; URL-bearing attributes (`href`, `src`, `action`, `formaction`, `cite`, `poster`, `background`, `srcset`, `ping`, `manifest`, `data`, `xlink:href`) routed through `sanitizeUrl`; attribute values escaped against both `"` and `'`; `<script>` and `<style>` elements stripped from the serialized output; comment-terminator forms (`-->`, `--!>`, `<!--`, trailing `--`) escaped inside comment bodies.
+- **`renderToDocument`** — meta / link / bodyAttrs attribute names validated via `buildAttrString`; `on*` keys dropped; URL attributes pass through `sanitizeUrl`; `<meta http-equiv="refresh" content="0;url=javascript:…">` detected and refused via `isDangerousMetaRefresh`; the page `title` is HTML-escaped; script `src` entries go through `sanitizeUrl`.
+- **`serializeState` / `serializeRouteState` / `setStructuredData`** — JSON payloads escaped against `<`, `>`, `&`, `U+2028`, `U+2029` so nothing inside a string literal can close the `<script>` tag or break out of JS string context on pre-ES2019 engines.
+- **`suspenseSwapScript(id)`** — ids validated against `^[A-Za-z0-9_-]+$` and rejected otherwise. Previously a crafted id could inject context-breakers into the CSS selector or the JS string literal.
+- **`bindAttribute`** — refuses `on*` event handlers (defense-in-depth — the tag factory already filters them, but `bindAttribute` is exported and could be called directly).
+- **`machine(...)`** — filtered prototype-pollution keys from action-returned context patches.
+- **`scopedStyle`** — CSS escape-sequence obfuscation bypass fixed (see Fixed).
+
+**A10 Server-Side Request Forgery (client-side analogue)**
+
+- **`socket()`** — `validateWsUrl()` restricts WebSocket URLs to `ws://` / `wss://` and strips control characters that would bypass a naïve `startsWith` check.
+- **`stream()`** — `validateSseUrl()` routes EventSource URLs through `sanitizeUrl()` to block `javascript:` / `data:` / `blob:`.
+
+**CWE-1321 Prototype pollution**
+
+- **`routerSSR.parseURL`** — `params` and `query` created with `Object.create(null)`; `__proto__` / `constructor` / `prototype` filtered from both query-string parsing and pattern-captured route params.
+- **`hydrateIslands` / `hydrateProgressively`** — island lookups go through `Object.hasOwn` instead of direct indexing. A `data-sibu-island="__proto__"` marker cannot resolve to `Object.prototype`.
+
+**Head tag hardening**
+
+- **`Head`** — meta / link / script attribute names validated; `on*` keys rejected; `base.href` routed through `sanitizeUrl` (an attacker-controlled base href could otherwise rewrite every relative URL on the page into a `javascript:` URI); `setStructuredData` escapes JSON via the shared `escapeScriptJson`; `<meta http-equiv="refresh">` with a dangerous URL dropped entirely.
+
+### Testing
+
+- **+238 tests, 0 regressions**. Full suite: **2113 / 2113 passing** (baseline was 1875).
+- 74 dedicated security tests across `ssr-security.test.ts` (38), `head-security.test.ts` (11), `ssr-context.test.ts` (4), and `owasp-security.test.ts` (21).
+- 10 new feature-test files covering concurrent primitives, `formAction`, `strict`, `ErrorBoundary resetKeys`, router `lazy` shorthand, hydration diagnostics, a11y primitives, testing queries, `ErrorDisplay`, and the devtools signal graph.
+- New `shorthand-nested.test.ts` (10 tests) locks in the `tag(props, children)` dispatch including deep nesting, string/array/node/function second-args, positional-override-of-`nodes`, and legacy form compatibility.
+
+---
+
 ## [1.2.0] — 2026-04-09
 
 ### Added

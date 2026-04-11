@@ -1,5 +1,5 @@
 /**
- * React-style functional component props with TypeScript inference for SibuJS.
+ * Functional component props with TypeScript inference for SibuJS.
  *
  * Provides utilities to define typed components with prop defaults,
  * nodes slots, and prop mapping — all with full TypeScript inference.

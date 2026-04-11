@@ -1,4 +1,18 @@
 import { SVG_NS, tagFactory } from "./tagFactory";
+import type {
+  AnchorProps,
+  AudioProps,
+  ButtonProps,
+  FormProps,
+  ImgProps,
+  InputProps,
+  LabelProps,
+  OptionProps,
+  SelectProps,
+  TextareaProps,
+  TypedTagFunction,
+  VideoProps,
+} from "./tagPropTypes";
 
 // Document structure
 export const html = tagFactory("html");
@@ -39,7 +53,8 @@ export const ul = tagFactory("ul");
 export const pre = tagFactory("pre");
 
 // Inline text semantics
-export const a = tagFactory("a");
+// `a` carries anchor-specific prop types (href, target, rel, etc.)
+export const a = tagFactory("a") as unknown as TypedTagFunction<AnchorProps, HTMLAnchorElement>;
 export const abbr = tagFactory("abbr");
 export const b = tagFactory("b");
 export const bdi = tagFactory("bdi");
@@ -69,11 +84,11 @@ export const var_ = tagFactory("var"); // 'var' is a reserved keyword
 
 // Image and multimedia
 export const area = tagFactory("area");
-export const audio = tagFactory("audio");
-export const img = tagFactory("img");
+export const audio = tagFactory("audio") as unknown as TypedTagFunction<AudioProps, HTMLAudioElement>;
+export const img = tagFactory("img") as unknown as TypedTagFunction<ImgProps, HTMLImageElement>;
 export const map = tagFactory("map");
 export const track = tagFactory("track");
-export const video = tagFactory("video");
+export const video = tagFactory("video") as unknown as TypedTagFunction<VideoProps, HTMLVideoElement>;
 
 // Embedded content
 export const embed = tagFactory("embed");
@@ -109,21 +124,22 @@ export const th = tagFactory("th");
 export const thead = tagFactory("thead");
 export const tr = tagFactory("tr");
 
-// Forms
-export const button = tagFactory("button");
+// Forms — typed factories for the most common elements. All others
+// fall back to the untyped `TagProps` for full flexibility.
+export const button = tagFactory("button") as unknown as TypedTagFunction<ButtonProps, HTMLButtonElement>;
 export const datalist = tagFactory("datalist");
 export const fieldset = tagFactory("fieldset");
-export const form = tagFactory("form");
-export const input = tagFactory("input");
-export const label = tagFactory("label");
+export const form = tagFactory("form") as unknown as TypedTagFunction<FormProps, HTMLFormElement>;
+export const input = tagFactory("input") as unknown as TypedTagFunction<InputProps, HTMLInputElement>;
+export const label = tagFactory("label") as unknown as TypedTagFunction<LabelProps, HTMLLabelElement>;
 export const legend = tagFactory("legend");
 export const meter = tagFactory("meter");
 export const optgroup = tagFactory("optgroup");
-export const option = tagFactory("option");
+export const option = tagFactory("option") as unknown as TypedTagFunction<OptionProps, HTMLOptionElement>;
 export const output = tagFactory("output");
 export const progress = tagFactory("progress");
-export const select = tagFactory("select");
-export const textarea = tagFactory("textarea");
+export const select = tagFactory("select") as unknown as TypedTagFunction<SelectProps, HTMLSelectElement>;
+export const textarea = tagFactory("textarea") as unknown as TypedTagFunction<TextareaProps, HTMLTextAreaElement>;
 
 // Interactive elements
 export const details = tagFactory("details");

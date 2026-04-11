@@ -27,22 +27,32 @@ export interface PersistOptions<T = unknown> {
   /** Optional type guard to validate deserialized data. Falls back to initial on failure. */
   validate?: (value: unknown) => value is T;
   /**
+   * Sync the signal across browser tabs via the `storage` event.
+   * Only applies when using localStorage (not sessionStorage — session storage
+   * is already isolated per tab). Default: `true` for localStorage.
+   */
+  syncTabs?: boolean;
+  /**
    * Encrypt the serialized value before writing to storage.
    * Paired with `decrypt` for reading. Use for sensitive data.
    *
-   * **Security:** Use a real encryption algorithm (e.g. AES-GCM via Web Crypto API).
-   * Do NOT use `btoa()`/`atob()` — Base64 is encoding, not encryption, and provides
-   * zero confidentiality.
+   * **Security requirement:** use an authenticated encryption algorithm
+   * such as AES-GCM via the Web Crypto API. Do NOT:
+   *
+   *  - use `btoa()` / `atob()` — Base64 is encoding, not encryption
+   *  - use XOR with a static key — trivially reversible
+   *  - roll your own cipher — nearly always broken
    *
    * @example
    * ```ts
-   * // Example using a simple XOR cipher for illustration — in production,
-   * // use crypto.subtle.encrypt() with AES-GCM or a proven library.
    * persisted("token", "", {
-   *   encrypt: (v) => myAesGcmEncrypt(v, secretKey),
-   *   decrypt: (v) => myAesGcmDecrypt(v, secretKey),
+   *   encrypt: async (v) => aesGcmEncrypt(v, await getKey()),
+   *   decrypt: async (v) => aesGcmDecrypt(v, await getKey()),
    * });
    * ```
+   *
+   * Note that because localStorage is synchronous, any real AES-GCM
+   * flow needs pre-derived keys and is inherently best-effort.
    */
   encrypt?: (value: string) => string;
   /** Decrypt the stored value before deserialization. Required if `encrypt` is set. */
@@ -59,6 +69,8 @@ export function persisted<T>(
   const deserialize = options.deserialize || JSON.parse;
   const encrypt = options.encrypt;
   const decrypt = options.decrypt;
+  // Cross-tab sync defaults to on for localStorage, always off for sessionStorage
+  const syncTabs = options.session ? false : (options.syncTabs ?? true);
 
   // Try to restore persisted value
   let restored = initial;
@@ -76,9 +88,14 @@ export function persisted<T>(
 
   const [value, setValue] = signal<T>(restored);
 
+  // Guard reentry when a storage event causes us to setValue(), which would
+  // otherwise bounce back through the persisting effect below.
+  let applyingFromStorage = false;
+
   // Persist on every change
   effect(() => {
     const current = value();
+    if (applyingFromStorage) return;
     try {
       let serialized = serialize(current);
       if (encrypt) serialized = encrypt(serialized);
@@ -86,6 +103,59 @@ export function persisted<T>(
     } catch {
       // Storage full or unavailable
     }
+  });
+
+  // Cross-tab synchronization via the `storage` event.
+  // Only localStorage fires this event in other tabs. The listener is
+  // cleaned up by the returned `dispose` function on the handle — callers
+  // that never dispose should be aware that the listener lives for the
+  // lifetime of the page.
+  let storageListener: ((e: StorageEvent) => void) | null = null;
+  if (syncTabs && typeof window !== "undefined") {
+    storageListener = (e: StorageEvent) => {
+      if (e.storageArea !== storage || e.key !== key) return;
+      if (e.newValue === null) {
+        applyingFromStorage = true;
+        try {
+          setValue(initial);
+        } finally {
+          applyingFromStorage = false;
+        }
+        return;
+      }
+      try {
+        let raw = e.newValue;
+        if (decrypt) raw = decrypt(raw);
+        const parsed = deserialize(raw);
+        if (options.validate && !options.validate(parsed)) return;
+        applyingFromStorage = true;
+        try {
+          setValue(parsed as T);
+        } finally {
+          applyingFromStorage = false;
+        }
+      } catch {
+        // Ignore malformed updates from other tabs
+      }
+    };
+    window.addEventListener("storage", storageListener);
+  }
+
+  // Attach a dispose hook to the returned tuple so callers that want to
+  // clean up the storage listener (e.g. during component unmount) can do
+  // so. Exposed as a non-enumerable property on the setter to keep the
+  // tuple's public shape identical to `signal()`'s return type.
+  const dispose = () => {
+    if (storageListener && typeof window !== "undefined") {
+      window.removeEventListener("storage", storageListener);
+      storageListener = null;
+    }
+  };
+  Object.defineProperty(setValue, "dispose", {
+    value: dispose,
+    enumerable: false,
+    writable: false,
+    configurable: false,
   });
 
   return [value, setValue];
