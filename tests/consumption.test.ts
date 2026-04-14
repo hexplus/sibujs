@@ -129,7 +129,9 @@ describe("Package consumption", () => {
 
     it("each export has types, import, and require fields", () => {
       const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
-      for (const [_key, value] of Object.entries(pkg.exports)) {
+      for (const [key, value] of Object.entries(pkg.exports)) {
+        // ./cdn ships an IIFE bundle for direct <script> tags — no ESM/CJS/dts.
+        if (key === "./cdn") continue;
         const entry = value as Record<string, string>;
         expect(entry.types).toBeDefined();
         expect(entry.import).toBeDefined();

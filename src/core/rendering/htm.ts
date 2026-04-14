@@ -1,9 +1,16 @@
+import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { isUrlAttribute, sanitizeUrl } from "../../utils/sanitize";
+import { isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
+
+const _isDev = isDev();
+
+// Tags whose children are treated as raw text by the HTML parser and thus
+// cannot safely embed dynamic expressions.
+const RAW_TEXT_TAGS = new Set(["script", "style"]);
 
 // Void elements that cannot have children (self-closing by spec)
 const VOID_ELEMENTS = new Set([
@@ -277,6 +284,19 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
         } else {
           const inner = parseChildren();
 
+          // Raw-text contexts (<script>, <style>) cannot safely interpolate
+          // dynamic values — the HTML parser treats their contents as raw
+          // text, so escaping doesn't apply. Refuse at parse time.
+          if (RAW_TEXT_TAGS.has(tag.toLowerCase())) {
+            for (let i = 0; i < inner.length; i++) {
+              if (inner[i].t === 2) {
+                throw new Error(
+                  `html: dynamic \${...} expressions are not allowed inside <${tag}> (raw-text context). Build the content separately and append it as a Node.`,
+                );
+              }
+            }
+          }
+
           // Skip closing tag </tagName>
           if (template[pos] === "<" && pos + 1 < len && template[pos + 1] === "/") {
             pos += 2;
@@ -314,29 +334,55 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
       case 1: {
         // expr
         const name = attr.name;
-        // Block on* event handler attributes (XSS prevention)
-        if (name[0] === "o" && name[1] === "n") break;
+        // Block on* event handler attributes (XSS prevention) — case-insensitive
+        const lname = name.toLowerCase();
+        if (lname[0] === "o" && lname[1] === "n") break;
         const val = values[attr.idx];
         if (typeof val === "function") {
           registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));
         } else if (val != null) {
           const str = String(val);
-          el.setAttribute(name, isUrlAttribute(name) ? sanitizeUrl(str) : str);
+          if (lname === "srcset") {
+            el.setAttribute(name, sanitizeSrcset(str));
+          } else if (isUrlAttribute(lname)) {
+            el.setAttribute(name, sanitizeUrl(str));
+          } else {
+            el.setAttribute(name, str);
+          }
         }
         break;
       }
       case 2: {
-        // mixed
+        // mixed — concatenate statics + expressions, then sanitize the whole
+        // string for URL attributes so attacks like `href="java${x}:..."`
+        // still get caught.
         let val = attr.statics[0];
         for (let j = 0; j < attr.exprs.length; j++) {
-          val += String(values[attr.exprs[j]]) + attr.statics[j + 1];
+          const ev = values[attr.exprs[j]];
+          val += (ev == null ? "" : String(ev)) + attr.statics[j + 1];
         }
-        el.setAttribute(attr.name, val);
+        const lname2 = attr.name.toLowerCase();
+        if (lname2 === "srcset") {
+          el.setAttribute(attr.name, sanitizeSrcset(val));
+        } else if (isUrlAttribute(lname2)) {
+          el.setAttribute(attr.name, sanitizeUrl(val));
+        } else {
+          el.setAttribute(attr.name, val);
+        }
         break;
       }
-      case 3: // event
-        el.addEventListener(attr.name, values[attr.idx] as EventListener);
+      case 3: {
+        // event — must be a function
+        const fn = values[attr.idx];
+        if (typeof fn === "function") {
+          el.addEventListener(attr.name, fn as EventListener);
+        } else if (_isDev) {
+          devWarn(
+            `html: on:${attr.name} handler is not a function (got ${typeof fn}). Event listener was not attached.`,
+          );
+        }
         break;
+      }
       case 4: // boolean
         el.setAttribute(attr.name, "");
         break;

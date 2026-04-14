@@ -86,28 +86,27 @@ export function inspectSignal(getter: () => unknown): ReactiveNodeInfo | null {
 export function walkDependencyGraph(
   getter: () => unknown,
   maxDepth = 10,
+  visited: WeakSet<ReactiveSignal> = new WeakSet(),
 ): { name: string | undefined; subscribers: number; downstream: ReturnType<typeof walkDependencyGraph>[] } {
   const signal = (getter as unknown as Record<string, unknown>).__signal as ReactiveSignal | undefined;
-  if (!signal || maxDepth <= 0) {
+  if (!signal || maxDepth <= 0 || visited.has(signal)) {
     return { name: getSignalName(getter), subscribers: 0, downstream: [] };
   }
+  visited.add(signal);
 
   const subs = (signal as Record<string, unknown>)[SUBS] as Set<() => void> | undefined;
   const downstream: ReturnType<typeof walkDependencyGraph>[] = [];
 
   if (subs) {
     for (const sub of subs) {
-      // Check if subscriber is a computed (has _sig)
       const subSig = (sub as unknown as Record<string, unknown>)._sig as ReactiveSignal | undefined;
-      if (subSig) {
-        // Find the computed getter that has __signal === subSig
-        const subName = (subSig as Record<string, unknown>).__name as string | undefined;
-        const subSubs = (subSig as Record<string, unknown>)[SUBS] as Set<unknown> | undefined;
-        downstream.push({
-          name: subName,
-          subscribers: subSubs ? subSubs.size : 0,
-          downstream: [], // Could recurse but we keep it simple
-        });
+      if (subSig && !visited.has(subSig)) {
+        const subName = (subSig as Record<string, unknown>).__name;
+        const fakeGetter = (() => undefined) as unknown as () => unknown;
+        const tag = fakeGetter as unknown as Record<string, unknown>;
+        tag.__signal = subSig;
+        if (subName !== undefined) tag.__name = subName;
+        downstream.push(walkDependencyGraph(fakeGetter, maxDepth - 1, visited));
       }
     }
   }

@@ -1,3 +1,4 @@
+import { devWarn, isDev } from "../core/dev";
 import { track } from "./track";
 
 /**
@@ -15,7 +16,10 @@ export function bindTextNode(textNode: Text, getter: () => string | number): () 
     let value: string | number;
     try {
       value = getter();
-    } catch {
+    } catch (err) {
+      if (isDev()) {
+        devWarn(`[SibuJS] bindTextNode getter threw: ${err instanceof Error ? err.message : String(err)}`);
+      }
       return;
     }
     textNode.textContent = String(value);

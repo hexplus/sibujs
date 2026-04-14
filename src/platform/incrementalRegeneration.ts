@@ -2,7 +2,7 @@ import { signal } from "../core/signals/signal";
 
 export interface ISROptions<T> {
   revalidateAfter: number; // ms
-  fetcher: () => Promise<T>;
+  fetcher: (ctx?: { signal: AbortSignal }) => Promise<T>;
   initialData?: T;
 }
 
@@ -22,6 +22,10 @@ export function createISR<T>(options: ISROptions<T>): {
   const [data, setData] = signal<T | undefined>(initialData);
   const [timestamp, setTimestamp] = signal<number>(initialData !== undefined ? Date.now() : 0);
 
+  const controller = new AbortController();
+  let inFlight = false;
+  let disposed = false;
+
   const isStale = (): boolean => {
     const ts = timestamp();
     if (ts === 0) return true;
@@ -29,23 +33,38 @@ export function createISR<T>(options: ISROptions<T>): {
   };
 
   const revalidate = async (): Promise<void> => {
-    const result = await fetcher();
-    setData(result);
-    setTimestamp(Date.now());
+    if (disposed || inFlight) return;
+    if (controller.signal.aborted) return;
+    inFlight = true;
+    try {
+      const result = await fetcher({ signal: controller.signal });
+      if (disposed || controller.signal.aborted) return;
+      setData(result);
+      setTimestamp(Date.now());
+    } finally {
+      inFlight = false;
+    }
   };
 
-  // Perform initial fetch if no initial data provided
+  // Initial fetch and interval revalidates: fire-and-forget, so attach .catch
+  // to surface fetcher rejections without becoming unhandled rejections.
   if (initialData === undefined) {
-    revalidate();
+    revalidate().catch((err) => {
+      if (typeof console !== "undefined") console.warn("[SibuJS ISR] initial fetch failed", err);
+    });
   }
 
-  // Set up automatic revalidation interval
   const intervalId = setInterval(() => {
-    revalidate();
+    revalidate().catch((err) => {
+      if (typeof console !== "undefined") console.warn("[SibuJS ISR] revalidate failed", err);
+    });
   }, revalidateAfter);
 
   const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
     clearInterval(intervalId);
+    controller.abort();
   };
 
   return { data, isStale, revalidate, dispose };

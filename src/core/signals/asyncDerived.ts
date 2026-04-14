@@ -1,3 +1,4 @@
+import { batch } from "../../reactivity/batch";
 import { effect } from "./effect";
 import { signal } from "./signal";
 
@@ -51,28 +52,36 @@ export function asyncDerived<T>(factory: () => Promise<T>, initial: T): AsyncDer
   effect(() => {
     tick(); // track so `refresh()` re-runs
     const currentRun = ++runId;
-    setLoading(true);
-    setError(null);
+    batch(() => {
+      setLoading(true);
+      setError(null);
+    });
 
     let promise: Promise<T>;
     try {
       promise = factory();
     } catch (err) {
-      setError(err);
-      setLoading(false);
+      batch(() => {
+        setError(err);
+        setLoading(false);
+      });
       return;
     }
 
     promise.then(
       (result) => {
         if (currentRun !== runId) return; // stale
-        setValue(result);
-        setLoading(false);
+        batch(() => {
+          setValue(result);
+          setLoading(false);
+        });
       },
       (err) => {
         if (currentRun !== runId) return; // stale
-        setError(err);
-        setLoading(false);
+        batch(() => {
+          setError(err);
+          setLoading(false);
+        });
       },
     );
   });

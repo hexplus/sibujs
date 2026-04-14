@@ -26,7 +26,10 @@ export interface ChunkConfig {
 
 interface CacheEntry<T> {
   value: T;
+  /** Time the entry was inserted. Used for TTL validity. */
   timestamp: number;
+  /** Last time the entry was read. Used for LRU eviction. */
+  lastAccess: number;
   accessCount: number;
 }
 
@@ -51,18 +54,21 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
   const pending = new Map<string, Promise<unknown>>();
   const preloaded = new Set<string>();
 
-  // Evict oldest/least-accessed entry when cache is full
+  // True LRU eviction: drop the entry with the oldest lastAccess timestamp.
+  // Loops while at-or-above max so concurrent loads can't grow the cache.
   function evict() {
-    if (cache.size < maxCacheSize) return;
-    let oldest: string | null = null;
-    let oldestTime = Infinity;
-    for (const [key, entry] of cache) {
-      if (entry.timestamp < oldestTime) {
-        oldestTime = entry.timestamp;
-        oldest = key;
+    while (cache.size >= maxCacheSize) {
+      let lru: string | null = null;
+      let lruTime = Infinity;
+      for (const [key, entry] of cache) {
+        if (entry.lastAccess < lruTime) {
+          lruTime = entry.lastAccess;
+          lru = key;
+        }
       }
+      if (!lru) return;
+      cache.delete(lru);
     }
-    if (oldest) cache.delete(oldest);
   }
 
   // Check if cached entry is still valid
@@ -73,17 +79,29 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
 
   // Load with retry logic
   async function loadWithRetry<T>(id: string, loader: () => Promise<T>, attempt = 0): Promise<T> {
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
       const result = await (timeout > 0
-        ? Promise.race([
-            loader(),
-            new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`Chunk '${id}' loading timed out after ${timeout}ms`)), timeout),
-            ),
-          ])
+        ? new Promise<T>((resolve, reject) => {
+            timeoutHandle = setTimeout(
+              () => reject(new Error(`Chunk '${id}' loading timed out after ${timeout}ms`)),
+              timeout,
+            );
+            loader().then(
+              (v) => {
+                if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+                resolve(v);
+              },
+              (e) => {
+                if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+                reject(e);
+              },
+            );
+          })
         : loader());
       return result;
     } catch (err) {
+      if (timeoutHandle !== null) clearTimeout(timeoutHandle);
       if (attempt < retries) {
         await new Promise((r) => setTimeout(r, retryDelay * (attempt + 1)));
         return loadWithRetry(id, loader, attempt + 1);
@@ -92,58 +110,58 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
     }
   }
 
+  async function loadFn<T>(id: string, loader: () => Promise<T>): Promise<T> {
+    const cached = cache.get(id);
+    if (cached && isValid(cached)) {
+      cached.accessCount++;
+      cached.lastAccess = Date.now();
+      return cached.value as T;
+    }
+
+    const pendingLoad = pending.get(id);
+    if (pendingLoad) return pendingLoad as Promise<T>;
+
+    onLoadStart?.(id);
+    const loadPromise = loadWithRetry(id, loader)
+      .then((value) => {
+        evict();
+        const now = Date.now();
+        cache.set(id, { value, timestamp: now, lastAccess: now, accessCount: 1 });
+        pending.delete(id);
+        onLoadEnd?.(id);
+        return value;
+      })
+      .catch((err) => {
+        pending.delete(id);
+        const error = err instanceof Error ? err : new Error(String(err));
+        onLoadError?.(id, error);
+        throw error;
+      });
+
+    pending.set(id, loadPromise as Promise<unknown>);
+    return loadPromise;
+  }
+
+  function preloadFn<T>(id: string, loader: () => Promise<T>): void {
+    // `preloaded` is purely a "requested" guard to dedupe calls.
+    // On failure we clear it so future preload() calls can retry.
+    if (cache.has(id) || pending.has(id) || preloaded.has(id)) return;
+    preloaded.add(id);
+    loadFn(id, loader).catch(() => {
+      preloaded.delete(id);
+    });
+  }
+
   return {
-    /**
-     * Load a chunk by ID. Uses cache if available, otherwise loads via the provided loader.
-     */
-    async load<T>(id: string, loader: () => Promise<T>): Promise<T> {
-      // Check cache
-      const cached = cache.get(id);
-      if (cached && isValid(cached)) {
-        cached.accessCount++;
-        return cached.value as T;
-      }
-
-      // Check if already loading (dedup)
-      const pendingLoad = pending.get(id);
-      if (pendingLoad) return pendingLoad as Promise<T>;
-
-      // Start loading
-      onLoadStart?.(id);
-      const loadPromise = loadWithRetry(id, loader)
-        .then((value) => {
-          evict();
-          cache.set(id, { value, timestamp: Date.now(), accessCount: 1 });
-          pending.delete(id);
-          onLoadEnd?.(id);
-          return value;
-        })
-        .catch((err) => {
-          pending.delete(id);
-          const error = err instanceof Error ? err : new Error(String(err));
-          onLoadError?.(id, error);
-          throw error;
-        });
-
-      pending.set(id, loadPromise as Promise<unknown>);
-      return loadPromise;
-    },
-
-    /**
-     * Preload a chunk without blocking. Silently caches for later use.
-     */
-    preload<T>(id: string, loader: () => Promise<T>): void {
-      if (cache.has(id) || pending.has(id) || preloaded.has(id)) return;
-      preloaded.add(id);
-      this.load(id, loader).catch(() => {});
-    },
+    load: loadFn,
+    preload: preloadFn,
 
     /**
      * Preload multiple chunks in parallel.
      */
     preloadAll(entries: Array<{ id: string; loader: () => Promise<unknown> }>): void {
       for (const entry of entries) {
-        this.preload(entry.id, entry.loader);
+        preloadFn(entry.id, entry.loader);
       }
     },
 
@@ -162,6 +180,7 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
       const entry = cache.get(id);
       if (entry && isValid(entry)) {
         entry.accessCount++;
+        entry.lastAccess = Date.now();
         return entry.value as T;
       }
       return undefined;
@@ -172,6 +191,7 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
      */
     invalidate(id: string): void {
       cache.delete(id);
+      preloaded.delete(id);
     },
 
     /**

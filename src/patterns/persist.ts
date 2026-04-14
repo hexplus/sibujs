@@ -43,19 +43,24 @@ export interface PersistOptions<T = unknown> {
    *  - use XOR with a static key — trivially reversible
    *  - roll your own cipher — nearly always broken
    *
+   * **Sync only:** because `persisted()` exposes synchronous getters and
+   * setters, both `encrypt` and `decrypt` must be SYNCHRONOUS. Async
+   * crypto (e.g. `crypto.subtle.encrypt`) is NOT supported here — derive
+   * keys ahead of time and use a sync wrapper, or pre/post-process the
+   * value yourself before/after `setValue`.
+   *
    * @example
    * ```ts
+   * // Pre-derived key + sync wrapper
    * persisted("token", "", {
-   *   encrypt: async (v) => aesGcmEncrypt(v, await getKey()),
-   *   decrypt: async (v) => aesGcmDecrypt(v, await getKey()),
+   *   encrypt: (v) => syncAesGcmEncrypt(v, derivedKey),
+   *   decrypt: (v) => syncAesGcmDecrypt(v, derivedKey),
    * });
    * ```
-   *
-   * Note that because localStorage is synchronous, any real AES-GCM
-   * flow needs pre-derived keys and is inherently best-effort.
    */
   encrypt?: (value: string) => string;
-  /** Decrypt the stored value before deserialization. Required if `encrypt` is set. */
+  /** Decrypt the stored value before deserialization. Required if `encrypt` is set.
+   *  Must be synchronous — see `encrypt` docs. */
   decrypt?: (value: string) => string;
 }
 
@@ -66,7 +71,13 @@ export function persisted<T>(
 ): [() => T, (next: T | ((prev: T) => T)) => void] {
   const storage = options.session ? sessionStorage : localStorage;
   const serialize = options.serialize || JSON.stringify;
-  const deserialize = options.deserialize || JSON.parse;
+  // Reject __proto__ / constructor / prototype keys at parse time to block
+  // prototype pollution from a tampered storage entry (CWE-1321).
+  const safeReviver = (k: string, v: unknown): unknown => {
+    if (k === "__proto__" || k === "constructor" || k === "prototype") return undefined;
+    return v;
+  };
+  const deserialize = options.deserialize || ((raw: string) => JSON.parse(raw, safeReviver));
   const encrypt = options.encrypt;
   const decrypt = options.decrypt;
   // Cross-tab sync defaults to on for localStorage, always off for sessionStorage

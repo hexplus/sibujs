@@ -42,7 +42,7 @@ describe("reduxAdapter", () => {
     const api = inject<ReduxAdapterAPI<TestState>>("redux");
     expect(api).toBeDefined();
     expect(api.getState).toBeTypeOf("function");
-    expect(api.useSelector).toBeTypeOf("function");
+    expect(api.select).toBeTypeOf("function");
     expect(api.dispatch).toBeTypeOf("function");
     expect(api.destroy).toBeTypeOf("function");
   });
@@ -56,12 +56,12 @@ describe("reduxAdapter", () => {
     expect(api.getState().name).toBe("Bob");
   });
 
-  it("should create reactive selector via useSelector", () => {
+  it("should create reactive selector via select", () => {
     const store = createMockReduxStore({ count: 10, name: "Carol" });
     const p = reduxAdapter({ store });
     plugin(p);
     const api = inject<ReduxAdapterAPI<TestState>>("redux");
-    const count = api.useSelector((s) => s.count);
+    const count = api.select((s) => s.count);
     expect(count()).toBe(10);
   });
 
@@ -70,7 +70,7 @@ describe("reduxAdapter", () => {
     const p = reduxAdapter({ store });
     plugin(p);
     const api = inject<ReduxAdapterAPI<TestState>>("redux");
-    const count = api.useSelector((s) => s.count);
+    const count = api.select((s) => s.count);
     expect(count()).toBe(0);
 
     store.dispatch({ type: "SET_COUNT", payload: 42 });
@@ -92,7 +92,7 @@ describe("reduxAdapter", () => {
     const p = reduxAdapter({ store });
     plugin(p);
     const api = inject<ReduxAdapterAPI<TestState>>("redux");
-    const count = api.useSelector((s) => s.count);
+    const count = api.select((s) => s.count);
 
     api.destroy();
     store._setState({ count: 999, name: "Grace" });

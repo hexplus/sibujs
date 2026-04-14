@@ -48,7 +48,7 @@ describe("zustandAdapter", () => {
     const api = inject<ZustandAdapterAPI<TestState>>("zustand");
     expect(api).toBeDefined();
     expect(api.getState).toBeTypeOf("function");
-    expect(api.useSelector).toBeTypeOf("function");
+    expect(api.select).toBeTypeOf("function");
   });
 
   it("should return initial state", () => {
@@ -62,7 +62,7 @@ describe("zustandAdapter", () => {
     const store = createMockZustandStore({ bears: 0, fish: 10 });
     plugin(zustandAdapter({ store }));
     const api = inject<ZustandAdapterAPI<TestState>>("zustand");
-    const bears = api.useSelector((s) => s.bears);
+    const bears = api.select((s) => s.bears);
     expect(bears()).toBe(0);
 
     store._trigger({ bears: 7, fish: 10 });

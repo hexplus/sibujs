@@ -147,20 +147,21 @@ const STYLES = `
     font-weight: 600;
   }
   .sibu-error-display .sibu-err-copy-btn {
-    background: transparent;
-    border: 1px solid #3a3a4e;
+    background: rgba(0, 0, 0, 0.22);
+    border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 4px;
-    color: #a0a3b8;
+    color: rgba(255, 255, 255, 0.85);
     cursor: pointer;
     padding: 2px 10px;
-    font-size: 0.95em;
+    font-size: 0.78em;
     font-family: inherit;
     transition: all 0.12s ease;
+    flex-shrink: 0;
   }
   .sibu-error-display .sibu-err-copy-btn:hover {
-    background: #2a2a3e;
-    color: #e5e7eb;
-    border-color: #4a4a5e;
+    background: rgba(0, 0, 0, 0.35);
+    color: white;
+    border-color: rgba(255, 255, 255, 0.3);
   }
 
   .sibu-error-display .sibu-err-stack {
@@ -308,24 +309,28 @@ function normalizeError(err: unknown): NormalizedError {
   };
 }
 
-function buildCopyText(err: NormalizedError, meta: Record<string, unknown> | undefined): string {
+function buildCopyText(err: NormalizedError, meta: Record<string, unknown> | undefined, headline: string): string {
   const lines: string[] = [];
+  lines.push(headline);
   lines.push(`[${err.code}] ${err.message}`);
   if (err.stack) {
     lines.push("");
+    lines.push("Stack Trace:");
     lines.push(err.stack);
   }
-  if (err.cause) {
+  let cause: NormalizedError | null = err.cause;
+  while (cause) {
     lines.push("");
     lines.push("Caused by:");
-    lines.push(`  [${err.cause.code}] ${err.cause.message}`);
-    if (err.cause.stack) {
-      const indented = err.cause.stack
+    lines.push(`  [${cause.code}] ${cause.message}`);
+    if (cause.stack) {
+      const indented = cause.stack
         .split("\n")
         .map((l) => `  ${l}`)
         .join("\n");
       lines.push(indented);
     }
+    cause = cause.cause;
   }
   if (meta && Object.keys(meta).length > 0) {
     lines.push("");
@@ -335,9 +340,13 @@ function buildCopyText(err: NormalizedError, meta: Record<string, unknown> | und
     }
   }
   lines.push("");
-  lines.push(`At: ${new Date().toISOString()}`);
+  lines.push("Environment:");
+  lines.push(`  Timestamp: ${new Date().toISOString()}`);
+  if (typeof location !== "undefined") {
+    lines.push(`  URL: ${location.href}`);
+  }
   if (typeof navigator !== "undefined" && navigator.userAgent) {
-    lines.push(`UA: ${navigator.userAgent}`);
+    lines.push(`  User Agent: ${navigator.userAgent}`);
   }
   return lines.join("\n");
 }
@@ -429,7 +438,7 @@ export function ErrorDisplay(props: ErrorDisplayProps): Element {
     nodes: () => copyLabel(),
     on: {
       click: () => {
-        const text = buildCopyText(normalized, props.metadata);
+        const text = buildCopyText(normalized, props.metadata, headline);
         if (typeof navigator !== "undefined" && navigator.clipboard) {
           navigator.clipboard.writeText(text).then(
             () => {
@@ -451,6 +460,7 @@ export function ErrorDisplay(props: ErrorDisplayProps): Element {
     nodes: [
       code({ class: "sibu-err-icon", nodes: normalized.code }) as Element,
       h3({ class: "sibu-err-title", nodes: headline }) as Element,
+      copyBtn,
       span({ class: "sibu-err-timestamp", nodes: timestamp }) as Element,
     ],
   }) as Element;
@@ -464,23 +474,9 @@ export function ErrorDisplay(props: ErrorDisplayProps): Element {
         nodes: [
           div({
             class: "sibu-err-section-head",
-            nodes: [span({ nodes: "Stack Trace" }) as Element, copyBtn],
+            nodes: [span({ nodes: "Stack Trace" }) as Element],
           }) as Element,
           renderFrames(normalized.frames),
-        ],
-      }) as Element,
-    );
-  } else if (showDetails) {
-    // Even with no stack, still offer a copy button for the message + metadata
-    bodyChildren.push(
-      div({
-        class: "sibu-err-section",
-        nodes: [
-          div({
-            class: "sibu-err-section-head",
-            nodes: [span({ nodes: "Details" }) as Element, copyBtn],
-          }) as Element,
-          div({ class: "sibu-err-stack", nodes: "(no stack available)" }) as Element,
         ],
       }) as Element,
     );
@@ -497,38 +493,6 @@ export function ErrorDisplay(props: ErrorDisplayProps): Element {
         nodes: [
           div({ class: "sibu-err-section-head", nodes: [span({ nodes: "Metadata" }) as Element] }) as Element,
           renderMetadata(props.metadata),
-        ],
-      }) as Element,
-    );
-  }
-
-  if (showDetails && typeof navigator !== "undefined" && navigator.userAgent) {
-    bodyChildren.push(
-      div({
-        class: "sibu-err-section",
-        nodes: [
-          div({ class: "sibu-err-section-head", nodes: [span({ nodes: "Environment" }) as Element] }) as Element,
-          div({
-            class: "sibu-err-meta",
-            nodes: (() => {
-              const dl = document.createElement("dl");
-              dl.className = "sibu-err-meta";
-              const entries: [string, string][] = [
-                ["User Agent", navigator.userAgent],
-                ["URL", typeof location !== "undefined" ? location.href : "(n/a)"],
-                ["Timestamp", new Date().toISOString()],
-              ];
-              for (const [k, v] of entries) {
-                const dt = document.createElement("dt");
-                dt.textContent = k;
-                const dd = document.createElement("dd");
-                dd.textContent = v;
-                dl.appendChild(dt);
-                dl.appendChild(dd);
-              }
-              return dl as unknown as Node;
-            })(),
-          }) as Element,
         ],
       }) as Element,
     );

@@ -18,7 +18,7 @@ export interface MobXAdapterAPI {
    * Takes a MobX expression (function reading MobX observables)
    * and returns a SibuJS getter that updates when the observables change.
    */
-  fromMobX: <T>(expression: () => T) => () => T;
+  fromMobX: <T>(expression: () => T) => (() => T) & { dispose: () => void };
 
   /**
    * Bridge a SibuJS getter into a MobX reaction.
@@ -63,8 +63,11 @@ export function mobXAdapter(options: MobXAdapterOptions): SibuPlugin {
     const { autorun } = options;
     const disposers: MobXReactionDisposer[] = [];
 
-    function fromMobX<T>(expression: () => T): () => T {
-      const [getValue, setValue] = signal<T>(expression());
+    function fromMobX<T>(expression: () => T): (() => T) & { dispose: () => void } {
+      // Seed with `undefined` and let autorun's synchronous first invocation
+      // populate the signal — autorun calls the view immediately, so calling
+      // expression() here as well would double-evaluate observables.
+      const [getValue, setValue] = signal<T | undefined>(undefined);
 
       const disposer = autorun(() => {
         const newValue = expression();
@@ -74,7 +77,15 @@ export function mobXAdapter(options: MobXAdapterOptions): SibuPlugin {
       });
       disposers.push(disposer);
 
-      return getValue;
+      // Attach a per-subscription dispose on the getter so callers can
+      // unsubscribe individually without tearing down the whole adapter.
+      const getter = (() => getValue() as T) as (() => T) & { dispose: () => void };
+      getter.dispose = () => {
+        const i = disposers.indexOf(disposer);
+        if (i >= 0) disposers.splice(i, 1);
+        disposer();
+      };
+      return getter;
     }
 
     function toMobX(sibuGetter: () => unknown, callback: (value: unknown) => void): () => void {

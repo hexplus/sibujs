@@ -2,6 +2,8 @@
 // CUSTOM ELEMENTS (WEB COMPONENTS)
 // ============================================================================
 
+import { dispose } from "../core/rendering/dispose";
+
 export interface CustomElementOptions {
   shadow?: boolean;
   mode?: "open" | "closed";
@@ -24,7 +26,7 @@ export function defineElement(
 
   class SibuElement extends HTMLElement {
     private _root: HTMLElement | ShadowRoot;
-    private _rendered = false;
+    private _rendered: HTMLElement | null = null;
 
     static get observedAttributes(): string[] {
       return observed;
@@ -44,11 +46,7 @@ export function defineElement(
     }
 
     disconnectedCallback(): void {
-      // Cleanup rendered content
-      if (this._root instanceof ShadowRoot) {
-        this._root.innerHTML = "";
-      }
-      this._rendered = false;
+      this._teardown();
     }
 
     attributeChangedCallback(): void {
@@ -57,19 +55,21 @@ export function defineElement(
       }
     }
 
+    private _teardown(): void {
+      if (this._rendered) {
+        // Run reactive disposers attached to the rendered subtree before
+        // detaching it. Without this, signals/effects/listeners created
+        // inside the user component leak across reconnects.
+        dispose(this._rendered);
+        this._rendered = null;
+      }
+      this._root.replaceChildren();
+    }
+
     private _render(): void {
+      this._teardown();
       const props = this._getProps();
 
-      // Clear
-      if (this._root instanceof ShadowRoot) {
-        this._root.innerHTML = "";
-      } else {
-        while (this._root.firstChild) {
-          this._root.removeChild(this._root.firstChild);
-        }
-      }
-
-      // Add styles if shadow DOM
       if (options.styles && this._root instanceof ShadowRoot) {
         const styleEl = document.createElement("style");
         styleEl.textContent = options.styles;
@@ -78,7 +78,7 @@ export function defineElement(
 
       const el = component(props, this);
       this._root.appendChild(el);
-      this._rendered = true;
+      this._rendered = el;
     }
 
     private _getProps(): Record<string, unknown> {

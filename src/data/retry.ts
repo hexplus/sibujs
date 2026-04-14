@@ -41,10 +41,15 @@ export function calculateDelay(
       break;
   }
   delay = Math.min(delay, maxDelay);
+  // Cap delay before computing jitter so Infinity * jitter doesn't produce
+  // NaN — that would cause setTimeout(fn, NaN) to fire immediately and
+  // defeat backoff entirely.
+  if (!Number.isFinite(delay)) delay = Number.MAX_SAFE_INTEGER;
   if (jitter > 0) {
     const jitterRange = delay * jitter;
     delay += (Math.random() * 2 - 1) * jitterRange;
   }
+  if (!Number.isFinite(delay) || Number.isNaN(delay)) delay = 0;
   return Math.max(0, delay);
 }
 
@@ -83,6 +88,7 @@ export async function withRetry<T>(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     try {
+      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       return await fn();
     } catch (error) {
       lastError = error;

@@ -30,7 +30,7 @@ const _isDev = isDev();
  */
 export function devAssert(condition: boolean, message: string): void {
   if (_isDev && !condition) {
-    throw new Error(`[Sibu] ${message}`);
+    throw new Error(`[SibuJS] ${message}`);
   }
 }
 
@@ -39,6 +39,6 @@ export function devAssert(condition: boolean, message: string): void {
  */
 export function devWarn(message: string): void {
   if (_isDev) {
-    console.warn(`[Sibu] ${message}`);
+    console.warn(`[SibuJS] ${message}`);
   }
 }

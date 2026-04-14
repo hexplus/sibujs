@@ -27,8 +27,14 @@ export function preloadCritical(
   if (typeof document === "undefined") return;
 
   for (const resource of resources) {
-    // Skip if a preload link for this href already exists
-    const existing = document.querySelector(`link[rel="preload"][href="${resource.href}"]`);
+    // Skip if a preload link for this href already exists.
+    // Use CSS.escape to safely embed arbitrary URLs in the attribute selector
+    // (hrefs may contain quotes, brackets, or other special characters).
+    const safeHref =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(resource.href)
+        : resource.href.replace(/["\\]/g, "\\$&");
+    const existing = document.querySelector(`link[rel="preload"][href="${safeHref}"]`);
     if (existing) continue;
 
     const link = document.createElement("link");

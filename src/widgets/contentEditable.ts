@@ -1,4 +1,27 @@
 import { signal } from "../core/signals/signal";
+import { stripHtml } from "../utils/sanitize";
+
+/**
+ * Options for `setContent`.
+ *
+ * WARNING: passing `sanitize: false` bypasses the built-in protection and
+ * requires the caller to guarantee the HTML has already been sanitized with
+ * a trusted library. Any untrusted input that reaches `setContent` with
+ * `sanitize: false` is an XSS vector.
+ */
+export interface SetContentOptions {
+  /** Raw HTML to assign. Sanitized by default (tags are stripped). */
+  html?: string;
+  /** Plain text. Always safe — assigned via `textContent`. */
+  text?: string;
+  /**
+   * When true (default), `html` is run through the framework's HTML
+   * stripper before assignment — tags are removed, only text content is
+   * preserved. Set to `false` ONLY when `html` has already been sanitized
+   * with a dedicated library (e.g. DOMPurify).
+   */
+  sanitize?: boolean;
+}
 
 /**
  * contentEditable provides reactive binding for contenteditable elements.
@@ -9,15 +32,43 @@ import { signal } from "../core/signals/signal";
  */
 export function contentEditable(): {
   content: () => string;
-  setContent: (html: string) => void;
+  /**
+   * Update the reactive content value.
+   *
+   * - `setContent("<b>x</b>")` — LEGACY: treated as `{ html, sanitize: true }`.
+   *   The HTML is stripped to text by default to prevent XSS. Prefer the
+   *   options form below.
+   * - `setContent({ text: "hello" })` — plain text, always safe.
+   * - `setContent({ html, sanitize: true })` — sanitized HTML (default).
+   * - `setContent({ html, sanitize: false })` — raw HTML; the caller MUST
+   *   have pre-sanitized it with a trusted library (e.g. DOMPurify).
+   */
+  setContent: (input: string | SetContentOptions) => void;
   isFocused: () => boolean;
   setFocused: (v: boolean) => void;
   bold: () => void;
   italic: () => void;
   underline: () => void;
 } {
-  const [content, setContent] = signal<string>("");
+  const [content, setContentInternal] = signal<string>("");
   const [isFocused, setFocused] = signal<boolean>(false);
+
+  function setContent(input: string | SetContentOptions): void {
+    if (typeof input === "string") {
+      setContentInternal(input);
+      return;
+    }
+    if (typeof input.text === "string") {
+      setContentInternal(input.text);
+      return;
+    }
+    if (typeof input.html === "string") {
+      const shouldSanitize = input.sanitize !== false;
+      setContentInternal(shouldSanitize ? stripHtml(input.html) : input.html);
+      return;
+    }
+    setContentInternal("");
+  }
 
   /**
    * Wrap the current selection in an inline element (e.g. <strong>, <em>, <u>).

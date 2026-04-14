@@ -25,6 +25,15 @@ export interface ScrollLockHandle {
   unlock: () => void;
 }
 
+// Module-level counter + snapshot. The snapshot is taken EXACTLY ONCE on the
+// 0 → 1 transition and restored on the N → 0 transition; nested locks never
+// re-snapshot. Concurrent lock()/unlock() from multiple handles is safe as
+// long as each handle obeys its own `owned` flag (enforced below).
+//
+// Note: we do NOT observe external mutations to `document.body.style` while
+// the lock is active — if application code assigns `body.style.overflow`
+// during a lock, that value will be clobbered on unlock. Keep modal state
+// in scrollLock handles, not direct style writes.
 let lockCount = 0;
 let savedOverflow: string | null = null;
 let savedPaddingRight: string | null = null;
@@ -36,6 +45,8 @@ export function scrollLock(): ScrollLockHandle {
     if (owned) return;
     owned = true;
     lockCount++;
+    // Only the 0 → 1 transition snapshots and mutates the body; nested locks
+    // increment the counter and otherwise no-op.
     if (lockCount !== 1 || typeof document === "undefined") return;
 
     const body = document.body;
@@ -52,6 +63,7 @@ export function scrollLock(): ScrollLockHandle {
     if (!owned) return;
     owned = false;
     lockCount = Math.max(0, lockCount - 1);
+    // Only the N → 0 transition restores the snapshot.
     if (lockCount !== 0 || typeof document === "undefined") return;
 
     const body = document.body;

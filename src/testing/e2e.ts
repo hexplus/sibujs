@@ -26,8 +26,9 @@ export interface MockRoute {
  * Create an HTTP mock server that intercepts fetch calls.
  * Useful for testing components that make API calls.
  */
-export function createHttpMock(routes: MockRoute[] = []) {
+export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: (cleanup: () => void) => void } = {}) {
   const originalFetch = globalThis.fetch;
+  const hadOriginalFetch = Object.hasOwn(globalThis, "fetch");
   const requestLog: Array<{ url: string; method: string; body: unknown; timestamp: number }> = [];
   const mockRoutes = [...routes];
 
@@ -52,33 +53,50 @@ export function createHttpMock(routes: MockRoute[] = []) {
       return new Response(JSON.stringify({ error: "Not mocked" }), { status: 404 });
     }
 
+    // Wrap response resolution in try/finally so a user-supplied response
+    // callback throwing does not leave the mock in a partially-applied state.
     let mockResponse: MockResponse;
-    if (typeof route.response === "function") {
-      mockResponse = await route.response({ url, method, body, headers: new Headers(init?.headers) });
-    } else {
-      mockResponse = route.response;
-    }
+    try {
+      if (typeof route.response === "function") {
+        mockResponse = await route.response({ url, method, body, headers: new Headers(init?.headers) });
+      } else {
+        mockResponse = route.response;
+      }
 
-    if (mockResponse.delay) {
-      await new Promise((r) => setTimeout(r, mockResponse.delay));
-    }
+      if (mockResponse.delay) {
+        await new Promise((r) => setTimeout(r, mockResponse.delay));
+      }
 
-    return new Response(typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body), {
-      status: mockResponse.status || 200,
-      statusText: mockResponse.statusText || "OK",
-      headers: mockResponse.headers,
-    });
+      return new Response(
+        typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body),
+        {
+          status: mockResponse.status || 200,
+          statusText: mockResponse.statusText || "OK",
+          headers: mockResponse.headers,
+        },
+      );
+    } catch (err) {
+      // Surface response-handler errors as a synthetic 500 so tests see them
+      // instead of an unhandled rejection leaking past the mock boundary.
+      return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
+    }
   };
 
-  return {
+  const restore = (): void => {
+    if (hadOriginalFetch) {
+      globalThis.fetch = originalFetch;
+    } else {
+      delete (globalThis as unknown as Record<string, unknown>).fetch;
+    }
+  };
+
+  const api = {
     /** Install the mock (replace global fetch) */
     install(): void {
       globalThis.fetch = mockFetch as typeof fetch;
     },
     /** Restore original fetch */
-    restore(): void {
-      globalThis.fetch = originalFetch;
-    },
+    restore,
     /** Add a mock route */
     addRoute(route: MockRoute): void {
       mockRoutes.push(route);
@@ -110,6 +128,13 @@ export function createHttpMock(routes: MockRoute[] = []) {
       return requestLog.filter((r) => r.url.includes(url) && r.method.toUpperCase() === method.toUpperCase()).length;
     },
   };
+
+  // Optional auto-restore via a caller-supplied afterEach hook (e.g. vitest's).
+  if (typeof options.afterEach === "function") {
+    options.afterEach(() => api.restore());
+  }
+
+  return api;
 }
 
 // ─── Timer Mock ─────────────────────────────────────────────────────────────
@@ -118,19 +143,30 @@ export function createHttpMock(routes: MockRoute[] = []) {
  * Create a fake timer system for testing time-dependent code.
  * Mocks setTimeout, setInterval, requestAnimationFrame.
  */
-export function createTimerMock() {
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalSetInterval = globalThis.setInterval;
-  const originalClearTimeout = globalThis.clearTimeout;
-  const originalClearInterval = globalThis.clearInterval;
-  const originalRAF = typeof requestAnimationFrame !== "undefined" ? requestAnimationFrame : undefined;
-  const originalCAF = typeof cancelAnimationFrame !== "undefined" ? cancelAnimationFrame : undefined;
+export function createTimerMock(options: { afterEach?: (cleanup: () => void) => void } = {}) {
+  const g = globalThis as unknown as Record<string, unknown>;
+
+  // Capture originals alongside a "was it defined?" flag so restore() can
+  // properly `delete` keys that were never present in the first place,
+  // rather than leaving `undefined` stubs behind.
+  const snapshot = (key: string) => ({
+    had: Object.hasOwn(globalThis, key),
+    value: g[key],
+  });
+  const saved = {
+    setTimeout: snapshot("setTimeout"),
+    setInterval: snapshot("setInterval"),
+    clearTimeout: snapshot("clearTimeout"),
+    clearInterval: snapshot("clearInterval"),
+    requestAnimationFrame: snapshot("requestAnimationFrame"),
+    cancelAnimationFrame: snapshot("cancelAnimationFrame"),
+  };
 
   let currentTime = 0;
   let nextId = 1;
   const timers: Array<{ id: number; callback: () => void; time: number; interval?: number }> = [];
 
-  return {
+  const api = {
     install(): void {
       currentTime = 0;
       (globalThis as unknown as Record<string, unknown>).setTimeout = (cb: () => void, delay = 0) => {
@@ -162,12 +198,16 @@ export function createTimerMock() {
       };
     },
     restore(): void {
-      globalThis.setTimeout = originalSetTimeout;
-      globalThis.setInterval = originalSetInterval;
-      globalThis.clearTimeout = originalClearTimeout;
-      globalThis.clearInterval = originalClearInterval;
-      if (originalRAF) (globalThis as unknown as Record<string, unknown>).requestAnimationFrame = originalRAF;
-      if (originalCAF) (globalThis as unknown as Record<string, unknown>).cancelAnimationFrame = originalCAF;
+      for (const [key, snap] of Object.entries(saved)) {
+        if (snap.had) {
+          g[key] = snap.value;
+        } else {
+          // When an original was never defined (e.g. rAF in non-browser envs),
+          // `delete` the key rather than leaving an `undefined` stub — callers
+          // typically guard via `typeof requestAnimationFrame !== "undefined"`.
+          delete g[key];
+        }
+      }
       timers.length = 0;
     },
     /** Advance time by a given number of ms, running any timers that fire */
@@ -214,6 +254,12 @@ export function createTimerMock() {
       return timers.length;
     },
   };
+
+  if (typeof options.afterEach === "function") {
+    options.afterEach(() => api.restore());
+  }
+
+  return api;
 }
 
 // ─── DOM Snapshot Testing ───────────────────────────────────────────────────

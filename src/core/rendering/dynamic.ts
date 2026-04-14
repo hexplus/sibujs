@@ -1,5 +1,5 @@
 import { track } from "../../reactivity/track";
-import { dispose } from "./dispose";
+import { dispose, registerDisposer } from "./dispose";
 import { div } from "./html";
 
 type Component = () => HTMLElement;
@@ -89,8 +89,10 @@ export function DynamicComponent(is: () => string | Component): HTMLElement {
     container.replaceChildren(el);
   }
 
-  // Track reactive dependencies so render re-runs when `is()` changes
-  track(render);
+  // Track reactive dependencies so render re-runs when `is()` changes.
+  // Capture the teardown so disposing the container unsubscribes the effect.
+  const untrack = track(render);
+  registerDisposer(container, untrack);
 
   return container;
 }

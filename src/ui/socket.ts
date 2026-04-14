@@ -44,7 +44,9 @@ export function socket(
 } {
   const autoReconnect = options?.autoReconnect ?? false;
   const reconnectDelay = options?.reconnectDelay ?? 1000;
-  const maxReconnects = options?.maxReconnects ?? Infinity;
+  // Bound default to 10 attempts so a permanently broken URL doesn't hammer
+  // the server forever. Callers can pass Infinity if that behavior is wanted.
+  const maxReconnects = options?.maxReconnects ?? 10;
   const heartbeat = options?.heartbeat;
   const protocols = options?.protocols;
 
@@ -88,13 +90,22 @@ export function socket(
     ws.onclose = () => {
       setStatus("closed");
       stopHeartbeat();
-      if (autoReconnect && !disposed && !manuallyClosed && reconnectCount < maxReconnects) {
+      const wasManual = manuallyClosed;
+      // Reset BEFORE scheduling so close() during the timer window correctly
+      // re-sets manuallyClosed and the scheduled reconnect short-circuits.
+      manuallyClosed = false;
+      if (autoReconnect && !disposed && !wasManual && reconnectCount < maxReconnects) {
+        // Exponential backoff with jitter, capped at 30s.
+        const cap = 30_000;
+        const delay = Math.min(cap, reconnectDelay * 2 ** reconnectCount);
+        const jittered = delay * (0.5 + Math.random() * 0.5);
         reconnectCount++;
         reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          if (disposed || manuallyClosed) return;
           connect();
-        }, reconnectDelay);
+        }, jittered);
       }
-      manuallyClosed = false;
     };
 
     ws.onerror = () => {

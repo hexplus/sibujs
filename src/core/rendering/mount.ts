@@ -11,7 +11,7 @@ export function mount(
 ): { node: Node; unmount: () => void } {
   if (!container) {
     throw new Error(
-      "[Sibu] mount: container element not found. Make sure the DOM element exists before calling mount().",
+      "[SibuJS mount] container element not found. Make sure the DOM element exists before calling mount().",
     );
   }
 

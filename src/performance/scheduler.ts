@@ -22,7 +22,12 @@ interface ScheduledTask {
 let taskIdCounter = 0;
 const taskQueue: ScheduledTask[] = [];
 let isProcessing = false;
-let frameId: number | null = null;
+// Distinguish scheduled work by type so we can cancel the right handle.
+// Microtasks cannot be cancelled — we only track they are scheduled.
+type ScheduledKind = "frame" | "idle" | "timeout" | "microtask";
+let scheduledKind: ScheduledKind | null = null;
+let scheduledHandle: number | null = null;
+let microtaskScheduled = false;
 
 function insertTask(task: ScheduledTask): void {
   // Insert in priority order (lower number = higher priority)
@@ -70,35 +75,44 @@ function processQueue(): void {
 }
 
 function scheduleFrame(): void {
-  if (frameId !== null) return;
+  if (scheduledKind !== null || microtaskScheduled) return;
 
   const nextTask = taskQueue.find((t) => !t.cancelled);
   if (!nextTask) return;
 
   if (nextTask.priority <= Priority.USER_BLOCKING) {
-    // High priority — use microtask
+    // High priority — use microtask. Set flag BEFORE queueing to avoid
+    // races where another scheduleFrame() call slips through.
+    microtaskScheduled = true;
+    scheduledKind = "microtask";
     queueMicrotask(() => {
-      frameId = null;
+      microtaskScheduled = false;
+      scheduledKind = null;
       processQueue();
     });
-    frameId = -1;
   } else if (nextTask.priority === Priority.IDLE) {
     // Idle priority — use requestIdleCallback if available
     if (typeof requestIdleCallback !== "undefined") {
-      frameId = requestIdleCallback(() => {
-        frameId = null;
+      scheduledKind = "idle";
+      scheduledHandle = requestIdleCallback(() => {
+        scheduledKind = null;
+        scheduledHandle = null;
         processQueue();
       }) as unknown as number;
     } else {
-      frameId = setTimeout(() => {
-        frameId = null;
+      scheduledKind = "timeout";
+      scheduledHandle = setTimeout(() => {
+        scheduledKind = null;
+        scheduledHandle = null;
         processQueue();
       }, 50) as unknown as number;
     }
   } else {
     // Normal/Low priority — use requestAnimationFrame
-    frameId = requestAnimationFrame(() => {
-      frameId = null;
+    scheduledKind = "frame";
+    scheduledHandle = requestAnimationFrame(() => {
+      scheduledKind = null;
+      scheduledHandle = null;
       processQueue();
     });
   }
@@ -138,6 +152,18 @@ export function scheduleUpdate(priority: PriorityLevel, callback: () => void): (
  * Flush all pending tasks synchronously (useful for testing).
  */
 export function flushScheduler(): void {
+  // Cancel any pending scheduled work. Microtasks are not cancellable, but
+  // the callback becomes a no-op once the queue drains.
+  if (scheduledHandle !== null) {
+    if (scheduledKind === "frame") cancelAnimationFrame(scheduledHandle);
+    else if (scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined") {
+      cancelIdleCallback(scheduledHandle);
+    } else if (scheduledKind === "timeout") clearTimeout(scheduledHandle);
+  }
+  scheduledHandle = null;
+  scheduledKind = null;
+  microtaskScheduled = false;
+
   while (taskQueue.length > 0) {
     const task = taskQueue.shift();
     if (!task) break;
@@ -146,7 +172,6 @@ export function flushScheduler(): void {
     }
   }
   isProcessing = false;
-  frameId = null;
 }
 
 /**

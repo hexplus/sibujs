@@ -46,13 +46,15 @@ import { track } from "./track";
  * each(() => heavyFilter(items, deferredQuery()), row => li(row.name));
  * ```
  */
-export function defer<T>(getter: () => T): () => T {
+export function defer<T>(getter: () => T): (() => T) & { dispose: () => void } {
   const [value, setValue] = signal<T>(getter());
   let pending = false;
+  let disposed = false;
   let latest: T = value();
 
   const flush = () => {
     pending = false;
+    if (disposed) return;
     setValue(latest);
   };
 
@@ -68,12 +70,18 @@ export function defer<T>(getter: () => T): () => T {
     });
   };
 
-  track(() => {
+  const teardown = track(() => {
     latest = getter();
     schedule();
   });
 
-  return value;
+  const accessor = (() => value()) as (() => T) & { dispose: () => void };
+  accessor.dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    teardown();
+  };
+  return accessor;
 }
 
 // ─── transition() ──────────────────────────────────────────────────────────

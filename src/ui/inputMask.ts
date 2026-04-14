@@ -18,7 +18,7 @@ export interface MaskOptions {
 export function inputMask(options: MaskOptions): {
   value: () => string;
   rawValue: () => string;
-  bind: (input: HTMLInputElement) => void;
+  bind: (input: HTMLInputElement) => () => void;
 } {
   const placeholder = options.placeholder || "_";
   const [value, setValue] = signal("");
@@ -95,8 +95,8 @@ export function inputMask(options: MaskOptions): {
   const stripRegex = buildStripRegex();
   const rawCharTest = options.pattern.includes("*") ? () => true : (c: string) => /[a-zA-Z0-9]/.test(c);
 
-  function bind(input: HTMLInputElement): void {
-    input.addEventListener("input", () => {
+  function bind(input: HTMLInputElement): () => void {
+    const onInput = () => {
       const cursorBefore = input.selectionStart ?? input.value.length;
       const oldValue = input.value;
       const raw = oldValue.replace(stripRegex, "");
@@ -105,8 +105,6 @@ export function inputMask(options: MaskOptions): {
       setRawValue(extractRaw(masked));
       input.value = masked;
 
-      // Restore cursor: count raw chars before the old cursor, then find
-      // the position in the masked string after that many filled slots.
       let rawBefore = 0;
       for (let i = 0; i < cursorBefore && i < oldValue.length; i++) {
         if (rawCharTest(oldValue[i])) rawBefore++;
@@ -123,9 +121,9 @@ export function inputMask(options: MaskOptions): {
         }
       }
       input.setSelectionRange(newCursor, newCursor);
-    });
+    };
 
-    input.addEventListener("focus", () => {
+    const onFocus = () => {
       if (!input.value) {
         const display = options.pattern
           .replace(/9/g, placeholder)
@@ -133,7 +131,15 @@ export function inputMask(options: MaskOptions): {
           .replace(/\*/g, placeholder);
         input.placeholder = display;
       }
-    });
+    };
+
+    input.addEventListener("input", onInput);
+    input.addEventListener("focus", onFocus);
+
+    return () => {
+      input.removeEventListener("input", onInput);
+      input.removeEventListener("focus", onFocus);
+    };
   }
 
   return { value, rawValue, bind };

@@ -1,4 +1,7 @@
+import { registerDisposer } from "../core/rendering/dispose";
 import { div, span, style } from "../core/rendering/html";
+import { takePendingError } from "../core/rendering/lazy";
+import { onMount } from "../core/rendering/lifecycle";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { ErrorDisplay } from "./ErrorDisplay";
@@ -203,8 +206,13 @@ function injectStyles() {
   }
 }
 
-// Memoization cache for fallback elements keyed by error message
-const fallbackCache = new WeakMap<(...args: never[]) => unknown, Map<string, Element>>();
+// Memoization cache for fallback renderers keyed by error message.
+// We cache a *factory* (bound to the error) rather than a live Element to
+// avoid re-inserting the same DOM node into multiple parents and to bound
+// memory growth. Each fallback function gets its own LRU Map capped at
+// FALLBACK_CACHE_MAX entries — oldest key evicted when full.
+const FALLBACK_CACHE_MAX = 50;
+const fallbackCache = new WeakMap<(...args: never[]) => unknown, Map<string, () => Element>>();
 
 function getMemoizedFallback(
   fallbackFn: (error: Error, retry: () => void) => Element,
@@ -217,10 +225,22 @@ function getMemoizedFallback(
     fallbackCache.set(fallbackFn, cache);
   }
   const key = error.message;
-  if (!cache.has(key)) {
-    cache.set(key, fallbackFn(error, retry));
+  let factory = cache.get(key);
+  if (factory) {
+    // LRU touch: move to most-recently-used end
+    cache.delete(key);
+    cache.set(key, factory);
+  } else {
+    factory = () => fallbackFn(error, retry);
+    cache.set(key, factory);
+    // Evict oldest if over limit
+    if (cache.size > FALLBACK_CACHE_MAX) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey !== undefined) cache.delete(oldestKey);
+    }
   }
-  return cache.get(key) as Element;
+  // Always return a *fresh* Element so the same node is never inserted twice
+  return factory();
 }
 
 // Stack parsing is now handled by ErrorDisplay. The helper used to
@@ -244,9 +264,13 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
   const [error, setError] = signal<Error | null>(null);
 
   const retry = () => {
-    // Clear memoized fallback cache on retry so fresh fallback is created
+    // Drop only the cached factory bound to the current error message, so
+    // memoized fallbacks for OTHER errors (e.g. unrelated boundary instances
+    // sharing the same fallback fn) survive.
     if (fallback) {
-      fallbackCache.delete(fallback);
+      const cur = error();
+      const inner = fallbackCache.get(fallback);
+      if (cur && inner) inner.delete(cur.message);
     }
     setError(null);
   };
@@ -254,16 +278,21 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
   // Wire `resetKeys` — when any listed getter changes after an error has
   // been caught, clear the error and re-render. Skip the first run so we
   // do not retry before an error has even occurred.
+  // Capture the effect teardown so it can be disposed with the boundary.
+  let resetKeysTeardown: (() => void) | null = null;
   if (resetKeys && resetKeys.length > 0) {
     let initialized = false;
-    effect(() => {
+    resetKeysTeardown = effect(() => {
       // Read every key so each one is tracked as a dependency
       for (const k of resetKeys) {
         try {
           k();
-        } catch {
+        } catch (err) {
           // A key getter that throws is still a valid dependency — we
           // just ignore the value. Do not let it crash the effect.
+          if (typeof console !== "undefined") {
+            console.warn("[SibuJS ErrorBoundary] resetKeys getter threw:", err);
+          }
         }
       }
       if (!initialized) {
@@ -277,7 +306,15 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
   const handleError = (e: unknown): Error => {
     const errorObj = e instanceof Error ? e : new Error(String(e));
     setError(errorObj);
-    onError?.(errorObj);
+    if (onError) {
+      try {
+        onError(errorObj);
+      } catch (cbErr) {
+        if (typeof console !== "undefined") {
+          console.error("[SibuJS ErrorBoundary] onError callback threw:", cbErr);
+        }
+      }
+    }
     return errorObj;
   };
 
@@ -297,6 +334,9 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
       // Defer dispatch so the container is connected to the DOM tree first
       const propagateError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError));
       queueMicrotask(() => {
+        // CustomEvent bubbling traverses parentNode chains even on detached
+        // subtrees; require parentNode (not isConnected) so nested boundaries
+        // work in tests and pre-mount setup.
         if (container.parentNode) {
           container.dispatchEvent(
             new CustomEvent("sibu:error-propagate", {
@@ -347,8 +387,10 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
     },
   }) as Element;
 
-  // Listen for error propagation from nested ErrorBoundaries
-  container.addEventListener("sibu:error-propagate", (e: Event) => {
+  // Listen for error propagation from nested ErrorBoundaries.
+  // Store the handler so it can be removed via registerDisposer to avoid
+  // leaking the listener when the boundary itself is disposed.
+  const propagateListener = (e: Event) => {
     // If this boundary is already in error state, let the event bubble to parent
     if (error()) return;
     e.stopPropagation();
@@ -357,6 +399,40 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
     if (propagatedError) {
       handleError(propagatedError);
     }
+  };
+  container.addEventListener("sibu:error-propagate", propagateListener);
+
+  // After mount, scan descendants for errors that were stashed by lazy()/etc.
+  // when their dispatch fired before any parent existed (silent-loss path).
+  // Collect every pending error so siblings aren't dropped.
+  onMount(() => {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_ELEMENT);
+    const collected: Error[] = [];
+    // walker.currentNode starts at the container root — include it.
+    let node: Node | null = walker.currentNode;
+    while (node) {
+      const pending = takePendingError(node as Element);
+      if (pending) collected.push(pending);
+      node = walker.nextNode();
+    }
+    if (collected.length === 1) {
+      handleError(collected[0]);
+    } else if (collected.length > 1) {
+      const Agg = (globalThis as { AggregateError?: typeof AggregateError }).AggregateError;
+      handleError(
+        Agg
+          ? new Agg(collected, `${collected.length} pre-mount errors caught by ErrorBoundary`)
+          : new Error(collected.map((e) => e.message).join("; ")),
+      );
+    }
+    return undefined;
+  }, container as HTMLElement);
+
+  // Tear down resetKeys effect + remove the propagation listener when the
+  // boundary root is disposed (via when/match/each/dispose).
+  registerDisposer(container, () => {
+    if (resetKeysTeardown) resetKeysTeardown();
+    container.removeEventListener("sibu:error-propagate", propagateListener);
   });
 
   return container;

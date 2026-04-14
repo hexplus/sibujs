@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,15 @@ function run(cmd, opts = {}) {
   } catch {
     return null;
   }
+}
+
+// Argv-array form: safe against shell-interpolation of version strings.
+// Usage: runArgs("git", ["commit", "-m", msg])
+function runArgs(file, args, opts = {}) {
+  // Throw on failure so callers (release flow) can abort instead of silently
+  // proceeding to tag/publish with broken state. The previous swallow-and-return-null
+  // could leave a half-committed release on a pre-commit hook failure.
+  return execFileSync(file, args, { stdio: "inherit", cwd: __dirname, ...opts });
 }
 
 function runSilent(cmd) {
@@ -151,38 +160,62 @@ async function main() {
   // 1. Pre-flight
   await preflight();
 
-  // 2. Version bump
+  // 2. Version bump — capture pre-bump version so we can roll back on failure
   const newVersion = await selectVersion();
+  if (!/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(newVersion)) {
+    abort(`Invalid version format: "${newVersion}"`);
+  }
   const pkg = readPkg();
+  const previousVersion = pkg.version;
   pkg.version = newVersion;
   writePkg(pkg);
   console.log(`  Updated package.json to v${newVersion}`);
 
+  // Helper: restore package.json to its pre-bump state
+  const restoreVersion = () => {
+    const current = readPkg();
+    current.version = previousVersion;
+    writePkg(current);
+    console.log(`  Restored package.json to v${previousVersion}`);
+  };
+
   // 3. Build
   log("Building...");
   if (run("npm run build") === null) {
-    // Restore version on failure
-    pkg.version = readPkg().version;
+    restoreVersion();
     abort("Build failed.");
   }
 
   // 4. Tests
   log("Running tests...");
   if (run("npm run test -- --run") === null) {
-    abort("Tests failed. Version was already bumped in package.json — revert if needed.");
+    restoreVersion();
+    abort("Tests failed.");
   }
 
-  // 5. Git commit & tag
-  log("Creating git commit and tag...");
-  run(`git add package.json`);
-  run(`git commit -m "release: v${newVersion}"`);
-  run(`git tag v${newVersion}`);
-
-  // 6. Publish
+  // 5. Publish FIRST so a publish failure leaves no orphaned commit/tag
+  // behind. OTP is handled interactively by npm if required.
   log("Publishing to npm...");
+  // publishConfig.access + provenance are set in package.json so the CLI flag
+  // is redundant; keep --access explicit as a belt-and-braces guard against
+  // private-by-default registries.
   if (run("npm publish --access public") === null) {
+    restoreVersion();
+    abort("Publish failed. Reverted package.json; no git commit/tag created.");
+  }
+
+  // 6. Git commit & tag — only after publish succeeds. Args as array so the
+  // version string cannot be shell-interpreted. runArgs throws on failure
+  // (e.g. pre-commit hook), aborting before push.
+  log("Creating git commit and tag...");
+  try {
+    runArgs("git", ["add", "package.json"]);
+    runArgs("git", ["commit", "-m", `release: v${newVersion}`]);
+    runArgs("git", ["tag", `v${newVersion}`]);
+  } catch (err) {
     abort(
-      `Publish failed. Git commit and tag v${newVersion} were created — you may need to revert them.`
+      `Publish succeeded but git commit/tag failed (${err && err.message ? err.message : err}). ` +
+        `You'll need to commit and tag v${newVersion} manually.`,
     );
   }
 

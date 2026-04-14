@@ -188,24 +188,27 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   }
 
   function select(value: string): void {
+    // Snapshot the previous selection once — reading the signal a second
+    // time after `setSelectedValue()` would mix DOM reconciliation into the
+    // signal read path and can race if any subscribers mutate state.
+    const previous = selectedValue();
+    let nextSelectedSet: Set<string>;
     if (multiple) {
-      const current = selectedValue();
-      const set = new Set((current ?? "").split(",").filter(Boolean));
-      if (set.has(value)) set.delete(value);
-      else set.add(value);
-      setSelectedValue(Array.from(set).join(","));
+      nextSelectedSet = new Set((previous ?? "").split(",").filter(Boolean));
+      if (nextSelectedSet.has(value)) nextSelectedSet.delete(value);
+      else nextSelectedSet.add(value);
+      setSelectedValue(Array.from(nextSelectedSet).join(","));
     } else {
+      nextSelectedSet = new Set([value]);
       setSelectedValue(value);
     }
     options.onSelect?.(value);
 
-    // Reflect `aria-selected` on each option
+    // Reflect `aria-selected` on each option using the computed next set.
     const opts = getOptions();
-    const current = selectedValue();
-    const selected = new Set((current ?? "").split(",").filter(Boolean));
     for (const opt of opts) {
       const ov = opt.dataset.value ?? "";
-      opt.setAttribute("aria-selected", selected.has(ov) ? "true" : "false");
+      opt.setAttribute("aria-selected", nextSelectedSet.has(ov) ? "true" : "false");
     }
   }
 

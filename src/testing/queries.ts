@@ -147,23 +147,33 @@ export function waitForSignal<T>(
   const timeoutMs = options.timeout ?? 1000;
   return new Promise<T>((resolve, reject) => {
     let resolved = false;
-    const timer = setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const finish = (fn: () => void) => {
+      if (resolved) return;
+      resolved = true;
+      // Always clear the timer — cheap no-op if it already fired, and
+      // guarantees we never leak a pending handle on any resolve path.
+      if (timer !== undefined) clearTimeout(timer);
+      fn();
+    };
+
+    timer = setTimeout(() => {
+      finish(() => {
         teardown();
         reject(new Error(`waitForSignal: predicate did not match within ${timeoutMs}ms`));
-      }
+      });
     }, timeoutMs);
 
     const teardown = effect(() => {
       if (resolved) return;
       const value = getter();
       if (predicate(value)) {
-        resolved = true;
-        clearTimeout(timer);
-        // Defer teardown so the current effect pass completes cleanly
-        queueMicrotask(() => teardown());
-        resolve(value);
+        finish(() => {
+          // Defer teardown so the current effect pass completes cleanly
+          queueMicrotask(() => teardown());
+          resolve(value);
+        });
       }
     });
   });

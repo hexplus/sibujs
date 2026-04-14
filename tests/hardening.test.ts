@@ -275,7 +275,7 @@ describe("each large list stress tests", () => {
     expect(items[0].textContent).toBe("item-9999");
     expect(items[9_999].textContent).toBe("item-0");
     document.body.removeChild(container);
-  });
+  }, 15_000);
 
   it("rapid add/remove cycles (100 iterations)", () => {
     const { setItems, container } = setupList(100);

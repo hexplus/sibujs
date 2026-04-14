@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DOMPool, domPool, preloadResource } from "../src/performance/domRecycler";
+import { DOMPool, getDOMPool, preloadResource } from "../src/performance/domRecycler";
 
 describe("DOMPool", () => {
   it("should acquire a new element", () => {
@@ -39,9 +39,10 @@ describe("DOMPool", () => {
   });
 });
 
-describe("domPool (global)", () => {
+describe("getDOMPool (global)", () => {
   it("should be available as a singleton", () => {
-    expect(domPool).toBeInstanceOf(DOMPool);
+    expect(getDOMPool()).toBeInstanceOf(DOMPool);
+    expect(getDOMPool()).toBe(getDOMPool());
   });
 });
 

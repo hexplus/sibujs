@@ -25,6 +25,9 @@ export function stream(
   options?: {
     withCredentials?: boolean;
     autoReconnect?: boolean;
+    maxReconnects?: number;
+    reconnectBaseMs?: number;
+    reconnectMaxMs?: number;
   },
 ): {
   data: () => string | null;
@@ -34,6 +37,9 @@ export function stream(
   dispose: () => void;
 } {
   const autoReconnect = options?.autoReconnect ?? false;
+  const maxReconnects = options?.maxReconnects ?? 10;
+  const baseMs = options?.reconnectBaseMs ?? 1000;
+  const maxMs = options?.reconnectMaxMs ?? 30_000;
 
   const [data, setData] = signal<string | null>(null);
   const [event, setEvent] = signal<string | null>(null);
@@ -42,6 +48,7 @@ export function stream(
   let source: EventSource | null = null;
   let disposed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let attempts = 0;
 
   function connect(): void {
     if (disposed) return;
@@ -59,6 +66,7 @@ export function stream(
 
     source.onopen = () => {
       setStatus("open");
+      attempts = 0; // successful connection resets backoff
     };
 
     source.onmessage = (evt: MessageEvent) => {
@@ -70,11 +78,15 @@ export function stream(
       if (source && source.readyState === EventSource.CLOSED) {
         setStatus("closed");
         source = null;
-        if (autoReconnect && !disposed) {
+        if (autoReconnect && !disposed && attempts < maxReconnects) {
+          // Exponential backoff with jitter, capped at reconnectMaxMs.
+          const delay = Math.min(maxMs, baseMs * 2 ** attempts);
+          const jittered = delay * (0.5 + Math.random() * 0.5);
+          attempts++;
           reconnectTimer = setTimeout(() => {
             reconnectTimer = null;
             connect();
-          }, 1000);
+          }, jittered);
         }
       }
     };

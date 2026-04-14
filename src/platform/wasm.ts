@@ -96,12 +96,52 @@ export function wasm<T extends Record<string, unknown> = Record<string, unknown>
  * Supports loading from URL, ArrayBuffer, or Uint8Array.
  * Caches compiled modules for reuse.
  */
+export interface LoadWasmOptions {
+  imports?: WebAssembly.Imports;
+  cacheKey?: string;
+  allowedOrigins?: string[];
+  /** Required when source is a URL and allowedOrigins is empty. WASM is
+   *  compiled code with imports into JS memory — fetching from any URL is
+   *  a supply-chain risk equivalent to remote module import (CWE-829). */
+  unsafelyAllowAnyOrigin?: boolean;
+}
+
 export async function loadWasmModule(
   source: string | ArrayBuffer | Uint8Array,
-  imports?: WebAssembly.Imports,
+  imports?: WebAssembly.Imports | LoadWasmOptions,
   cacheKey?: string,
 ): Promise<WebAssembly.Instance> {
-  const key = cacheKey || (typeof source === "string" ? source : undefined);
+  // Back-compat: `imports` may be either WebAssembly.Imports (a record of
+  // module-name -> imports map) or a LoadWasmOptions bag. Disambiguate via
+  // the unique option keys ONLY — never `imports`/`cacheKey`, which a user
+  // could legally name a WASM module namespace.
+  const isOptionsBag = !!(imports && ("allowedOrigins" in imports || "unsafelyAllowAnyOrigin" in imports));
+  const opts: LoadWasmOptions = isOptionsBag
+    ? (imports as LoadWasmOptions)
+    : { imports: imports as WebAssembly.Imports | undefined, cacheKey };
+  const wasmImports = opts.imports;
+  const key = opts.cacheKey || (typeof source === "string" ? source : undefined);
+
+  if (typeof source === "string") {
+    const allowed = opts.allowedOrigins ?? [];
+    if (allowed.length > 0) {
+      let parsed: URL;
+      try {
+        parsed = new URL(source, typeof location !== "undefined" ? location.href : undefined);
+      } catch {
+        throw new Error(`loadWasmModule: invalid URL "${source}"`);
+      }
+      if (!allowed.includes(parsed.origin)) {
+        throw new Error(`loadWasmModule: origin "${parsed.origin}" is not in the allowlist`);
+      }
+    } else if (!opts.unsafelyAllowAnyOrigin) {
+      throw new Error(
+        `loadWasmModule: refused to fetch "${source}" with no allowedOrigins. ` +
+          "Pass { allowedOrigins: [...] } to restrict the origin, or " +
+          "{ unsafelyAllowAnyOrigin: true } to opt in (CWE-829).",
+      );
+    }
+  }
 
   // Check instance cache
   if (key) {
@@ -124,7 +164,7 @@ export async function loadWasmModule(
       // URL - use streaming compilation if available
       if (typeof WebAssembly.instantiateStreaming === "function") {
         const response = fetch(source);
-        const result = await WebAssembly.instantiateStreaming(response, imports || {});
+        const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
         if (key) {
           moduleCache.set(key, result.module);
           instanceCache.set(key, result.instance);
@@ -144,7 +184,7 @@ export async function loadWasmModule(
   }
 
   // Instantiate
-  const instance = await WebAssembly.instantiate(module, imports || {});
+  const instance = await WebAssembly.instantiate(module, wasmImports || {});
   if (key) instanceCache.set(key, instance);
   return instance;
 }
@@ -155,8 +195,28 @@ export async function loadWasmModule(
  * Preload and compile a WASM module without instantiating it.
  * The compiled module is cached for instant instantiation later.
  */
-export async function preloadWasm(url: string): Promise<void> {
+export async function preloadWasm(
+  url: string,
+  options: { allowedOrigins?: string[]; unsafelyAllowAnyOrigin?: boolean } = {},
+): Promise<void> {
   if (moduleCache.has(url)) return;
+  const allowed = options.allowedOrigins ?? [];
+  if (allowed.length > 0) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url, typeof location !== "undefined" ? location.href : undefined);
+    } catch {
+      throw new Error(`preloadWasm: invalid URL "${url}"`);
+    }
+    if (!allowed.includes(parsed.origin)) {
+      throw new Error(`preloadWasm: origin "${parsed.origin}" is not in the allowlist`);
+    }
+  } else if (!options.unsafelyAllowAnyOrigin) {
+    throw new Error(
+      `preloadWasm: refused to fetch "${url}" with no allowedOrigins. ` +
+        "Pass { allowedOrigins: [...] } or { unsafelyAllowAnyOrigin: true } (CWE-829).",
+    );
+  }
 
   let module: WebAssembly.Module;
   if (typeof WebAssembly.compileStreaming === "function") {

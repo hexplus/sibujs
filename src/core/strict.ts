@@ -46,7 +46,7 @@ export function strict<T>(fn: () => T): T {
       try {
         fn();
       } catch (err) {
-        console.warn("[Sibu strict] second run threw:", err);
+        console.warn("[SibuJS strict] second run threw:", err);
       }
     });
   }
@@ -83,7 +83,7 @@ export function strictEffect(fn: () => void): () => void {
     try {
       secondTeardown = effect(fn);
     } catch (err) {
-      console.warn("[Sibu strictEffect] second run threw:", err);
+      console.warn("[SibuJS strictEffect] second run threw:", err);
     }
   });
 

@@ -54,9 +54,17 @@ export function loaderData<T = unknown>(): {
 export async function preloadRoute(
   route: LoaderRoute,
   context: { params: Record<string, string>; path: string },
+  callerSignal?: AbortSignal,
 ): Promise<unknown> {
   if (!route.loader) return undefined;
 
   const controller = new AbortController();
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort();
+    } else {
+      callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
   return route.loader(context, { signal: controller.signal });
 }

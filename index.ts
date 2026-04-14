@@ -32,7 +32,7 @@ export type {
 export { html } from "./src/core/rendering/htm";
 
 // Rendering types
-export type { NodeChild, NodeChildren } from "./src/core/rendering/types";
+export type { Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
 
 // Mounting & rendering
 export * from "./src/core/rendering/mount";
@@ -78,8 +78,12 @@ export { untracked } from "./src/reactivity/track";
 export { bindDynamic } from "./src/reactivity/bindAttribute";
 
 // Lazy loading & Suspense
-export { lazy, Suspense } from "./src/core/rendering/lazy";
+export { lazy, Suspense, takePendingError } from "./src/core/rendering/lazy";
 export type { SuspenseProps } from "./src/core/rendering/lazy";
+
+// Trusted HTML brand for opt-in unsafe-HTML APIs (compiled.staticTemplate, ssr.headExtra)
+export { trustHTML } from "./src/platform/ssr";
+export type { TrustedHTML } from "./src/platform/ssr";
 
 // Components
 export * from "./src/components/ErrorBoundary";

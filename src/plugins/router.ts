@@ -620,9 +620,11 @@ class ComponentLoader {
 
       return component;
     } catch (error) {
-      throw new Error(
+      const wrapped = new Error(
         `Failed to load component for route "${routePath}": ${error instanceof Error ? error.message : String(error)}`,
       );
+      wrapped.cause = error;
+      throw wrapped;
     }
   }
 
@@ -894,13 +896,17 @@ export class SibuRouter {
       // Handle redirects
       if ("redirect" in route) {
         const redirectPath = typeof route.redirect === "function" ? route.redirect(to) : route.redirect;
-        // Warn about absolute URL redirects (potential open redirect vulnerability)
-        if (typeof redirectPath === "string" && /^https?:\/\/|^\/\//i.test(redirectPath)) {
-          console.warn(
-            `[SibuJS Router] Redirect to absolute URL "${redirectPath}" detected. Use relative paths for safer redirects.`,
-          );
+        // Refuse cross-origin / protocol-relative redirects by default —
+        // these are open-redirect vectors (CWE-601) when redirect targets
+        // are derived from untrusted route params.
+        if (typeof redirectPath === "string" && /^(https?:)?\/\//i.test(redirectPath)) {
+          if (typeof console !== "undefined") {
+            console.error(
+              `[SibuJS Router] Refusing absolute/protocol-relative redirect "${redirectPath}" — open-redirect risk.`,
+            );
+          }
+          throw new NavigationFailureError("aborted", from, to);
         }
-        // Security: refuse redirect targets with dangerous protocols.
         if (typeof redirectPath === "string" && !isSafeNavigationTarget(redirectPath)) {
           throw new NavigationFailureError("aborted", from, to);
         }
@@ -1186,6 +1192,7 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
   }
 
   globalRouter = new SibuRouter(routes, options);
+  ensureRouterPagehide();
   return globalRouter;
 }
 
@@ -1290,7 +1297,12 @@ export function Route(): Node {
 
   const cleanupNodes = () => {
     [currentNode, loadingNode, errorNode].forEach((node) => {
-      if (node?.parentNode) {
+      if (!node) return;
+      // Run reactive disposers attached during route render BEFORE detaching.
+      // Without dispose(), every effect/binding/listener inside the route
+      // subtree leaks across navigations.
+      dispose(node);
+      if (node.parentNode) {
         node.parentNode.removeChild(node);
       }
     });
@@ -1328,7 +1340,7 @@ export function Route(): Node {
     }
   };
 
-  const showError = (error: Error) => {
+  const showError = (error: Error, routeDef?: RouteDef) => {
     if (!anchor.parentNode) return;
 
     cleanupNodes();
@@ -1337,6 +1349,23 @@ export function Route(): Node {
     (errorNode as HTMLElement).className = "route-error";
     (errorNode as HTMLElement).setAttribute("role", "alert");
     (errorNode as HTMLElement).setAttribute("aria-live", "assertive");
+
+    // Attach component source info so the app layer can display it.
+    // Extract the import path from the lazy function's source (e.g. import("./pages/Features.ts")).
+    if (routeDef && "component" in routeDef) {
+      const src = routeDef.component.toString();
+      const importMatch = src.match(/import\(["']([^"']+)["']\)/);
+      if (importMatch) {
+        (errorNode as HTMLElement).setAttribute("data-component-source", importMatch[1]);
+      }
+      if (routeDef.component.name) {
+        (errorNode as HTMLElement).setAttribute("data-component-name", routeDef.component.name);
+      }
+    }
+
+    // Stash the original error so the app layer can access the real
+    // stack trace and cause chain (DOM only carries text otherwise).
+    (errorNode as HTMLElement & { __routeError?: Error }).__routeError = error;
 
     // SECURITY FIX: Use textContent instead of innerHTML to prevent XSS
     const title = document.createElement("h3");
@@ -1351,12 +1380,17 @@ export function Route(): Node {
     retryButton.textContent = "Retry";
     retryButton.className = "route-error-retry";
     retryButton.type = "button";
-    retryButton.addEventListener("click", () => {
+    const onRetryClick = () => {
       if (globalRouter) {
         globalRouter.clearErrorCache();
-        update(); // Trigger retry
+        update();
       }
-    });
+    };
+    retryButton.addEventListener("click", onRetryClick);
+    // Pair the listener with a disposer so replacing the error node via
+    // cleanupNodes() -> dispose() actually releases the closure capturing
+    // globalRouter/update.
+    registerDisposer(retryButton, () => retryButton.removeEventListener("click", onRetryClick));
 
     (errorNode as HTMLElement).appendChild(title);
     (errorNode as HTMLElement).appendChild(message);
@@ -1404,7 +1438,11 @@ export function Route(): Node {
       if ("redirect" in routeDef) {
         const redirectPath = typeof routeDef.redirect === "function" ? routeDef.redirect(route) : routeDef.redirect;
 
-        queueMicrotask(() => globalRouter?.navigate(redirectPath));
+        queueMicrotask(() => {
+          globalRouter?.navigate(redirectPath).catch((err) => {
+            if (typeof console !== "undefined") console.error("[router] redirect failed:", err);
+          });
+        });
         return;
       }
 
@@ -1431,7 +1469,7 @@ export function Route(): Node {
         } catch (error) {
           hideLoading();
           console.error("[Route] Component error:", error);
-          showError(error instanceof Error ? error : new Error(String(error)));
+          showError(error instanceof Error ? error : new Error(String(error)), routeDef);
         }
       }
     } catch (error) {
@@ -1454,15 +1492,17 @@ export function Route(): Node {
     await originalUpdate();
     routeInitialized = true;
   };
-  track(wrappedUpdate);
+  const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
     queueMicrotask(() => {
       if (!routeInitialized && anchor.parentNode) wrappedUpdate();
     });
   }
 
-  // Register cleanup for destroyRouter
-  routeCleanups.push(cleanupNodes);
+  routeCleanups.push(() => {
+    routeTeardown();
+    cleanupNodes();
+  });
 
   return anchor;
 }
@@ -1528,7 +1568,11 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     const { route: routeDef } = match;
     if ("redirect" in routeDef) {
       const redirectPath = typeof routeDef.redirect === "function" ? routeDef.redirect(route) : routeDef.redirect;
-      queueMicrotask(() => globalRouter?.navigate(redirectPath));
+      queueMicrotask(() => {
+        globalRouter?.navigate(redirectPath).catch((err) => {
+          if (typeof console !== "undefined") console.error("[router] redirect failed:", err);
+        });
+      });
       return;
     }
 
@@ -1618,7 +1662,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     await update();
     initialized = true;
   };
-  track(wrappedUpdate);
+  const kaTeardown = track(wrappedUpdate);
   if (!initialized) {
     queueMicrotask(() => {
       if (!initialized && anchor.parentNode) wrappedUpdate();
@@ -1626,6 +1670,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   }
 
   routeCleanups.push(() => {
+    kaTeardown();
     for (const node of cache.values()) {
       dispose(node);
       if (node.parentNode) node.parentNode.removeChild(node);
@@ -1722,14 +1767,18 @@ export function RouterLink(props: {
   }
 
   // Handle click for internal navigation
-  link.addEventListener("click", (e) => {
-    // Let browser handle external links, modified clicks, or when target is set
+  const onLinkClick = (e: MouseEvent) => {
     if (target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
       return;
     }
-
     e.preventDefault();
-    globalRouter?.navigate(to, { replace });
+    globalRouter?.navigate(to, { replace }).catch((err) => {
+      if (typeof console !== "undefined") console.error("[router] link navigate failed:", err);
+    });
+  };
+  link.addEventListener("click", onLinkClick);
+  registerDisposer(link, () => {
+    link.removeEventListener("click", onLinkClick);
   });
 
   return link;
@@ -1900,11 +1949,39 @@ export function destroyRouter(): void {
   }
 }
 
-// Cleanup on page unload
-if (typeof window !== "undefined") {
-  window.addEventListener("beforeunload", () => {
-    destroyRouter();
-  });
+// Cleanup on page unload.
+// Use `pagehide` instead of `beforeunload` so the browser's back/forward
+// cache (bfcache) is not disabled. Only actually destroy when the page is
+// being discarded (persisted === false); if it may be restored from bfcache,
+// keep the router intact so a user returning via Back sees a working app.
+//
+// Previously registered at module top-level — that contradicts the package's
+// `sideEffects: false` claim and fires per-import in test/HMR loops. Now
+// installed lazily on first `createRouter()` call and de-duplicated via
+// the `_routerPagehideHandler` module variable.
+let _routerPagehideHandler: ((event: PageTransitionEvent) => void) | null = null;
+
+function ensureRouterPagehide(): void {
+  if (_routerPagehideHandler || typeof window === "undefined") return;
+  _routerPagehideHandler = (event: PageTransitionEvent) => {
+    if (event.persisted === false) {
+      destroyRouter();
+    }
+  };
+  window.addEventListener("pagehide", _routerPagehideHandler);
+}
+
+/**
+ * Remove the module-level `pagehide` listener. Intended for HMR and tests —
+ * normal apps never need to call this (the listener is page-lifetime).
+ *
+ * @internal
+ */
+export function __removeRouterPagehideHandler(): void {
+  if (_routerPagehideHandler && typeof window !== "undefined") {
+    window.removeEventListener("pagehide", _routerPagehideHandler);
+    _routerPagehideHandler = null;
+  }
 }
 
 // ============================================================================
@@ -1946,12 +2023,20 @@ export function Outlet(): Node {
     }
   };
 
-  track(update);
+  const outletTeardown = track(update);
   if (!anchor.parentNode) {
     queueMicrotask(() => {
       if (anchor.parentNode) update();
     });
   }
+  routeCleanups.push(() => {
+    outletTeardown();
+    if (currentNode) {
+      dispose(currentNode);
+      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
+      currentNode = null;
+    }
+  });
   return anchor;
 }
 

@@ -87,21 +87,36 @@ export function optimisticList<T>(initialValue: T[]): {
   add: (item: T, asyncAction: () => Promise<T>) => Promise<void>;
   remove: (predicate: (item: T) => boolean, asyncAction: () => Promise<void>) => Promise<void>;
   update: (predicate: (item: T) => boolean, patch: Partial<T>, asyncAction: () => Promise<T>) => Promise<void>;
-  /** @deprecated Use `add` instead */
-  addOptimistic: (item: T, asyncAction: () => Promise<T>) => Promise<void>;
-  /** @deprecated Use `remove` instead */
-  removeOptimistic: (predicate: (item: T) => boolean, asyncAction: () => Promise<void>) => Promise<void>;
-  /** @deprecated Use `update` instead */
-  updateOptimistic: (
-    predicate: (item: T) => boolean,
-    patch: Partial<T>,
-    asyncAction: () => Promise<T>,
-  ) => Promise<void>;
 } {
   const [items, setItems] = signal<T[]>([...initialValue]);
   const [pending, setPending] = signal(false);
   let inflightCount = 0;
   let version = 0;
+  // Tag each optimistic item with an internal id so patch/remove locate
+  // the correct entry even when array contents are replaced by reference.
+  let tempIdCounter = 0;
+  const itemIds = new WeakMap<object, number>();
+  const idToItem = new Map<number, T>();
+
+  function tagItem(item: T): number {
+    const id = ++tempIdCounter;
+    if (item !== null && typeof item === "object") {
+      itemIds.set(item as unknown as object, id);
+    }
+    idToItem.set(id, item);
+    return id;
+  }
+
+  function findIndexById(list: T[], id: number): number {
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      if (it !== null && typeof it === "object" && itemIds.get(it as unknown as object) === id) {
+        return i;
+      }
+      if (Object.is(it, idToItem.get(id))) return i;
+    }
+    return -1;
+  }
 
   function begin(): number {
     const v = ++version;
@@ -120,13 +135,14 @@ export function optimisticList<T>(initialValue: T[]): {
 
   async function add(item: T, asyncAction: () => Promise<T>): Promise<void> {
     const prev = items();
+    const id = tagItem(item);
     setItems([...prev, item]);
     const myVersion = begin();
 
     try {
       const result = await asyncAction();
       setItems((current) => {
-        const idx = current.lastIndexOf(item);
+        const idx = findIndexById(current, id);
         if (idx >= 0) {
           const next = [...current];
           next[idx] = result;
@@ -134,8 +150,10 @@ export function optimisticList<T>(initialValue: T[]): {
         }
         return [...current, result];
       });
+      idToItem.delete(id);
       end(myVersion);
     } catch {
+      idToItem.delete(id);
       end(myVersion, () => setItems(prev));
     }
   }
@@ -159,12 +177,13 @@ export function optimisticList<T>(initialValue: T[]): {
     asyncAction: () => Promise<T>,
   ): Promise<void> {
     const prev = items();
-    const patchedRefs: T[] = [];
+    const patchedIds: number[] = [];
     setItems(
       prev.map((item) => {
         if (predicate(item)) {
           const patched = { ...item, ...patch } as T;
-          patchedRefs.push(patched);
+          const id = tagItem(patched);
+          patchedIds.push(id);
           return patched;
         }
         return item;
@@ -174,9 +193,19 @@ export function optimisticList<T>(initialValue: T[]): {
 
     try {
       const result = await asyncAction();
-      setItems((current) => current.map((item) => (patchedRefs.includes(item) ? result : item)));
+      setItems((current) =>
+        current.map((item) => {
+          if (item !== null && typeof item === "object") {
+            const existingId = itemIds.get(item as unknown as object);
+            if (existingId !== undefined && patchedIds.includes(existingId)) return result;
+          }
+          return item;
+        }),
+      );
+      for (const id of patchedIds) idToItem.delete(id);
       end(myVersion);
     } catch {
+      for (const id of patchedIds) idToItem.delete(id);
       end(myVersion, () => setItems(prev));
     }
   }
@@ -187,8 +216,5 @@ export function optimisticList<T>(initialValue: T[]): {
     add,
     remove,
     update: updateItem,
-    addOptimistic: add,
-    removeOptimistic: remove,
-    updateOptimistic: updateItem,
   };
 }

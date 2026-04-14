@@ -1,6 +1,11 @@
 import { signal } from "../core/signals/signal";
 
 /**
+ * Note on trust model: `BroadcastChannel` only delivers messages between
+ * same-origin browsing contexts (tabs, iframes, workers). We therefore treat
+ * incoming payloads as same-origin-trusted and pass them through unmodified.
+ * Do not use this transport for cross-origin messaging.
+ *
  * broadcast wraps the BroadcastChannel API as a reactive signal.
  * Unlike the `storage` event (which only fires for localStorage writes and
  * sends only the serialized value), a `BroadcastChannel` can send arbitrary

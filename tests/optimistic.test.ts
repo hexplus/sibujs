@@ -214,13 +214,4 @@ describe("optimisticList", () => {
     await p2;
     expect(o.items()).toContain(50);
   });
-
-  // ---- deprecated aliases -------------------------------------------------
-
-  it("addOptimistic/removeOptimistic/updateOptimistic are aliases", () => {
-    const o = optimisticList<number>([]);
-    expect(o.addOptimistic).toBe(o.add);
-    expect(o.removeOptimistic).toBe(o.remove);
-    expect(o.updateOptimistic).toBe(o.update);
-  });
 });

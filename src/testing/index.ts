@@ -2,8 +2,44 @@
 // TESTING UTILITIES
 // ============================================================================
 
+import { dispose } from "../core/rendering/dispose";
+
+/**
+ * Escape a value for safe embedding in a CSS attribute selector.
+ * Uses the native `CSS.escape` when available (jsdom/browsers) and
+ * falls back to a conservative hex-escape otherwise.
+ */
+function escapeSelector(value: string): string {
+  const g = globalThis as unknown as { CSS?: { escape?: (v: string) => string } };
+  if (g.CSS && typeof g.CSS.escape === "function") return g.CSS.escape(value);
+  return value.replace(/[^\w-]/g, (m) => `\\${m.charCodeAt(0).toString(16)} `);
+}
+
+// Tracks containers produced by `render()` so tests can bulk-clean via
+// `unmountAll()` when individual `unmount()` calls were missed.
+const _renderedContainers = new Set<HTMLElement>();
+
+/**
+ * Unmount every container still alive from prior `render()` calls.
+ * Safe to call from an `afterEach` hook to guarantee teardown.
+ */
+export function unmountAll(): void {
+  for (const container of _renderedContainers) {
+    // Run reactive disposers before clearing markup so effects/listeners
+    // registered during render don't leak across tests.
+    for (const child of Array.from(container.childNodes)) dispose(child);
+    container.replaceChildren();
+    if (container.parentNode) container.parentNode.removeChild(container);
+  }
+  _renderedContainers.clear();
+}
+
 /**
  * render mounts a component into a test container and returns helpers.
+ *
+ * The caller is responsible for calling `unmount()` (typically from an
+ * `afterEach` hook). For bulk teardown across many renders, call
+ * `unmountAll()` instead — every live container is tracked internally.
  */
 export function render(component: () => HTMLElement): {
   container: HTMLElement;
@@ -16,6 +52,7 @@ export function render(component: () => HTMLElement): {
 } {
   const container = document.createElement("div");
   document.body.appendChild(container);
+  _renderedContainers.add(container);
 
   const element = component();
   container.appendChild(element);
@@ -35,7 +72,7 @@ export function render(component: () => HTMLElement): {
   }
 
   function getByTestId(testId: string): HTMLElement | null {
-    return container.querySelector(`[data-testid="${testId}"]`);
+    return container.querySelector(`[data-testid="${escapeSelector(testId)}"]`);
   }
 
   function getByRole(role: string): HTMLElement | null {
@@ -47,8 +84,10 @@ export function render(component: () => HTMLElement): {
   }
 
   function unmount(): void {
-    container.innerHTML = "";
+    for (const child of Array.from(container.childNodes)) dispose(child);
+    container.replaceChildren();
     if (container.parentNode) container.parentNode.removeChild(container);
+    _renderedContainers.delete(container);
   }
 
   return { container, element, getByText, getByTestId, getByRole, queryAll, unmount };

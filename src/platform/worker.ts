@@ -41,6 +41,14 @@ export function worker<TInput = unknown, TOutput = unknown>(
   const [loading, setLoading] = signal(false);
 
   let worker: Worker | null = null;
+  let blobUrl: string | null = null;
+
+  const revokeBlobUrl = () => {
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = null;
+    }
+  };
 
   try {
     if (typeof Worker === "undefined") {
@@ -49,20 +57,28 @@ export function worker<TInput = unknown, TOutput = unknown>(
 
     const fnBody = workerFn.toString();
     const blob = new Blob([`self.onmessage = ${fnBody};`], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-    worker = new Worker(url);
-    URL.revokeObjectURL(url);
+    blobUrl = URL.createObjectURL(blob);
+    worker = new Worker(blobUrl);
 
-    worker.onmessage = (e: MessageEvent<TOutput>) => {
+    worker.addEventListener("message", (e: MessageEvent<TOutput>) => {
+      revokeBlobUrl();
       setResult(e.data);
       setLoading(false);
-    };
+    });
 
-    worker.onerror = (e: ErrorEvent) => {
+    worker.addEventListener("error", (e: ErrorEvent) => {
+      revokeBlobUrl();
       setError(new Error(e.message || "Worker error"));
       setLoading(false);
-    };
+      // Mirror workerFn behavior: terminate on uncaught error so subsequent
+      // post() calls fail fast rather than silently target a broken worker.
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
+    });
   } catch (err) {
+    revokeBlobUrl();
     setError(err instanceof Error ? err : new Error(String(err)));
   }
 
@@ -78,6 +94,7 @@ export function worker<TInput = unknown, TOutput = unknown>(
     if (!worker) return;
     worker.terminate();
     worker = null;
+    revokeBlobUrl();
     setLoading(false);
   }
 
@@ -109,6 +126,18 @@ export function workerFn<TArgs extends unknown[], TResult>(
   const [loading, setLoading] = signal(false);
 
   let worker: Worker | null = null;
+  let blobUrl: string | null = null;
+
+  const revokeBlobUrl = () => {
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = null;
+    }
+  };
+
+  // FIFO queue of pending run() promises. The worker processes postMessage
+  // in order, so the head of the queue corresponds to the next reply.
+  const queue: { resolve: (v: TResult) => void; reject: (e: Error) => void }[] = [];
 
   try {
     if (typeof Worker === "undefined") {
@@ -126,11 +155,29 @@ export function workerFn<TArgs extends unknown[], TResult>(
       ],
       { type: "application/javascript" },
     );
-    const url = URL.createObjectURL(blob);
-    worker = new Worker(url);
-    URL.revokeObjectURL(url);
+    blobUrl = URL.createObjectURL(blob);
+    worker = new Worker(blobUrl);
+    worker.addEventListener("message", (e: MessageEvent<TResult>) => {
+      revokeBlobUrl();
+      const head = queue.shift();
+      if (queue.length === 0) setLoading(false);
+      if (head) head.resolve(e.data);
+    });
+    worker.addEventListener("error", (e: ErrorEvent) => {
+      // Worker error events do not carry a request id, so we cannot know
+      // which pending run() failed. Reject ALL pending and terminate so
+      // future run() calls fail fast rather than silently mis-routing.
+      revokeBlobUrl();
+      const err = new Error(e.message || "Worker error");
+      while (queue.length > 0) queue.shift()!.reject(err);
+      setLoading(false);
+      if (worker) {
+        worker.terminate();
+        worker = null;
+      }
+    });
   } catch {
-    // Worker creation failed; run will reject
+    revokeBlobUrl();
   }
 
   function run(...args: TArgs): Promise<TResult> {
@@ -139,19 +186,8 @@ export function workerFn<TArgs extends unknown[], TResult>(
         reject(new Error("Worker is not available"));
         return;
       }
-
       setLoading(true);
-
-      worker.onmessage = (e: MessageEvent<TResult>) => {
-        setLoading(false);
-        resolve(e.data);
-      };
-
-      worker.onerror = (e: ErrorEvent) => {
-        setLoading(false);
-        reject(new Error(e.message || "Worker error"));
-      };
-
+      queue.push({ resolve, reject });
       worker.postMessage(args);
     });
   }
@@ -160,6 +196,9 @@ export function workerFn<TArgs extends unknown[], TResult>(
     if (!worker) return;
     worker.terminate();
     worker = null;
+    const err = new Error("Worker terminated");
+    while (queue.length > 0) queue.shift()!.reject(err);
+    revokeBlobUrl();
     setLoading(false);
   }
 
@@ -191,26 +230,69 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
 ): WorkerPool<TInput, TOutput> {
   const size = poolSize || (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
 
+  type Slot = { data: TInput; resolve: (v: TOutput) => void; reject: (e: Error) => void };
+  type Slot2 = Slot & { onMsg: (e: MessageEvent<TOutput>) => void; onErr: (e: ErrorEvent) => void };
   const workers: Worker[] = [];
+  const queues: Slot[][] = [];
+  const inflight: (Slot2 | null)[] = [];
   let currentIndex = 0;
   let alive = true;
+  let blobUrl: string | null = null;
+  let firedOnce = false;
+
+  const revokeBlobUrl = () => {
+    if (blobUrl) {
+      URL.revokeObjectURL(blobUrl);
+      blobUrl = null;
+    }
+  };
+
+  function dispatchNext(idx: number) {
+    if (!alive || inflight[idx] || queues[idx].length === 0) return;
+    const w = workers[idx];
+    const slot = queues[idx].shift() as Slot;
+    const onMsg = (e: MessageEvent<TOutput>) => {
+      if (!firedOnce) {
+        firedOnce = true;
+        revokeBlobUrl();
+      }
+      w.removeEventListener("message", onMsg);
+      w.removeEventListener("error", onErr);
+      inflight[idx] = null;
+      slot.resolve(e.data);
+      dispatchNext(idx);
+    };
+    const onErr = (e: ErrorEvent) => {
+      if (!firedOnce) {
+        firedOnce = true;
+        revokeBlobUrl();
+      }
+      w.removeEventListener("message", onMsg);
+      w.removeEventListener("error", onErr);
+      inflight[idx] = null;
+      slot.reject(new Error(e.message || "Worker error"));
+      dispatchNext(idx);
+    };
+    inflight[idx] = { ...slot, onMsg, onErr };
+    w.addEventListener("message", onMsg);
+    w.addEventListener("error", onErr);
+    w.postMessage(slot.data);
+  }
 
   try {
     if (typeof Worker === "undefined") {
       throw new Error("Web Workers are not supported in this environment");
     }
-
     const fnBody = workerFn.toString();
     const blob = new Blob([`self.onmessage = ${fnBody};`], { type: "application/javascript" });
-    const url = URL.createObjectURL(blob);
-
+    blobUrl = URL.createObjectURL(blob);
     for (let i = 0; i < size; i++) {
-      workers.push(new Worker(url));
+      workers.push(new Worker(blobUrl));
+      queues.push([]);
+      inflight.push(null);
     }
-
-    URL.revokeObjectURL(url);
   } catch {
-    // Pool creation failed; execute will reject
+    revokeBlobUrl();
   }
 
   function execute(data: TInput): Promise<TOutput> {
@@ -219,28 +301,26 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
         reject(new Error("Worker pool is not available"));
         return;
       }
-
-      const worker = workers[currentIndex % workers.length];
+      const idx = currentIndex % workers.length;
       currentIndex++;
-
-      worker.onmessage = (e: MessageEvent<TOutput>) => {
-        resolve(e.data);
-      };
-
-      worker.onerror = (e: ErrorEvent) => {
-        reject(new Error(e.message || "Worker error"));
-      };
-
-      worker.postMessage(data);
+      queues[idx].push({ data, resolve, reject });
+      dispatchNext(idx);
     });
   }
 
   function terminate(): void {
     alive = false;
-    for (const w of workers) {
-      w.terminate();
+    for (const w of workers) w.terminate();
+    const err = new Error("Worker pool terminated");
+    for (let i = 0; i < queues.length; i++) {
+      const inf = inflight[i];
+      if (inf) inf.reject(err);
+      for (const s of queues[i]) s.reject(err);
+      queues[i] = [];
+      inflight[i] = null;
     }
     workers.length = 0;
+    revokeBlobUrl();
   }
 
   return { execute, terminate };

@@ -4,11 +4,13 @@
  */
 
 /**
- * Mark a function as pure for tree-shaking.
- * Bundlers (Rollup, esbuild, webpack) use this to eliminate unused code.
- * Wraps a factory function with the PURE annotation.
+ * Invoke a factory and return its result. The PURE annotation that enables
+ * tree-shaking is only honoured at the call site, not inside the function
+ * declaration. Annotate call sites like this:
+ *
+ *     const x = /\* @__PURE__ *\/ pure(() => expensive());
  */
-export function /* @__PURE__ */ pure<T>(fn: () => T): T {
+export function pure<T>(fn: () => T): T {
   return fn();
 }
 

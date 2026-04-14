@@ -86,6 +86,7 @@ export function infiniteQuery<TData, TPageParam = number>(
 
   let abortController: AbortController | null = null;
   let disposed = false;
+  let runId = 0;
 
   async function fetchPage(pageParam: TPageParam, direction: "next" | "prev" | "initial"): Promise<void> {
     if (disposed) return;
@@ -93,6 +94,7 @@ export function infiniteQuery<TData, TPageParam = number>(
     abortController?.abort();
     abortController = new AbortController();
     const signal = abortController.signal;
+    const myRun = ++runId;
 
     batch(() => {
       setIsFetching(true);
@@ -104,7 +106,7 @@ export function infiniteQuery<TData, TPageParam = number>(
     try {
       const page = await withRetry(() => fetcher({ signal, pageParam }), retryOptions, undefined, signal);
 
-      if (disposed) return;
+      if (disposed || myRun !== runId) return;
 
       const currentPages = pages();
       let newPages: TData[];
@@ -129,7 +131,7 @@ export function infiniteQuery<TData, TPageParam = number>(
 
       onSuccess?.(newPages);
     } catch (err) {
-      if (disposed) return;
+      if (disposed || myRun !== runId) return;
       if (err instanceof DOMException && err.name === "AbortError") return;
 
       const errorObj = err instanceof Error ? err : new Error(String(err));
@@ -146,9 +148,12 @@ export function infiniteQuery<TData, TPageParam = number>(
   const effectCleanup = effect(() => {
     resolveKey();
     if (enabled) {
-      setPages([]);
-      setNextPageParam(initialPageParam);
-      setPrevPageParam(undefined);
+      abortController?.abort();
+      batch(() => {
+        setPages([]);
+        setNextPageParam(initialPageParam);
+        setPrevPageParam(undefined);
+      });
       fetchPage(initialPageParam, "initial");
     }
   });

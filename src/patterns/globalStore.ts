@@ -1,6 +1,41 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 
+/**
+ * Deep-clone a value, preserving Date / Map / Set / typed arrays via
+ * `structuredClone` when available. Falls back to a recursive clone for
+ * environments without it. Throws on circular references in the fallback.
+ */
+function deepClone<T>(value: T): T {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  const seen = new WeakSet<object>();
+  const clone = (v: unknown): unknown => {
+    if (v === null || typeof v !== "object") return v;
+    if (seen.has(v as object)) throw new Error("deepClone: circular reference");
+    seen.add(v as object);
+    if (v instanceof Date) return new Date(v.getTime());
+    if (v instanceof Map) {
+      const out = new Map();
+      for (const [k, val] of v) out.set(clone(k), clone(val));
+      return out;
+    }
+    if (v instanceof Set) {
+      const out = new Set();
+      for (const val of v) out.add(clone(val));
+      return out;
+    }
+    if (Array.isArray(v)) return v.map(clone);
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(v as Record<string, unknown>)) {
+      out[k] = clone((v as Record<string, unknown>)[k]);
+    }
+    return out;
+  };
+  return clone(value) as T;
+}
+
 // ============================================================================
 // GLOBAL STATE MANAGEMENT
 // ============================================================================
@@ -28,7 +63,7 @@ export function globalStore<
   S extends Record<string, unknown>,
   A extends Record<string, (state: S, payload?: unknown) => Partial<S>>,
 >(config: { state: S; actions: A; middleware?: Middleware<S>[] }): GlobalStore<S, A> {
-  const initialState = JSON.parse(JSON.stringify(config.state)) as S;
+  const initialState = deepClone(config.state);
   const [getState, setState] = signal<S>({ ...initialState });
   const listeners: Set<(state: S) => void> = new Set();
   const middlewares = config.middleware || [];

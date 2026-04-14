@@ -40,30 +40,38 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       return;
     }
 
-    // Build the new node list
+    // Build the new node list. Dedupe by reference so a getter returning
+    // `[sharedEl, sharedEl]` doesn't desync DOM (insertBefore moves the
+    // node, leaving only one in place but our list recording two).
     let newNodes: Node[];
     if (Array.isArray(result)) {
       newNodes = [];
+      const seen = new Set<Node>();
       for (let i = 0; i < result.length; i++) {
         const item = result[i];
         if (item == null || typeof item === "boolean") continue;
-        newNodes.push(item instanceof Node ? item : document.createTextNode(String(item)));
+        const node = item instanceof Node ? item : document.createTextNode(String(item));
+        if (seen.has(node)) {
+          if (_isDev)
+            devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
+          continue;
+        }
+        seen.add(node);
+        newNodes.push(node);
       }
     } else {
       const node = result instanceof Node ? result : document.createTextNode(String(result));
       newNodes = [node];
     }
 
-    // Build a set of nodes that will be reused (present in both old and new lists)
-    const reused: Set<Node> | undefined = lastNodes.length > 0 && newNodes.length > 0 ? new Set<Node>() : undefined;
-    if (reused) {
+    // Build a set of nodes that will be reused (present in both old and new lists).
+    // Use Set membership for O(n+m) instead of the previous O(n*m) nested scan.
+    let reused: Set<Node> | undefined;
+    if (lastNodes.length > 0 && newNodes.length > 0) {
+      const lastSet = new Set<Node>(lastNodes);
+      reused = new Set<Node>();
       for (let i = 0; i < newNodes.length; i++) {
-        for (let j = 0; j < lastNodes.length; j++) {
-          if (newNodes[i] === lastNodes[j]) {
-            reused.add(newNodes[i]);
-            break;
-          }
-        }
+        if (lastSet.has(newNodes[i])) reused.add(newNodes[i]);
       }
     }
 

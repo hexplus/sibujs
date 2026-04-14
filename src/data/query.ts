@@ -126,21 +126,33 @@ export function query<T>(
     let entry = queryCache.get(key);
     if (!entry) {
       entry = getOrCreateEntry(key);
-      entry.subscribers++;
       entry.listeners.add(onCacheUpdate);
       entry.refetchers.add(doFetch);
     }
 
-    // Dedup: another subscriber is already fetching this key — await its result
+    // Dedup: another subscriber is already fetching this key — await its result.
+    // Capture the in-flight promise so a cache invalidation that swaps it
+    // mid-await doesn't make us read entry.data/entry.error from the new fetch.
     if (entry.promise) {
       setIsFetching(true);
+      const captured = entry.promise;
       try {
-        await entry.promise;
+        await captured;
+        if (disposed || currentKey !== key) return;
+        if (entry.promise === captured) {
+          onCacheUpdate();
+          if (entry.error) onError?.(entry.error);
+          else if (entry.data !== undefined) onSuccess?.(entry.data as T);
+        }
       } catch {
-        // Error handling is done by the original fetcher via listeners
+        if (disposed || currentKey !== key) return;
+        if (entry.promise === captured) {
+          onCacheUpdate();
+          if (entry.error) onError?.(entry.error);
+        }
+      } finally {
+        if (!disposed && currentKey === key) onSettled?.();
       }
-      // Sync state from cache entry after deduped fetch completes
-      onCacheUpdate();
       return;
     }
 
@@ -150,8 +162,19 @@ export function query<T>(
 
     setIsFetching(true);
 
-    const promise = withRetry(() => fetcher({ signal, key }), retryOptions, undefined, signal);
-    entry.promise = promise;
+    let promise: Promise<unknown>;
+    try {
+      promise = withRetry(() => fetcher({ signal, key }), retryOptions, undefined, signal);
+    } catch (err) {
+      // Synchronous throw from fetcher / withRetry — keep state consistent.
+      setIsFetching(false);
+      const errorObj = err instanceof Error ? err : new Error(String(err));
+      entry.error = errorObj;
+      onError?.(errorObj);
+      onSettled?.();
+      return;
+    }
+    entry.promise = promise as Promise<T>;
 
     try {
       const result = await promise;
@@ -222,6 +245,10 @@ export function query<T>(
         oldEntry.subscribers--;
         if (oldEntry.subscribers <= 0 && cacheTime >= 0) {
           const oldKey = currentKey;
+          // Clear any existing gcTimer before scheduling a new one so a
+          // rapid key swap doesn't leave two timers racing toward the
+          // same cache.delete(oldKey).
+          if (oldEntry.gcTimer !== null) clearTimeout(oldEntry.gcTimer);
           oldEntry.gcTimer = setTimeout(() => queryCache.delete(oldKey), cacheTime);
         }
       }
@@ -230,7 +257,7 @@ export function query<T>(
     const keyChanged = currentKey !== key;
     currentKey = key;
     const entry = getOrCreateEntry(key, initialData);
-    if (keyChanged || entry.subscribers === 0) entry.subscribers++;
+    if (keyChanged) entry.subscribers++;
     if (entry.gcTimer !== null) {
       clearTimeout(entry.gcTimer);
       entry.gcTimer = null;
@@ -245,6 +272,15 @@ export function query<T>(
         setData(selected);
         setError(entry.error);
       });
+    }
+
+    // Only fetch when the key actually changed (or on first mount). Fresh
+    // data in-cache should not trigger a refetch storm when multiple
+    // subscribers mount with the same key.
+    if (!keyChanged && currentKey === key && entry.data !== undefined) {
+      const isDataStale = entry.dataUpdatedAt === 0 || Date.now() - entry.dataUpdatedAt >= staleTime;
+      if (enabled && isDataStale && !entry.promise) doFetch();
+      return;
     }
 
     const isDataStale = entry.dataUpdatedAt === 0 || Date.now() - entry.dataUpdatedAt >= staleTime;
@@ -278,6 +314,9 @@ export function query<T>(
   }
 
   function dispose(): void {
+    // Idempotent: double-dispose previously decremented subscribers twice,
+    // corrupting refcount and GC'ing entries still held by other subscribers.
+    if (disposed) return;
     disposed = true;
     abortController?.abort();
     effectCleanup();
@@ -290,12 +329,20 @@ export function query<T>(
         entry.subscribers--;
         if (entry.subscribers <= 0 && cacheTime >= 0) {
           const key = currentKey;
+          if (entry.gcTimer !== null) clearTimeout(entry.gcTimer);
           entry.gcTimer = setTimeout(() => queryCache.delete(key), cacheTime);
         }
       }
     }
-    if (focusHandler) globalThis.removeEventListener("focus", focusHandler);
-    if (onlineHandler) globalThis.removeEventListener("online", onlineHandler);
+    // Guard removeEventListener in case the runtime added addEventListener
+    // to globalThis but doesn't expose removeEventListener symmetrically
+    // (e.g. polyfilled-focus environments).
+    if (focusHandler && typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("focus", focusHandler);
+    }
+    if (onlineHandler && typeof globalThis.removeEventListener === "function") {
+      globalThis.removeEventListener("online", onlineHandler);
+    }
   }
 
   return {
@@ -348,5 +395,25 @@ export function clearQueryCache(): void {
   }
   queryCache.clear();
   for (const listener of activeListeners) listener();
-  for (const refetcher of activeRefetchers) refetcher();
+  for (const refetcher of activeRefetchers) {
+    refetcher().catch((err) => {
+      if (typeof console !== "undefined") {
+        console.warn("[SibuJS query] refetch after clearQueryCache failed:", err);
+      }
+    });
+  }
+}
+
+/**
+ * Test-only helper to drop every cache entry without invoking refetchers —
+ * intended for afterEach hooks in test suites that reset the whole module
+ * state between specs.
+ *
+ * @internal
+ */
+export function __resetQueryCache(): void {
+  for (const entry of queryCache.values()) {
+    if (entry.gcTimer) clearTimeout(entry.gcTimer);
+  }
+  queryCache.clear();
 }

@@ -1,4 +1,41 @@
+import { devWarn } from "../dev";
+import { registerDisposer } from "./dispose";
 import { div, span } from "./html";
+
+// Marker used by ErrorBoundary to detect a pending error stored on a node
+// that was never mounted in time to dispatch via CustomEvent bubbling.
+const PENDING_ERROR = "__sibuPendingError";
+
+function dispatchPropagate(node: Element, error: Error): void {
+  const fire = () => {
+    try {
+      if (!node.parentNode) return false;
+      node.dispatchEvent(new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error } }));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Synchronous attempt for the common already-mounted case.
+  if (node.parentNode && fire()) return;
+  // Defer one microtask in case a fast rejection beat the mount.
+  queueMicrotask(() => {
+    if (fire()) return;
+    // Last-resort: stash the error on the node so a delayed mount can
+    // re-dispatch it. ErrorBoundary scans for this on its own connect.
+    (node as unknown as Record<string, unknown>)[PENDING_ERROR] = error;
+  });
+}
+
+export function takePendingError(node: Element): Error | undefined {
+  const rec = node as unknown as Record<string, unknown>;
+  const err = rec[PENDING_ERROR];
+  if (err instanceof Error) {
+    delete rec[PENDING_ERROR];
+    return err;
+  }
+  return undefined;
+}
 
 type Component = () => HTMLElement;
 type LazyImport = () => Promise<{ default: Component }>;
@@ -47,18 +84,20 @@ export function lazy(importFn: LazyImport): Component {
       .catch((err) => {
         if (disposed) return;
         const errorObj = err instanceof Error ? err : new Error(String(err));
-        container.replaceChildren(div("sibu-lazy-error", `Failed to load component: ${errorObj.message}`));
+        devWarn(`[SibuJS] lazy() failed to load component: ${errorObj.message}`);
+        container.replaceChildren(div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`));
+        dispatchPropagate(container, errorObj);
       });
 
     // Show loading placeholder initially
     container.appendChild(span("sibu-lazy-loading", "Loading...") as Node);
 
-    // Guard against stale loads if container is disposed before import resolves
-    const origRemove = container.remove.bind(container);
-    container.remove = () => {
+    // Guard against stale loads if container is disposed before import resolves.
+    // Previously this monkey-patched container.remove — now we hook into
+    // the standard disposer chain, which covers when/match/each/dispose paths.
+    registerDisposer(container, () => {
       disposed = true;
-      origRemove();
-    };
+    });
 
     return container;
   };
@@ -87,37 +126,48 @@ export interface SuspenseProps {
 export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
   const container = div({ class: "sibu-suspense" }) as HTMLElement;
 
-  // Show fallback immediately
   const fallbackEl = fallback();
   container.appendChild(fallbackEl);
 
-  // Attempt to render nodes — may be a lazy component
+  let suspenseDisposed = false;
+  let observer: MutationObserver | null = null;
+
+  registerDisposer(container, () => {
+    suspenseDisposed = true;
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+  });
+
   queueMicrotask(() => {
+    if (suspenseDisposed) return;
     try {
       const childEl = nodes();
 
-      // If the child is a lazy container, observe when it gets real content
       if (childEl.classList.contains("sibu-lazy")) {
-        const observer = new MutationObserver(() => {
-          // Check if loading placeholder was replaced with actual content
+        // Already loaded synchronously — swap and skip the observer entirely.
+        if (!childEl.querySelector(".sibu-lazy-loading")) {
+          container.replaceChildren(childEl);
+          return;
+        }
+        observer = new MutationObserver(() => {
+          if (suspenseDisposed) return;
           const loading = childEl.querySelector(".sibu-lazy-loading");
           if (!loading) {
-            observer.disconnect();
+            observer?.disconnect();
+            observer = null;
             container.replaceChildren(childEl);
           }
         });
         observer.observe(childEl, { childList: true, subtree: true });
-
-        // Also check if already loaded (race condition)
-        if (!childEl.querySelector(".sibu-lazy-loading")) {
-          container.replaceChildren(childEl);
-        }
       } else {
-        // Not a lazy component — swap immediately
         container.replaceChildren(childEl);
       }
-    } catch {
-      // If nodes() throws, keep showing fallback
+    } catch (err) {
+      const errorObj = err instanceof Error ? err : new Error(String(err));
+      devWarn(`[SibuJS] Suspense nodes() threw: ${errorObj.message}`);
+      dispatchPropagate(container, errorObj);
     }
   });
 

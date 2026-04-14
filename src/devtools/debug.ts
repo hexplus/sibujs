@@ -141,7 +141,11 @@ export function runCleanups(component: string): void {
     for (const cleanup of cleanups) {
       try {
         cleanup();
-      } catch {}
+      } catch (err) {
+        if (typeof console !== "undefined") {
+          console.warn("[SibuJS debug] cleanup threw:", err);
+        }
+      }
     }
     trackedCleanups.delete(component);
   }

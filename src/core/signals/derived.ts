@@ -1,5 +1,5 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
-import { recordDependency, track, trackingSuspended } from "../../reactivity/track";
+import { recordDependency, retrack, track, trackingSuspended } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import type { Accessor } from "./signal";
 
@@ -13,9 +13,18 @@ import type { Accessor } from "./signal";
  * - On re-evaluation, dependencies are re-tracked via track() so that
  *   derived-of-derived chains propagate correctly.
  */
-export function derived<T>(getter: () => T, options?: { name?: string }): Accessor<T> {
+export function derived<T>(
+  getter: () => T,
+  options?: {
+    name?: string;
+    /** Custom equality — when the recomputed value equals the previous,
+     *  downstream subscribers are not notified. Defaults to `Object.is`. */
+    equals?: (a: T, b: T) => boolean;
+  },
+): Accessor<T> {
   devAssert(typeof getter === "function", "derived: argument must be a getter function.");
   const debugName = options?.name;
+  const equals = options?.equals;
   const cs: any = {};
   cs._d = false;
   cs._g = getter;
@@ -29,8 +38,14 @@ export function derived<T>(getter: () => T, options?: { name?: string }): Access
 
   // Initial evaluation — sets up dependencies
   track(() => {
-    cs._d = false;
-    cs._v = getter();
+    let threw = true;
+    try {
+      cs._v = getter();
+      cs._d = false;
+      threw = false;
+    } finally {
+      if (threw) cs._d = true;
+    }
   }, markDirty);
 
   // DevTools: emit computed:create
@@ -49,11 +64,19 @@ export function derived<T>(getter: () => T, options?: { name?: string }): Access
     if (trackingSuspended) {
       if (cs._d) {
         evaluating = true;
+        let threw = true;
         try {
-          cs._d = false;
-          cs._v = getter();
+          // Use retrack (epoch-based sweep) so steady-state chains skip
+          // Set.delete+add cycles on every pull — only deps that actually
+          // changed do Set mutations.
+          retrack(() => {
+            cs._v = getter();
+            cs._d = false;
+            threw = false;
+          }, markDirty);
         } finally {
           evaluating = false;
+          if (threw) cs._d = true;
         }
       }
       return cs._v;
@@ -66,13 +89,24 @@ export function derived<T>(getter: () => T, options?: { name?: string }): Access
       const oldValue = cs._v;
 
       evaluating = true;
+      let threw = true;
       try {
-        track(() => {
+        // retrack (no cleanup, no stack array push) so new conditional
+        // deps acquired by the getter still subscribe markDirty. Steady-
+        // state chains skip the Set.delete+add cycle that track() incurs.
+        retrack(() => {
+          const next = getter();
+          // If caller provided a custom equality fn and the value didn't
+          // change under it, preserve the prior reference — upstream
+          // notifications to subscribers checking `oldValue !== cs._v`
+          // (e.g. the devtools hook below) will correctly skip.
+          cs._v = equals && cs._v !== undefined ? (equals(cs._v, next) ? cs._v : next) : next;
           cs._d = false;
-          cs._v = getter();
+          threw = false;
         }, markDirty);
       } finally {
         evaluating = false;
+        if (threw) cs._d = true;
       }
 
       // DevTools: emit computed recomputation

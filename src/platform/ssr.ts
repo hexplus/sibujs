@@ -28,6 +28,7 @@
 //    to block prototype-pollution lookups on the islands map.
 
 import { isDev } from "../core/dev";
+import { getSSRStore } from "../core/ssr-context";
 import { sanitizeUrl } from "../utils/sanitize";
 
 const _isDev = isDev();
@@ -238,26 +239,26 @@ export function hydrate(component: () => HTMLElement, container: HTMLElement, op
         options.onMismatch(first);
       } else if (_isDev) {
         console.warn(
-          `[Sibu hydration] ${first.message}\n  at ${first.path}\n  server: ${first.serverValue}\n  client: ${first.clientValue}`,
+          `[SibuJS hydration] ${first.message}\n  at ${first.path}\n  server: ${first.serverValue}\n  client: ${first.clientValue}`,
         );
       }
     }
   }
 
-  hydrateNode(container.firstElementChild as HTMLElement, clientTree);
+  // Replace the server-rendered subtree with the client tree so that all
+  // reactive bindings created by `component()` actually drive the visible
+  // DOM. In-place attribute reconciliation cannot adopt those bindings —
+  // they remain wired to the client subtree, so leaving the server DOM in
+  // place would silently freeze updates.
+  container.replaceChildren(clientTree);
   container.setAttribute("data-sibu-hydrated", "true");
 }
 
-function hydrateNode(serverNode: HTMLElement | null, clientNode: HTMLElement): void {
-  if (!serverNode) return;
-
-  const serverChildren = Array.from(serverNode.children) as HTMLElement[];
-  const clientChildren = Array.from(clientNode.children) as HTMLElement[];
-
-  for (let i = 0; i < Math.min(serverChildren.length, clientChildren.length); i++) {
-    hydrateNode(serverChildren[i], clientChildren[i]);
-  }
-}
+// hydrateNode was the in-place reconciler used before the replace-strategy
+// fix. Both `hydrate()` and `hydrateProgressively()` now use replaceChildren/
+// replaceWith because in-place attr copy can't adopt reactive bindings on
+// the server tree. Function intentionally removed — kept this comment for
+// future readers grepping for it.
 
 /**
  * Walk two DOM trees in lock-step and collect the first mismatches.
@@ -631,8 +632,8 @@ export function renderToReadableStream(element: HTMLElement | DocumentFragment |
         controller.enqueue(value);
       }
     },
-    cancel() {
-      generator.return(undefined);
+    async cancel() {
+      await generator.return(undefined);
     },
   });
 }
@@ -643,7 +644,13 @@ export function renderToReadableStream(element: HTMLElement | DocumentFragment |
  * Marks an element as a hydration island. During partial hydration
  * only elements marked with `data-sibu-island` will be hydrated.
  */
+/** Allowlist for island ids — they appear in attribute selectors and object lookups. */
+const SAFE_ID = /^[A-Za-z0-9_-]+$/;
+
 export function island(id: string, component: () => HTMLElement): HTMLElement {
+  if (!SAFE_ID.test(id)) {
+    throw new Error(`[SibuJS SSR] island: id must match [A-Za-z0-9_-]+ (got: ${JSON.stringify(id.slice(0, 32))})`);
+  }
   const el = component();
   el.setAttribute("data-sibu-island", id);
   return el;
@@ -665,8 +672,11 @@ export function hydrateIslands(container: HTMLElement, islands: Record<string, (
     if (typeof factory !== "function") continue;
 
     const clientTree = factory();
-    hydrateNode(marker as HTMLElement, clientTree);
-    (marker as HTMLElement).setAttribute("data-sibu-hydrated", "true");
+    // Preserve island marker so consumers can re-query and so progressive
+    // hydration loops don't re-process already-hydrated islands.
+    (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
+    (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
+    (marker as HTMLElement).replaceWith(clientTree);
   }
   container.setAttribute("data-sibu-hydrated", "partial");
 }
@@ -697,8 +707,13 @@ export function hydrateProgressively(
         for (const entry of entries) {
           if (entry.isIntersecting) {
             const clientTree = factory();
-            hydrateNode(marker as HTMLElement, clientTree);
-            (marker as HTMLElement).setAttribute("data-sibu-hydrated", "true");
+            // Replace strategy: same fix as `hydrate()` — in-place attribute
+            // copy leaves reactive bindings wired to the orphan client tree
+            // and the visible DOM never updates. Preserve the island marker
+            // + data-sibu-hydrated for downstream re-queries.
+            (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
+            (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
+            (marker as HTMLElement).replaceWith(clientTree);
             observer.disconnect();
             break;
           }
@@ -720,15 +735,20 @@ export function hydrateProgressively(
 
 // ─── SSR Suspense Streaming ──────────────────────────────────────────────────
 
-let suspenseIdCounter = 0;
-
 /**
  * Reset SSR state between requests. Call at the start of each SSR render
  * to prevent ID drift in long-lived server processes.
+ *
+ * When running inside `runInSSRContext`, each request already owns its
+ * own counter via AsyncLocalStorage — this hook only touches the
+ * module-global fallback used outside that context.
  */
 export function resetSSRState(): void {
-  suspenseIdCounter = 0;
+  getSSRStore().suspenseIdCounter = 0;
 }
+
+/** No-op used as a .catch handler to prevent unhandledRejection. */
+function noop(): void {}
 
 /**
  * Create a suspense boundary for SSR streaming.
@@ -737,21 +757,48 @@ export function resetSSRState(): void {
  * The returned element contains the fallback UI with a `data-sibu-suspense-id`
  * marker. The promise resolves to `{ id, html }` once async content is ready.
  */
-export function ssrSuspense(props: { fallback: () => HTMLElement; content: () => Promise<HTMLElement> }): {
+export function ssrSuspense(props: {
+  fallback: () => HTMLElement;
+  content: () => Promise<HTMLElement>;
+  /** Milliseconds before the content promise is rejected. Defaults to 30000. */
+  timeoutMs?: number;
+}): {
   element: HTMLElement;
   promise: Promise<{ id: string; html: string }>;
 } {
-  const id = `sibu-sus-${suspenseIdCounter++}`;
+  const store = getSSRStore();
+  const id = `sibu-sus-${store.suspenseIdCounter++}`;
+  const timeoutMs = props.timeoutMs ?? 30_000;
 
   const fallbackEl = props.fallback();
   const wrapper = document.createElement("div");
   wrapper.setAttribute("data-sibu-suspense-id", id);
   wrapper.appendChild(fallbackEl);
 
-  const promise = props.content().then((resolvedEl) => ({
-    id,
-    html: renderToString(resolvedEl),
-  }));
+  const fallbackHtml = renderToString(fallbackEl);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<HTMLElement>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`[SibuJS SSR] ssrSuspense timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+
+  const raced = Promise.race([props.content(), timeoutPromise]);
+  const promise = raced.then(
+    (resolvedEl) => {
+      if (timer) clearTimeout(timer);
+      return { id, html: renderToString(resolvedEl) };
+    },
+    (err) => {
+      if (timer) clearTimeout(timer);
+      // Emit the fallback HTML on timeout/error so the stream still
+      // produces a deterministic swap payload instead of hanging.
+      if (_isDev) console.warn("[SibuJS SSR] ssrSuspense rejected:", err);
+      return { id, html: fallbackHtml };
+    },
+  );
+
+  // Prevent unhandledRejection when the caller never awaits the promise.
+  promise.catch(noop);
 
   return { element: wrapper, promise };
 }
@@ -845,8 +892,25 @@ export function escapeScriptJson(json: string): string {
  * break out of string literals on pre-ES2019 engines. Supports a `nonce`
  * attribute so the script is compatible with strict CSP.
  */
-export function serializeState(state: Record<string, unknown>, nonce?: string): string {
-  const json = escapeScriptJson(JSON.stringify(state));
+/** Default maximum size of a serialized SSR payload (1 MB). */
+const DEFAULT_MAX_SSR_BYTES = 1024 * 1024;
+
+export function serializeState(
+  state: Record<string, unknown>,
+  nonce?: string,
+  options?: { maxBytes?: number },
+): string {
+  const rawJson = JSON.stringify(state);
+  const maxBytes = options?.maxBytes ?? DEFAULT_MAX_SSR_BYTES;
+  // Count bytes, not characters — multibyte strings still count correctly.
+  const byteLen =
+    typeof TextEncoder !== "undefined"
+      ? new TextEncoder().encode(rawJson).byteLength
+      : Buffer.byteLength(rawJson, "utf8");
+  if (byteLen > maxBytes) {
+    throw new Error(`[SibuJS SSR] serializeState: payload (${byteLen} bytes) exceeds maxBytes (${maxBytes})`);
+  }
+  const json = escapeScriptJson(rawJson);
   const nonceAttr = nonce ? ` nonce="${escapeAttr(nonce)}"` : "";
   return `<script${nonceAttr}>window.${SSR_DATA_ATTR}=${json}</script>`;
 }
@@ -862,7 +926,13 @@ export function serializeState(state: Record<string, unknown>, nonce?: string): 
  */
 export function deserializeState<T = Record<string, unknown>>(validate?: (data: unknown) => data is T): T | undefined {
   if (typeof window === "undefined") return undefined;
-  const raw = (window as unknown as Record<string, unknown>)[SSR_DATA_ATTR];
+  if (_isDev && !validate) {
+    console.warn(
+      "[SibuJS SSR] deserializeState() called without a validate guard — tampered SSR payloads will not be detected.",
+    );
+  }
+  const w = window as unknown as Record<string, unknown>;
+  const raw = w[SSR_DATA_ATTR];
   if (raw === undefined) return undefined;
   if (validate && !validate(raw)) return undefined;
   return raw as T;

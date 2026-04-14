@@ -38,7 +38,10 @@ export function dispose(node: Node): void {
   while (stack.length > 0) {
     const current = stack.pop()!;
     order.push(current);
-    const children = current.childNodes;
+    // Snapshot childNodes — it's a live NodeList. If a disposer mutates the
+    // tree mid-traversal (removeChild/replaceChild), reading it lazily can
+    // skip or duplicate children.
+    const children = Array.from(current.childNodes);
     for (let i = 0; i < children.length; i++) {
       stack.push(children[i]);
     }
@@ -48,8 +51,14 @@ export function dispose(node: Node): void {
     const current = order[i];
     const disposers = elementDisposers.get(current);
     if (disposers) {
-      if (_isDev) activeBindingCount -= disposers.length;
-      for (const d of disposers) {
+      // Snapshot + delete BEFORE running so re-entrant dispose() on the
+      // same node (e.g. parent disposer triggering child cleanup) doesn't
+      // re-run these or land in an infinite cycle. Disposers may also push
+      // new entries during execution; drain those after the snapshot.
+      const snapshot = disposers.slice();
+      elementDisposers.delete(current);
+      if (_isDev) activeBindingCount -= snapshot.length;
+      for (const d of snapshot) {
         try {
           d();
         } catch (err) {
@@ -58,7 +67,25 @@ export function dispose(node: Node): void {
           }
         }
       }
-      elementDisposers.delete(current);
+      // Drain any disposers added during execution above. Bounded by a
+      // pass cap to prevent runaway re-entry.
+      let extraPasses = 0;
+      while (extraPasses++ < 8) {
+        const added = elementDisposers.get(current);
+        if (!added || added.length === 0) break;
+        const moreSnapshot = added.slice();
+        elementDisposers.delete(current);
+        if (_isDev) activeBindingCount -= moreSnapshot.length;
+        for (const d of moreSnapshot) {
+          try {
+            d();
+          } catch (err) {
+            if (_isDev && typeof console !== "undefined") {
+              console.warn("[SibuJS] Disposer threw during cleanup:", err);
+            }
+          }
+        }
+      }
     }
   }
 }

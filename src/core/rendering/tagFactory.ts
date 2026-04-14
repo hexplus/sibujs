@@ -1,11 +1,51 @@
+import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { track } from "../../reactivity/track";
-import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl } from "../../utils/sanitize";
+import { isUrlAttribute, sanitizeCSSValue, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
+
+const _isDev = isDev();
+
+// Tag names that must never be created via tagFactory — they enable script
+// execution or arbitrary plugin loading regardless of attributes. The check
+// is case-insensitive and applies to HTML, SVG, and MathML namespaces since
+// e.g. <script> exists in both HTML and SVG.
+const BLOCKED_TAGS = new Set(["script", "iframe", "object", "embed", "frame", "frameset"]);
+
+function validateTagName(tag: string): void {
+  const lower = tag.toLowerCase();
+  if (BLOCKED_TAGS.has(lower)) {
+    throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
+  }
+}
+
+// IDs matching well-known window/document properties are risky due to DOM
+// clobbering (a named element can shadow a global). Warn in dev only.
+const CLOBBER_RISKY_IDS = new Set([
+  "config",
+  "location",
+  "history",
+  "document",
+  "window",
+  "navigator",
+  "name",
+  "top",
+  "parent",
+  "self",
+  "frames",
+]);
+
+/**
+ * Typed property setter that avoids `@ts-expect-error` sprinkled at call sites.
+ * Use only when the property is known to exist on the element at runtime.
+ */
+export function setProp(el: Element, key: string, val: unknown): void {
+  (el as unknown as Record<string, unknown>)[key] = val;
+}
 
 export interface TagProps {
   id?: string;
@@ -185,9 +225,9 @@ function appendChildren(el: Element, nodes: NodeChildren) {
  *
  * `children` overrides `props.nodes` when both are present.
  */
-export const tagFactory =
-  (tag: string, ns?: string) =>
-  (first?: TagProps | NodeChildren, second?: NodeChildren): Element => {
+export const tagFactory = (tag: string, ns?: string) => {
+  return (first?: TagProps | NodeChildren, second?: NodeChildren): Element => {
+    validateTagName(tag);
     const el = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
 
     // Fast path: tag() — no arguments
@@ -229,7 +269,17 @@ export const tagFactory =
     if (pClass != null) applyClass(el, pClass);
 
     const pId = props.id;
-    if (pId != null) el.id = pId as string;
+    if (pId != null) {
+      // DOM clobbering: an element with id="foo" becomes window.foo. If the
+      // id value is user-controlled, it can shadow globals like `config`,
+      // `location`, etc. Warn in dev so authors notice.
+      if (_isDev && typeof pId === "string" && CLOBBER_RISKY_IDS.has(pId.toLowerCase())) {
+        devWarn(
+          `tagFactory: element id="${pId}" matches a common global and may cause DOM clobbering. Avoid setting ids from untrusted input.`,
+        );
+      }
+      el.id = pId as string;
+    }
 
     // Children resolution: `second` (positional) beats `props.nodes`.
     // This lets callers write the deeply-nested shorthand:
@@ -242,7 +292,14 @@ export const tagFactory =
     const pOn = props.on;
     if (pOn) {
       for (const ev in pOn) {
-        el.addEventListener(ev, pOn[ev] as EventListener);
+        const handler = pOn[ev];
+        if (typeof handler === "function") {
+          el.addEventListener(ev, handler as EventListener);
+        } else if (_isDev) {
+          devWarn(
+            `tagFactory: on.${ev} handler is not a function (got ${typeof handler}). Event listener was not attached.`,
+          );
+        }
       }
     }
 
@@ -266,13 +323,16 @@ export const tagFactory =
         default: {
           const value = props[key];
           if (value == null) continue;
-          if (key[0] === "o" && key[1] === "n") continue;
+          // Block on* event-handler attributes (case-insensitive). The `on`
+          // props object is the supported way to attach listeners.
+          const lkey = key.toLowerCase();
+          if (lkey[0] === "o" && lkey[1] === "n") continue;
           if (typeof value === "function") {
             registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
           } else if (typeof value === "boolean") {
             // For IDL properties (checked, disabled, selected), set the DOM property directly
             if (key in el && (key === "checked" || key === "disabled" || key === "selected")) {
-              (el as unknown as Record<string, boolean>)[key] = value;
+              setProp(el, key, value);
             } else if (value) {
               el.setAttribute(key, "");
             } else {
@@ -280,7 +340,13 @@ export const tagFactory =
             }
           } else {
             const str = String(value);
-            el.setAttribute(key, isUrlAttribute(key) ? sanitizeUrl(str) : str);
+            if (lkey === "srcset") {
+              el.setAttribute(key, sanitizeSrcset(str));
+            } else if (isUrlAttribute(lkey)) {
+              el.setAttribute(key, sanitizeUrl(str));
+            } else {
+              el.setAttribute(key, str);
+            }
           }
         }
       }
@@ -293,3 +359,4 @@ export const tagFactory =
 
     return el;
   };
+};

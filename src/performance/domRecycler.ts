@@ -2,6 +2,10 @@
 // DOM RECYCLING & RESOURCE PRELOADING
 // ============================================================================
 
+import { devWarn, isDev } from "../core/dev";
+
+const _isDev = isDev();
+
 /**
  * DOMPool manages a pool of reusable DOM elements to reduce GC pressure.
  */
@@ -28,8 +32,18 @@ export class DOMPool {
   /**
    * Return an element to the pool for reuse.
    * Clears attributes, children, and event listeners.
+   *
+   * Contract: the caller MUST detach the element from the DOM (and run any
+   * `dispose()` on bound reactive subscriptions) BEFORE calling `release()`.
+   * Releasing a connected element leaves it visible while it is mutated and
+   * is almost certainly a bug.
    */
   release(element: HTMLElement): void {
+    if (_isDev && element.isConnected) {
+      devWarn(
+        "DOMPool.release() called on a still-connected element. Detach it from the DOM first (remove() / dispose()).",
+      );
+    }
     const tag = element.tagName.toLowerCase();
     let pool = this.pools.get(tag);
     if (!pool) {
@@ -75,8 +89,16 @@ export class DOMPool {
   }
 }
 
-/** Default global pool instance */
-export const domPool = new DOMPool();
+/**
+ * Lazily obtain the shared default DOMPool instance.
+ * Avoids the side effect of constructing a pool at module load time —
+ * callers that never recycle DOM pay no allocation cost.
+ */
+let _defaultPool: DOMPool | null = null;
+export function getDOMPool(): DOMPool {
+  if (_defaultPool === null) _defaultPool = new DOMPool();
+  return _defaultPool;
+}
 
 // ============================================================================
 // RESOURCE PRELOADING

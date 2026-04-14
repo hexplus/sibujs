@@ -21,14 +21,37 @@
 import { JSDOM } from "jsdom";
 
 // ── Bootstrap jsdom ──────────────────────────────────────────────────────────
+//
+// This script is standalone (run via `node bench.mjs`) so mutating globalThis
+// here is safe. The installBenchGlobals/restoreBenchGlobals pair is exported
+// shape for anyone importing this module from a test runner that cares about
+// global cleanup. Note: queueMicrotask is already available natively in Node.
 
 const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>");
-globalThis.document = dom.window.document;
-globalThis.HTMLElement = dom.window.HTMLElement;
-globalThis.Element = dom.window.Element;
-globalThis.Node = dom.window.Node;
-globalThis.Comment = dom.window.Comment;
-// Note: queueMicrotask is already available natively in Node.js
+
+const BENCH_GLOBAL_KEYS = ["document", "HTMLElement", "Element", "Node", "Comment"];
+const _savedGlobals = {};
+
+export function installBenchGlobals() {
+  for (const key of BENCH_GLOBAL_KEYS) {
+    _savedGlobals[key] = Object.prototype.hasOwnProperty.call(globalThis, key)
+      ? globalThis[key]
+      : undefined;
+    globalThis[key] = dom.window[key];
+  }
+}
+
+export function restoreBenchGlobals() {
+  for (const key of BENCH_GLOBAL_KEYS) {
+    if (_savedGlobals[key] === undefined) {
+      delete globalThis[key];
+    } else {
+      globalThis[key] = _savedGlobals[key];
+    }
+  }
+}
+
+installBenchGlobals();
 
 // ── Import Sibu (from source via tsup output) ────────────────────────────────
 

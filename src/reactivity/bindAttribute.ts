@@ -5,6 +5,14 @@ import { track } from "./track";
 const _isDev = isDev();
 
 /**
+ * Typed property setter — local helper to avoid `@ts-expect-error` at call
+ * sites when assigning to dynamic IDL properties (checked, value, etc.).
+ */
+function setProp(el: Element, key: string, val: unknown): void {
+  (el as unknown as Record<string, unknown>)[key] = val;
+}
+
+/**
  * Is this attribute an `on*` event handler? Event-handler attributes are
  * always a XSS vector when set via `setAttribute` (they evaluate the
  * value as JavaScript on event dispatch), so the framework refuses to
@@ -52,8 +60,7 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
       // For IDL properties like checked/disabled/selected, set the DOM property
       // directly — setAttribute only changes the default, not the current state.
       if (attr in el && (attr === "checked" || attr === "disabled" || attr === "selected")) {
-        // @ts-expect-error — dynamic property assignment
-        el[attr] = value;
+        setProp(el, attr, value);
       } else if (value) {
         el.setAttribute(attr, "");
       } else {
@@ -66,8 +73,7 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
 
     // If binding an input value or checked state, update the property
     if ((attr === "value" || attr === "checked") && attr in el) {
-      // @ts-expect-error
-      el[attr] = attr === "checked" ? Boolean(value) : str;
+      setProp(el, attr, attr === "checked" ? Boolean(value) : str);
     } else {
       // URL attributes need protocol sanitization; others are safe via setAttribute
       el.setAttribute(attr, isUrlAttribute(attr) ? sanitizeUrl(str) : str);
@@ -127,8 +133,7 @@ export function bindDynamic(
 
     // If binding an input value or checked state, update the property
     if ((name === "value" || name === "checked") && name in el) {
-      // @ts-expect-error
-      el[name] = name === "checked" ? Boolean(value) : str;
+      setProp(el, name, name === "checked" ? Boolean(value) : str);
     } else {
       el.setAttribute(name, isUrlAttribute(name) ? sanitizeUrl(str) : str);
     }

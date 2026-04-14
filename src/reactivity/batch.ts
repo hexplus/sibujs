@@ -63,9 +63,14 @@ export function isBatching(): boolean {
  * regardless of how many signals changed.
  */
 function flushBatch(): void {
-  for (const signal of pendingSignals) {
-    queueSignalNotification(signal);
+  // Clear-before-drain + try/finally so a throwing subscriber during
+  // notification can't strand pendingSignals for the next batch.
+  try {
+    for (const signal of pendingSignals) {
+      queueSignalNotification(signal);
+    }
+  } finally {
+    pendingSignals.clear();
   }
-  pendingSignals.clear();
   drainNotificationQueue();
 }

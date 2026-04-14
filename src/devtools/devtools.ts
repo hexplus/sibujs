@@ -25,6 +25,7 @@
 
 import { isDev } from "../core/dev";
 import { signal as _sbSignal } from "../core/signals/signal";
+import { stripHtml } from "../utils/sanitize";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,6 +42,32 @@ interface DevToolsConfig {
   maxEvents?: number;
   enabled?: boolean;
   maxSignals?: number;
+  /**
+   * When true, attach the devtools API and data providers onto
+   * `globalThis.__SIBU__` (and the deprecated legacy `__SIBU_DEVTOOLS__*`
+   * aliases) so the browser extension / panel can read them. Defaults to
+   * `false` — production and tests should leave this off.
+   */
+  expose?: boolean;
+}
+
+/**
+ * Single consolidated namespace exposed on globalThis when `expose: true`.
+ * Old `__SIBU_DEVTOOLS__*` globals are kept as deprecated aliases that
+ * proxy onto this object so existing panels keep working.
+ */
+interface SibuNamespace {
+  version: string;
+  devtools?: unknown;
+  hmr?: unknown;
+  data?: () => string;
+  changeVersion?: () => number;
+}
+
+function getSibuNamespace(): SibuNamespace {
+  const g = globalThis as unknown as { __SIBU__?: SibuNamespace };
+  if (!g.__SIBU__) g.__SIBU__ = { version: "1.0.0" };
+  return g.__SIBU__;
 }
 
 interface ComponentEntry {
@@ -139,6 +166,12 @@ function getOrCreateHook(): SibuGlobalHook {
 
 let activeDevTools: ReturnType<typeof initDevTools> | null = null;
 let nextNodeId = 0;
+/**
+ * Gate for inferName(). Only `true` while devtools are initialized AND we
+ * are in dev mode — otherwise we skip the Error-stack walk entirely so prod
+ * hot paths don't allocate stacks.
+ */
+let inferNameArmed = false;
 
 export function getActiveDevTools(): ReturnType<typeof initDevTools> | null {
   return activeDevTools;
@@ -154,7 +187,15 @@ export function initDevTools(config?: DevToolsConfig) {
   // Default to enabled only in dev mode — production builds get a no-op API
   // unless explicitly opted in via { enabled: true }.
   const enabled = config?.enabled ?? isDev();
+  // Window / __SIBU__ exposure is OFF by default. Hosts that want the panel
+  // to read data must explicitly opt-in. In production with enabled=false
+  // nothing is ever attached to globalThis.
+  const expose = config?.expose ?? isDev();
   if (!enabled) return createNoopApi();
+
+  // inferName() walks Error stacks — keep it gated so it never runs when
+  // devtools are disabled (prod hot paths).
+  inferNameArmed = true;
 
   const hook = getOrCreateHook();
   nextNodeId = 0;
@@ -177,6 +218,7 @@ export function initDevTools(config?: DevToolsConfig) {
       createdAt: Date.now(),
     };
     hook.nodes.set(nextNodeId, node);
+    emit();
   });
 
   hook.on("signal:update", (payload: unknown) => {
@@ -193,6 +235,7 @@ export function initDevTools(config?: DevToolsConfig) {
       newValue: p.newValue,
       timestamp: Date.now(),
     });
+    emit();
   });
 
   hook.on("computed:create", (payload: unknown) => {
@@ -208,6 +251,7 @@ export function initDevTools(config?: DevToolsConfig) {
       createdAt: Date.now(),
     };
     hook.nodes.set(nextNodeId, node);
+    emit();
   });
 
   hook.on("computed:update", (payload: unknown) => {
@@ -221,6 +265,7 @@ export function initDevTools(config?: DevToolsConfig) {
       newValue: p.newValue,
       timestamp: Date.now(),
     });
+    emit();
   });
 
   hook.on("effect:create", (payload: unknown) => {
@@ -229,6 +274,7 @@ export function initDevTools(config?: DevToolsConfig) {
     const p = payload as { effectFn: () => void };
     const node: DevNode = { id: nextNodeId, type: "effect", name, ref: p.effectFn, createdAt: Date.now() };
     hook.nodes.set(nextNodeId, node);
+    emit();
   });
 
   hook.on("effect:run", (payload: unknown) => {
@@ -240,6 +286,7 @@ export function initDevTools(config?: DevToolsConfig) {
       duration: 0,
       timestamp: Date.now(),
     });
+    emit();
   });
 
   hook.on("app:init", (payload: unknown) => {
@@ -250,16 +297,23 @@ export function initDevTools(config?: DevToolsConfig) {
       duration: p.duration,
       timestamp: Date.now(),
     });
+    emit();
     // Auto-discover components
     if (typeof document !== "undefined") {
-      queueMicrotask(() => discoverComponents(hook, eventLog, maxEvents));
+      queueMicrotask(() => {
+        discoverComponents(hook, eventLog, maxEvents);
+        emit();
+      });
     }
   });
 
   // ─── API for backward compatibility + extension ──────────────────────────
 
   function record(event: DevToolsEvent): void {
-    if (isActive) pushEvent(eventLog, maxEvents, event);
+    if (isActive) {
+      pushEvent(eventLog, maxEvents, event);
+      emit();
+    }
   }
   function getEvents(filter?: { type?: string; component?: string }): DevToolsEvent[] {
     if (!filter) return eventLog.slice();
@@ -274,9 +328,11 @@ export function initDevTools(config?: DevToolsConfig) {
   }
   function registerComponent(name: string, element: HTMLElement, state?: Record<string, unknown>): void {
     hook.components.set(name, { element, state });
+    emit();
   }
   function unregisterComponent(name: string): void {
     hook.components.delete(name);
+    emit();
   }
   function getComponents(): Map<string, ComponentEntry> {
     return new Map(hook.components);
@@ -305,6 +361,20 @@ export function initDevTools(config?: DevToolsConfig) {
     return result;
   }
 
+  // Refs we need to dispose on destroy()
+  let domObserver: MutationObserver | null = null;
+  const activeHighlightTimers = new Set<ReturnType<typeof setTimeout>>();
+  let changeVersion = 0;
+  /**
+   * Explicit change notifier. Called by internal instrumentation points and
+   * listeners (signal:create, mount, etc.) instead of monkey-patching
+   * `Map.set` / `Array.push` which leaked into user-observable behavior
+   * and didn't survive `destroy()`.
+   */
+  function emit(): void {
+    changeVersion++;
+  }
+
   let isActive: boolean = enabled;
   function isEnabled(): boolean {
     return isActive;
@@ -317,32 +387,97 @@ export function initDevTools(config?: DevToolsConfig) {
     for (const [name, entry] of hook.components) snap[name] = entry.state ? { ...entry.state } : {};
     return snap;
   }
+  function restoreHighlight(el: HTMLElement): void {
+    const prevOutline = el.dataset.sibuHighlightPrevOutline;
+    const prevOffset = el.dataset.sibuHighlightPrevOffset;
+    el.style.outline = prevOutline ?? "";
+    el.style.outlineOffset = prevOffset ?? "";
+    delete el.dataset.sibuHighlightPrevOutline;
+    delete el.dataset.sibuHighlightPrevOffset;
+    el.removeAttribute("data-sibu-highlight");
+  }
+
   function highlightElement(name: string): void {
     const prev = document.querySelector("[data-sibu-highlight]");
-    if (prev) {
-      (prev as HTMLElement).style.outline = "";
-      prev.removeAttribute("data-sibu-highlight");
-    }
+    if (prev instanceof HTMLElement) restoreHighlight(prev);
+
     const entry = hook.components.get(name);
-    if (entry?.element?.isConnected) {
-      entry.element.style.outline = "2px solid #89b4fa";
-      entry.element.setAttribute("data-sibu-highlight", "true");
-      entry.element.scrollIntoView({ behavior: "smooth", block: "center" });
-      setTimeout(() => {
-        entry.element.style.outline = "";
-        entry.element.removeAttribute("data-sibu-highlight");
-      }, 3000);
+    const el = entry?.element;
+    if (!el || !el.isConnected) return;
+
+    // Save originals (inline style only — computed style isn't safe to restore)
+    el.dataset.sibuHighlightPrevOutline = el.style.outline || "";
+    el.dataset.sibuHighlightPrevOffset = el.style.outlineOffset || "";
+    el.style.outline = "2px solid #89b4fa";
+    el.setAttribute("data-sibu-highlight", "true");
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    const timer = setTimeout(() => {
+      activeHighlightTimers.delete(timer);
+      if (!el.isConnected) return; // element was removed — nothing to restore
+      restoreHighlight(el);
+    }, 3000);
+    activeHighlightTimers.add(timer);
+  }
+  /**
+   * Opt-in HTML access for a registered component. Consumers that truly need
+   * HTML must call this explicitly — it is sanitized via `stripHtml` (removes
+   * scripts, event handlers, dangerous URLs) before return.
+   */
+  function getElementHTML(name: string, max = 2000): string | null {
+    const entry = hook.components.get(name);
+    const el = entry?.element;
+    if (!el) return null;
+    try {
+      const raw = el.outerHTML || "";
+      const cleaned = stripHtml(raw);
+      return cleaned.length > max ? `${cleaned.substring(0, max)}...` : cleaned;
+    } catch (err) {
+      if (typeof console !== "undefined") {
+        console.warn("[SibuJS devtools] getElementHTML failed:", err);
+      }
+      return null;
     }
   }
+
   function destroy(): void {
+    // Disconnect observers and clear timers BEFORE clearing state so
+    // highlight restoration doesn't run against already-cleared hook data.
+    if (domObserver) {
+      domObserver.disconnect();
+      domObserver = null;
+    }
+    for (const t of activeHighlightTimers) clearTimeout(t);
+    activeHighlightTimers.clear();
+    // Remove any still-highlighted element
+    if (typeof document !== "undefined") {
+      const prev = document.querySelector("[data-sibu-highlight]");
+      if (prev instanceof HTMLElement) restoreHighlight(prev);
+    }
+
     eventLog.length = 0;
     hook.nodes.clear();
     hook.components.clear();
     hook.events.length = 0;
     isActive = false;
+    inferNameArmed = false;
     activeDevTools = null;
-    const g = globalThis as any;
+
+    const g = globalThis as unknown as {
+      __SIBU__?: SibuNamespace;
+      __SIBU_DEVTOOLS__?: unknown;
+      __SIBU_DEVTOOLS_VERSION__?: unknown;
+      __SIBU_DEVTOOLS_DATA__?: unknown;
+      __SIBU_DEVTOOLS_GLOBAL_HOOK__?: unknown;
+    };
+    if (g.__SIBU__) {
+      delete g.__SIBU__.devtools;
+      delete g.__SIBU__.data;
+      delete g.__SIBU__.changeVersion;
+    }
     if (g.__SIBU_DEVTOOLS__ === api) delete g.__SIBU_DEVTOOLS__;
+    delete g.__SIBU_DEVTOOLS_VERSION__;
+    delete g.__SIBU_DEVTOOLS_DATA__;
     // Remove the hook so listeners don't leak between tests/instances
     if (g.__SIBU_DEVTOOLS_GLOBAL_HOOK__ === hook) delete g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
   }
@@ -359,210 +494,205 @@ export function initDevTools(config?: DevToolsConfig) {
     setEnabled,
     snapshot,
     highlightElement,
+    getElementHTML,
     destroy,
   };
 
-  // Expose API on window
-  if (typeof window !== "undefined") {
-    (window as any).__SIBU_DEVTOOLS__ = api;
-
-    // Change counter — incremented on every event. The panel checks this
-    // cheaply and only does a full data read when it changes.
-    let changeVersion = 0;
-    const origPush = eventLog.push.bind(eventLog);
-    eventLog.push = (...args: DevToolsEvent[]) => {
-      changeVersion++;
-      return origPush(...args);
-    };
-    // Also increment on node additions
-    const origNodeSet = hook.nodes.set.bind(hook.nodes);
-    hook.nodes.set = (k: number, v: DevNode) => {
-      changeVersion++;
-      return origNodeSet(k, v);
-    };
-    const origCompSet = hook.components.set.bind(hook.components);
-    hook.components.set = (k: string, v: ComponentEntry) => {
-      changeVersion++;
-      return origCompSet(k, v);
-    };
-
-    (window as any).__SIBU_DEVTOOLS_VERSION__ = (): number => changeVersion;
-
-    // Install __SIBU_DEVTOOLS_DATA__
-    (window as any).__SIBU_DEVTOOLS_DATA__ = (): string => {
-      const sArr: Array<{ id: number; n: string; tp: string; v: string; fv: string; sc: number }> = [];
-      for (const [, node] of hook.nodes) {
-        let val = "";
-        try {
-          let raw: unknown;
-          // Read value directly from internal state — never call getter
-          // to avoid registering spurious reactive dependencies
-          if (node.type === "signal" && node.ref && "value" in node.ref) {
-            raw = node.ref.value;
-          } else if (node.type === "computed" && node.ref) {
-            // If dirty, re-evaluate to get current value
-            if (node.ref._d && node.ref._g) {
-              try {
-                raw = node.ref._g();
-              } catch {
-                raw = node.ref._v;
-              }
-            } else {
+  // Build data serializer (used by panel reads; also exposed when expose=true)
+  function buildData(): string {
+    const sArr: Array<{ id: number; n: string; tp: string; v: string; fv: string; sc: number }> = [];
+    for (const [, node] of hook.nodes) {
+      let val = "";
+      try {
+        let raw: unknown;
+        // Read value directly from internal state — never call getter
+        // to avoid registering spurious reactive dependencies
+        if (node.type === "signal" && node.ref && "value" in node.ref) {
+          raw = node.ref.value;
+        } else if (node.type === "computed" && node.ref) {
+          // If dirty, re-evaluate to get current value
+          if (node.ref._d && node.ref._g) {
+            try {
+              raw = node.ref._g();
+            } catch {
               raw = node.ref._v;
             }
-          } else if (node.type === "effect") {
-            raw = undefined; // effects don't have values
-          } else if (node.ref && "value" in node.ref) {
-            raw = node.ref.value;
+          } else {
+            raw = node.ref._v;
           }
-          if (raw === undefined) val = "undefined";
-          else if (raw === null) val = "null";
-          else if (typeof raw === "object") val = JSON.stringify(raw);
-          else val = String(raw);
-        } catch {
-          val = "?";
+        } else if (node.type === "effect") {
+          raw = undefined; // effects don't have values
+        } else if (node.ref && "value" in node.ref) {
+          raw = node.ref.value;
         }
-        const fullVal = val;
-        const shortVal = val.length > 80 ? `${val.substring(0, 80)}...` : val;
-
-        const subs = node.ref?.__s;
-        sArr.push({
-          id: node.id,
-          n: node.name,
-          tp: node.type,
-          v: shortVal,
-          fv: fullVal,
-          sc: subs instanceof Set ? subs.size : 0,
-        });
+        if (raw === undefined) val = "undefined";
+        else if (raw === null) val = "null";
+        else if (typeof raw === "object") val = JSON.stringify(raw);
+        else val = String(raw);
+      } catch {
+        val = "?";
       }
+      const fullVal = val;
+      const shortVal = val.length > 80 ? `${val.substring(0, 80)}...` : val;
 
-      interface CNode {
-        tg: string;
-        id: string;
-        cl: string;
-        txt: string;
-        html: string;
-        ev: string[];
-        ch: CNode[];
-      }
+      const subs = node.ref?.__s;
+      sArr.push({
+        id: node.id,
+        n: node.name,
+        tp: node.type,
+        v: shortVal,
+        fv: fullVal,
+        sc: subs instanceof Set ? subs.size : 0,
+      });
+    }
 
-      function walkElement(el: Element, depth: number): CNode[] {
-        if (depth > 8) return [];
-        const result: CNode[] = [];
-        const max = Math.min(el.children.length, 50);
-        for (let i = 0; i < max; i++) {
-          const child = el.children[i] as HTMLElement;
-          // Collect text from direct child text nodes and immediate children's text
-          const txtParts: string[] = [];
-          for (let ti = 0; ti < child.childNodes.length; ti++) {
-            const cn = child.childNodes[ti];
-            if (cn.nodeType === 3) {
-              const t = cn.textContent?.trim();
-              if (t) txtParts.push(t);
-            } else if (cn.nodeType === 1) {
-              // For element children, get their own direct text (not deep)
-              const el2 = cn as HTMLElement;
-              let directTxt = "";
-              for (let ci = 0; ci < el2.childNodes.length; ci++) {
-                if (el2.childNodes[ci].nodeType === 3) {
-                  const t2 = el2.childNodes[ci].textContent?.trim();
-                  if (t2) {
-                    directTxt = t2;
-                    break;
-                  }
+    interface CNode {
+      tg: string;
+      id: string;
+      cl: string;
+      txt: string;
+      /** Sanitized descriptor: attribute names only, no raw HTML. Use
+       * getElementHTML(name) for explicit, sanitized opt-in HTML access. */
+      attrs: string[];
+      ev: string[];
+      ch: CNode[];
+    }
+
+    function walkElement(el: Element, depth: number): CNode[] {
+      if (depth > 8) return [];
+      const result: CNode[] = [];
+      const max = Math.min(el.children.length, 50);
+      for (let i = 0; i < max; i++) {
+        const child = el.children[i] as HTMLElement;
+        // Collect text from direct child text nodes and immediate children's text
+        const txtParts: string[] = [];
+        for (let ti = 0; ti < child.childNodes.length; ti++) {
+          const cn = child.childNodes[ti];
+          if (cn.nodeType === 3) {
+            const t = cn.textContent?.trim();
+            if (t) txtParts.push(t);
+          } else if (cn.nodeType === 1) {
+            // For element children, get their own direct text (not deep)
+            const el2 = cn as HTMLElement;
+            let directTxt = "";
+            for (let ci = 0; ci < el2.childNodes.length; ci++) {
+              if (el2.childNodes[ci].nodeType === 3) {
+                const t2 = el2.childNodes[ci].textContent?.trim();
+                if (t2) {
+                  directTxt = t2;
+                  break;
                 }
               }
-              if (directTxt) txtParts.push(directTxt);
             }
+            if (directTxt) txtParts.push(directTxt);
           }
-          let txt = txtParts.join(" | ");
-          if (txt.length > 120) txt = `${txt.substring(0, 120)}...`;
-          let html = "";
-          try {
-            const outer = child.outerHTML || "";
-            html = outer.length > 500 ? `${outer.substring(0, 500)}...` : outer;
-          } catch {
-            html = "";
-          }
-          const ev: string[] = ((child as unknown as Record<string, unknown>).__sibu_events__ as string[]) || [];
-          result.push({
-            tg: child.tagName ? child.tagName.toLowerCase() : "?",
-            id: child.id || "",
-            cl: (child.className || "").toString().split(" ").slice(0, 3).join(" "),
-            txt: txt.length > 60 ? `${txt.substring(0, 60)}...` : txt,
-            html,
-            ev,
-            ch: child.childElementCount > 0 ? walkElement(child, depth + 1) : [],
-          });
         }
-        return result;
-      }
-
-      const cArr: Array<{ n: string; tg: string; ch: number; cn: boolean; kids: CNode[] }> = [];
-      for (const [name, entry] of hook.components) {
-        const el = entry.element;
-        cArr.push({
-          n: name,
-          tg: el?.tagName ? el.tagName.toLowerCase() : "?",
-          ch: el?.childElementCount || 0,
-          cn: !!el?.isConnected,
-          kids: el ? walkElement(el, 0) : [],
+        let txt = txtParts.join(" | ");
+        if (txt.length > 120) txt = `${txt.substring(0, 120)}...`;
+        // Sanitized descriptor: attribute NAMES only. We never serialize
+        // raw outerHTML — values can carry secrets/XSS. Consumers that
+        // need HTML must opt in via api.getElementHTML(name).
+        const attrs: string[] = [];
+        try {
+          const al = child.attributes;
+          for (let ai = 0; ai < al.length && ai < 20; ai++) attrs.push(al[ai].name);
+        } catch {
+          /* */
+        }
+        const ev: string[] = ((child as unknown as Record<string, unknown>).__sibu_events__ as string[]) || [];
+        result.push({
+          tg: child.tagName ? child.tagName.toLowerCase() : "?",
+          id: child.id || "",
+          cl: (child.className || "").toString().split(" ").slice(0, 3).join(" "),
+          txt: txt.length > 60 ? `${txt.substring(0, 60)}...` : txt,
+          attrs,
+          ev,
+          ch: child.childElementCount > 0 ? walkElement(child, depth + 1) : [],
         });
       }
+      return result;
+    }
 
-      const eArr: Array<{ t: string; c: string; ts: number; d: string; ov: string; nv: string; k: string }> = [];
-      const start = eventLog.length > 500 ? eventLog.length - 500 : 0;
-      for (let i = start; i < eventLog.length; i++) {
-        const e = eventLog[i];
-        let detail = "";
-        let ov = "";
-        let nv = "";
-        let key = "";
-        if (e.type === "state-change") {
-          const sc = e as { oldValue: unknown; newValue: unknown; key: string };
-          key = sc.key || "";
-          try {
-            ov =
-              sc.oldValue === undefined
-                ? "undefined"
-                : sc.oldValue === null
-                  ? "null"
-                  : typeof sc.oldValue === "object"
-                    ? JSON.stringify(sc.oldValue, null, 2)
-                    : String(sc.oldValue);
-          } catch {
-            ov = "?";
-          }
-          try {
-            nv =
-              sc.newValue === undefined
-                ? "undefined"
-                : sc.newValue === null
-                  ? "null"
-                  : typeof sc.newValue === "object"
-                    ? JSON.stringify(sc.newValue, null, 2)
-                    : String(sc.newValue);
-          } catch {
-            nv = "?";
-          }
-          const ovShort = ov.length > 40 ? `${ov.substring(0, 40)}...` : ov;
-          const nvShort = nv.length > 40 ? `${nv.substring(0, 40)}...` : nv;
-          detail = `${ovShort} → ${nvShort}`;
-        } else if (e.type === "render") {
-          detail = `${(e as { duration: number }).duration.toFixed(1)}ms`;
+    const cArr: Array<{ n: string; tg: string; ch: number; cn: boolean; kids: CNode[] }> = [];
+    for (const [name, entry] of hook.components) {
+      const el = entry.element;
+      cArr.push({
+        n: name,
+        tg: el?.tagName ? el.tagName.toLowerCase() : "?",
+        ch: el?.childElementCount || 0,
+        cn: !!el?.isConnected,
+        kids: el ? walkElement(el, 0) : [],
+      });
+    }
+
+    const eArr: Array<{ t: string; c: string; ts: number; d: string; ov: string; nv: string; k: string }> = [];
+    const start = eventLog.length > 500 ? eventLog.length - 500 : 0;
+    for (let i = start; i < eventLog.length; i++) {
+      const e = eventLog[i];
+      let detail = "";
+      let ov = "";
+      let nv = "";
+      let key = "";
+      if (e.type === "state-change") {
+        const sc = e as { oldValue: unknown; newValue: unknown; key: string };
+        key = sc.key || "";
+        try {
+          ov =
+            sc.oldValue === undefined
+              ? "undefined"
+              : sc.oldValue === null
+                ? "null"
+                : typeof sc.oldValue === "object"
+                  ? JSON.stringify(sc.oldValue, null, 2)
+                  : String(sc.oldValue);
+        } catch {
+          ov = "?";
         }
-        eArr.push({ t: e.type, c: e.component, ts: e.timestamp, d: detail, ov, nv, k: key });
+        try {
+          nv =
+            sc.newValue === undefined
+              ? "undefined"
+              : sc.newValue === null
+                ? "null"
+                : typeof sc.newValue === "object"
+                  ? JSON.stringify(sc.newValue, null, 2)
+                  : String(sc.newValue);
+        } catch {
+          nv = "?";
+        }
+        const ovShort = ov.length > 40 ? `${ov.substring(0, 40)}...` : ov;
+        const nvShort = nv.length > 40 ? `${nv.substring(0, 40)}...` : nv;
+        detail = `${ovShort} → ${nvShort}`;
+      } else if (e.type === "render") {
+        detail = `${(e as { duration: number }).duration.toFixed(1)}ms`;
       }
+      eArr.push({ t: e.type, c: e.component, ts: e.timestamp, d: detail, ov, nv, k: key });
+    }
 
-      return JSON.stringify({ s: sArr, c: cArr, e: eArr });
-    };
+    return JSON.stringify({ s: sArr, c: cArr, e: eArr });
+  }
+
+  // ─── Expose on globalThis (opt-in) ───────────────────────────────────────
+  // Consolidated under __SIBU__. Legacy __SIBU_DEVTOOLS__* names are kept
+  // as deprecated aliases so existing extension panels keep working.
+  if (expose && typeof window !== "undefined") {
+    const ns = getSibuNamespace();
+    ns.devtools = api;
+    ns.data = buildData;
+    ns.changeVersion = () => changeVersion;
+
+    const w = window as unknown as Record<string, unknown>;
+    w.__SIBU_DEVTOOLS__ = api;
+    w.__SIBU_DEVTOOLS_VERSION__ = () => changeVersion;
+    w.__SIBU_DEVTOOLS_DATA__ = buildData;
   }
 
   activeDevTools = api;
 
   // DOM component auto-discovery
   if (typeof document !== "undefined") {
-    const observer = new MutationObserver((mutations) => {
+    domObserver = new MutationObserver((mutations) => {
+      let changed = false;
       for (const m of mutations) {
         for (const node of m.addedNodes) {
           if (node instanceof HTMLElement) {
@@ -570,6 +700,7 @@ export function initDevTools(config?: DevToolsConfig) {
             if (name && !hook.components.has(name)) {
               hook.components.set(name, { element: node });
               pushEvent(eventLog, maxEvents, { type: "mount", component: name, element: node, timestamp: Date.now() });
+              changed = true;
             }
           }
         }
@@ -579,11 +710,14 @@ export function initDevTools(config?: DevToolsConfig) {
             if (name && hook.components.has(name)) {
               pushEvent(eventLog, maxEvents, { type: "unmount", component: name, timestamp: Date.now() });
               hook.components.delete(name);
+              changed = true;
             }
           }
         }
       }
+      if (changed) emit();
     });
+    const observer = domObserver;
     queueMicrotask(() => {
       if (!document.body) return;
       observer.observe(document.body, { childList: true, subtree: true });
@@ -631,6 +765,7 @@ export function initDevTools(config?: DevToolsConfig) {
           }
         });
       }
+      emit();
     });
   }
 
@@ -642,6 +777,7 @@ export function initDevTools(config?: DevToolsConfig) {
 // ---------------------------------------------------------------------------
 
 function inferName(): string {
+  if (!inferNameArmed || !isDev()) return "anonymous";
   try {
     const stack = new Error().stack || "";
     for (const line of stack.split("\n")) {
@@ -711,6 +847,7 @@ function createNoopApi() {
     setEnabled: noop,
     snapshot: () => ({}) as Record<string, unknown>,
     highlightElement: noop as (n: string) => void,
+    getElementHTML: ((_n: string) => null) as (n: string, max?: number) => string | null,
     destroy: noop,
   };
 }

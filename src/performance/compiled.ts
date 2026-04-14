@@ -4,14 +4,25 @@
  * These are hints for build tools and static analyzers.
  */
 
+// Re-export the canonical TrustedHTML brand + minter from platform/ssr so
+// values minted in either module are interchangeable. Defining a second
+// brand here previously caused silent type incompatibilities between
+// compiled.ts and ssr.ts callers.
+export { type TrustedHTML, trustHTML } from "../platform/ssr";
+
+import type { TrustedHTML } from "../platform/ssr";
+
 /**
  * Marks a component's template as static (no reactive bindings).
  * A build tool can pre-render this to a static HTML string and
  * skip reactive setup entirely.
+ *
+ * Accepts only `TrustedHTML` (mint via `trustHTML(...)`) to keep the
+ * `innerHTML` write from becoming a silent XSS sink (CWE-79).
  */
-export function staticTemplate(html: string): HTMLElement {
+export function staticTemplate(html: TrustedHTML): HTMLElement {
   const template = document.createElement("template");
-  template.innerHTML = html.trim();
+  template.innerHTML = (html as string).trim();
   return template.content.firstElementChild as HTMLElement;
 }
 
@@ -28,11 +39,11 @@ export function cloneTemplate(template: HTMLTemplateElement): DocumentFragment {
  * Caches the template and only applies dynamic bindings on each call.
  */
 export function precompile<Props>(
-  templateHtml: string,
+  templateHtml: TrustedHTML,
   hydrate: (el: HTMLElement, props: Props) => void,
 ): (props: Props) => HTMLElement {
   const tpl = document.createElement("template");
-  tpl.innerHTML = templateHtml.trim();
+  tpl.innerHTML = (templateHtml as string).trim();
 
   return (props: Props): HTMLElement => {
     const el = tpl.content.firstElementChild?.cloneNode(true) as HTMLElement;

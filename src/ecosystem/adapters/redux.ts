@@ -18,7 +18,7 @@ export interface ReduxAdapterAPI<S = unknown> {
   /** Full store state as a SibuJS reactive getter */
   getState: () => S;
   /** Create a SibuJS reactive getter from a Redux selector */
-  useSelector: <R>(selector: (state: S) => R) => () => R;
+  select: <R>(selector: (state: S) => R) => () => R;
   /** Dispatch an action to the Redux store */
   dispatch: ReduxStore<S>["dispatch"];
   /** Unsubscribe from the Redux store */
@@ -42,7 +42,7 @@ export interface ReduxAdapterAPI<S = unknown> {
  * plugin(reduxPlugin);
  *
  * const redux = inject<ReduxAdapterAPI>("redux");
- * const count = redux.useSelector(s => s.counter);
+ * const count = redux.select(s => s.counter);
  * div(() => `Count: ${count()}`);
  * ```
  */
@@ -57,13 +57,13 @@ export function reduxAdapter<S>(options: ReduxAdapterOptions<S>): SibuPlugin {
       });
     });
 
-    function useSelector<R>(selector: (state: S) => R): () => R {
+    function select<R>(selector: (state: S) => R): () => R {
       return derived(() => selector(getState()));
     }
 
     const api: ReduxAdapterAPI<S> = {
       getState,
-      useSelector,
+      select,
       dispatch: store.dispatch.bind(store),
       destroy: unsubscribe,
     };

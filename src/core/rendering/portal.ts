@@ -26,8 +26,12 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
   const anchor = document.createComment("portal");
   const container = target || document.body;
   let portalContent: HTMLElement | null = null;
+  let disposed = false;
 
   queueMicrotask(() => {
+    // If the anchor was disposed before this microtask ran, skip append
+    // entirely — otherwise portalContent leaks into the target DOM.
+    if (disposed) return;
     try {
       portalContent = nodes();
       container.appendChild(portalContent);
@@ -35,12 +39,27 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
       if (typeof console !== "undefined") {
         console.error("[Portal] Render error:", err);
       }
+      // Dispatch on the anchor's Element parent — Comment anchors don't bubble.
+      const errorObj = err instanceof Error ? err : new Error(String(err));
+      queueMicrotask(() => {
+        try {
+          const target = anchor.parentNode as Element | null;
+          if (target?.dispatchEvent) {
+            target.dispatchEvent(
+              new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
+            );
+          }
+        } catch {
+          /* ignore dispatch failure */
+        }
+      });
     }
   });
 
   // Primary cleanup: registerDisposer on the anchor so `dispose()`,
   // `when()`, `match()`, and `each()` all clean up portal content.
   registerDisposer(anchor as unknown as HTMLElement, () => {
+    disposed = true;
     if (portalContent) {
       dispose(portalContent);
       portalContent.remove();

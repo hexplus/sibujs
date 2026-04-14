@@ -527,11 +527,17 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
     const resolved = resolveServerRoute(serverState.path, routes);
     if (resolved.component) {
       // Import hydrate from ssr and attach bindings to existing DOM
-      import("../platform/ssr").then(({ hydrate }) => {
-        if (resolved.component) {
-          hydrate(resolved.component, container);
-        }
-      });
+      import("../platform/ssr")
+        .then(({ hydrate }) => {
+          if (resolved.component) {
+            hydrate(resolved.component, container);
+          }
+        })
+        .catch((err) => {
+          if (typeof console !== "undefined") {
+            console.error("[SibuJS routerSSR] failed to load hydrate:", err);
+          }
+        });
     }
   }
 }

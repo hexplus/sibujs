@@ -1,6 +1,6 @@
-import { track } from "../../reactivity/track";
+import { track, untracked } from "../../reactivity/track";
 import { devAssert, devWarn, isDev } from "../dev";
-import { dispose } from "./dispose";
+import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
 
 const _isDev = isDev();
@@ -184,7 +184,10 @@ export function each<T>(
         // Create stable getters that close over the key and always read
         // from the latest array via keyIndexMap, making them reactive.
         const itemKey = key;
-        const itemGetter = () => getArray()[keyIndexMap.get(itemKey)!];
+        // Read getArray() inside untracked() so consumers reading item()
+        // inside derived/effect do NOT subscribe to the whole-array signal —
+        // re-runs would otherwise fire on any unrelated row mutation.
+        const itemGetter = () => untracked(() => getArray()[keyIndexMap.get(itemKey)!]);
         const indexGetter = () => keyIndexMap.get(itemKey)!;
         try {
           node = resolveNodeChild(render(itemGetter, indexGetter));
@@ -195,6 +198,24 @@ export function each<T>(
             );
           }
           node = document.createComment(`each:error:${i}`);
+          // Comment nodes don't bubble events to ancestor Elements. Defer
+          // and dispatch on the anchor's Element parent so an enclosing
+          // ErrorBoundary can catch it. Skip if anchor is still detached.
+          const errorObj = err instanceof Error ? err : new Error(String(err));
+          queueMicrotask(() => {
+            try {
+              const target = anchor.parentNode as Element | null;
+              if (target?.dispatchEvent) {
+                target.dispatchEvent(
+                  new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
+                );
+              } else if (_isDev) {
+                devWarn(`each: error not surfaced — anchor detached: ${errorObj.message}`);
+              }
+            } catch {
+              /* ignore */
+            }
+          });
         }
       }
       workMap.set(key, node);
@@ -288,7 +309,9 @@ export function each<T>(
 
   // Track synchronously — dependencies are registered even if anchor
   // has no parent yet (getArray() runs before the parent check).
-  track(update);
+  // Capture teardown so disposing the anchor unsubscribes the effect.
+  const untrack = track(update);
+  registerDisposer(anchor, untrack);
 
   // Fallback: if the anchor wasn't in the DOM during the initial track
   // (common when each() is called inside tagFactory nodes), schedule

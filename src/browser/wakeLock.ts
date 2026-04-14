@@ -71,14 +71,22 @@ export function wakeLock(): {
   // Re-acquire on visibility return (browsers auto-release when hidden)
   const onVisibility = () => {
     if (sentinel?.released && !document.hidden) {
-      void request();
+      request().catch((err) => {
+        if (typeof console !== "undefined") {
+          console.warn("[SibuJS wakeLock] re-acquire failed:", err);
+        }
+      });
     }
   };
   document.addEventListener("visibilitychange", onVisibility);
 
   function dispose(): void {
     document.removeEventListener("visibilitychange", onVisibility);
-    void release();
+    release().catch((err) => {
+      if (typeof console !== "undefined") {
+        console.warn("[SibuJS wakeLock] release failed:", err);
+      }
+    });
   }
 
   return { active, request, release, dispose };

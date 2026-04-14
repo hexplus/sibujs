@@ -1,5 +1,6 @@
 import { track } from "../../reactivity/track";
-import { dispose } from "./dispose";
+import { devWarn, isDev } from "../dev";
+import { dispose, registerDisposer } from "./dispose";
 
 /**
  * Options for KeepAlive.
@@ -46,13 +47,19 @@ export function KeepAlive(
   const anchor = document.createComment("keep-alive");
   const cache = new Map<string, Node>();
   const lruOrder: string[] = [];
-  const max = options?.max ?? 0;
+  // Default to a bounded cache (10). Pass { max: 0 } explicitly for unbounded.
+  const max = options?.max ?? 10;
+  if (max === 0 && isDev()) {
+    devWarn("KeepAlive: unbounded cache (max: 0). Cached subtrees will never be evicted — set `max` to bound memory.");
+  }
 
   let currentKey: string | undefined;
   let currentNode: Node | null = null;
   let initialized = false;
+  let disposed = false;
 
   const update = () => {
+    if (disposed) return;
     const key = activeKey();
 
     const parent = anchor.parentNode;
@@ -106,13 +113,28 @@ export function KeepAlive(
     initialized = true;
   };
 
-  track(update);
+  const untrack = track(update);
 
   if (!initialized) {
     queueMicrotask(() => {
       if (!initialized && anchor.parentNode) update();
     });
   }
+
+  // When the anchor is disposed (via when/match/each/dispose), tear down the
+  // track() subscription AND dispose every cached subtree — including the
+  // currently-detached one, which would otherwise leak its bindings.
+  registerDisposer(anchor, () => {
+    disposed = true;
+    untrack();
+    for (const node of cache.values()) {
+      dispose(node);
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }
+    cache.clear();
+    lruOrder.length = 0;
+    currentNode = null;
+  });
 
   return anchor;
 }

@@ -1,3 +1,12 @@
+/**
+ * Canonical disposer/teardown signature used across the framework.
+ *
+ * Returned by `effect()`, `track()`, widget `bind()` methods, and other
+ * subscription/lifecycle helpers. All disposers MUST be idempotent — calling
+ * twice should be a no-op rather than an error.
+ */
+export type Dispose = () => void;
+
 export type NodeChild =
   | Node
   | Element

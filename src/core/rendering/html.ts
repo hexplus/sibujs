@@ -184,5 +184,6 @@ export const center = tagFactory("center");
 export const font = tagFactory("font");
 export const marquee = tagFactory("marquee");
 
-// Custom elements placeholder
+// Custom elements placeholder. Tag name validation (blocking <script>,
+// <iframe>, etc.) is enforced inside tagFactory.
 export const customElement = (tagName: string) => tagFactory(tagName);

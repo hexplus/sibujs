@@ -58,18 +58,32 @@ export function springSignal(
   let velocity = 0;
   let target = initial;
   let rafId: number | null = null;
+  let lastTime = 0;
+  // Reference timestep (60 Hz) — coefficients are tuned at this rate so
+  // the same `stiffness`/`damping` produce the same feel regardless of
+  // monitor refresh rate. Clamped per-frame to avoid blow-ups after a
+  // tab is throttled / backgrounded.
+  const REF_DT_MS = 1000 / 60;
+  const MAX_STEP_RATIO = 4; // never integrate more than 4 reference steps
 
-  function tick(): void {
+  function tick(now: number): void {
+    if (lastTime === 0) lastTime = now;
+    const rawDt = now - lastTime;
+    lastTime = now;
+    // Guard against NaN/Infinity from broken rAF shims and clock skew.
+    const dt = Number.isFinite(rawDt) && rawDt > 0 ? rawDt : REF_DT_MS;
+    const ratio = Math.min(MAX_STEP_RATIO, Math.max(0.1, dt / REF_DT_MS));
+
     const force = -stiffness * (current - target);
     const dampingForce = -damping * velocity;
-    velocity += force + dampingForce;
-    current += velocity;
+    velocity += (force + dampingForce) * ratio;
+    current += velocity * ratio;
 
-    // Check if settled
     if (Math.abs(current - target) < precision && Math.abs(velocity) < precision) {
       current = target;
       velocity = 0;
       rafId = null;
+      lastTime = 0;
       setValue(current);
       return;
     }
@@ -89,12 +103,14 @@ export function springSignal(
         cancelAnimationFrame(rafId);
         rafId = null;
       }
+      lastTime = 0;
       setValue(current);
       return;
     }
 
     // Start animation loop if not already running
     if (rafId === null) {
+      lastTime = 0;
       rafId = requestAnimationFrame(tick);
     }
   }
@@ -104,6 +120,7 @@ export function springSignal(
       cancelAnimationFrame(rafId);
       rafId = null;
     }
+    lastTime = 0;
   }
 
   return [value, set, dispose];

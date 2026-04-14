@@ -29,7 +29,7 @@ export function ref<T>(initial?: T): Ref<T | undefined> {
       return get();
     },
     set current(value: T | undefined) {
-      set(value as T);
+      set(value);
     },
   };
 }

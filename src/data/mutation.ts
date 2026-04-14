@@ -121,7 +121,14 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     isSuccess,
     isIdle,
     mutate: (variables: TVariables) => {
-      execute(variables).catch(() => {});
+      // The error is already surfaced via the reactive `error` signal and
+      // options.onError — but keep a devWarn so fire-and-forget mutate()
+      // failures aren't completely invisible when onError isn't wired.
+      execute(variables).catch((err) => {
+        if (typeof console !== "undefined") {
+          console.warn("[SibuJS mutation] mutate() failed; check `.error()` signal or onError option.", err);
+        }
+      });
     },
     mutateAsync: execute,
     reset,

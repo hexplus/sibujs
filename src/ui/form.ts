@@ -203,9 +203,21 @@ export function form<T extends Record<string, unknown>>(config: FormConfig<T>): 
       return null;
     });
 
+    // Wrap the setter so editing the field clears any prior manual error
+    // (e.g. server-side "email already taken" must not stick after edit).
+    const wrappedSet = (next: T[keyof T]) => {
+      setValue(next);
+      setManualErrors((prev) => {
+        if (!((name as string) in prev) || prev[name as string] == null) return prev;
+        const copy = { ...prev };
+        copy[name as string] = null;
+        return copy;
+      });
+    };
+
     fieldMap[name] = {
       value,
-      set: setValue,
+      set: wrappedSet,
       error,
       touched: isTouched,
       touch: () => setTouched(true),

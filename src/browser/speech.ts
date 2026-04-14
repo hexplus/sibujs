@@ -55,14 +55,24 @@ export function speech(): {
 
   const synth = window.speechSynthesis;
 
-  // Poll the synth state — the spec doesn't dispatch events for every
-  // transition on every browser, so periodic sync is the safest approach.
-  const interval = setInterval(() => {
-    setSpeaking(synth.speaking);
-    setPaused(synth.paused);
-  }, 200);
+  // Poll the synth state ONLY while something is actively speaking. Avoids
+  // a 5-Hz wake-up forever on pages that may never call speak().
+  let interval: ReturnType<typeof setInterval> | null = null;
+  function startPolling(): void {
+    if (interval !== null) return;
+    interval = setInterval(() => {
+      setSpeaking(synth.speaking);
+      setPaused(synth.paused);
+      if (!synth.speaking && !synth.paused) {
+        clearInterval(interval as ReturnType<typeof setInterval>);
+        interval = null;
+      }
+    }, 200);
+  }
 
+  let disposed = false;
   function speak(text: string, options: SpeakOptions = {}): void {
+    if (disposed) return;
     const u = new SpeechSynthesisUtterance(text);
     if (options.lang) u.lang = options.lang;
     if (options.rate != null) u.rate = options.rate;
@@ -73,20 +83,44 @@ export function speech(): {
       const match = voices.find((v) => v.name === options.voice);
       if (match) u.voice = match;
     }
-    u.addEventListener("start", () => setSpeaking(true));
-    u.addEventListener("end", () => {
-      setSpeaking(false);
-      setPaused(false);
-    });
-    u.addEventListener("error", () => {
-      setSpeaking(false);
-      setPaused(false);
-    });
+    // { once: true } on end/error + a disposed-guard on start prevent signal
+    // writes after dispose when synth.cancel() fires queued error events.
+    u.addEventListener(
+      "start",
+      () => {
+        if (!disposed) setSpeaking(true);
+      },
+      { once: true },
+    );
+    u.addEventListener(
+      "end",
+      () => {
+        if (disposed) return;
+        setSpeaking(false);
+        setPaused(false);
+      },
+      { once: true },
+    );
+    u.addEventListener(
+      "error",
+      () => {
+        if (disposed) return;
+        setSpeaking(false);
+        setPaused(false);
+      },
+      { once: true },
+    );
     synth.speak(u);
+    setSpeaking(true);
+    startPolling();
   }
 
   function dispose(): void {
-    clearInterval(interval);
+    disposed = true;
+    if (interval !== null) {
+      clearInterval(interval);
+      interval = null;
+    }
     synth.cancel();
   }
 

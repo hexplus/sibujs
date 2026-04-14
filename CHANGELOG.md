@@ -6,6 +6,167 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.0.0] — 2026-04-14
+
+Major hardening + features release. Spans reactivity, rendering, SSR, widgets, security, and build tooling. **2187/2187 tests passing, zero lint errors, zero type errors.**
+
+### Breaking
+
+- **Adapter method renames** — `redux.useSelector` → `redux.select`, `zustand.useSelector` → `zustand.select`. The `use*` prefix is no longer used anywhere in the framework.
+  ```ts
+  // before
+  const count = redux.useSelector(s => s.count);
+  // after
+  const count = redux.select(s => s.count);
+  ```
+
+- **`useDefaultPluginRegistry` renamed to `setDefaultPluginRegistry`** — aligns with the verb-based convention used elsewhere.
+
+- **`loadRemoteModule()` now refuses un-allowlisted URLs** — previously warned in dev and loaded anyway. Now rejects unless `{ allowedOrigins: [...] }` or `{ unsafelyAllowAnyOrigin: true }` is passed (CWE-829 supply-chain hardening).
+
+- **`loadWasmModule()` / `preloadWasm()` require origin allowlist** — same policy as `loadRemoteModule`. Options bag now disambiguated via `allowedOrigins`/`unsafelyAllowAnyOrigin` keys only.
+
+- **`compiled.staticTemplate()` / `precompile()` require `TrustedHTML`** — arbitrary strings no longer accepted to prevent silent `innerHTML` XSS sinks. Mint via `trustHTML(raw)` after your own sanitization pass.
+
+- **Router refuses protocol-relative redirects** — `"//evil.com/path"` style redirect targets now throw `NavigationFailureError` instead of logging a warning (CWE-601 open redirect).
+
+- **`hydrate()` / `hydrateIslands` / `hydrateProgressively` use replace strategy** — the prior in-place attribute-reconciliation silently orphaned reactive bindings to the discarded client tree, leaving the visible DOM frozen. The client subtree now replaces the server subtree (island markers and `data-sibu-hydrated` preserved) so reactive bindings actually drive the DOM.
+
+- **`socket()` / `stream()` default `maxReconnects` is now 10** — was effectively unbounded. Permanently broken URLs no longer hammer servers forever. Exponential backoff with jitter added.
+
+- **`optimisticList()` deprecated aliases removed** — `addOptimistic`/`removeOptimistic`/`updateOptimistic` were deprecated in 1.5.0 and are now gone. Use `add`/`remove`/`update`.
+
+- **`contentEditable().setContent` signature widened** — takes either a string (raw HTML, legacy) or `{ text, html, sanitize }`. The options form is the recommended path.
+
+### Added
+
+- **`retrack()`** reactivity primitive for derived pull-path — skips the `track()` cleanup pass; uses save/restore of `currentSubscriber` instead of stackTop push/pop. Steady-state chains avoid Set.delete+add churn.
+
+- **`effect((onCleanup) => { … })`** — canonical teardown pattern now built in. User cleanups run in reverse registration order before every re-run and on dispose; throwing cleanups are isolated and logged.
+  ```ts
+  effect((onCleanup) => {
+    const handler = () => { … };
+    window.addEventListener("resize", handler);
+    onCleanup(() => window.removeEventListener("resize", handler));
+  });
+  ```
+
+- **`derived(getter, { equals })`** — custom equality suppresses notifications when the recomputed value is equivalent to the previous.
+
+- **`Dispose` canonical type** exported from `sibu`.
+
+- **Widget ARIA `bind()` layer** — every headless widget now ships a `bind(els)` that wires roles, keyboard, and idempotent teardown per WAI-ARIA APG:
+  - `Tabs` — role=tablist, roving tabindex, Arrow/Home/End
+  - `Accordion` — aria-expanded/controls, Enter/Space
+  - `Tooltip` — role=tooltip, aria-describedby splice, Escape dismiss, hoverable grace
+  - `Popover` — role=dialog, aria-haspopup, Escape + click-outside
+  - `Combobox` — Combobox 1.2 pattern, aria-activedescendant, typeahead
+  - `Select` — role=listbox, aria-multiselectable, typeahead, disabled-aware
+  - `FileUpload` — labeling, aria-describedby splice, drop-zone keyboard
+  - `datePicker` — role=grid, arrow/Home/End, PageUp/Down, Shift+PageUp/Down (year)
+  - All `bind()` returns are idempotent via WeakMap and restore every touched attribute on dispose.
+
+- **`takePendingError()` exported** — ErrorBoundary now scans mounted subtrees for stashed errors from `lazy()` rejections that beat any boundary to mount. Multiple pending errors wrapped in `AggregateError`.
+
+- **`trustHTML(html)` + `TrustedHTML` type** re-exported from `sibu` (was only on `sibu/ssr` and `sibu/performance`, which minted incompatible brands).
+
+- **Test-reset helpers** — `__resetQueryCache`, `__resetDialogStack`, `__removeRouterPagehideHandler`.
+
+- **Build/release hardening** — `tsup --clean`; `./cdn` subpath export; `publishConfig.access=public` + `provenance=true`; `publish.mjs` publishes BEFORE git commit/tag (so a publish failure leaves no orphan commit).
+
+- **10 new tests** — `keepAlive.test.ts`, `pluginRegistry.test.ts`, `widgetsAria.test.ts`.
+
+### Fixed — Reactivity
+
+- **`derived` pull-path correctness under `suspendTracking`** — new conditional deps register their markDirty subscription even when the outer caller is in `untracked()` context.
+- **`propagateDirty`** is iterative (no recursion) with already-dirty skip — closes O(depth²) walk on deep chains.
+- **`batch.flushBatch`** wrapped in try/finally — a throwing subscriber can't strand `pendingSignals` for the next batch.
+- **`effect()` disposer idempotent** — double-dispose no longer re-emits `effect:destroy` or re-walks subs lists.
+- **`effect()` re-entry detection** — a re-entering update now warns in dev and drops (was silent).
+- **`bindChildNode` diff** — O(n²) nested scan replaced with O(n+m) Set-based reuse detection; dedupes duplicate node refs in the output array.
+- **Dead `signalSubscribers` WeakMap** removed (the `__s` property cache is authoritative).
+
+### Fixed — Rendering & Lifecycle
+
+- **`dispose()` re-entry safe** — snapshot-then-delete + bounded extra-pass drain. `Array.from(childNodes)` snapshot guards against disposers mutating the tree mid-walk.
+- **`onUnmount` false-fires on same-tick re-parent** — `fireUnmount` defers one microtask and re-checks `isConnected`.
+- **`lifecycle` descendant walk** short-circuited for leaf insertions.
+- **`keepAlive` disposed-flag** prevents post-dispose microtask writes; cached subtrees properly disposed on anchor teardown.
+- **`each` itemGetter** wraps in `untracked()` so per-row consumers don't subscribe to the whole-array signal.
+- **`each`, `portal`, `lazy.Suspense` error propagation** — CustomEvent dispatched on the anchor's Element parent (Comment anchors don't bubble); deferred one microtask for pre-mount races.
+- **`lazy()` pending-error stash** (`PENDING_ERROR` marker) — ErrorBoundary scans descendants on mount so failures before any boundary mounts aren't silently lost.
+- **`hydrateProgressively` island marker preserved** on replacement.
+
+### Fixed — Data & Platform
+
+- **`workerFn` pool crosstalk** — per-worker FIFO queue with `addEventListener`; terminate-on-error so concurrent `run()` calls can't mis-route results.
+- **`worker()` top-level** uses `addEventListener` + terminate-on-error.
+- **`infiniteQuery` run-id generation** — stale responses discarded; `AbortController.abort()` at top of effect.
+- **`offlineStore` atomic writes** — `idbPutWithChange` / `idbDeleteWithChange` single-transaction across `items`+`_changes`; cursor-snapshotted sync; pull skips items with pending local edits (conflict avoidance); `idbPutMany` batches remote items; `closed` flag checked between awaits; `sync()` error now logs via `devWarn` (was silent).
+- **`query` dedup** captures `entry.promise` locally and re-checks identity after await; sync-throw from `withRetry` cleaned up; `onSettled` in `finally`; `dispose()` idempotent + gcTimer deduplicated.
+- **`chunkLoader`** true LRU with `lastAccess`; `invalidate(id)` clears `preloaded`; `this.load` replaced with closure reference (destructure-safe); preload `.delete(id)` on failure.
+- **`serviceWorker`** listener refs tracked; prior `statechange` detached before reassignment; all detached in `unregister()`.
+- **`incrementalRegeneration`, `routerSSR`, `wakeLock`, `clearQueryCache` refetchers** — `.catch` instead of silent.
+- **`mutation.mutate()`** fire-and-forget rejection now warns (was silent `catch(() => {})`).
+
+### Fixed — SSR
+
+- **`runInSSRContext`** uses Node's `AsyncLocalStorage` when available so concurrent requests don't share `ssrMode`/suspense counters.
+- **`serializeState`** byte cap via `TextEncoder`; escapes U+2028/9; drops the `__SIBU_SSR_STATE_RAW__` fallback (defeated escape).
+- **`deserializeState`** dev-warns when no `validate` guard is passed.
+
+### Fixed — Widgets & UI
+
+- **`datePicker` month/year overflow** — uses day-1 anchor (no Jan-31→Mar-3 drift).
+- **`form.wrappedSet`** clears `manualErrors` on edit (server-side "email taken" errors no longer stick after user edits).
+- **`Tooltip.bind()` teardown** splices its id out of the current `aria-describedby` so ids added by other libraries survive.
+- **`a11y.FocusTrap`** `keydown` removed on dispose; announce live region checks `isConnected` before writing.
+- **`inputMask.bind()`** returns a dispose function that removes input/focus listeners.
+- **`customElement._teardown`** runs `dispose()` on rendered subtree before reconnect (reactive bindings no longer leak across reconnects).
+
+### Fixed — Plugins & Router
+
+- **`router.cleanupNodes`** calls `dispose(node)` before detaching — every reactive binding inside a route subtree is torn down on navigation.
+- **`Route()` / `KeepAliveRoute()` / `Outlet()`** `track()` teardowns stored in `routeCleanups` (was leaking effects).
+- **`RouterLink` click listener** removed via `registerDisposer`; navigate failures `.catch`'d.
+- **Router `pagehide` listener lazy-initialized** on first `createRouter()` call (honors `sideEffects: false`).
+
+### Fixed — Security
+
+- **`URL_ATTRIBUTES`** expanded: `xlink:href`, `formtarget`, `ping`, `data` now run through `sanitizeUrl()` (was bypassed).
+- **`persist` + `dragDrop` `JSON.parse`** revivers block `__proto__`/`constructor`/`prototype` (CWE-1321).
+- **`each` error dispatch** logs via `devWarn` when anchor is detached (no silent swallow).
+
+### Fixed — Performance
+
+- **Spring animation** is `dt`-aware (`REF_DT_MS`, `MAX_STEP_RATIO=4`, NaN-guard) — frame-rate-independent; no runaway on tab-throttle.
+- **`speech.ts` setInterval** polls only while actively speaking (was constant 5Hz).
+- **`socket` / `stream` auto-reconnect** — exponential backoff with jitter.
+
+### Fixed — DX
+
+- **Error prefix standardized to `[SibuJS]`** (was mix of `[Sibu]` / `[Sibu strict]` / `[Sibu hydration]`).
+- **`devtools.hmr`** calls `disposeNode` on replaced subtrees so HMR reloads don't leak effects/listeners.
+- **`testing.unmount` / `unmountAll`** call `dispose()` before clearing DOM (was `innerHTML = ""`, leaked every effect/binding).
+- **`tsconfig.json`** drops `"types": ["vitest"]` — zero `src/` deps on test-only types.
+- **Unused `biome-ignore` suppressions** removed; unused variables cleaned.
+
+### Migration
+
+Most apps need no changes. If you hit any of these:
+
+- **`redux.useSelector` / `zustand.useSelector`** → rename to `select`.
+- **`useDefaultPluginRegistry`** → rename to `setDefaultPluginRegistry`.
+- **`loadRemoteModule(url)` without options** → pass `{ allowedOrigins: [...] }` (recommended) or `{ unsafelyAllowAnyOrigin: true }` for opt-in.
+- **`loadWasmModule(url)`** → same.
+- **`compiled.staticTemplate(html)`** → wrap via `trustHTML(html)` after your sanitization.
+- **`hydrate()` consumers relying on preserved server DOM refs** → client tree replaces server tree; grab refs after mount.
+- **`socket({ autoReconnect: true })`** → now caps at 10 reconnect attempts; pass `maxReconnects: Infinity` to restore prior behavior.
+- **Router redirects to `//other-host/path`** → now throw; rewrite as relative or absolute `https://` within an allowed origin.
+- **`optimisticList().addOptimistic/removeOptimistic/updateOptimistic`** → rename to `add`/`remove`/`update`.
+
+---
+
 ## [1.5.0] — 2026-04-11
 
 Comprehensive bug-fix and hardening release. **30 bugs fixed across 29 files**, covering the reactive core, data fetching, state management, routing, rendering, lifecycle, forms, UI utilities, browser composables, and devtools. Full framework audit with 2178/2178 tests passing, zero regressions.

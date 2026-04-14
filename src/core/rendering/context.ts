@@ -26,14 +26,32 @@ import { signal } from "../signals/signal";
  */
 
 export interface Context<T> {
-  /** Set the context value globally. Affects all consumers. */
-  provide(value: T): void;
+  /**
+   * Set the context value globally. Affects all consumers.
+   *
+   * Returns a `restore` function that re-sets the context to the value it
+   * had *before* this `provide` call. Useful for scoped overrides:
+   *
+   * ```ts
+   * const restore = Theme.provide("dark");
+   * try { renderChild(); } finally { restore(); }
+   * ```
+   *
+   * Callers that don't need scoping can ignore the return value — existing
+   * semantics are preserved.
+   */
+  provide(value: T): () => void;
   /** Get a reactive getter for the current context value. */
   use(): () => T;
   /** Get the current value directly (non-reactive). */
   get(): T;
   /** Update the provided value reactively. */
   set(value: T): void;
+  /**
+   * Run `fn` with the context temporarily set to `value`, then restore the
+   * previous value (even if `fn` throws). Returns the result of `fn`.
+   */
+  withContext<R>(value: T, fn: () => R): R;
 }
 
 /**
@@ -45,9 +63,11 @@ export interface Context<T> {
 export function context<T>(defaultValue: T): Context<T> {
   const [getValue, setValue] = signal<T>(defaultValue);
 
-  return {
-    provide(value: T): void {
+  const ctx: Context<T> = {
+    provide(value: T): () => void {
+      const previous = getValue();
       setValue(value);
+      return () => setValue(previous);
     },
 
     use(): () => T {
@@ -61,5 +81,17 @@ export function context<T>(defaultValue: T): Context<T> {
     set(value: T): void {
       setValue(value);
     },
+
+    withContext<R>(value: T, fn: () => R): R {
+      const previous = getValue();
+      setValue(value);
+      try {
+        return fn();
+      } finally {
+        setValue(previous);
+      }
+    },
   };
+
+  return ctx;
 }

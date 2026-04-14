@@ -130,7 +130,11 @@ export function dropZone(
         const raw = e.dataTransfer.getData("application/json");
         if (raw) {
           try {
-            transferData = JSON.parse(raw);
+            // Reviver blocks __proto__/constructor/prototype to prevent
+            // prototype pollution from a foreign drag source (CWE-1321).
+            transferData = JSON.parse(raw, (k, v) =>
+              k === "__proto__" || k === "constructor" || k === "prototype" ? undefined : v,
+            );
           } catch {
             transferData = raw;
           }

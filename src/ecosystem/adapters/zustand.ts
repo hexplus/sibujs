@@ -19,7 +19,7 @@ export interface ZustandAdapterAPI<S> {
   /** Full Zustand state as a SibuJS reactive getter */
   getState: () => S;
   /** Create a SibuJS reactive getter from a Zustand selector */
-  useSelector: <R>(selector: (state: S) => R) => () => R;
+  select: <R>(selector: (state: S) => R) => () => R;
   /** Set state on the Zustand store */
   setState: ZustandStore<S>["setState"];
   /** Destroy the subscription and the Zustand store */
@@ -43,7 +43,7 @@ export interface ZustandAdapterAPI<S> {
  * plugin(plugin);
  *
  * const zs = inject<ZustandAdapterAPI>("zustand");
- * const bears = zs.useSelector(s => s.bears);
+ * const bears = zs.select(s => s.bears);
  * div(() => `Bears: ${bears()}`);
  * ```
  */
@@ -58,13 +58,13 @@ export function zustandAdapter<S>(options: ZustandAdapterOptions<S>): SibuPlugin
       });
     });
 
-    function useSelector<R>(selector: (state: S) => R): () => R {
+    function select<R>(selector: (state: S) => R): () => R {
       return derived(() => selector(getState()));
     }
 
     const api: ZustandAdapterAPI<S> = {
       getState,
-      useSelector,
+      select,
       setState: store.setState.bind(store),
       destroy() {
         unsubscribe();

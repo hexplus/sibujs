@@ -1,3 +1,4 @@
+import { batch } from "../../reactivity/batch";
 import { devAssert } from "../dev";
 import { effect } from "./effect";
 import { signal } from "./signal";
@@ -69,7 +70,7 @@ export function store<T extends object>(
     },
     set() {
       throw new Error(
-        "[Sibu] store: Direct mutation is not allowed. Use actions.setState() to update store properties.",
+        "[SibuJS store] Direct mutation is not allowed. Use actions.setState() to update store properties.",
       );
     },
   });
@@ -87,17 +88,21 @@ export function store<T extends object>(
   const setState = (patch: Partial<T> | ((state: T) => T)) => {
     const current = getSnapshot();
     const nextState = typeof patch === "function" ? patch(current) : patch;
-    Object.entries(nextState).forEach(([key, value]) => {
-      if (key in signals) {
-        signals[key as keyof T][1](value as T[keyof T]);
-      }
+    batch(() => {
+      Object.entries(nextState).forEach(([key, value]) => {
+        if (key in signals) {
+          signals[key as keyof T][1](value as T[keyof T]);
+        }
+      });
     });
   };
 
   const reset = () => {
-    (Object.keys(initialState) as Array<keyof T>).forEach((key) => {
-      const setter = signals[key][1];
-      setter(initialState[key]);
+    batch(() => {
+      (Object.keys(initialState) as Array<keyof T>).forEach((key) => {
+        const setter = signals[key][1];
+        setter(initialState[key]);
+      });
     });
   };
 

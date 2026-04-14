@@ -11,14 +11,53 @@
  * `import.meta.hot` API (Webpack, Vite, Parcel, etc.).
  */
 
+import { dispose as disposeNode } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
 
 // ---------------------------------------------------------------------------
 // Internal HMR state store
 // ---------------------------------------------------------------------------
 
+/** Maximum number of entries in the HMR state store before FIFO eviction kicks in. */
+const HMR_STORE_MAX_SIZE = 200;
+
 /** Global state store that survives across module reloads */
 const hmrStateStore = new Map<string, unknown>();
+
+/**
+ * Insert / update an entry in the HMR state store, enforcing a FIFO cap.
+ * When the cap is exceeded the oldest entry is dropped and a one-time warning
+ * is emitted so the developer can notice leaks.
+ */
+let hmrStoreOverflowWarned = false;
+function hmrStoreSet(id: string, value: unknown): void {
+  // Re-insert to keep insertion-order fresh (Map preserves insertion order)
+  if (hmrStateStore.has(id)) hmrStateStore.delete(id);
+  hmrStateStore.set(id, value);
+  if (hmrStateStore.size > HMR_STORE_MAX_SIZE) {
+    const oldestKey = hmrStateStore.keys().next().value;
+    if (oldestKey !== undefined) hmrStateStore.delete(oldestKey);
+    if (!hmrStoreOverflowWarned) {
+      hmrStoreOverflowWarned = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[sibujs/hmr] HMR state store exceeded ${HMR_STORE_MAX_SIZE} entries — oldest entries are being evicted. ` +
+          `Call clearHMRModule(id) from your module's accept/dispose handlers to avoid this.`,
+      );
+    }
+  }
+}
+
+/**
+ * Remove a single HMR module entry (state + registry) by id.
+ * Call this from `import.meta.hot.accept()` / `module.hot.dispose()` handlers
+ * when the module is being fully replaced or torn down.
+ */
+export function clearHMRModule(id: string): void {
+  hmrStateStore.delete(id);
+  hmrRegistry.delete(id);
+  hmrRegistry.delete(`boundary:${id}`);
+}
 
 /** Registry of active HMR component registrations */
 const hmrRegistry = new Map<
@@ -60,11 +99,11 @@ export function hmrState<T>(id: string, initial: T): [() => T, (value: T | ((pre
   function hmrSet(next: T | ((prev: T) => T)): void {
     set(next);
     // Persist the latest value so it survives the next hot reload
-    hmrStateStore.set(id, get());
+    hmrStoreSet(id, get());
   }
 
   // Also persist the initial / restored value immediately
-  hmrStateStore.set(id, restored);
+  hmrStoreSet(id, restored);
 
   return [get, hmrSet];
 }
@@ -137,15 +176,16 @@ export function registerHMR(
     }
     reg.disposeCallbacks.length = 0;
 
-    // Render the new version
     const newElement = newComponent();
+    const oldElement = reg.currentElement;
 
-    // Replace the old element in the DOM
-    if (reg.currentElement?.parentNode) {
-      reg.currentElement.parentNode.replaceChild(newElement, reg.currentElement);
+    if (oldElement?.parentNode) {
+      oldElement.parentNode.replaceChild(newElement, oldElement);
     }
+    // Run reactive disposers on the OLD subtree after detaching, so effects
+    // and listeners inside the previous version don't leak across reloads.
+    if (oldElement) disposeNode(oldElement);
 
-    // Update the registry entry
     reg.component = newComponent;
     reg.currentElement = newElement;
   }
@@ -162,9 +202,10 @@ export function registerHMR(
       }
     }
 
-    // Remove the element from the DOM
-    if (reg.currentElement?.parentNode) {
-      reg.currentElement.parentNode.removeChild(reg.currentElement);
+    if (reg.currentElement) {
+      const el = reg.currentElement;
+      if (el.parentNode) el.parentNode.removeChild(el);
+      disposeNode(el);
     }
 
     hmrRegistry.delete(id);
@@ -262,11 +303,17 @@ export function createHMRBoundary(id: string): {
           }
           disposeCallbacks.length = 0;
 
-          // Re-render with the current (updated) component
-          if (currentComponent && currentElement?.parentNode) {
-            const newElement = currentComponent();
-            currentElement.parentNode.replaceChild(newElement, currentElement);
-            currentElement = newElement;
+          if (currentComponent && currentElement) {
+            const oldEl = currentElement;
+            const parent = oldEl.parentNode;
+            if (parent) {
+              const newElement = currentComponent();
+              parent.replaceChild(newElement, oldEl);
+              // Tear down reactive bindings inside the previous version so
+              // each hot reload doesn't accumulate effects/listeners.
+              disposeNode(oldEl);
+              currentElement = newElement;
+            }
           }
 
           // Run accept callbacks
@@ -303,6 +350,27 @@ export function createHMRBoundary(id: string): {
 export function clearHMRState(): void {
   hmrStateStore.clear();
   hmrRegistry.clear();
+  hmrStoreOverflowWarned = false;
+}
+
+/**
+ * Register HMR helpers under `__SIBU__.hmr` so devtools panels can reach them.
+ * Call this explicitly from your app bootstrap when you want the exposure —
+ * nothing is attached by default, matching initDevTools({ expose: true }).
+ */
+export function exposeHMR(): void {
+  const g = globalThis as unknown as {
+    __SIBU__?: { version: string; hmr?: unknown };
+  };
+  if (!g.__SIBU__) g.__SIBU__ = { version: "1.0.0" };
+  g.__SIBU__.hmr = {
+    hmrState,
+    registerHMR,
+    createHMRBoundary,
+    clearHMRState,
+    clearHMRModule,
+    isHMRAvailable,
+  };
 }
 
 /**

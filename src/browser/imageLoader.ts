@@ -1,3 +1,4 @@
+import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 
 export interface ImageLoaderState {
@@ -74,16 +75,24 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
     img.src = url;
   }
 
+  let srcEffectTeardown: (() => void) | null = null;
   if (typeof src === "function") {
-    // Reactive src — we don't pull in `effect` to keep this module browser-only
-    // and cheap. Callers that want reactive src should wrap in an effect.
-    start(src());
+    // Re-run when the reactive src changes; abandons the prior in-flight load
+    // via the `current !== img` guard inside start().
+    srcEffectTeardown = effect(() => {
+      const url = (src as () => string)();
+      start(url);
+    });
   } else {
     start(src);
   }
 
   function dispose() {
     disposed = true;
+    if (srcEffectTeardown) {
+      srcEffectTeardown();
+      srcEffectTeardown = null;
+    }
     if (current) {
       current.onload = null;
       current.onerror = null;

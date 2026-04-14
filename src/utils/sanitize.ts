@@ -12,17 +12,18 @@ export function sanitize(value: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
+// Allowlist of safe URL protocols. Anything else (including javascript:,
+// data:, vbscript:, blob:, file:, etc.) is rejected.
+const SAFE_URL_PROTOCOLS = ["http:", "https:", "mailto:", "tel:", "ftp:"];
+
 /**
- * Sanitizes a URL to prevent javascript: and data: protocol injection.
- * Allows http, https, mailto, tel, and relative URLs.
+ * Sanitizes a URL using a protocol allowlist. Accepts http:, https:,
+ * mailto:, tel:, ftp:, and relative URLs. All other protocols are rejected.
  *
  * @param url URL string to sanitize
  * @returns The URL if safe, or empty string if dangerous
  */
 export function sanitizeUrl(url: string): string {
-  // Strip ASCII control characters (C0 controls, 0x00-0x1F) that browsers
-  // may silently ignore, which could bypass protocol checks.
-  // E.g. "\x01javascript:alert(1)" would skip startsWith("javascript:").
   // Strip C0/C1 control characters and Unicode whitespace that browsers
   // may silently ignore, which could bypass protocol checks.
   // E.g. "\x01javascript:alert(1)" or "java\tscript:alert(1)"
@@ -30,18 +31,49 @@ export function sanitizeUrl(url: string): string {
   const trimmed = url.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
   if (!trimmed) return "";
 
-  // Block dangerous protocols
+  // Detect an explicit scheme: the first ":" before any "/", "?", or "#".
+  // If there's no scheme, treat as relative URL (safe).
   const lower = trimmed.toLowerCase();
-  if (
-    lower.startsWith("javascript:") ||
-    lower.startsWith("data:") ||
-    lower.startsWith("vbscript:") ||
-    lower.startsWith("blob:")
-  ) {
-    return "";
+  let schemeEnd = -1;
+  for (let i = 0; i < lower.length; i++) {
+    const ch = lower.charCodeAt(i);
+    if (ch === 58 /* : */) {
+      schemeEnd = i;
+      break;
+    }
+    // Stop if we hit a path/query/fragment separator — it's a relative URL.
+    if (ch === 47 /* / */ || ch === 63 /* ? */ || ch === 35 /* # */) break;
   }
 
+  if (schemeEnd === -1) return trimmed; // relative URL
+
+  const scheme = lower.slice(0, schemeEnd + 1);
+  // Only chars [a-z0-9+.-] are valid scheme characters; anything else means
+  // the ":" is part of a path/fragment, not a scheme.
+  if (!/^[a-z][a-z0-9+.-]*:$/.test(scheme)) return trimmed;
+
+  if (SAFE_URL_PROTOCOLS.indexOf(scheme) === -1) return "";
   return trimmed;
+}
+
+/**
+ * Sanitizes a srcset attribute value by splitting on commas, running each
+ * URL through sanitizeUrl, and re-joining. Invalid candidates are dropped.
+ */
+export function sanitizeSrcset(value: string): string {
+  const parts = value.split(",");
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+    if (!part) continue;
+    // Candidate = URL [descriptor]. Split on first whitespace run.
+    const m = part.match(/^(\S+)(\s+.+)?$/);
+    if (!m) continue;
+    const safe = sanitizeUrl(m[1]);
+    if (!safe) continue;
+    out.push(m[2] ? `${safe}${m[2]}` : safe);
+  }
+  return out.join(", ");
 }
 
 /**
@@ -52,12 +84,28 @@ export function sanitizeUrl(url: string): string {
  * @returns The sanitized value, or empty string if dangerous
  */
 export function sanitizeCSSValue(value: string): string {
-  const lower = value.toLowerCase().replace(/\s+/g, "");
+  // Decode CSS escapes (\xx hex and \uXXXX) so attackers can't bypass checks
+  // via e.g. "ex\\70 ression(...)" or "\\75 rl(...)".
+  const decoded = value.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex) => {
+    const code = Number.parseInt(hex, 16);
+    if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return "";
+    try {
+      return String.fromCodePoint(code);
+    } catch {
+      return "";
+    }
+  });
+  const lower = decoded.toLowerCase().replace(/\s+/g, "");
   if (
     lower.includes("url(") ||
     lower.includes("expression(") ||
     lower.includes("javascript:") ||
-    lower.includes("-moz-binding")
+    lower.includes("vbscript:") ||
+    lower.includes("-moz-binding") ||
+    lower.includes("behavior:") ||
+    lower.includes("@import") ||
+    lower.includes("image-set(") ||
+    lower.includes("filter:progid")
   ) {
     return "";
   }
@@ -112,8 +160,24 @@ const SAFE_ATTRIBUTES = new Set([
   "data-*",
 ]);
 
-// Attributes that hold URLs and need URL sanitization
-const URL_ATTRIBUTES = new Set(["href", "src", "action", "formaction", "cite", "poster", "background", "srcset"]);
+// Attributes that hold URLs and need URL sanitization.
+// `xlink:href` is a legacy SVG alias for `href` and has historically been a
+// javascript: vector on `<a>` / `<use>`. `formtarget` / `ping` / `data`
+// (on `<object>`) are additional URL sinks enumerated by the HTML spec.
+const URL_ATTRIBUTES = new Set([
+  "href",
+  "xlink:href",
+  "src",
+  "action",
+  "formaction",
+  "formtarget",
+  "cite",
+  "poster",
+  "background",
+  "srcset",
+  "ping",
+  "data",
+]);
 
 /**
  * Checks if an attribute name is safe to set without sanitization.

@@ -79,13 +79,7 @@ export function createMicroApp(config: MicroAppConfig): MicroApp {
 
   function mount(component: () => HTMLElement): void {
     // Clear any previous content
-    if (root instanceof ShadowRoot) {
-      root.innerHTML = "";
-    } else {
-      while (root.firstChild) {
-        root.removeChild(root.firstChild);
-      }
-    }
+    root.replaceChildren();
 
     const el = component();
     root.appendChild(el);
@@ -94,14 +88,7 @@ export function createMicroApp(config: MicroAppConfig): MicroApp {
 
   function unmount(): void {
     if (!mounted) return;
-
-    if (root instanceof ShadowRoot) {
-      root.innerHTML = "";
-    } else {
-      while (root.firstChild) {
-        root.removeChild(root.firstChild);
-      }
-    }
+    root.replaceChildren();
     mounted = false;
   }
 
@@ -124,7 +111,42 @@ export function createMicroApp(config: MicroAppConfig): MicroApp {
  * const el = charts.BarChart({ data: [1, 2, 3] });
  * ```
  */
-export function loadRemoteModule(url: string): Promise<unknown> {
+export interface LoadRemoteModuleOptions {
+  allowedOrigins?: string[];
+  /** Required when allowedOrigins is empty. Forces a deliberate decision
+   *  to import code from any URL — equivalent to remote eval (CWE-829). */
+  unsafelyAllowAnyOrigin?: boolean;
+}
+
+export function loadRemoteModule(
+  url: string,
+  optionsOrAllowedOrigins: string[] | LoadRemoteModuleOptions = [],
+): Promise<unknown> {
+  const opts: LoadRemoteModuleOptions = Array.isArray(optionsOrAllowedOrigins)
+    ? { allowedOrigins: optionsOrAllowedOrigins }
+    : optionsOrAllowedOrigins;
+  const allowedOrigins = opts.allowedOrigins ?? [];
+
+  if (allowedOrigins.length > 0) {
+    let parsed: URL;
+    try {
+      parsed = new URL(url, typeof location !== "undefined" ? location.href : undefined);
+    } catch {
+      return Promise.reject(new Error(`loadRemoteModule: invalid URL "${url}"`));
+    }
+    if (!allowedOrigins.includes(parsed.origin)) {
+      return Promise.reject(new Error(`loadRemoteModule: origin "${parsed.origin}" is not in the allowlist`));
+    }
+  } else if (!opts.unsafelyAllowAnyOrigin) {
+    return Promise.reject(
+      new Error(
+        `loadRemoteModule: refused to import "${url}" with no allowedOrigins. ` +
+          "Pass { allowedOrigins: [...] } to restrict the origin, or " +
+          "{ unsafelyAllowAnyOrigin: true } to opt in to unrestricted imports (CWE-829).",
+      ),
+    );
+  }
+
   const cached = moduleCache.get(url);
   if (cached) return cached;
 

@@ -1,5 +1,8 @@
 import { derived } from "../core/signals/derived";
+import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+
+const boundDatePickers = new WeakMap<HTMLElement, () => void>();
 
 export interface DatePickerOptions {
   initialDate?: Date;
@@ -25,6 +28,9 @@ export function datePicker(options?: DatePickerOptions): {
   }>;
   isDateDisabled: (date: Date) => boolean;
   isSelected: (date: Date) => boolean;
+  /** WAI-ARIA Date Picker dialog grid wiring: `role=grid`, arrow nav,
+   *  PageUp/Down (month), Shift+PageUp/Down (year), Home/End. */
+  bind: (els: { grid: HTMLElement; cell: (date: Date) => HTMLElement | null }) => () => void;
 } {
   const minDate = options?.minDate;
   const maxDate = options?.maxDate;
@@ -54,36 +60,26 @@ export function datePicker(options?: DatePickerOptions): {
     }
   }
 
+  // Use day=1 anchor before shifting month/year so .setMonth/.setFullYear
+  // never overflow into the following month (e.g. Jan 31 → Feb → Mar 3).
+  function shiftMonth(prev: Date, delta: number): Date {
+    return new Date(prev.getFullYear(), prev.getMonth() + delta, 1);
+  }
+
   function nextMonth(): void {
-    setViewDate((prev) => {
-      const next = new Date(prev);
-      next.setMonth(next.getMonth() + 1);
-      return next;
-    });
+    setViewDate((prev) => shiftMonth(prev, 1));
   }
 
   function prevMonth(): void {
-    setViewDate((prev) => {
-      const next = new Date(prev);
-      next.setMonth(next.getMonth() - 1);
-      return next;
-    });
+    setViewDate((prev) => shiftMonth(prev, -1));
   }
 
   function nextYear(): void {
-    setViewDate((prev) => {
-      const next = new Date(prev);
-      next.setFullYear(next.getFullYear() + 1);
-      return next;
-    });
+    setViewDate((prev) => new Date(prev.getFullYear() + 1, prev.getMonth(), 1));
   }
 
   function prevYear(): void {
-    setViewDate((prev) => {
-      const next = new Date(prev);
-      next.setFullYear(next.getFullYear() - 1);
-      return next;
-    });
+    setViewDate((prev) => new Date(prev.getFullYear() - 1, prev.getMonth(), 1));
   }
 
   const daysInMonth = derived(() => {
@@ -172,5 +168,92 @@ export function datePicker(options?: DatePickerOptions): {
     isDateDisabled,
     /** Reactive check — use inside class bindings for per-day reactivity */
     isSelected,
+    bind,
   };
+
+  function bind(els: { grid: HTMLElement; cell: (date: Date) => HTMLElement | null }): () => void {
+    const existing = boundDatePickers.get(els.grid);
+    if (existing) return existing;
+
+    els.grid.setAttribute("role", "grid");
+    if (els.grid.tabIndex < 0) els.grid.tabIndex = 0;
+
+    const fxTeardown = effect(() => {
+      const sel = selectedDate();
+      const view = viewDate();
+      const days = daysInMonth();
+      for (const d of days) {
+        const cell = els.cell(d.date);
+        if (!cell) continue;
+        cell.setAttribute("role", "gridcell");
+        cell.setAttribute("aria-selected", sel && isSameCalendarDay(sel, d.date) ? "true" : "false");
+        if (d.isDisabled) cell.setAttribute("aria-disabled", "true");
+        else cell.removeAttribute("aria-disabled");
+        // Roving tabindex on focused-day (view date) cell.
+        cell.tabIndex = isSameCalendarDay(view, d.date) ? 0 : -1;
+      }
+    });
+
+    function isSameCalendarDay(a: Date, b: Date): boolean {
+      return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    }
+
+    function shiftDays(delta: number): void {
+      setViewDate((prev) => new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + delta));
+    }
+
+    const onKey = (e: KeyboardEvent) => {
+      switch (e.key) {
+        case "ArrowLeft":
+          e.preventDefault();
+          shiftDays(-1);
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          shiftDays(1);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          shiftDays(-7);
+          break;
+        case "ArrowDown":
+          e.preventDefault();
+          shiftDays(7);
+          break;
+        case "Home":
+          e.preventDefault();
+          setViewDate((p) => new Date(p.getFullYear(), p.getMonth(), p.getDate() - p.getDay()));
+          break;
+        case "End": {
+          e.preventDefault();
+          setViewDate((p) => new Date(p.getFullYear(), p.getMonth(), p.getDate() + (6 - p.getDay())));
+          break;
+        }
+        case "PageUp":
+          e.preventDefault();
+          if (e.shiftKey) prevYear();
+          else prevMonth();
+          break;
+        case "PageDown":
+          e.preventDefault();
+          if (e.shiftKey) nextYear();
+          else nextMonth();
+          break;
+        case "Enter":
+        case " ":
+          e.preventDefault();
+          select(viewDate());
+          break;
+      }
+    };
+    els.grid.addEventListener("keydown", onKey);
+
+    const teardown = () => {
+      boundDatePickers.delete(els.grid);
+      fxTeardown();
+      els.grid.removeEventListener("keydown", onKey);
+    };
+    boundDatePickers.set(els.grid, teardown);
+    return teardown;
+  }
 }

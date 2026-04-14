@@ -21,6 +21,7 @@ export function intersection(options?: IntersectionObserverInit): IntersectionRe
   let currentElement: HTMLElement | null = null;
 
   function observe(element: HTMLElement): void {
+    if (typeof IntersectionObserver === "undefined") return;
     unobserve();
     currentElement = element;
 
@@ -57,6 +58,10 @@ export function intersection(options?: IntersectionObserverInit): IntersectionRe
  * Calls the loader function when element becomes visible.
  */
 export function lazyLoad(element: HTMLElement, loader: () => void, options?: IntersectionObserverInit): () => void {
+  if (typeof IntersectionObserver === "undefined") {
+    loader();
+    return () => {};
+  }
   const observer = new IntersectionObserver((entries) => {
     for (const entry of entries) {
       if (entry.isIntersecting) {

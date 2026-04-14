@@ -1,5 +1,6 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
+import { batch } from "../reactivity/batch";
 
 // ============================================================================
 // TIME-TRAVEL DEBUGGING
@@ -42,15 +43,19 @@ export function timeline<T>(initial: T, maxHistory = 100): TimeTravelReturn<T> {
     const newHistory = hist.slice(0, idx + 1);
     newHistory.push(newValue);
 
-    // Trim if exceeds max
-    if (newHistory.length > maxHistory) {
-      newHistory.shift();
-      setHistory(newHistory);
-      setIndex(newHistory.length - 1);
-    } else {
-      setHistory(newHistory);
-      setIndex(idx + 1);
-    }
+    // Trim if exceeds max. Wrap in batch() so history + index update
+    // atomically — otherwise derived(value) can observe a transient state
+    // where index points past the array.
+    batch(() => {
+      if (newHistory.length > maxHistory) {
+        newHistory.shift();
+        setHistory(newHistory);
+        setIndex(newHistory.length - 1);
+      } else {
+        setHistory(newHistory);
+        setIndex(idx + 1);
+      }
+    });
   }
 
   function undo(): void {
@@ -66,8 +71,10 @@ export function timeline<T>(initial: T, maxHistory = 100): TimeTravelReturn<T> {
   }
 
   function reset(): void {
-    setHistory([initial]);
-    setIndex(0);
+    batch(() => {
+      setHistory([initial]);
+      setIndex(0);
+    });
   }
 
   function jumpTo(targetIndex: number): void {

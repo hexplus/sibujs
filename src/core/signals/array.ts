@@ -192,7 +192,8 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
   function get(): readonly T[] {
     recordDependency(signal);
     if (snapshot === null) {
-      snapshot = Object.freeze([...data]);
+      const copy = data.slice();
+      snapshot = Object.freeze(copy);
     }
     return snapshot;
   }

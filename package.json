@@ -1,6 +1,6 @@
 {
   "name": "sibujs",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "description": "A lightweight, function-based frontend framework that combines the best of React, Svelte, and Vue — with zero VDOM and maximum simplicity. Designed for developers who want fine-grained reactivity and full control without compilation or magic.",
   "keywords": [
     "frontend",
@@ -33,7 +33,7 @@
     "format": "biome format --write src/ tests/",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist && tsup cdn.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
+    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup cdn.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
     "bench": "node bench.mjs",
     "bench:save": "node bench.mjs --save",
     "bench:check": "node bench.mjs --compare",
@@ -116,7 +116,14 @@
       "types": "./dist/extras.d.ts",
       "import": "./dist/extras.js",
       "require": "./dist/extras.cjs"
+    },
+    "./cdn": {
+      "default": "./dist/cdn.global.js"
     }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "browserslist": [
     "Chrome >= 80",
