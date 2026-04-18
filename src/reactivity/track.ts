@@ -124,7 +124,7 @@ function pruneStaleDeps(sub: any, currentEpoch: number): void {
     if (sub._depEpoch !== currentEpoch) {
       const sig = sub._dep as SignalWithCache;
       const subs = sig[SUBS];
-      if (subs && subs.delete(sub)) syncFastPath(sig, subs);
+      if (subs?.delete(sub)) syncFastPath(sig, subs);
       sub._dep = undefined;
       sub._depEpoch = undefined;
     }
@@ -148,7 +148,7 @@ function pruneStaleDeps(sub: any, currentEpoch: number): void {
     deps.delete(signal);
     const sig = signal as SignalWithCache;
     const subs = sig[SUBS];
-    if (subs && subs.delete(sub)) syncFastPath(sig, subs);
+    if (subs?.delete(sub)) syncFastPath(sig, subs);
   }
 }
 
@@ -608,7 +608,7 @@ function cleanup(subscriber: Subscriber) {
   if (singleDep !== undefined) {
     const sig = singleDep as SignalWithCache;
     const subs = sig[SUBS];
-    if (subs && subs.delete(subscriber)) {
+    if (subs?.delete(subscriber)) {
       syncFastPath(sig, subs);
     }
     sub._dep = undefined;
@@ -623,7 +623,7 @@ function cleanup(subscriber: Subscriber) {
   for (const signal of deps.keys()) {
     const sig = signal as SignalWithCache;
     const subs = sig[SUBS];
-    if (subs && subs.delete(subscriber)) {
+    if (subs?.delete(subscriber)) {
       syncFastPath(sig, subs);
     }
   }
