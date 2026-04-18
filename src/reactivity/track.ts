@@ -6,9 +6,13 @@ type Subscriber = () => void;
 // Cache dev mode at module load for zero-cost production checks
 const _isDev = isDev();
 
-// Stack to support nested subscribers — pre-allocated with index for O(1) push/pop
-const subscriberStack: (Subscriber | null)[] = new Array(32);
-let stackCapacity = 32;
+// Stack to support nested subscribers — pre-allocated with index for O(1) push/pop.
+// Grows by doubling on overflow; lazily shrinks at end-of-track() when idle so a
+// one-off spike in nesting depth doesn't permanently retain the memory.
+const STACK_INITIAL = 32;
+const STACK_SHRINK_THRESHOLD = 128; // only attempt shrink when capacity exceeds this
+const subscriberStack: (Subscriber | null)[] = new Array(STACK_INITIAL);
+let stackCapacity = STACK_INITIAL;
 let stackTop = -1;
 let currentSubscriber: Subscriber | null = null;
 
@@ -19,7 +23,30 @@ let currentSubscriber: Subscriber | null = null;
 // for O(1) property access during notification (avoids WeakMap hash lookup).
 // The cached Set is the SAME object stored in signalSubscribers.
 const SUBS = "__s" as const;
-type SignalWithCache = ReactiveSignal & { [SUBS]?: Set<Subscriber> };
+type SignalWithCache = ReactiveSignal & { [SUBS]?: Set<Subscriber>; __f?: Subscriber };
+
+// ---------------------------------------------------------------------------
+// Fast-path (__f / __s) invariant — maintained by syncFastPath() below:
+//
+//   subs.size === 0  →  __f = undefined, __s deleted (zero-allocation signal)
+//   subs.size === 1  →  __f = the single subscriber
+//   subs.size >= 2   →  __f = undefined
+//
+// All add/remove operations must call syncFastPath() after mutating the set
+// so no code path leaves these out of sync. Inlined in the hot paths for
+// zero-overhead: the function itself exists for correctness & readability.
+// ---------------------------------------------------------------------------
+function syncFastPath(signal: SignalWithCache, subs: Set<Subscriber>): void {
+  const size = subs.size;
+  if (size === 0) {
+    signal.__f = undefined;
+    delete signal[SUBS];
+  } else if (size === 1) {
+    signal.__f = subs.values().next().value;
+  } else {
+    signal.__f = undefined;
+  }
+}
 
 // Notification queue for cascading propagation with deduplication.
 let notifyDepth = 0;
@@ -47,24 +74,81 @@ function safeInvoke(sub: Subscriber): void {
 let suspendDepth = 0;
 export let trackingSuspended = false;
 
+// ---------------------------------------------------------------------------
+// Subscriber epoch counter for retrack-based stale-dep pruning.
+//
+// Each call to `retrack()` bumps this counter and stamps the subscriber's
+// `_epoch` with the new value. recordDependency() tags each accessed dep
+// with the subscriber's current epoch. At end of retrack(), any dep whose
+// tagged epoch is not the current one was NOT read during this evaluation
+// and is therefore stale — we unsubscribe it and remove the edge.
+//
+// This closes the stale-dep leak that otherwise accumulates on derived
+// getters with conditional branches (e.g. `() => flag() ? a() : b()`):
+// without pruning, both `a` and `b` stay subscribed forever even though
+// only one is read per evaluation, causing unnecessary re-evaluations.
+// ---------------------------------------------------------------------------
+let subscriberEpochCounter = 0;
+
 /**
- * Re-run a subscriber body WITHOUT cleanup. New deps naturally subscribe via
- * recordDependency; previously-subscribed deps stay subscribed (accepting
- * mild over-subscription on conditional getters — same model as Vue/MobX/
- * Preact Signals).
+ * Re-run a subscriber body. Stale deps (present before but not re-read
+ * during this run) are pruned at end via epoch comparison — fixes the
+ * conditional-derived over-subscription problem without paying the
+ * full Set.delete + re-subscribe cost of `track()`'s cleanup phase.
  *
- * Used by `derived` on every pull. Skips the O(N) Set.delete + Set.add
- * cycle per dep that `track()`'s cleanup phase incurs, AND uses a simple
- * save/restore of `currentSubscriber` instead of the stackTop push/pop —
- * measurably faster on deep chains where this function runs per-level.
+ * Used by `derived` on every pull. Uses a simple save/restore of
+ * `currentSubscriber` instead of the stackTop push/pop — measurably
+ * faster on deep chains where this function runs per-level.
  */
 export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   const prev = currentSubscriber;
   currentSubscriber = subscriber;
+  const sub = subscriber as any;
+  const epoch = ++subscriberEpochCounter;
+  sub._epoch = epoch;
   try {
     effectFn();
   } finally {
     currentSubscriber = prev;
+    pruneStaleDeps(sub, epoch);
+  }
+}
+
+/**
+ * Unsubscribe from any deps recorded with an epoch other than `currentEpoch`
+ * (i.e. deps that were not re-read during the most recent retrack).
+ */
+function pruneStaleDeps(sub: any, currentEpoch: number): void {
+  // Single-dep fast path
+  if (sub._dep !== undefined) {
+    if (sub._depEpoch !== currentEpoch) {
+      const sig = sub._dep as SignalWithCache;
+      const subs = sig[SUBS];
+      if (subs?.delete(sub)) syncFastPath(sig, subs);
+      sub._dep = undefined;
+      sub._depEpoch = undefined;
+    }
+    return;
+  }
+
+  // Multi-dep path — _deps is Map<signal, epoch>
+  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
+  if (!deps || deps.size === 0) return;
+
+  // Collect stales in one pass, mutate in a second — avoids iterating a Map
+  // while deleting entries on most engines.
+  let stales: ReactiveSignal[] | undefined;
+  for (const [signal, epoch] of deps) {
+    if (epoch !== currentEpoch) {
+      (stales ??= []).push(signal);
+    }
+  }
+  if (!stales) return;
+  for (const signal of stales) {
+    deps.delete(signal);
+    const sig = signal as SignalWithCache;
+    const subs = sig[SUBS];
+    if (subs?.delete(sub)) syncFastPath(sig, subs);
   }
 }
 
@@ -89,6 +173,14 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
   } finally {
     stackTop--;
     currentSubscriber = stackTop >= 0 ? subscriberStack[stackTop] : null;
+    // Lazy shrink: if the stack is idle and grew well beyond typical usage,
+    // halve the underlying array so a transient deep-nesting spike doesn't
+    // retain memory for the process lifetime. One extra branch on the cold
+    // exit path; no effect on the hot path.
+    if (stackTop < 0 && stackCapacity > STACK_SHRINK_THRESHOLD) {
+      stackCapacity = Math.max(STACK_INITIAL, stackCapacity >>> 1);
+      subscriberStack.length = stackCapacity;
+    }
   }
 
   return () => cleanup(subscriber);
@@ -143,45 +235,66 @@ export function untracked<T>(fn: () => T): T {
  * Record that the current subscriber depends on this signal.
  *
  * Fast path: for the first dependency of a subscriber, stores the signal
- * directly as _dep (avoiding Set allocation). Promotes to _deps Set only
+ * directly as _dep (avoiding Map allocation). Promotes to _deps Map only
  * when a second dependency is recorded. Most effects/computeds have 1-3 deps,
- * so the single-dep fast path eliminates Set overhead in the common case.
+ * so the single-dep fast path eliminates Map overhead in the common case.
+ *
+ * Every edge is tagged with the subscriber's current `_epoch` so that
+ * `retrack()` can identify and prune stale deps at end of evaluation.
+ * Subscribers that only ever flow through `track()` (effects) don't set
+ * _epoch; the epoch field is then `undefined` and harmlessly unused.
  */
 export function recordDependency(signal: ReactiveSignal) {
   if (!currentSubscriber) return;
 
   const sub = currentSubscriber as any;
+  const epoch = sub._epoch;
 
-  // Fast path: check single-dep slot first
-  if (sub._dep === signal) return;
-
-  const deps: Set<ReactiveSignal> | undefined = sub._deps;
-  if (deps) {
-    if (deps.has(signal)) return;
-    deps.add(signal);
-  } else if (sub._dep !== undefined) {
-    // Promote single-dep to Set
-    const set = new Set<ReactiveSignal>();
-    set.add(sub._dep);
-    set.add(signal);
-    sub._deps = set;
-    sub._dep = undefined;
-  } else {
-    // First dep — store directly, no Set allocation
-    sub._dep = signal;
+  // Fast path: check single-dep slot first. Still refresh epoch so
+  // pruneStaleDeps sees this dep as "live" during retrack.
+  if (sub._dep === signal) {
+    sub._depEpoch = epoch;
+    return;
   }
 
-  // Register subscriber on the signal
-  let subs = (signal as SignalWithCache)[SUBS];
+  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
+  if (deps) {
+    // Map.set both adds new edges and refreshes the epoch on existing ones.
+    // The subs.add() call below is idempotent, so it's safe to run
+    // unconditionally — Set.add is fast enough that the "already subscribed"
+    // short-circuit isn't worth the branch.
+    deps.set(signal, epoch);
+  } else if (sub._dep !== undefined) {
+    // Promote single-dep to Map (carry forward the existing epoch).
+    const map = new Map<ReactiveSignal, number>();
+    map.set(sub._dep, sub._depEpoch);
+    map.set(signal, epoch);
+    sub._deps = map;
+    sub._dep = undefined;
+    sub._depEpoch = undefined;
+  } else {
+    // First dep — store directly, no Map allocation
+    sub._dep = signal;
+    sub._depEpoch = epoch;
+  }
+
+  // Register subscriber on the signal. subs.add() is idempotent: if the
+  // subscriber was already subscribed (stable dep during retrack), size
+  // won't change and syncFastPath stays a no-op.
+  const sig = signal as SignalWithCache;
+  let subs = sig[SUBS];
   if (!subs) {
     subs = new Set();
-    (signal as SignalWithCache)[SUBS] = subs;
+    sig[SUBS] = subs;
   }
+  const prevSize = subs.size;
   subs.add(currentSubscriber);
-  if (subs.size === 1) {
-    (signal as any).__f = currentSubscriber;
-  } else if ((signal as any).__f !== undefined) {
-    (signal as any).__f = undefined;
+  if (subs.size !== prevSize) {
+    if (subs.size === 1) {
+      sig.__f = currentSubscriber;
+    } else if (sig.__f !== undefined) {
+      sig.__f = undefined;
+    }
   }
 }
 
@@ -204,39 +317,107 @@ export function queueSignalNotification(signal: ReactiveSignal): void {
 }
 
 /**
- * Process all pending subscriber notifications.
+ * Cycle detection during notification drain.
  *
- * The drain cap prevents infinite cycles (effect A writes to signal that
- * triggers effect A again forever). Apps with very large legitimate fan-out
- * (e.g. >100k effects in a single batch) can raise it via `setMaxDrainIterations`.
+ * We no longer cap the total drain iterations (which conflates large
+ * legitimate fan-out with real cycles). Instead, we count how many times
+ * each individual subscriber has fired during the current drain. If any
+ * single subscriber fires more than `maxSubscriberRepeats` times, that is
+ * a near-certain sign of a write-reads-self cycle — bail loudly.
+ *
+ * Counts live on the subscriber itself (`_runs`, `_runEpoch`), reset lazily
+ * via an epoch counter to avoid walking all subscribers at end-of-drain.
+ *
+ * `maxDrainIterations` is kept as an absolute belt-and-braces safety net;
+ * it is sized high enough that legitimate apps (100k+ subscribers) never
+ * hit it, while still preventing a runaway process from eating all memory.
  */
-let maxDrainIterations = 100000;
+let maxSubscriberRepeats = 50;
+let maxDrainIterations = 1_000_000;
+let drainEpoch = 0;
 
-/** Raise/lower the per-batch drain iteration cap. Returns previous value. */
+/** Raise/lower the per-subscriber repeat cap. Returns previous value. */
+export function setMaxSubscriberRepeats(n: number): number {
+  const prev = maxSubscriberRepeats;
+  if (Number.isFinite(n) && n > 0) maxSubscriberRepeats = Math.floor(n);
+  return prev;
+}
+
+/** Raise/lower the absolute drain iteration safety net. Returns previous value. */
 export function setMaxDrainIterations(n: number): number {
   const prev = maxDrainIterations;
   if (Number.isFinite(n) && n > 0) maxDrainIterations = Math.floor(n);
   return prev;
 }
 
+/**
+ * Record one invocation of `sub` in the current drain and return true iff
+ * it has just exceeded the per-subscriber repeat cap (indicating a cycle).
+ */
+function tickRepeat(sub: Subscriber): boolean {
+  const s = sub as any;
+  if (s._runEpoch !== drainEpoch) {
+    s._runEpoch = drainEpoch;
+    s._runs = 1;
+    return false;
+  }
+  return ++s._runs > maxSubscriberRepeats;
+}
+
+function cycleError(sub: Subscriber): void {
+  if (typeof console !== "undefined") {
+    const name = (sub as any).__name ?? "<unnamed>";
+    console.error(
+      `[SibuJS] subscriber "${name}" fired more than ${maxSubscriberRepeats} times — ` +
+        "likely a write-reads-self cycle between effects/signals. Breaking to prevent infinite loop.",
+    );
+  }
+}
+
+function absoluteDrainError(): void {
+  if (typeof console !== "undefined") {
+    console.error(
+      `[SibuJS] Notification drain exceeded ${maxDrainIterations} iterations — ` +
+        "absolute safety net tripped. Breaking to prevent infinite loop.",
+    );
+  }
+}
+
+/**
+ * Process pending subscriber notifications until the queue is empty.
+ *
+ * Convergence model:
+ *   - A subscriber is removed from `pendingSet` immediately before invocation,
+ *     so any cascading write during its execution can re-enqueue it. This
+ *     allows sibling effects to converge on a consistent state when one
+ *     effect writes a signal another effect reads.
+ *   - `tickRepeat` bounds convergence: if a single subscriber fires more
+ *     than `maxSubscriberRepeats` times, we bail — that's a true cycle.
+ *   - `maxDrainIterations` is an absolute safety net for legitimate fan-out.
+ */
+function drainQueue(): void {
+  let i = 0;
+  while (i < pendingQueue.length) {
+    if (i >= maxDrainIterations) {
+      absoluteDrainError();
+      break;
+    }
+    const sub = pendingQueue[i++];
+    if (tickRepeat(sub)) {
+      cycleError(sub);
+      break;
+    }
+    pendingSet.delete(sub);
+    safeInvoke(sub);
+  }
+}
+
 export function drainNotificationQueue(): void {
   if (notifyDepth > 0) return;
   notifyDepth++;
+  drainEpoch++;
   try {
-    let i = 0;
-    while (i < pendingQueue.length) {
-      if (i >= maxDrainIterations) {
-        if (typeof console !== "undefined") {
-          console.error(
-            `[SibuJS] Notification queue exceeded ${maxDrainIterations} iterations — ` +
-              "likely an effect that writes to a signal it reads. Breaking to prevent infinite loop.",
-          );
-        }
-        break;
-      }
-      safeInvoke(pendingQueue[i]);
-      i++;
-    }
+    drainQueue();
   } finally {
     notifyDepth--;
     if (notifyDepth === 0) {
@@ -317,15 +498,22 @@ function propagateDirty(sub: () => void): void {
 /**
  * Notify all subscribers of a given signal change.
  *
- * Two-pass outermost notification:
- *   Pass 1: Computed subscribers run first for dirty propagation (iterative).
- *           Effect subscribers discovered via cascading are queued with dedup.
- *   Pass 2: Direct effect subscribers run, skipping those already queued
- *           by cascading (fixes diamond double-execution).
- *   Pass 3: Drain any remaining cascading effects.
+ * Unified model:
+ *   - For outermost notifications: enqueue all effect subs, propagate dirty
+ *     through computed subs, then drain the queue. A subscriber is
+ *     re-eligible for enqueue once it has begun executing (pendingSet is
+ *     cleared of it before invoke), so sibling effects converge when one
+ *     effect's write dirties a signal another effect reads.
+ *   - Cycles bound: per-subscriber repeat counting (tickRepeat) stops
+ *     runaway write-reads-self loops loudly rather than silently.
+ *   - Single-subscriber fast path: when there is exactly one subscriber,
+ *     inline invocation is safe — there is no sibling that could observe
+ *     an intermediate state — and avoids queue allocation overhead.
  *
- * This avoids adding ALL subscribers to pendingSet upfront (which would add
- * overhead to the common flat fan-out case with 10K+ effects).
+ * This replaces an older 3-pass structure whose fast/slow paths diverged
+ * on whether effects could re-run during cascade: the fast path allowed it
+ * (eventually consistent), the slow path did not (single-run-maybe-stale).
+ * Unification makes both paths eventually consistent.
  */
 export function notifySubscribers(signal: ReactiveSignal) {
   // Fast path: single subscriber (avoids Set iteration entirely)
@@ -341,27 +529,16 @@ export function notifySubscribers(signal: ReactiveSignal) {
       return;
     }
     notifyDepth++;
+    drainEpoch++;
     try {
       if (first._c) {
         propagateDirty(first);
+      } else if (tickRepeat(first)) {
+        cycleError(first);
       } else {
         safeInvoke(first);
       }
-      // Drain cascading effects
-      let i = 0;
-      while (i < pendingQueue.length) {
-        if (i >= maxDrainIterations) {
-          if (typeof console !== "undefined") {
-            console.error(
-              `[SibuJS] Notification queue exceeded ${maxDrainIterations} iterations — ` +
-                "likely an effect that writes to a signal it reads. Breaking to prevent infinite loop.",
-            );
-          }
-          break;
-        }
-        safeInvoke(pendingQueue[i]);
-        i++;
-      }
+      drainQueue();
     } finally {
       notifyDepth--;
       if (notifyDepth === 0) {
@@ -388,59 +565,25 @@ export function notifySubscribers(signal: ReactiveSignal) {
     return;
   }
 
-  // Outermost notification
+  // Outermost multi-subscriber notification.
   notifyDepth++;
+  drainEpoch++;
   try {
-    // Snapshot direct subscribers, noting whether any are computed.
-    // If none are computed, skip Pass 1/2 machinery and invoke directly.
-    let directCount = 0;
-    let hasComputedSub = false;
+    // Single iteration over direct subs:
+    //   - computed subs → propagateDirty (marks downstream dirty, queues
+    //     downstream effects via the notifyDepth>0 cascade branch above)
+    //   - effect subs → enqueue with pendingSet dedup
+    // Iteration order matches Set insertion order, so effects run in
+    // subscription order during drain (modulo cascaded re-runs).
     for (const sub of subs) {
-      if ((sub as any)._c) hasComputedSub = true;
-      pendingQueue[directCount++] = sub;
-    }
-
-    if (!hasComputedSub) {
-      // Fast path: pure effect fan-out — invoke directly, no Pass 2 bookkeeping.
-      for (let i = 0; i < directCount; i++) {
-        safeInvoke(pendingQueue[i]);
-      }
-    } else {
-      // Pass 1: Run computed subscribers for dirty propagation (iterative)
-      for (let i = 0; i < directCount; i++) {
-        if ((pendingQueue[i] as any)._c) {
-          propagateDirty(pendingQueue[i]);
-        }
-      }
-
-      // Pass 2: Run direct effect subscribers, skip those already queued
-      // by cascading during Pass 1 (prevents diamond double-execution).
-      // Add sub to pendingSet BEFORE invoking so any re-entrant cascade
-      // cannot double-execute the same effect.
-      for (let i = 0; i < directCount; i++) {
-        const sub = pendingQueue[i];
-        if (!(sub as any)._c && !pendingSet.has(sub)) {
-          pendingSet.add(sub);
-          safeInvoke(sub);
-        }
+      if ((sub as any)._c) {
+        propagateDirty(sub);
+      } else if (!pendingSet.has(sub)) {
+        pendingSet.add(sub);
+        pendingQueue.push(sub);
       }
     }
-
-    // Pass 3: Drain cascading effects queued during propagation
-    let i = directCount;
-    while (i < pendingQueue.length) {
-      if (i - directCount >= maxDrainIterations) {
-        if (typeof console !== "undefined") {
-          console.error(
-            `[SibuJS] Notification queue exceeded ${maxDrainIterations} iterations — ` +
-              "likely an effect that writes to a signal it reads. Breaking to prevent infinite loop.",
-          );
-        }
-        break;
-      }
-      safeInvoke(pendingQueue[i]);
-      i++;
-    }
+    drainQueue();
   } finally {
     notifyDepth--;
     if (notifyDepth === 0) {
@@ -452,39 +595,36 @@ export function notifySubscribers(signal: ReactiveSignal) {
 
 /**
  * Remove a subscriber from all signal dependency lists.
+ *
+ * After each removal, syncFastPath() restores the __f / __s invariant:
+ * empty sets are cleared to release memory, and __f tracks the last
+ * remaining subscriber when size collapses back to 1.
  */
 function cleanup(subscriber: Subscriber) {
   const sub = subscriber as any;
 
-  // Fast path: single dependency (no Set to iterate)
+  // Fast path: single dependency (no Map to iterate)
   const singleDep: ReactiveSignal | undefined = sub._dep;
   if (singleDep !== undefined) {
-    const subs = (singleDep as SignalWithCache)[SUBS];
-    if (subs) {
-      subs.delete(subscriber);
-      if ((singleDep as any).__f === subscriber) {
-        (singleDep as any).__f = subs.size === 1 ? subs.values().next().value : undefined;
-      } else if (subs.size === 1 && (singleDep as any).__f === undefined) {
-        (singleDep as any).__f = subs.values().next().value;
-      }
+    const sig = singleDep as SignalWithCache;
+    const subs = sig[SUBS];
+    if (subs?.delete(subscriber)) {
+      syncFastPath(sig, subs);
     }
     sub._dep = undefined;
+    sub._depEpoch = undefined;
     return;
   }
 
-  // Multi-dep path
-  const deps: Set<ReactiveSignal> | undefined = sub._deps;
+  // Multi-dep path — _deps is Map<signal, epoch>
+  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
   if (!deps || deps.size === 0) return;
 
-  for (const signal of deps) {
-    const subs = (signal as SignalWithCache)[SUBS];
-    if (subs) {
-      subs.delete(subscriber);
-      if ((signal as any).__f === subscriber) {
-        (signal as any).__f = subs.size === 1 ? subs.values().next().value : undefined;
-      } else if (subs.size === 1 && (signal as any).__f === undefined) {
-        (signal as any).__f = subs.values().next().value;
-      }
+  for (const signal of deps.keys()) {
+    const sig = signal as SignalWithCache;
+    const subs = sig[SUBS];
+    if (subs?.delete(subscriber)) {
+      syncFastPath(sig, subs);
     }
   }
 

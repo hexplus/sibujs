@@ -116,38 +116,76 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
 
   let cleanupHandle: () => void = () => {};
   let running = false;
+  let rerunPending = false;
+
+  // Safety cap — if an effect keeps requesting re-runs, bail rather than
+  // loop forever. Matches the spirit of drainNotificationQueue's cap.
+  const MAX_RERUNS = 100;
 
   const subscriber = () => {
     if (running) {
-      // Effect wrote to a signal it depends on while still running. We
-      // can't re-enter without risking infinite recursion, so the update
-      // is dropped — surface it in dev so the developer can debug.
-      if (_g.__SIBU_DEV_WARN__ !== false && typeof console !== "undefined") {
-        console.warn(
-          "[SibuJS] effect re-entered itself while running — " +
-            "the triggering update will be ignored. Wrap mutual writes in `batch()` " +
-            "or split the effect to avoid this.",
-        );
-      }
+      // Effect wrote to a signal it depends on while still running.
+      // Instead of silently dropping the update (which leaves the effect's
+      // last-seen state out of sync with reality), flag a re-run request
+      // and run it after the current body finishes. This preserves the
+      // no-reentrant-recursion invariant while keeping state consistent.
+      rerunPending = true;
       return;
     }
     running = true;
     try {
-      // Run user onCleanup BEFORE cleanupHandle so user teardown observes
-      // the reactive state from the previous run (e.g. before subs are cut).
-      runUserCleanups();
-      cleanupHandle();
-      cleanupHandle = track(wrappedFn, subscriber);
+      let reruns = 0;
+      do {
+        rerunPending = false;
+        // Run user onCleanup BEFORE cleanupHandle so user teardown observes
+        // the reactive state from the previous run (e.g. before subs are cut).
+        runUserCleanups();
+        cleanupHandle();
+        cleanupHandle = track(wrappedFn, subscriber);
+        if (++reruns > MAX_RERUNS) {
+          if (_g.__SIBU_DEV_WARN__ !== false && typeof console !== "undefined") {
+            console.error(
+              `[SibuJS] effect re-requested itself ${MAX_RERUNS}+ times — ` +
+                "likely a write-reads-self cycle. Breaking to prevent infinite loop.",
+            );
+          }
+          rerunPending = false;
+          break;
+        }
+      } while (rerunPending);
     } finally {
       running = false;
+      rerunPending = false;
     }
   };
 
   running = true;
   try {
-    cleanupHandle = track(wrappedFn, subscriber);
+    let reruns = 0;
+    do {
+      rerunPending = false;
+      // On iterations > 1 we need to tear down the *previous* iteration's
+      // registrations before re-tracking, otherwise onCleanup callbacks
+      // accumulate across rerun passes and the prior track()'s
+      // subscriptions stay dangling until track()'s own cleanup() runs.
+      // No-ops on the first iteration (userCleanups empty, cleanupHandle noop).
+      runUserCleanups();
+      cleanupHandle();
+      cleanupHandle = track(wrappedFn, subscriber);
+      if (++reruns > MAX_RERUNS) {
+        if (_g.__SIBU_DEV_WARN__ !== false && typeof console !== "undefined") {
+          console.error(
+            `[SibuJS] effect re-requested itself ${MAX_RERUNS}+ times on initial run — ` +
+              "likely a write-reads-self cycle. Breaking to prevent infinite loop.",
+          );
+        }
+        rerunPending = false;
+        break;
+      }
+    } while (rerunPending);
   } finally {
     running = false;
+    rerunPending = false;
   }
 
   const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;

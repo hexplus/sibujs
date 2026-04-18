@@ -6,6 +6,42 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.1.0] — 2026-04-17
+
+Reactivity-core hardening release. Closes correctness gaps around effect re-entry, derived stale deps, sibling-effect consistency, and cycle detection. **201/201 test files, 2187/2187 tests passing — no behavior changes to user code that was already correct.**
+
+### Fixed
+
+- **Effects that write to a signal they subscribe to no longer silently drop the update.** Previously the re-entrant invocation was dropped with a dev-only warning, leaving the effect's observed state out of sync with reality. Now the update is flagged as `rerunPending` and the effect re-runs after its current body completes, converging on consistent state. A 100-iteration safety cap breaks legitimate write-reads-self cycles with a loud `console.error` instead of hanging.
+
+- **`derived()` no longer accumulates stale dependencies on conditional code paths.** A getter like `() => flag() ? a() : b()` used to keep both `a` and `b` subscribed forever once both had been read, causing spurious re-evaluations whenever the untaken branch fired. The `retrack()` pull path now tags each dependency with a per-evaluation epoch and unsubscribes any edge whose epoch is stale at end of run — bounded memory, no spurious work.
+
+- **Sibling effects now converge to consistent state through the outermost notification.** Previously two paths of `notifySubscribers` diverged: the pure-effect fast path allowed re-enqueue (effects could run twice, final state consistent), while the mixed-computed slow path forbade it (effects ran once, possibly observing stale downstream state). Both paths now share a single drain with at-most-once enqueue dedup cleared before invoke — sibling effects that cross-write converge rather than one losing to the other.
+
+- **Unbounded empty-`__s` allocation per signal.** Signals whose last subscriber disposed kept an empty subscriber `Set` on the signal object for the process lifetime. The set is now cleared when size drops to zero.
+
+- **`subscriberStack` never released memory after a one-off nesting spike.** A transient deep-nesting excursion (e.g. a debug-mode traversal) could double the stack and retain it forever. The stack now shrinks lazily at end-of-`track()` when idle and over-allocated.
+
+### Changed
+
+- **Cycle detection is now per-subscriber repeat-counted instead of total-iteration-capped.** The previous 100 000-iteration cap conflated "infinite cycle" with "legitimate large fan-out" — apps with 100k+ effects in one batch flirted with false positives while real tight cycles could burn the full budget before tripping. The new detector counts per-subscriber firings within a drain and bails when any single subscriber exceeds `maxSubscriberRepeats` (default 50) — accurate, cheap, and tolerant of arbitrary legitimate fan-out. The absolute iteration cap is retained as a safety net at 1 000 000.
+
+- **`setMaxDrainIterations(n)`** is now the safety-net knob rather than the primary cycle check; semantics unchanged for callers, default raised from 100 000 → 1 000 000.
+
+### Added
+
+- **`setMaxSubscriberRepeats(n)`** — raise/lower the per-subscriber repeat cap used for cycle detection. Returns the previous value.
+
+### Internal
+
+- Subscriber dep storage in the reactivity core migrated from `Set<signal>` to `Map<signal, epoch>` to carry per-edge epoch tags for `retrack()` pruning. Public API unchanged; the single-dep fast path still avoids `Map` allocation entirely.
+
+- `__f` / `__s` fast-path invariant centralized in a `syncFastPath()` helper — same performance, simpler to reason about across add/remove sites.
+
+- Devtools `introspect.getDependencies()` updated for the new `Map` layout; return type unchanged.
+
+---
+
 ## [2.0.0] — 2026-04-14
 
 Major hardening + features release. Spans reactivity, rendering, SSR, widgets, security, and build tooling. **2187/2187 tests passing, zero lint errors, zero type errors.**
