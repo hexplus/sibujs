@@ -74,7 +74,7 @@ export * from "./src/core/ssr-context";
 export * from "./src/reactivity/batch";
 export * from "./src/reactivity/nextTick";
 export * from "./src/reactivity/concurrent";
-export { untracked } from "./src/reactivity/track";
+export { untracked, retrack, setMaxDrainIterations } from "./src/reactivity/track";
 export { bindDynamic } from "./src/reactivity/bindAttribute";
 
 // Lazy loading & Suspense

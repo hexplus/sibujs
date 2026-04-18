@@ -53,11 +53,18 @@ export function getSubscriberCount(getter: () => unknown): number {
  * Get the dependency list of an effect or computed subscriber function.
  * Returns signal references that the subscriber depends on.
  *
- * Note: This reads the _deps Set that track.ts maintains on subscriber functions.
+ * Note: This reads the internal dep storage that track.ts maintains on
+ * subscriber functions. Handles both the single-dep fast path (`_dep`)
+ * and the multi-dep Map (`_deps`).
  */
 export function getDependencies(subscriberFn: () => void): ReactiveSignal[] {
-  const deps = (subscriberFn as unknown as Record<string, unknown>)._deps as Set<ReactiveSignal> | undefined;
-  return deps ? Array.from(deps) : [];
+  const fn = subscriberFn as unknown as Record<string, unknown>;
+  const singleDep = fn._dep as ReactiveSignal | undefined;
+  if (singleDep !== undefined) return [singleDep];
+  const deps = fn._deps as Map<ReactiveSignal, number> | Set<ReactiveSignal> | undefined;
+  if (!deps) return [];
+  // Map exposes keys(); Set is iterable directly.
+  return deps instanceof Map ? Array.from(deps.keys()) : Array.from(deps);
 }
 
 /**
