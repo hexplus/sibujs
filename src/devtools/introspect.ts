@@ -8,9 +8,11 @@
  */
 
 import type { ReactiveSignal } from "../reactivity/signal";
-
-// Internal subscriber type matches track.ts
-const SUBS = "__s" as const;
+import {
+  getSubscriberCount as coreGetSubscriberCount,
+  forEachSubscriber,
+  getSubscriberDeps,
+} from "../reactivity/track";
 
 /** Info about a reactive node in the dependency graph */
 export interface ReactiveNodeInfo {
@@ -45,26 +47,18 @@ export function getSignalName(getter: () => unknown): string | undefined {
 export function getSubscriberCount(getter: () => unknown): number {
   const signal = (getter as unknown as Record<string, unknown>).__signal as ReactiveSignal | undefined;
   if (!signal) return 0;
-  const subs = (signal as Record<string, unknown>)[SUBS] as Set<unknown> | undefined;
-  return subs ? subs.size : 0;
+  return coreGetSubscriberCount(signal);
 }
 
 /**
  * Get the dependency list of an effect or computed subscriber function.
  * Returns signal references that the subscriber depends on.
  *
- * Note: This reads the internal dep storage that track.ts maintains on
- * subscriber functions. Handles both the single-dep fast path (`_dep`)
- * and the multi-dep Map (`_deps`).
+ * Note: This reads the linked-list dep storage maintained by track.ts. Safe
+ * to call on any subscriber (effect or computed markDirty).
  */
 export function getDependencies(subscriberFn: () => void): ReactiveSignal[] {
-  const fn = subscriberFn as unknown as Record<string, unknown>;
-  const singleDep = fn._dep as ReactiveSignal | undefined;
-  if (singleDep !== undefined) return [singleDep];
-  const deps = fn._deps as Map<ReactiveSignal, number> | Set<ReactiveSignal> | undefined;
-  if (!deps) return [];
-  // Map exposes keys(); Set is iterable directly.
-  return deps instanceof Map ? Array.from(deps.keys()) : Array.from(deps);
+  return getSubscriberDeps(subscriberFn);
 }
 
 /**
@@ -74,12 +68,10 @@ export function inspectSignal(getter: () => unknown): ReactiveNodeInfo | null {
   const signal = (getter as unknown as Record<string, unknown>).__signal as ReactiveSignal | undefined;
   if (!signal) return null;
 
-  const subs = (signal as Record<string, unknown>)[SUBS] as Set<unknown> | undefined;
-
   return {
     name: (getter as unknown as Record<string, unknown>).__name as string | undefined,
     signal,
-    subscriberCount: subs ? subs.size : 0,
+    subscriberCount: coreGetSubscriberCount(signal),
   };
 }
 
@@ -101,26 +93,22 @@ export function walkDependencyGraph(
   }
   visited.add(signal);
 
-  const subs = (signal as Record<string, unknown>)[SUBS] as Set<() => void> | undefined;
   const downstream: ReturnType<typeof walkDependencyGraph>[] = [];
-
-  if (subs) {
-    for (const sub of subs) {
-      const subSig = (sub as unknown as Record<string, unknown>)._sig as ReactiveSignal | undefined;
-      if (subSig && !visited.has(subSig)) {
-        const subName = (subSig as Record<string, unknown>).__name;
-        const fakeGetter = (() => undefined) as unknown as () => unknown;
-        const tag = fakeGetter as unknown as Record<string, unknown>;
-        tag.__signal = subSig;
-        if (subName !== undefined) tag.__name = subName;
-        downstream.push(walkDependencyGraph(fakeGetter, maxDepth - 1, visited));
-      }
+  forEachSubscriber(signal, (sub) => {
+    const subSig = (sub as unknown as Record<string, unknown>)._sig as ReactiveSignal | undefined;
+    if (subSig && !visited.has(subSig)) {
+      const subName = (subSig as Record<string, unknown>).__name;
+      const fakeGetter = (() => undefined) as unknown as () => unknown;
+      const tag = fakeGetter as unknown as Record<string, unknown>;
+      tag.__signal = subSig;
+      if (subName !== undefined) tag.__name = subName;
+      downstream.push(walkDependencyGraph(fakeGetter, maxDepth - 1, visited));
     }
-  }
+  });
 
   return {
     name: getSignalName(getter),
-    subscribers: subs ? subs.size : 0,
+    subscribers: coreGetSubscriberCount(signal),
     downstream,
   };
 }
