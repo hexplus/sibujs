@@ -7,16 +7,13 @@ describe("ErrorBoundary / resetKeys", () => {
     const [route, setRoute] = signal("/a");
     let throwIt = true;
 
-    const boundary = ErrorBoundary({
-      resetKeys: [route],
-      nodes: () => {
-        if (throwIt) {
-          throw new Error("first render failed");
-        }
-        const d = document.createElement("div");
-        d.textContent = "ok";
-        return d;
-      },
+    const boundary = ErrorBoundary({ resetKeys: [route] }, () => {
+      if (throwIt) {
+        throw new Error("first render failed");
+      }
+      const d = document.createElement("div");
+      d.textContent = "ok";
+      return d;
     });
 
     document.body.appendChild(boundary);

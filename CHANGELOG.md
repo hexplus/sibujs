@@ -6,6 +6,42 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.0.0] — 2026-04-19
+
+### Breaking
+
+- **`ErrorBoundary` drops the `nodes` option** — the subtree is now passed as the positional second argument, matching the tag-factory shorthand (`tag(props, children)`). This removes the last `nodes:` prop from the public framework surface (tag factories migrated in 1.3.0). Signature:
+
+  ```ts
+  ErrorBoundary(children: () => Element): Element;
+  ErrorBoundary(options: ErrorBoundaryOptions, children: () => Element): Element;
+  ```
+
+  **Migration:**
+
+  ```ts
+  // Before
+  ErrorBoundary({
+    nodes: () => RiskyArea(),
+    fallback: (err, retry) => …,
+    onError,
+    resetKeys,
+  });
+
+  // After
+  ErrorBoundary(
+    { fallback: (err, retry) => …, onError, resetKeys },
+    () => RiskyArea(),
+  );
+
+  // Options-free form
+  ErrorBoundary(() => RiskyArea());
+  ```
+
+  `ErrorBoundaryProps` is retained as a deprecated alias of the renamed `ErrorBoundaryOptions` so type imports keep compiling.
+
+---
+
 ## [2.2.0] — 2026-04-18
 
 Reactivity-core rewrite. Replaces the `Set<Subscriber>` / `Map<Signal, epoch>` subscription graph with doubly-linked `SubNode` edges, a node pool, and an `__activeNode` back-pointer for O(1) duplicate-dependency detection. Subscription is now O(1) on both add and remove, the hot path has no hash operations, and GC churn on create/destroy workloads drops sharply.

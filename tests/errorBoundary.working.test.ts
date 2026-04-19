@@ -39,14 +39,16 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: TestComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Error caught: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Error caught: ${error.message}`;
+              return div;
+            },
           },
-        });
+          TestComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -73,23 +75,25 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: TestComponent,
-          fallback: (error, retry) => {
-            const div = document.createElement("div");
-            div.textContent = `Error: ${error.message}`;
+        ErrorBoundary(
+          {
+            fallback: (error, retry) => {
+              const div = document.createElement("div");
+              div.textContent = `Error: ${error.message}`;
 
-            const button = document.createElement("button");
-            button.textContent = "Retry";
-            button.onclick = () => {
-              setShouldThrow(false);
-              retry?.();
-            };
+              const button = document.createElement("button");
+              button.textContent = "Retry";
+              button.onclick = () => {
+                setShouldThrow(false);
+                retry?.();
+              };
 
-            div.appendChild(button);
-            return div;
+              div.appendChild(button);
+              return div;
+            },
           },
-        });
+          TestComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -113,14 +117,16 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: FailingComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Init error: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Init error: ${error.message}`;
+              return div;
+            },
           },
-        });
+          FailingComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -142,25 +148,29 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       function MiddleComponent() {
-        return ErrorBoundary({
-          nodes: InnerComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Inner fallback: ${error.message}`;
-            return div;
+        return ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Inner fallback: ${error.message}`;
+              return div;
+            },
           },
-        });
+          InnerComponent,
+        );
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: MiddleComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Outer fallback: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Outer fallback: ${error.message}`;
+              return div;
+            },
           },
-        });
+          MiddleComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -197,23 +207,25 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: TestComponent,
-          fallback: (error, retry) => {
-            const div = document.createElement("div");
-            div.textContent = `Error state: ${error.message}`;
+        ErrorBoundary(
+          {
+            fallback: (error, retry) => {
+              const div = document.createElement("div");
+              div.textContent = `Error state: ${error.message}`;
 
-            const button = document.createElement("button");
-            button.textContent = "Recover";
-            button.onclick = () => {
-              setErrorState("recovered");
-              retry?.();
-            };
+              const button = document.createElement("button");
+              button.textContent = "Recover";
+              button.onclick = () => {
+                setErrorState("recovered");
+                retry?.();
+              };
 
-            div.appendChild(button);
-            return div;
+              div.appendChild(button);
+              return div;
+            },
           },
-        });
+          TestComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -241,14 +253,16 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: StringErrorComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Caught: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Caught: ${error.message}`;
+              return div;
+            },
           },
-        });
+          StringErrorComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -261,14 +275,16 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: ErrorObjectComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Caught: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Caught: ${error.message}`;
+              return div;
+            },
           },
-        });
+          ErrorObjectComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -295,14 +311,16 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: TestComponent,
-          fallback: (error) => {
-            const div = document.createElement("div");
-            div.textContent = `Error: ${error.message}`;
-            return div;
+        ErrorBoundary(
+          {
+            fallback: (error) => {
+              const div = document.createElement("div");
+              div.textContent = `Error: ${error.message}`;
+              return div;
+            },
           },
-        });
+          TestComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();
@@ -340,23 +358,25 @@ describe("ErrorBoundary Working Features", () => {
       }
 
       const tree = () =>
-        ErrorBoundary({
-          nodes: CyclingComponent,
-          fallback: (error, retry) => {
-            const div = document.createElement("div");
-            div.textContent = error.message;
+        ErrorBoundary(
+          {
+            fallback: (error, retry) => {
+              const div = document.createElement("div");
+              div.textContent = error.message;
 
-            const button = document.createElement("button");
-            button.textContent = "Next Cycle";
-            button.onclick = () => {
-              setCycle((c) => c + 1);
-              retry?.();
-            };
+              const button = document.createElement("button");
+              button.textContent = "Next Cycle";
+              button.onclick = () => {
+                setCycle((c) => c + 1);
+                retry?.();
+              };
 
-            div.appendChild(button);
-            return div;
+              div.appendChild(button);
+              return div;
+            },
           },
-        });
+          CyclingComponent,
+        );
 
       const { container } = mountComponent(tree);
       await waitForAsync();

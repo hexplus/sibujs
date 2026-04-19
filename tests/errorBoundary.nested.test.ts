@@ -30,10 +30,7 @@ describe("ErrorBoundary nested behavior", () => {
 
     // Compose nested boundaries
     const tree = () => {
-      return ErrorBoundary({
-        nodes: () => ErrorBoundary({ nodes: BadChild, fallback: innerFallback }),
-        fallback: outerFallback,
-      });
+      return ErrorBoundary({ fallback: outerFallback }, () => ErrorBoundary({ fallback: innerFallback }, BadChild));
     };
 
     const { container } = mountComponent(tree);
@@ -61,10 +58,7 @@ describe("ErrorBoundary nested behavior", () => {
     };
 
     const tree = () => {
-      return ErrorBoundary({
-        nodes: () => ErrorBoundary({ nodes: BadChild, fallback: BadFallback }),
-        fallback: outerFallback,
-      });
+      return ErrorBoundary({ fallback: outerFallback }, () => ErrorBoundary({ fallback: BadFallback }, BadChild));
     };
 
     const { container } = mountComponent(tree);

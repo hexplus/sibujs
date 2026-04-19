@@ -7,19 +7,21 @@ describe("ErrorBoundary", () => {
     const [toggle, setToggle] = signal(false);
     const parent = document.createElement("div");
 
-    const boundary = ErrorBoundary({
-      nodes: () => {
+    const boundary = ErrorBoundary(
+      {
+        fallback: (err) => {
+          const fallbackEl = document.createElement("div");
+          fallbackEl.textContent = `Fallback: ${err.message}`;
+          return fallbackEl;
+        },
+      },
+      () => {
         if (toggle()) throw new Error("Oops");
         const el = document.createElement("span");
         el.textContent = "OK";
         return el;
       },
-      fallback: (err) => {
-        const fallbackEl = document.createElement("div");
-        fallbackEl.textContent = `Fallback: ${err.message}`;
-        return fallbackEl;
-      },
-    });
+    );
 
     parent.appendChild(boundary);
 

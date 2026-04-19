@@ -268,18 +268,19 @@ function LiveFeed(): HTMLElement {
 ### Wrap components with ErrorBoundary
 
 ```ts
-import { ErrorBoundary } from "sibujs";
+import { ErrorBoundary, div, p, button } from "sibujs";
 
 function App(): HTMLElement {
-  return ErrorBoundary({
-    nodes: () => MainContent(),
-    fallback: (err, retry) => div({
-      nodes: [
-        p({ nodes: `Error: ${err.message}` }),
-        button({ nodes: "Retry", on: { click: retry } }),
-      ],
-    }) as HTMLElement,
-  });
+  return ErrorBoundary(
+    {
+      fallback: (err, retry) =>
+        div([
+          p(`Error: ${err.message}`),
+          button({ on: { click: retry } }, "Retry"),
+        ]) as HTMLElement,
+    },
+    () => MainContent(),
+  );
 }
 ```
 

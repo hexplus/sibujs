@@ -214,22 +214,24 @@ function App(): HTMLElement {
           div({
             class: "content",
             nodes: [
-              ErrorBoundary({
-                nodes: () =>
+              ErrorBoundary(
+                {
+                  fallback: (err, retry) =>
+                    div({
+                      class: "error-panel",
+                      nodes: [
+                        p({ nodes: `Error: ${err.message}` }),
+                        button({ nodes: "Retry", on: { click: retry } }),
+                      ],
+                    }) as HTMLElement,
+                },
+                () =>
                   Suspense({
                     fallback: () =>
                       div({ class: "loading", nodes: "Loading..." }) as HTMLElement,
                     nodes: () => Outlet(),
                   }),
-                fallback: (err, retry) =>
-                  div({
-                    class: "error-panel",
-                    nodes: [
-                      p({ nodes: `Error: ${err.message}` }),
-                      button({ nodes: "Retry", on: { click: retry } }),
-                    ],
-                  }) as HTMLElement,
-              }),
+              ),
             ],
           }),
         ],

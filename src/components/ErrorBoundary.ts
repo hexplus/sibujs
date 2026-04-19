@@ -6,11 +6,7 @@ import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { ErrorDisplay } from "./ErrorDisplay";
 
-export interface ErrorBoundaryProps {
-  /**
-   * Function that renders child content or throws.
-   */
-  nodes: () => Element;
+export interface ErrorBoundaryOptions {
   /**
    * Fallback renderer given an Error and retry callback.
    * Memoized internally — only re-created when the error changes.
@@ -30,14 +26,17 @@ export interface ErrorBoundaryProps {
    * @example
    * ```ts
    * const [route, setRoute] = signal("/");
-   * ErrorBoundary({
-   *   resetKeys: [route],
-   *   nodes: () => div(riskyPageFor(route())),
-   * });
+   * ErrorBoundary(
+   *   { resetKeys: [route] },
+   *   () => div(riskyPageFor(route())),
+   * );
    * ```
    */
   resetKeys?: Array<() => unknown>;
 }
+
+/** @deprecated Renamed to `ErrorBoundaryOptions`; kept for typing compatibility. */
+export type ErrorBoundaryProps = ErrorBoundaryOptions;
 
 // CSS styles for ErrorBoundary
 const errorBoundaryStyles = `
@@ -250,15 +249,25 @@ function getMemoizedFallback(
  * ErrorBoundary component using SibuJS reactive pattern.
  *
  * Features:
- * - Catches sync errors thrown by nodes
- * - Catches async errors (Promise rejections) from nodes
+ * - Catches sync errors thrown by children
+ * - Catches async errors (Promise rejections) from children
  * - Supports nested ErrorBoundaries (inner catches first, outer catches propagation)
- * - Retry functionality to clear error and re-render nodes
+ * - Retry functionality to clear error and re-render children
  * - Memoized fallback to avoid re-creating fallback UI on every render
  * - onError callback for logging/telemetry
  * - Improved CSS styling
  */
-export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoundaryProps): Element {
+export function ErrorBoundary(children: () => Element): Element;
+export function ErrorBoundary(options: ErrorBoundaryOptions, children: () => Element): Element;
+export function ErrorBoundary(
+  optionsOrChildren: ErrorBoundaryOptions | (() => Element),
+  maybeChildren?: () => Element,
+): Element {
+  const children: () => Element =
+    typeof optionsOrChildren === "function" ? optionsOrChildren : (maybeChildren as () => Element);
+  const options: ErrorBoundaryOptions = typeof optionsOrChildren === "function" ? {} : optionsOrChildren;
+  const { fallback, onError, resetKeys } = options;
+
   injectStyles();
 
   const [error, setError] = signal<Error | null>(null);
@@ -360,9 +369,9 @@ export function ErrorBoundary({ nodes, fallback, onError, resetKeys }: ErrorBoun
       }
 
       try {
-        const result = nodes();
+        const result = children();
 
-        // Handle async nodes (Promise-returning components)
+        // Handle async children (Promise-returning components)
         if (result && typeof (result as unknown as Promise<Element>).then === "function") {
           const asyncContainer = div({ class: "sibu-error-async" }) as Element;
           asyncContainer.appendChild(span({ class: "sibu-lazy-loading", nodes: "Loading..." }));
