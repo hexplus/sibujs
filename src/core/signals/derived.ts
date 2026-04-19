@@ -6,12 +6,21 @@ import type { Accessor } from "./signal";
 /**
  * derived creates a derived reactive signal whose value updates when dependencies change.
  *
- * Uses lazy pull-based evaluation with dirty flagging:
+ * Uses lazy pull-based evaluation with a single dirty flag:
  * - When a dependency changes, the computed is marked dirty (no re-evaluation).
  * - Dirtiness propagates downstream via propagateDirty.
  * - The getter only re-evaluates when actually read (pull-based).
- * - On re-evaluation, dependencies are re-tracked via track() so that
- *   derived-of-derived chains propagate correctly.
+ * - On re-evaluation, dependencies are re-tracked via retrack() so that
+ *   derived-of-derived chains propagate correctly without paying the full
+ *   Set-delete + re-add cost of track()'s cleanup phase.
+ *
+ * NOTE: a previous revision experimented with three-color (CLEAN/CHECK/DIRTY)
+ * state for read-side value-change short-circuiting. It regressed every
+ * benchmark except Memory (Deep Chain +122%, Component Tree +20%) because
+ * the workloads always produce a new downstream value and CHECK had no
+ * work to skip — only overhead to add. Keeping the simpler boolean flag
+ * here; revisit CHECK propagation when we have benchmarks that exercise
+ * stabilisation on diamond / conditional-branch patterns.
  */
 export function derived<T>(
   getter: () => T,
@@ -28,6 +37,10 @@ export function derived<T>(
   const cs: any = {};
   cs._d = false;
   cs._g = getter;
+  // __v: monotonic version counter, bumped only when re-evaluation produces
+  // a value different from the previous (Object.is comparison). Kept on the
+  // computed so future read-side short-circuit work can compare against it.
+  cs.__v = 0;
 
   const markDirty = (): void => {
     if (cs._d) return;
@@ -66,14 +79,14 @@ export function derived<T>(
         evaluating = true;
         let threw = true;
         try {
-          // Use retrack (epoch-based sweep) so steady-state chains skip
-          // Set.delete+add cycles on every pull — only deps that actually
-          // changed do Set mutations.
+          const prev = cs._v;
           retrack(() => {
-            cs._v = getter();
+            const next = getter();
+            cs._v = equals && cs._v !== undefined ? (equals(cs._v, next) ? cs._v : next) : next;
             cs._d = false;
             threw = false;
           }, markDirty);
+          if (!Object.is(prev, cs._v)) cs.__v++;
         } finally {
           evaluating = false;
           if (threw) cs._d = true;
@@ -91,9 +104,6 @@ export function derived<T>(
       evaluating = true;
       let threw = true;
       try {
-        // retrack (no cleanup, no stack array push) so new conditional
-        // deps acquired by the getter still subscribe markDirty. Steady-
-        // state chains skip the Set.delete+add cycle that track() incurs.
         retrack(() => {
           const next = getter();
           // If caller provided a custom equality fn and the value didn't
@@ -104,6 +114,7 @@ export function derived<T>(
           cs._d = false;
           threw = false;
         }, markDirty);
+        if (!Object.is(oldValue, cs._v)) cs.__v++;
       } finally {
         evaluating = false;
         if (threw) cs._d = true;

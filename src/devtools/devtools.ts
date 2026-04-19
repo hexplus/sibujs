@@ -349,13 +349,14 @@ export function initDevTools(config?: DevToolsConfig) {
       } catch {
         value = "<error>";
       }
-      const subs = node.ref?.__s;
       result.push({
         id: node.id,
         name: node.name,
         type: node.type,
         value,
-        subscriberCount: subs instanceof Set ? subs.size : 0,
+        // __sc is the O(1) subscriber count maintained by the reactivity
+        // core (track.ts) on every linked-list splice.
+        subscriberCount: (node.ref?.__sc as number | undefined) ?? 0,
       });
     }
     return result;
@@ -535,14 +536,13 @@ export function initDevTools(config?: DevToolsConfig) {
       const fullVal = val;
       const shortVal = val.length > 80 ? `${val.substring(0, 80)}...` : val;
 
-      const subs = node.ref?.__s;
       sArr.push({
         id: node.id,
         n: node.name,
         tp: node.type,
         v: shortVal,
         fv: fullVal,
-        sc: subs instanceof Set ? subs.size : 0,
+        sc: (node.ref?.__sc as number | undefined) ?? 0,
       });
     }
 
