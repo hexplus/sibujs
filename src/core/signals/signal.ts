@@ -46,14 +46,40 @@ const _isDev = isDev();
  * @param options Optional config: `{ name: "count" }` for devtools labeling
  */
 export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T> {
-  const state: { value: T } = { value: initial };
+  // Pre-initialize every internal field the reactivity core touches. This
+  // keeps the V8 hidden class stable across all signals — inline caches in
+  // recordDependency / notifySubscribers / link helpers stay monomorphic
+  // instead of transitioning on first subscribe, first notify, etc.
+  //
+  //   value          — user's current value
+  //   __v            — version counter, bumped only on actual change
+  //   __sc           — subscriber count (O(1) devtools reads)
+  //   subsHead/Tail  — doubly-linked subscriber list
+  //   __activeNode   — back-pointer for O(1) dup dep detection during tracking
+  //   __name         — optional debug label
+  const state: {
+    value: T;
+    __v: number;
+    __sc: number;
+    subsHead: unknown;
+    subsTail: unknown;
+    __activeNode: unknown;
+    __name?: string;
+  } = {
+    value: initial,
+    __v: 0,
+    __sc: 0,
+    subsHead: null,
+    subsTail: null,
+    __activeNode: null,
+    __name: undefined,
+  };
   const debugName = _isDev ? options?.name : undefined;
   const equalsFn = options?.equals;
 
-  // Tag signal with debug name for devtools/introspection
-  if (debugName) {
-    (state as Record<string, unknown>).__name = debugName;
-  }
+  // Debug name is pre-declared on the state shape so the hidden class stays
+  // stable whether or not a name is provided.
+  if (debugName) state.__name = debugName;
 
   function get(): T {
     recordDependency(state as ReactiveSignal);
@@ -64,22 +90,59 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
   (get as unknown as Record<string, unknown>).__signal = state;
   if (debugName) (get as unknown as Record<string, unknown>).__name = debugName;
 
-  function set(next: T | ((prev: T) => T)): void {
-    const newValue = typeof next === "function" ? (next as (prev: T) => T)(state.value) : next;
-    if (equalsFn ? equalsFn(state.value, newValue) : Object.is(newValue, state.value)) return;
+  // --- Setter: two specialized variants (Object.is fast path vs custom equals)
+  //
+  // V8 optimizes monomorphic function shapes better than polymorphic ones.
+  // Signals with the default equals (Object.is) are by far the common case;
+  // giving them their own closure with no branch on `equalsFn` lets the JIT
+  // inline it. Signals with custom equals pay the extra call, same as before.
+  //
+  // Dev-mode devtools hook emission lives behind the cached `_isDev` so
+  // production closures don't carry the branch either.
+  // ---------------------------------------------------------------------------
+  let set: SetState<T>;
 
-    if (_isDev) {
-      const oldValue = state.value;
+  if (equalsFn) {
+    set = (next) => {
+      const prev = state.value;
+      const newValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
+      if (equalsFn(prev, newValue)) return;
       state.value = newValue;
+      state.__v++;
+      if (_isDev) {
+        const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+        if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
+      }
+      if (!enqueueBatchedSignal(state as ReactiveSignal)) {
+        notifySubscribers(state as ReactiveSignal);
+      }
+    };
+  } else if (_isDev) {
+    set = (next) => {
+      const prev = state.value;
+      const newValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
+      if (Object.is(newValue, prev)) return;
+      state.value = newValue;
+      state.__v++;
       const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-      if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue, newValue });
-    } else {
+      if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
+      if (!enqueueBatchedSignal(state as ReactiveSignal)) {
+        notifySubscribers(state as ReactiveSignal);
+      }
+    };
+  } else {
+    // Production hot path — smallest possible setter. No dev hook, no custom
+    // equals branch, no debug-name lookup.
+    set = (next) => {
+      const prev = state.value;
+      const newValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
+      if (Object.is(newValue, prev)) return;
       state.value = newValue;
-    }
-
-    if (!enqueueBatchedSignal(state as ReactiveSignal)) {
-      notifySubscribers(state as ReactiveSignal);
-    }
+      state.__v++;
+      if (!enqueueBatchedSignal(state as ReactiveSignal)) {
+        notifySubscribers(state as ReactiveSignal);
+      }
+    };
   }
 
   if (_isDev) {

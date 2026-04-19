@@ -1,67 +1,224 @@
 import { devWarn, isDev } from "../core/dev";
 import type { ReactiveSignal } from "./signal";
 
+// ---------------------------------------------------------------------------
+// Reactivity core — doubly-linked-list subscription edges.
+//
+// Each (signal, subscriber) pair is represented by a `SubNode` allocated once
+// and spliced into two lists:
+//
+//   signal.subsHead ─▶ node ─▶ node ─▶ ...      (via sigNext)
+//                      ↑
+//   subscriber.depsHead ─▶ node ─▶ node ─▶ ...  (via subNext)
+//
+// This replaces the prior `Set<Subscriber>` on signals plus `Map<Signal,
+// epoch>` on subscribers. Wins:
+//
+//  * O(1) subscribe and O(1) unsubscribe (no hash ops, pointer splice)
+//  * Cache-friendly pointer traversal in propagate / notify / cleanup
+//  * One allocation per edge instead of two (was Set entry + Map entry)
+//  * A node pool eliminates per-edge GC pressure on create/destroy churn
+//
+// The `__f` single-subscriber cache is no longer needed — a signal with one
+// subscriber IS a one-step linked list walk, which already beats the prior
+// Set iteration. `__sc` (subscriber count) is maintained for O(1) devtools
+// reads.
+// ---------------------------------------------------------------------------
+
 type Subscriber = () => void;
 
 // Cache dev mode at module load for zero-cost production checks
 const _isDev = isDev();
 
-// Stack to support nested subscribers — pre-allocated with index for O(1) push/pop.
-// Grows by doubling on overflow; lazily shrinks at end-of-track() when idle so a
-// one-off spike in nesting depth doesn't permanently retain the memory.
-const STACK_INITIAL = 32;
-const STACK_SHRINK_THRESHOLD = 128; // only attempt shrink when capacity exceeds this
-const subscriberStack: (Subscriber | null)[] = new Array(STACK_INITIAL);
-let stackCapacity = STACK_INITIAL;
-let stackTop = -1;
-let currentSubscriber: Subscriber | null = null;
+// ---------- Subscription edge ---------------------------------------------
 
-// Subscriber deps stored directly on subscriber as _deps property (avoids WeakMap).
-// Signal subscribers stored in Set cached on signal as __s (avoids WeakMap in hot path).
+interface SubNode {
+  // The edge endpoints — null only while the node is sitting in the free pool.
+  sig: ReactiveSignal | null;
+  sub: Subscriber | null;
+  // Epoch stamp refreshed on every recordDependency() call. `retrack()` uses
+  // this to detect deps that were present before the run but not re-read.
+  epoch: number;
+  // Doubly-linked into signal.subsHead (most-recent-first insertion order).
+  sigPrev: SubNode | null;
+  sigNext: SubNode | null;
+  // Doubly-linked into subscriber.depsHead (record order).
+  subPrev: SubNode | null;
+  subNext: SubNode | null;
+  // Saved value of `signal.__activeNode` from when THIS node was activated —
+  // lets nested tracking runs restore the outer context's active marker when
+  // they finish, and lets recordDependency refresh existing edges in O(1).
+  prevActive: SubNode | null;
+}
 
-// Fast notification cache: store the Set reference directly on the signal
-// for O(1) property access during notification (avoids WeakMap hash lookup).
-// The cached Set is the SAME object stored in signalSubscribers.
-const SUBS = "__s" as const;
-type SignalWithCache = ReactiveSignal & { [SUBS]?: Set<Subscriber>; __f?: Subscriber };
+type SignalWithList = ReactiveSignal & {
+  subsHead?: SubNode | null;
+  subsTail?: SubNode | null;
+  __sc?: number;
+  __name?: string;
+  // Pointer to the subscription edge whose subscriber is CURRENTLY mid-eval.
+  // Non-null only during a tracking run. Gives recordDependency O(1)
+  // "have I already recorded this signal for the current sub?" detection
+  // without walking the subscriber's dep list.
+  __activeNode?: SubNode | null;
+};
 
-// ---------------------------------------------------------------------------
-// Fast-path (__f / __s) invariant — maintained by syncFastPath() below:
+// ---------- Node pool -----------------------------------------------------
 //
-//   subs.size === 0  →  __f = undefined, __s deleted (zero-allocation signal)
-//   subs.size === 1  →  __f = the single subscriber
-//   subs.size >= 2   →  __f = undefined
+// High-churn workloads (create/destroy cycles, wide track()+cleanup) allocate
+// many edges. Pooling avoids GC pressure by reusing node objects. Cap the
+// pool so a pathological spike doesn't retain memory forever.
 //
-// All add/remove operations must call syncFastPath() after mutating the set
-// so no code path leaves these out of sync. Inlined in the hot paths for
-// zero-overhead: the function itself exists for correctness & readability.
+// Shape-stable allocation in `createNode`: every node is born with the same
+// hidden class, which matters for V8 inline caches on property reads.
 // ---------------------------------------------------------------------------
-function syncFastPath(signal: SignalWithCache, subs: Set<Subscriber>): void {
-  const size = subs.size;
-  if (size === 0) {
-    signal.__f = undefined;
-    delete signal[SUBS];
-  } else if (size === 1) {
-    signal.__f = subs.values().next().value;
-  } else {
-    signal.__f = undefined;
+const POOL_MAX = 4096;
+const nodePool: SubNode[] = [];
+
+function createNode(): SubNode {
+  return {
+    sig: null,
+    sub: null,
+    epoch: 0,
+    sigPrev: null,
+    sigNext: null,
+    subPrev: null,
+    subNext: null,
+    prevActive: null,
+  };
+}
+
+function allocNode(sig: ReactiveSignal, sub: Subscriber, epoch: number): SubNode {
+  const n = nodePool.pop();
+  if (n) {
+    n.sig = sig;
+    n.sub = sub;
+    n.epoch = epoch;
+    // prev/next pointers left over from last life are overwritten by link ops.
+    return n;
+  }
+  const fresh = createNode();
+  fresh.sig = sig;
+  fresh.sub = sub;
+  fresh.epoch = epoch;
+  return fresh;
+}
+
+function freeNode(node: SubNode): void {
+  node.sig = null;
+  node.sub = null;
+  node.sigPrev = null;
+  node.sigNext = null;
+  node.subPrev = null;
+  node.subNext = null;
+  node.prevActive = null;
+  if (nodePool.length < POOL_MAX) nodePool.push(node);
+}
+
+// ---------- List splice helpers -------------------------------------------
+//
+// Inlined by the JIT in most call sites but factored for correctness — a
+// single point of truth for each list's prev/next/head/tail invariant.
+// ---------------------------------------------------------------------------
+
+function linkSignal(sig: SignalWithList, node: SubNode): void {
+  // Insert at the HEAD of signal.subsHead. O(1).
+  const oldHead = sig.subsHead ?? null;
+  node.sigPrev = null;
+  node.sigNext = oldHead;
+  if (oldHead) oldHead.sigPrev = node;
+  else sig.subsTail = node;
+  sig.subsHead = node;
+  sig.__sc = (sig.__sc ?? 0) + 1;
+}
+
+function unlinkSignal(node: SubNode): void {
+  const sig = node.sig as SignalWithList | null;
+  if (!sig) return;
+  const prev = node.sigPrev;
+  const next = node.sigNext;
+  if (prev) prev.sigNext = next;
+  else sig.subsHead = next;
+  if (next) next.sigPrev = prev;
+  else sig.subsTail = prev;
+  sig.__sc = (sig.__sc ?? 1) - 1;
+  // If the signal currently holds `node` as its active marker (rare — only
+  // if we unlink mid-eval, e.g. during pruneStaleDeps), restore to the
+  // saved prior marker so outer tracking contexts keep working.
+  if (sig.__activeNode === node) sig.__activeNode = node.prevActive;
+  // When a signal has no subscribers at all, clear the head/tail slots so
+  // isolated signals don't pin stale node references through their state
+  // objects' hidden class slots.
+  if (sig.__sc === 0) {
+    sig.subsHead = null;
+    sig.subsTail = null;
   }
 }
+
+function linkSub(sub: SubWithList, node: SubNode): void {
+  // Append to TAIL of subscriber.depsHead. Appending (vs prepending) keeps
+  // recordDependency order aligned with dep-read order, which helps any
+  // future position-based tracking and keeps cleanup traversal predictable.
+  const oldTail = sub.depsTail ?? null;
+  node.subPrev = oldTail;
+  node.subNext = null;
+  if (oldTail) oldTail.subNext = node;
+  else sub.depsHead = node;
+  sub.depsTail = node;
+}
+
+function unlinkSub(node: SubNode): void {
+  const sub = node.sub as SubWithList | null;
+  if (!sub) return;
+  const prev = node.subPrev;
+  const next = node.subNext;
+  if (prev) prev.subNext = next;
+  else sub.depsHead = next;
+  if (next) next.subPrev = prev;
+  else sub.depsTail = prev;
+}
+
+// ---------- Module state --------------------------------------------------
+
+// `currentSubscriber` is the single source of truth for "who is reading?".
+// track() and retrack() save/restore it around the body via a local prev;
+// suspendTracking() captures it into `suspendSavedSub` and restores on resume.
+// No stack is needed — nested tracking runs each keep their own local prev.
+let currentSubscriber: Subscriber | null = null;
+// Captured by suspendTracking at entry (when suspendDepth transitions 0→1);
+// restored by the matching resumeTracking. Nested suspends just bump depth.
+let suspendSavedSub: Subscriber | null = null;
 
 // Notification queue for cascading propagation with deduplication.
 let notifyDepth = 0;
 const pendingQueue: Subscriber[] = [];
 const pendingSet = new Set<Subscriber>();
 
-// Reusable worklist for iterative propagateDirty — avoids recursion on
-// wide diamonds where a single signal fans out to many computeds each
-// with their own downstream chains.
+// Reusable worklist for iterative propagateDirty.
 const propagateStack: ReactiveSignal[] = [];
 
-/**
- * Safely invoke a subscriber, catching errors to prevent one failing
- * subscriber from killing remaining subscribers in the notification queue.
- */
+// Subscribers carry a `depsHead` / `depsTail` pair plus epoch/cycle fields.
+// Kept as a typed alias for readability — at runtime a Subscriber is just
+// a plain function, we attach these as untyped props.
+type SubWithList = Subscriber & {
+  depsHead?: SubNode | null;
+  depsTail?: SubNode | null;
+  _epoch?: number;
+  _structDirty?: boolean;
+  _runEpoch?: number;
+  _runs?: number;
+  _c?: number;
+  _sig?: ReactiveSignal;
+  __name?: string;
+  // Cached disposer returned by track() — allocated once on first track(),
+  // reused for the life of the subscriber. Avoids per-invocation closure
+  // allocation in hot paths (Wide Graph sink: 10k+ calls, Memory benchmark:
+  // 25k+ effect creations).
+  _dispose?: () => void;
+};
+
+// ---------- Safe invoke ---------------------------------------------------
+
 function safeInvoke(sub: Subscriber): void {
   try {
     sub();
@@ -70,158 +227,32 @@ function safeInvoke(sub: Subscriber): void {
   }
 }
 
-// Suspend/resume tracking: counter-based for nested computed evaluations.
+// ---------- Tracking suspension -------------------------------------------
+
 let suspendDepth = 0;
 export let trackingSuspended = false;
 
-// ---------------------------------------------------------------------------
-// Subscriber epoch counter for retrack-based stale-dep pruning.
-//
-// Each call to `retrack()` bumps this counter and stamps the subscriber's
-// `_epoch` with the new value. recordDependency() tags each accessed dep
-// with the subscriber's current epoch. At end of retrack(), any dep whose
-// tagged epoch is not the current one was NOT read during this evaluation
-// and is therefore stale — we unsubscribe it and remove the edge.
-//
-// This closes the stale-dep leak that otherwise accumulates on derived
-// getters with conditional branches (e.g. `() => flag() ? a() : b()`):
-// without pruning, both `a` and `b` stay subscribed forever even though
-// only one is read per evaluation, causing unnecessary re-evaluations.
-// ---------------------------------------------------------------------------
-let subscriberEpochCounter = 0;
-
-/**
- * Re-run a subscriber body. Stale deps (present before but not re-read
- * during this run) are pruned at end via epoch comparison — fixes the
- * conditional-derived over-subscription problem without paying the
- * full Set.delete + re-subscribe cost of `track()`'s cleanup phase.
- *
- * Used by `derived` on every pull. Uses a simple save/restore of
- * `currentSubscriber` instead of the stackTop push/pop — measurably
- * faster on deep chains where this function runs per-level.
- */
-export function retrack(effectFn: () => void, subscriber: Subscriber): void {
-  const prev = currentSubscriber;
-  currentSubscriber = subscriber;
-  const sub = subscriber as any;
-  const epoch = ++subscriberEpochCounter;
-  sub._epoch = epoch;
-  try {
-    effectFn();
-  } finally {
-    currentSubscriber = prev;
-    pruneStaleDeps(sub, epoch);
-  }
-}
-
-/**
- * Unsubscribe from any deps recorded with an epoch other than `currentEpoch`
- * (i.e. deps that were not re-read during the most recent retrack).
- */
-function pruneStaleDeps(sub: any, currentEpoch: number): void {
-  // Single-dep fast path
-  if (sub._dep !== undefined) {
-    if (sub._depEpoch !== currentEpoch) {
-      const sig = sub._dep as SignalWithCache;
-      const subs = sig[SUBS];
-      if (subs?.delete(sub)) syncFastPath(sig, subs);
-      sub._dep = undefined;
-      sub._depEpoch = undefined;
-    }
-    return;
-  }
-
-  // Multi-dep path — _deps is Map<signal, epoch>
-  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
-  if (!deps || deps.size === 0) return;
-
-  // Collect stales in one pass, mutate in a second — avoids iterating a Map
-  // while deleting entries on most engines.
-  let stales: ReactiveSignal[] | undefined;
-  for (const [signal, epoch] of deps) {
-    if (epoch !== currentEpoch) {
-      (stales ??= []).push(signal);
-    }
-  }
-  if (!stales) return;
-  for (const signal of stales) {
-    deps.delete(signal);
-    const sig = signal as SignalWithCache;
-    const subs = sig[SUBS];
-    if (subs?.delete(sub)) syncFastPath(sig, subs);
-  }
-}
-
-/**
- * Track dependencies of an effect or computed subscriber.
- * Returns a teardown function to remove all subscriptions.
- */
-export function track(effectFn: () => void, subscriber?: Subscriber): () => void {
-  if (!subscriber) subscriber = effectFn;
-  cleanup(subscriber);
-
-  ++stackTop;
-  if (stackTop >= stackCapacity) {
-    stackCapacity *= 2;
-    subscriberStack.length = stackCapacity;
-  }
-  subscriberStack[stackTop] = subscriber;
-  currentSubscriber = subscriber;
-
-  try {
-    effectFn();
-  } finally {
-    stackTop--;
-    currentSubscriber = stackTop >= 0 ? subscriberStack[stackTop] : null;
-    // Lazy shrink: if the stack is idle and grew well beyond typical usage,
-    // halve the underlying array so a transient deep-nesting spike doesn't
-    // retain memory for the process lifetime. One extra branch on the cold
-    // exit path; no effect on the hot path.
-    if (stackTop < 0 && stackCapacity > STACK_SHRINK_THRESHOLD) {
-      stackCapacity = Math.max(STACK_INITIAL, stackCapacity >>> 1);
-      subscriberStack.length = stackCapacity;
-    }
-  }
-
-  return () => cleanup(subscriber);
-}
-
-/**
- * Suspend dependency tracking. Used by lazy computed re-evaluation.
- */
 export function suspendTracking(): void {
   if (suspendDepth === 0) {
-    ++stackTop;
-    if (stackTop >= stackCapacity) {
-      stackCapacity *= 2;
-      subscriberStack.length = stackCapacity;
-    }
-    subscriberStack[stackTop] = null;
+    // Capture the ACTUAL current subscriber (not null). Resume restores
+    // to this, so `untracked()` inside a tracking context returns control
+    // to that context with the right subscriber, without needing a stack.
+    suspendSavedSub = currentSubscriber;
     currentSubscriber = null;
     trackingSuspended = true;
   }
   suspendDepth++;
 }
 
-/**
- * Resume dependency tracking after suspendTracking().
- */
 export function resumeTracking(): void {
   suspendDepth--;
   if (suspendDepth === 0) {
-    stackTop--;
-    currentSubscriber = stackTop >= 0 ? subscriberStack[stackTop] : null;
+    currentSubscriber = suspendSavedSub;
+    suspendSavedSub = null;
     trackingSuspended = false;
   }
 }
 
-/**
- * Execute a function without tracking any signal reads as dependencies.
- * Useful for reading signals inside effects without creating subscriptions.
- *
- * @param fn Function to execute without dependency tracking
- * @returns The return value of fn
- */
 export function untracked<T>(fn: () => T): T {
   suspendTracking();
   try {
@@ -231,142 +262,201 @@ export function untracked<T>(fn: () => T): T {
   }
 }
 
-/**
- * Record that the current subscriber depends on this signal.
- *
- * Fast path: for the first dependency of a subscriber, stores the signal
- * directly as _dep (avoiding Map allocation). Promotes to _deps Map only
- * when a second dependency is recorded. Most effects/computeds have 1-3 deps,
- * so the single-dep fast path eliminates Map overhead in the common case.
- *
- * Every edge is tagged with the subscriber's current `_epoch` so that
- * `retrack()` can identify and prune stale deps at end of evaluation.
- * Subscribers that only ever flow through `track()` (effects) don't set
- * _epoch; the epoch field is then `undefined` and harmlessly unused.
- */
+// ---------- Epoch counter for retrack-based pruning -----------------------
+
+let subscriberEpochCounter = 0;
+
+// ---------- retrack -------------------------------------------------------
+//
+// Re-run a subscriber body. Stable deps have their epoch stamp refreshed;
+// deps that are no longer read are pruned at the end. Used by `derived()`
+// to validate / recompute without paying the full Set.delete + re-add cycle
+// of `track()`'s cleanup phase.
+// ---------------------------------------------------------------------------
+export function retrack(effectFn: () => void, subscriber: Subscriber): void {
+  const prev = currentSubscriber;
+  currentSubscriber = subscriber;
+  const sub = subscriber as SubWithList;
+  const epoch = ++subscriberEpochCounter;
+  sub._epoch = epoch;
+  sub._structDirty = false;
+
+  // Pre-walk: activate every existing dep on its signal so in-body
+  // recordDependency hits can refresh the existing edge in O(1) via
+  // `signal.__activeNode === existingNode && existingNode.sub === sub`.
+  // Each node stashes the prior `__activeNode` value in `prevActive` so
+  // outer tracking contexts' markers can be restored at post-walk.
+  for (let n: SubNode | null = sub.depsHead ?? null; n !== null; n = n.subNext) {
+    const sig = n.sig as SignalWithList;
+    n.prevActive = sig.__activeNode ?? null;
+    sig.__activeNode = n;
+  }
+
+  try {
+    effectFn();
+  } finally {
+    currentSubscriber = prev;
+    // Combined post-walk + stale-prune. For each node: restore the signal's
+    // `__activeNode` to whatever outer tracking context had, then drop the
+    // node if it wasn't refreshed during this run.
+    let node = sub.depsHead ?? null;
+    while (node !== null) {
+      const next: SubNode | null = node.subNext;
+      const sig = node.sig as SignalWithList;
+      sig.__activeNode = node.prevActive;
+      node.prevActive = null;
+      if (node.epoch !== epoch) {
+        unlinkSub(node);
+        unlinkSignal(node);
+        freeNode(node);
+      }
+      node = next;
+    }
+  }
+}
+
+// ---------- track ---------------------------------------------------------
+//
+// Full-cleanup + re-run. Used by effects (and one-shot initial setup of
+// computeds). Returns a disposer that clears all remaining subs.
+//
+// Stack-free: saves `currentSubscriber` in a local and restores it in
+// `finally`. Nested tracking runs each keep their own local prev; the old
+// `subscriberStack` was only ever needed because `suspend/resumeTracking`
+// used to push/pop null markers through it. suspend/resume now capture
+// the current subscriber directly, so no shared stack is needed.
+// ---------------------------------------------------------------------------
+export function track(effectFn: () => void, subscriber?: Subscriber): () => void {
+  if (!subscriber) subscriber = effectFn;
+  cleanup(subscriber);
+
+  const prev = currentSubscriber;
+  currentSubscriber = subscriber;
+
+  try {
+    effectFn();
+  } finally {
+    currentSubscriber = prev;
+
+    // Post-walk: restore each signal's `__activeNode` to what outer
+    // tracking contexts had before this track() started. We never do a
+    // pre-walk here because cleanup() emptied the dep list up-front.
+    const sub = subscriber as SubWithList;
+    for (let n: SubNode | null = sub.depsHead ?? null; n !== null; n = n.subNext) {
+      const sig = n.sig as SignalWithList;
+      sig.__activeNode = n.prevActive;
+      n.prevActive = null;
+    }
+  }
+
+  // Cache the disposer on the subscriber so repeated track() calls (effects
+  // re-running, derived re-setup) don't each allocate a fresh `() => cleanup`
+  // closure. For a 10k-subscriber workload this eliminates 10k allocations.
+  const sub = subscriber as SubWithList;
+  return sub._dispose ?? (sub._dispose = () => cleanup(subscriber));
+}
+
+// ---------- recordDependency ----------------------------------------------
+//
+// Called for every signal read inside a tracking context. O(1) in all cases
+// via the `signal.__activeNode` back-pointer:
+//
+//   * Pre-walk (retrack) or recordDependency-at-first-read (track) sets
+//     `signal.__activeNode` to the edge for the current subscriber.
+//   * Subsequent reads see `__activeNode.sub === currentSubscriber` and
+//     refresh epoch in place — no linked-list walk.
+//
+// This is Preact Signals' approach. Without it, a subscriber with N deps
+// (e.g. a sink effect in a wide fan-out graph) pays O(N²) per track run.
+// ---------------------------------------------------------------------------
 export function recordDependency(signal: ReactiveSignal) {
   if (!currentSubscriber) return;
 
-  const sub = currentSubscriber as any;
-  const epoch = sub._epoch;
+  const sub = currentSubscriber as SubWithList;
+  const sig = signal as SignalWithList;
+  const epoch = sub._epoch ?? 0;
 
-  // Fast path: check single-dep slot first. Still refresh epoch so
-  // pruneStaleDeps sees this dep as "live" during retrack.
-  if (sub._dep === signal) {
-    sub._depEpoch = epoch;
+  // O(1) dup check: if the signal's active edge already points at us,
+  // it's a re-read within this run. Refresh the epoch and we're done.
+  const active = sig.__activeNode ?? null;
+  if (active !== null && active.sub === sub) {
+    active.epoch = epoch;
     return;
   }
 
-  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
-  if (deps) {
-    // Map.set both adds new edges and refreshes the epoch on existing ones.
-    // The subs.add() call below is idempotent, so it's safe to run
-    // unconditionally — Set.add is fast enough that the "already subscribed"
-    // short-circuit isn't worth the branch.
-    deps.set(signal, epoch);
-  } else if (sub._dep !== undefined) {
-    // Promote single-dep to Map (carry forward the existing epoch).
-    const map = new Map<ReactiveSignal, number>();
-    map.set(sub._dep, sub._depEpoch);
-    map.set(signal, epoch);
-    sub._deps = map;
-    sub._dep = undefined;
-    sub._depEpoch = undefined;
-  } else {
-    // First dep — store directly, no Map allocation
-    sub._dep = signal;
-    sub._depEpoch = epoch;
-  }
+  // New edge. Stash whatever `__activeNode` was (may be null, may be an
+  // outer tracking context's node) into `prevActive` so the post-walk
+  // restores it.
+  const node = allocNode(signal, sub, epoch);
+  node.prevActive = active;
+  sig.__activeNode = node;
+  linkSub(sub, node);
+  linkSignal(sig, node);
+  sub._structDirty = true;
+}
 
-  // Register subscriber on the signal. subs.add() is idempotent: if the
-  // subscriber was already subscribed (stable dep during retrack), size
-  // won't change and syncFastPath stays a no-op.
-  const sig = signal as SignalWithCache;
-  let subs = sig[SUBS];
-  if (!subs) {
-    subs = new Set();
-    sig[SUBS] = subs;
-  }
-  const prevSize = subs.size;
-  subs.add(currentSubscriber);
-  if (subs.size !== prevSize) {
-    if (subs.size === 1) {
-      sig.__f = currentSubscriber;
-    } else if (sig.__f !== undefined) {
-      sig.__f = undefined;
-    }
+// ---------- cleanup --------------------------------------------------------
+//
+// Tear down every edge attached to this subscriber. Called by track() before
+// re-running and by the dispose handle. Nodes are returned to the pool.
+//
+// Exported so callers can dispose a subscriber without track() having to
+// allocate a per-call closure `() => cleanup(sub)`. Effect.ts calls this
+// directly on dispose, eliminating ~1 closure allocation per track() call.
+// ---------------------------------------------------------------------------
+export function cleanup(subscriber: Subscriber): void {
+  const sub = subscriber as SubWithList;
+  let node = sub.depsHead ?? null;
+  // We clear the subscriber's head/tail up-front so we don't have to
+  // repeatedly adjust them while unlinking — each node still needs its own
+  // signal-side unlink to maintain the signal's list invariant.
+  sub.depsHead = null;
+  sub.depsTail = null;
+  while (node) {
+    const next = node.subNext;
+    unlinkSignal(node);
+    freeNode(node);
+    node = next;
   }
 }
 
-/**
- * Queue all subscribers of a signal for deferred notification.
- * Computed subscribers (_c) are propagated through the chain via propagateDirty
- * so their downstream effect subscribers get queued correctly.
- */
-export function queueSignalNotification(signal: ReactiveSignal): void {
-  const subs = (signal as SignalWithCache)[SUBS];
-  if (!subs) return;
-  for (const sub of subs) {
-    if ((sub as any)._c) {
-      propagateDirty(sub);
-    } else if (!pendingSet.has(sub)) {
-      pendingSet.add(sub);
-      pendingQueue.push(sub);
-    }
-  }
-}
-
-/**
- * Cycle detection during notification drain.
- *
- * We no longer cap the total drain iterations (which conflates large
- * legitimate fan-out with real cycles). Instead, we count how many times
- * each individual subscriber has fired during the current drain. If any
- * single subscriber fires more than `maxSubscriberRepeats` times, that is
- * a near-certain sign of a write-reads-self cycle — bail loudly.
- *
- * Counts live on the subscriber itself (`_runs`, `_runEpoch`), reset lazily
- * via an epoch counter to avoid walking all subscribers at end-of-drain.
- *
- * `maxDrainIterations` is kept as an absolute belt-and-braces safety net;
- * it is sized high enough that legitimate apps (100k+ subscribers) never
- * hit it, while still preventing a runaway process from eating all memory.
- */
+// ---------- Cycle detection -----------------------------------------------
+//
+// Per-subscriber repeat count within a single drain. A subscriber that fires
+// more than `maxSubscriberRepeats` times in one drain is almost certainly a
+// write-reads-self cycle — bail loudly instead of wasting cycles. Counts
+// live on the subscriber itself via an epoch to avoid end-of-drain walks.
+// ---------------------------------------------------------------------------
 let maxSubscriberRepeats = 50;
 let maxDrainIterations = 1_000_000;
 let drainEpoch = 0;
 
-/** Raise/lower the per-subscriber repeat cap. Returns previous value. */
 export function setMaxSubscriberRepeats(n: number): number {
   const prev = maxSubscriberRepeats;
   if (Number.isFinite(n) && n > 0) maxSubscriberRepeats = Math.floor(n);
   return prev;
 }
 
-/** Raise/lower the absolute drain iteration safety net. Returns previous value. */
 export function setMaxDrainIterations(n: number): number {
   const prev = maxDrainIterations;
   if (Number.isFinite(n) && n > 0) maxDrainIterations = Math.floor(n);
   return prev;
 }
 
-/**
- * Record one invocation of `sub` in the current drain and return true iff
- * it has just exceeded the per-subscriber repeat cap (indicating a cycle).
- */
 function tickRepeat(sub: Subscriber): boolean {
-  const s = sub as any;
+  const s = sub as SubWithList;
   if (s._runEpoch !== drainEpoch) {
     s._runEpoch = drainEpoch;
     s._runs = 1;
     return false;
   }
-  return ++s._runs > maxSubscriberRepeats;
+  s._runs = (s._runs ?? 0) + 1;
+  return s._runs > maxSubscriberRepeats;
 }
 
 function cycleError(sub: Subscriber): void {
   if (typeof console !== "undefined") {
-    const name = (sub as any).__name ?? "<unnamed>";
+    const name = (sub as SubWithList).__name ?? "<unnamed>";
     console.error(
       `[SibuJS] subscriber "${name}" fired more than ${maxSubscriberRepeats} times — ` +
         "likely a write-reads-self cycle between effects/signals. Breaking to prevent infinite loop.",
@@ -383,18 +473,8 @@ function absoluteDrainError(): void {
   }
 }
 
-/**
- * Process pending subscriber notifications until the queue is empty.
- *
- * Convergence model:
- *   - A subscriber is removed from `pendingSet` immediately before invocation,
- *     so any cascading write during its execution can re-enqueue it. This
- *     allows sibling effects to converge on a consistent state when one
- *     effect writes a signal another effect reads.
- *   - `tickRepeat` bounds convergence: if a single subscriber fires more
- *     than `maxSubscriberRepeats` times, we bail — that's a true cycle.
- *   - `maxDrainIterations` is an absolute safety net for legitimate fan-out.
- */
+// ---------- Drain ---------------------------------------------------------
+
 function drainQueue(): void {
   let i = 0;
   while (i < pendingQueue.length) {
@@ -407,6 +487,9 @@ function drainQueue(): void {
       cycleError(sub);
       break;
     }
+    // Remove from pendingSet BEFORE invoking so a cascading write during
+    // this sub's execution can re-enqueue it. Enables sibling-effect
+    // convergence; tickRepeat caps runaway loops.
     pendingSet.delete(sub);
     safeInvoke(sub);
   }
@@ -427,161 +510,114 @@ export function drainNotificationQueue(): void {
   }
 }
 
-/**
- * Iteratively propagate dirty flags through a computed chain.
- *
- * Marks each computed dirty and walks downstream subscribers via an explicit
- * worklist (no recursion). markDirty (tagged _c) sets the dirty flag; _sig
- * exposes the computed's signal for walking downstream. Does NOT eagerly
- * evaluate — computedGetter uses track() on re-evaluation to re-register
- * dependencies, which is essential for derived-of-derived chains (e.g.
- * formula cells referencing other formula cells).
- *
- * In the __f fast path (single-subscriber chains), sets _d directly on the
- * signal — avoids megamorphic function calls to markDirty. Multi-dep
- * computeds are marked dirty and pulled lazily to avoid O(n²) re-evaluation
- * when many deps update.
- */
-function propagateDirty(sub: () => void): void {
-  sub(); // markDirty: sets dirty flag
-  const rootSig: ReactiveSignal | undefined = (sub as any)._sig;
+// ---------- propagateDirty ------------------------------------------------
+//
+// Walks downstream from a changed signal, marking computed subscribers dirty
+// and enqueuing effect subscribers. Iterative via a module-level worklist so
+// deep chains (1000+ levels) don't consume the JS call stack.
+// ---------------------------------------------------------------------------
+function propagateDirty(sub: Subscriber): void {
+  sub(); // markDirty: sets the computed's _d flag
+  const rootSig: ReactiveSignal | undefined = (sub as SubWithList)._sig;
   if (!rootSig) return;
 
-  // Iterative worklist using a reusable module-level stack.
-  // Each entry is a signal whose subscribers still need walking.
   const stack = propagateStack;
   const baseLen = stack.length;
   stack.push(rootSig);
 
   while (stack.length > baseLen) {
-    const sig = stack.pop() as ReactiveSignal;
-
-    // Fast path: single subscriber cached in __f
-    const first: any = (sig as any).__f;
-    if (first) {
-      if (first._c) {
-        const nSig: any = first._sig;
-        // Skip if already dirty — avoids redundant downstream walks on
-        // deep chains where the same signal is reached multiple times.
-        if (!nSig._d) {
-          nSig._d = true;
-          stack.push(nSig);
+    const sig = stack.pop() as SignalWithList;
+    let node = sig.subsHead ?? null;
+    while (node) {
+      const s = node.sub as SubWithList | null;
+      // node.sub is null only inside freeNode — shouldn't happen mid-walk,
+      // but the guard keeps us safe against a freed-but-still-linked corner
+      // case during a throwing effect body.
+      if (s) {
+        if (s._c) {
+          const nSig = s._sig as (SignalWithList & { _d?: boolean }) | undefined;
+          if (nSig) {
+            // Avoid redundant downstream walks when the same signal is
+            // reached by multiple diamond paths — mark dirty inline and
+            // only push the signal if it wasn't already dirty.
+            if (!nSig._d) {
+              nSig._d = true;
+              stack.push(nSig);
+            }
+          } else {
+            s();
+          }
+        } else if (!pendingSet.has(s)) {
+          pendingSet.add(s);
+          pendingQueue.push(s);
         }
-      } else if (!pendingSet.has(first)) {
-        pendingSet.add(first);
-        pendingQueue.push(first);
       }
-      continue;
+      node = node.sigNext;
     }
+  }
+}
 
-    // Multi-subscriber path (Set iteration)
-    const subs = (sig as SignalWithCache)[SUBS];
-    if (!subs) continue;
+// ---------- Public notification entrypoints ------------------------------
 
-    for (const s of subs) {
-      if ((s as any)._c) {
-        const nSig: any = (s as any)._sig;
-        if (nSig && !nSig._d) {
-          nSig._d = true; // markDirty inline; skip self-call when already dirty
-          stack.push(nSig);
-        } else if (!nSig) {
-          s(); // computed without _sig — fall back to function call
-        }
+export function queueSignalNotification(signal: ReactiveSignal): void {
+  const sig = signal as SignalWithList;
+  let node = sig.subsHead ?? null;
+  while (node) {
+    const s = node.sub as SubWithList | null;
+    if (s) {
+      if (s._c) {
+        propagateDirty(s);
       } else if (!pendingSet.has(s)) {
         pendingSet.add(s);
         pendingQueue.push(s);
       }
     }
+    node = node.sigNext;
   }
 }
 
-/**
- * Notify all subscribers of a given signal change.
- *
- * Unified model:
- *   - For outermost notifications: enqueue all effect subs, propagate dirty
- *     through computed subs, then drain the queue. A subscriber is
- *     re-eligible for enqueue once it has begun executing (pendingSet is
- *     cleared of it before invoke), so sibling effects converge when one
- *     effect's write dirties a signal another effect reads.
- *   - Cycles bound: per-subscriber repeat counting (tickRepeat) stops
- *     runaway write-reads-self loops loudly rather than silently.
- *   - Single-subscriber fast path: when there is exactly one subscriber,
- *     inline invocation is safe — there is no sibling that could observe
- *     an intermediate state — and avoids queue allocation overhead.
- *
- * This replaces an older 3-pass structure whose fast/slow paths diverged
- * on whether effects could re-run during cascade: the fast path allowed it
- * (eventually consistent), the slow path did not (single-run-maybe-stale).
- * Unification makes both paths eventually consistent.
- */
 export function notifySubscribers(signal: ReactiveSignal) {
-  // Fast path: single subscriber (avoids Set iteration entirely)
-  const first: any = (signal as any).__f;
-  if (first) {
-    if (notifyDepth > 0) {
-      if (first._c) {
-        propagateDirty(first);
-      } else if (!pendingSet.has(first)) {
-        pendingSet.add(first);
-        pendingQueue.push(first);
-      }
-      return;
-    }
-    notifyDepth++;
-    drainEpoch++;
-    try {
-      if (first._c) {
-        propagateDirty(first);
-      } else if (tickRepeat(first)) {
-        cycleError(first);
-      } else {
-        safeInvoke(first);
-      }
-      drainQueue();
-    } finally {
-      notifyDepth--;
-      if (notifyDepth === 0) {
-        pendingQueue.length = 0;
-        pendingSet.clear();
-      }
-    }
-    return;
-  }
-
-  const subs = (signal as SignalWithCache)[SUBS];
-  if (!subs || subs.size === 0) return;
+  const sig = signal as SignalWithList;
+  const head = sig.subsHead;
+  if (!head) return;
 
   if (notifyDepth > 0) {
-    // Cascading: computed subs propagated iteratively, effects queued with dedup
-    for (const sub of subs) {
-      if ((sub as any)._c) {
-        propagateDirty(sub);
-      } else if (!pendingSet.has(sub)) {
-        pendingSet.add(sub);
-        pendingQueue.push(sub);
+    // Cascading: enqueue everything with dedup.
+    let node: SubNode | null = head;
+    while (node) {
+      const s = node.sub as SubWithList | null;
+      if (s) {
+        if (s._c) {
+          propagateDirty(s);
+        } else if (!pendingSet.has(s)) {
+          pendingSet.add(s);
+          pendingQueue.push(s);
+        }
       }
+      node = node.sigNext;
     }
     return;
   }
 
-  // Outermost multi-subscriber notification.
+  // Outermost notification: snapshot direct subs into the queue, then drain.
+  // Using the existing pendingQueue/pendingSet keeps the drain semantics
+  // (eventual-consistency via pre-invoke pendingSet.delete) identical to the
+  // Set-based implementation.
   notifyDepth++;
   drainEpoch++;
   try {
-    // Single iteration over direct subs:
-    //   - computed subs → propagateDirty (marks downstream dirty, queues
-    //     downstream effects via the notifyDepth>0 cascade branch above)
-    //   - effect subs → enqueue with pendingSet dedup
-    // Iteration order matches Set insertion order, so effects run in
-    // subscription order during drain (modulo cascaded re-runs).
-    for (const sub of subs) {
-      if ((sub as any)._c) {
-        propagateDirty(sub);
-      } else if (!pendingSet.has(sub)) {
-        pendingSet.add(sub);
-        pendingQueue.push(sub);
+    let node: SubNode | null = head;
+    while (node) {
+      const s = node.sub as SubWithList | null;
+      if (s) {
+        if (s._c) {
+          propagateDirty(s);
+        } else if (!pendingSet.has(s)) {
+          pendingSet.add(s);
+          pendingQueue.push(s);
+        }
       }
+      node = node.sigNext;
     }
     drainQueue();
   } finally {
@@ -593,40 +629,31 @@ export function notifySubscribers(signal: ReactiveSignal) {
   }
 }
 
-/**
- * Remove a subscriber from all signal dependency lists.
- *
- * After each removal, syncFastPath() restores the __f / __s invariant:
- * empty sets are cleared to release memory, and __f tracks the last
- * remaining subscriber when size collapses back to 1.
- */
-function cleanup(subscriber: Subscriber) {
-  const sub = subscriber as any;
+// ---------- Devtools helpers ----------------------------------------------
 
-  // Fast path: single dependency (no Map to iterate)
-  const singleDep: ReactiveSignal | undefined = sub._dep;
-  if (singleDep !== undefined) {
-    const sig = singleDep as SignalWithCache;
-    const subs = sig[SUBS];
-    if (subs?.delete(subscriber)) {
-      syncFastPath(sig, subs);
-    }
-    sub._dep = undefined;
-    sub._depEpoch = undefined;
-    return;
+/** O(1) subscriber count for devtools / introspection. */
+export function getSubscriberCount(signal: ReactiveSignal): number {
+  return (signal as SignalWithList).__sc ?? 0;
+}
+
+/** Return the signals a subscriber currently depends on, in record order. */
+export function getSubscriberDeps(subscriber: Subscriber): ReactiveSignal[] {
+  const sub = subscriber as SubWithList;
+  const out: ReactiveSignal[] = [];
+  let node = sub.depsHead ?? null;
+  while (node) {
+    if (node.sig) out.push(node.sig);
+    node = node.subNext;
   }
+  return out;
+}
 
-  // Multi-dep path — _deps is Map<signal, epoch>
-  const deps: Map<ReactiveSignal, number> | undefined = sub._deps;
-  if (!deps || deps.size === 0) return;
-
-  for (const signal of deps.keys()) {
-    const sig = signal as SignalWithCache;
-    const subs = sig[SUBS];
-    if (subs?.delete(subscriber)) {
-      syncFastPath(sig, subs);
-    }
+/** Iterate subscribers of a signal (devtools graph walk). */
+export function forEachSubscriber(signal: ReactiveSignal, visit: (sub: Subscriber) => void): void {
+  let node = (signal as SignalWithList).subsHead ?? null;
+  while (node) {
+    const s = node.sub;
+    if (s) visit(s);
+    node = node.sigNext;
   }
-
-  deps.clear();
 }

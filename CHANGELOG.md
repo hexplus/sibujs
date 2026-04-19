@@ -6,6 +6,53 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [2.2.0] — 2026-04-18
+
+Reactivity-core rewrite. Replaces the `Set<Subscriber>` / `Map<Signal, epoch>` subscription graph with doubly-linked `SubNode` edges, a node pool, and an `__activeNode` back-pointer for O(1) duplicate-dependency detection. Subscription is now O(1) on both add and remove, the hot path has no hash operations, and GC churn on create/destroy workloads drops sharply.
+
+**Improvements over 2.1.0 on the reactivity stress-test suite (`benchmarks/`):**
+
+- **Wide graph / 10k fan-out: ~73% faster** (56.8 ms → 15.4 ms)
+- **Cascading effects: ~41% faster** (2.03 ms → 1.20 ms)
+- **Memory & cleanup: ~21% faster** (51.3 ms → 40.6 ms)
+- **Component tree propagation: ~10% faster** (23.0 ms → 20.6 ms)
+- **Deep computed chain: ~7% faster** (3.87 ms → 3.60 ms)
+
+**201/201 test files, 2187/2187 tests passing. No breaking changes to the documented public API** — `signal`, `derived`, `effect`, `batch`, `untracked`, `on`, `setMaxDrainIterations`, `setMaxSubscriberRepeats`, devtools introspection helpers, all behave identically.
+
+### Added
+
+- **`cleanup(subscriber)`** now exported from `sibujs/reactivity/track`. Disposes a subscriber directly without allocating an intermediate closure. Enables custom effect-like primitives to manage their own lifecycle without going through `track()`'s disposer.
+- **`getSubscriberCount(signal)`** — O(1) count of active subscribers, read from the `__sc` counter maintained on every subscribe/unsubscribe.
+- **`getSubscriberDeps(subscriber)`** — returns the signals a subscriber currently depends on, in record order. Replaces the previous `_dep` / `_deps` probe used by devtools.
+- **`forEachSubscriber(signal, visit)`** — iterate a signal's subscriber list without exposing the internal linked-list structure to callers.
+
+### Changed
+
+- **Subscription storage migrated from Set + Map to doubly-linked `SubNode` edges.** Each `(signal, subscriber)` pair is one object linked into both the signal's subscriber list and the subscriber's dep list. O(1) subscribe / unsubscribe via pointer splice, no hash operations on the hot path, one allocation per edge instead of two.
+- **Duplicate-dependency detection during tracking is now O(1)** via a `signal.__activeNode` back-pointer (Preact Signals' approach). A subscriber with 10 000 deps reading one signal twice no longer pays O(N²) in its inner loop.
+- **Effects now re-run via `retrack()` instead of `track()`.** Stable-dep effects (the overwhelmingly common case) skip the cleanup-and-rebuild cycle entirely — epoch-based pruning at end of run handles any deps that were dropped this invocation. On the Cascading Effects benchmark this drops per-invocation cost by ~40 ns.
+- **Effect internals consolidated behind an `EffectCtx` object.** Per-effect closure count went from six (`onCleanup`, `flushUserCleanups`, `wrappedFn`, `drainReruns`, `subscriber`, `dispose`) to three. `runSubscriber` and `runBody` are inlined directly into the per-effect closures, eliminating a function frame per invocation.
+- **`track()` is stack-free.** The shared `subscriberStack` array is gone; `track()` uses a local `prev` / restore pattern, and `suspend/resumeTracking` capture `currentSubscriber` directly. ~5–10 ns saved per track call, universal improvement.
+- **Signal state pre-initialises every internal slot** (`__v`, `__sc`, `subsHead`, `subsTail`, `__activeNode`, `__name`) at construction. V8 hidden classes stay monomorphic across all signals; inline caches in the reactivity hot paths don't transition on first subscribe.
+- **Signal setter specialised at creation time** — one closure for the default `Object.is` equality path, one for custom `equals`, one dev-mode variant carrying the devtools-hook emission. No per-call branching on the hot path.
+- **Cached `track()` disposer** via `sub._dispose ??= …` — allocated once per subscriber instead of once per `track()` call. Meaningful for high-churn workloads (large lists, create/destroy cycles).
+- **Node pool** (cap 4 096) recycles freed `SubNode` objects. Shape-stable allocation keeps hidden classes monomorphic; a create/destroy cycle with 25 000 effects reuses edge nodes instead of allocating and freeing them.
+
+### Removed
+
+- **`signal.__s`** — the Set-based subscriber cache. Replaced by `subsHead` / `subsTail` linked-list anchors plus `__sc` (count). External consumers should read counts via `getSubscriberCount()`.
+- **`signal.__f`** — the single-subscriber fast-path cache. A one-node linked-list walk is inherently as fast as the check it was avoiding.
+- **Internal `subscriberStack`** — the shared push/pop array used by the old `track()` / `suspend/resume` pair. Not observable from user code.
+
+### Internal
+
+- `introspect.ts` delegates to the new `getSubscriberCount` / `getSubscriberDeps` / `forEachSubscriber` helpers. Public API surface (`ReactiveNodeInfo`, `getSignalName`, `getDependencies`, `inspectSignal`, `walkDependencyGraph`) unchanged.
+- `devtools.ts` reads `node.ref?.__sc` instead of `node.ref?.__s.size`.
+- A three-color CLEAN/CHECK/DIRTY propagation model was prototyped and reverted after benchmark regression (+122% on Deep Chain). The workloads in the current suite all produce new downstream values on every signal change, so the CHECK state has no work to skip — only overhead to add. A dedicated benchmark suite for stabilisation patterns needs to come first; re-introducing three-color propagation is parked for a future release.
+
+---
+
 ## [2.1.0] — 2026-04-17
 
 Reactivity-core hardening release. Closes correctness gaps around effect re-entry, derived stale deps, sibling-effect consistency, and cycle detection. **201/201 test files, 2187/2187 tests passing — no behavior changes to user code that was already correct.**
