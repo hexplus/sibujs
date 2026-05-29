@@ -327,7 +327,16 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
 // the current subscriber directly, so no shared stack is needed.
 // ---------------------------------------------------------------------------
 export function track(effectFn: () => void, subscriber?: Subscriber): () => void {
-  if (!subscriber) subscriber = effectFn;
+  // No explicit subscriber → this is an eagerly-re-running reactive binding
+  // (the common `track(commit)` form used by class/style getters, directives,
+  // router views, `watch`, `each`, etc.). Route it through `reactiveBinding`
+  // so every re-run re-tracks dependencies. Using the body itself as the
+  // subscriber (the old behavior) meant re-runs were invoked WITHOUT a tracking
+  // context, so signals first read on a later run were never subscribed — the
+  // per-run-tracking correctness bug. An EXPLICIT subscriber (e.g. `derived`'s
+  // `markDirty`) keeps the run-once semantics below; such callers drive their
+  // own re-evaluation via `retrack`.
+  if (!subscriber) return reactiveBinding(effectFn);
   cleanup(subscriber);
 
   const prev = currentSubscriber;
@@ -354,6 +363,67 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
   // closure. For a 10k-subscriber workload this eliminates 10k allocations.
   const sub = subscriber as SubWithList;
   return sub._dispose ?? (sub._dispose = () => cleanup(subscriber));
+}
+
+// ---------- reactiveBinding ------------------------------------------------
+//
+// Eagerly re-running reactive binding used by the DOM binding paths
+// (bindChildNode / bindTextNode / bindAttribute). The subtlety it fixes:
+//
+//   A bare `track(commit)` registers `commit` ITSELF as the subscriber. On the
+//   first run `commit` records its deps, but when a signal later notifies, the
+//   drain invokes `commit()` DIRECTLY — with no `currentSubscriber` set and no
+//   epoch reset. So `recordDependency` is a no-op on every re-run: deps read
+//   for the FIRST time on a later run are never subscribed, and deps no longer
+//   read are never pruned. The binding is reactive only to whatever it read on
+//   its very first evaluation.
+//
+// The fix mirrors `effect()` / `derived()`: register a self-retracking
+// subscriber. Every notification re-runs `commit` through `retrack`, which
+// re-establishes the dependency set per run — adding newly-read deps and
+// pruning stale ones. Returns a disposer that tears down all edges.
+//
+// The `_reentrant` guard makes every `retrack` of a given subscriber mutually
+// exclusive. It is REQUIRED for correctness, not just loop safety: a `commit`
+// that writes to one of its own deps mid-run (e.g. ErrorBoundary's content
+// getter calls `setError` when a child render throws) would otherwise trigger
+// the drain to re-invoke the subscriber synchronously, nesting a second
+// `retrack` inside the first. The nested run bumps shared dep edges to a newer
+// epoch, and the OUTER run's post-walk then prunes those edges as "stale" —
+// silently dropping live subscriptions. Skipping the synchronous re-entry
+// keeps the epoch bookkeeping single-threaded; the write still re-enqueues the
+// subscriber, so the drain re-runs it once the outer run unwinds (eventual
+// consistency, bounded by the drain's `tickRepeat` cap).
+//
+// The guard wraps BOTH the initial run and every notification-driven run.
+// ---------------------------------------------------------------------------
+export function reactiveBinding(commit: () => void): () => void {
+  const run = (): void => {
+    const s = subscriber as SubWithList & { _reentrant?: boolean };
+    if (s._reentrant) return;
+    s._reentrant = true;
+    try {
+      retrack(commit, subscriber);
+    } finally {
+      s._reentrant = false;
+    }
+  };
+  const subscriber = run as SubWithList & { _reentrant?: boolean };
+
+  // Pre-initialize every field the core touches so all binding subscribers
+  // share one hidden class (monomorphic inline caches in retrack / cleanup).
+  subscriber.depsHead = null;
+  subscriber.depsTail = null;
+  subscriber._epoch = 0;
+  subscriber._structDirty = false;
+  subscriber._runEpoch = 0;
+  subscriber._runs = 0;
+  subscriber._reentrant = false;
+
+  // Initial run establishes the first dependency set (guarded, see above).
+  run();
+
+  return subscriber._dispose ?? (subscriber._dispose = () => cleanup(subscriber));
 }
 
 // ---------- recordDependency ----------------------------------------------

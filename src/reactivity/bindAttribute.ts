@@ -1,6 +1,6 @@
 import { devWarn, isDev } from "../core/dev";
 import { isUrlAttribute, sanitizeUrl } from "../utils/sanitize";
-import { track } from "./track";
+import { reactiveBinding } from "./track";
 
 const _isDev = isDev();
 
@@ -80,9 +80,9 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
     }
   }
 
-  // Initial run + reactive updates
-  const teardown = track(commit);
-  return teardown;
+  // Initial run + reactive updates. Re-tracks deps every run so a signal first
+  // read on a later run is subscribed (per-run dependency tracking).
+  return reactiveBinding(commit);
 }
 
 /**
@@ -141,8 +141,9 @@ export function bindDynamic(
     prevName = name;
   }
 
-  // Initial run + reactive updates
-  const teardown = track(commit);
+  // Initial run + reactive updates. Re-tracks deps every run so a signal first
+  // read on a later run is subscribed (per-run dependency tracking).
+  const teardown = reactiveBinding(commit);
 
   // Return a combined teardown: stop tracking and clean up the current attribute
   return () => {
