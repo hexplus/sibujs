@@ -119,19 +119,14 @@ Reactivity-core hardening release. Closes correctness gaps around effect re-entr
 ### Fixed
 
 - **Effects that write to a signal they subscribe to no longer silently drop the update.** Previously the re-entrant invocation was dropped with a dev-only warning, leaving the effect's observed state out of sync with reality. Now the update is flagged as `rerunPending` and the effect re-runs after its current body completes, converging on consistent state. A 100-iteration safety cap breaks legitimate write-reads-self cycles with a loud `console.error` instead of hanging.
-
 - **`derived()` no longer accumulates stale dependencies on conditional code paths.** A getter like `() => flag() ? a() : b()` used to keep both `a` and `b` subscribed forever once both had been read, causing spurious re-evaluations whenever the untaken branch fired. The `retrack()` pull path now tags each dependency with a per-evaluation epoch and unsubscribes any edge whose epoch is stale at end of run — bounded memory, no spurious work.
-
 - **Sibling effects now converge to consistent state through the outermost notification.** Previously two paths of `notifySubscribers` diverged: the pure-effect fast path allowed re-enqueue (effects could run twice, final state consistent), while the mixed-computed slow path forbade it (effects ran once, possibly observing stale downstream state). Both paths now share a single drain with at-most-once enqueue dedup cleared before invoke — sibling effects that cross-write converge rather than one losing to the other.
-
 - **Unbounded empty-`__s` allocation per signal.** Signals whose last subscriber disposed kept an empty subscriber `Set` on the signal object for the process lifetime. The set is now cleared when size drops to zero.
-
 - **`subscriberStack` never released memory after a one-off nesting spike.** A transient deep-nesting excursion (e.g. a debug-mode traversal) could double the stack and retain it forever. The stack now shrinks lazily at end-of-`track()` when idle and over-allocated.
 
 ### Changed
 
 - **Cycle detection is now per-subscriber repeat-counted instead of total-iteration-capped.** The previous 100 000-iteration cap conflated "infinite cycle" with "legitimate large fan-out" — apps with 100k+ effects in one batch flirted with false positives while real tight cycles could burn the full budget before tripping. The new detector counts per-subscriber firings within a drain and bails when any single subscriber exceeds `maxSubscriberRepeats` (default 50) — accurate, cheap, and tolerant of arbitrary legitimate fan-out. The absolute iteration cap is retained as a safety net at 1 000 000.
-
 - **`setMaxDrainIterations(n)`** is now the safety-net knob rather than the primary cycle check; semantics unchanged for callers, default raised from 100 000 → 1 000 000.
 
 ### Added
@@ -141,9 +136,7 @@ Reactivity-core hardening release. Closes correctness gaps around effect re-entr
 ### Internal
 
 - Subscriber dep storage in the reactivity core migrated from `Set<signal>` to `Map<signal, epoch>` to carry per-edge epoch tags for `retrack()` pruning. Public API unchanged; the single-dep fast path still avoids `Map` allocation entirely.
-
 - `__f` / `__s` fast-path invariant centralized in a `syncFastPath()` helper — same performance, simpler to reason about across add/remove sites.
-
 - Devtools `introspect.getDependencies()` updated for the new `Map` layout; return type unchanged.
 
 ---
@@ -155,36 +148,28 @@ Major hardening + features release. Spans reactivity, rendering, SSR, widgets, s
 ### Breaking
 
 - **Adapter method renames** — `redux.useSelector` → `redux.select`, `zustand.useSelector` → `zustand.select`. The `use*` prefix is no longer used anywhere in the framework.
+
   ```ts
   // before
   const count = redux.useSelector(s => s.count);
   // after
   const count = redux.select(s => s.count);
   ```
-
 - **`useDefaultPluginRegistry` renamed to `setDefaultPluginRegistry`** — aligns with the verb-based convention used elsewhere.
-
 - **`loadRemoteModule()` now refuses un-allowlisted URLs** — previously warned in dev and loaded anyway. Now rejects unless `{ allowedOrigins: [...] }` or `{ unsafelyAllowAnyOrigin: true }` is passed (CWE-829 supply-chain hardening).
-
 - **`loadWasmModule()` / `preloadWasm()` require origin allowlist** — same policy as `loadRemoteModule`. Options bag now disambiguated via `allowedOrigins`/`unsafelyAllowAnyOrigin` keys only.
-
 - **`compiled.staticTemplate()` / `precompile()` require `TrustedHTML`** — arbitrary strings no longer accepted to prevent silent `innerHTML` XSS sinks. Mint via `trustHTML(raw)` after your own sanitization pass.
-
 - **Router refuses protocol-relative redirects** — `"//evil.com/path"` style redirect targets now throw `NavigationFailureError` instead of logging a warning (CWE-601 open redirect).
-
 - **`hydrate()` / `hydrateIslands` / `hydrateProgressively` use replace strategy** — the prior in-place attribute-reconciliation silently orphaned reactive bindings to the discarded client tree, leaving the visible DOM frozen. The client subtree now replaces the server subtree (island markers and `data-sibu-hydrated` preserved) so reactive bindings actually drive the DOM.
-
 - **`socket()` / `stream()` default `maxReconnects` is now 10** — was effectively unbounded. Permanently broken URLs no longer hammer servers forever. Exponential backoff with jitter added.
-
 - **`optimisticList()` deprecated aliases removed** — `addOptimistic`/`removeOptimistic`/`updateOptimistic` were deprecated in 1.5.0 and are now gone. Use `add`/`remove`/`update`.
-
 - **`contentEditable().setContent` signature widened** — takes either a string (raw HTML, legacy) or `{ text, html, sanitize }`. The options form is the recommended path.
 
 ### Added
 
 - **`retrack()`** reactivity primitive for derived pull-path — skips the `track()` cleanup pass; uses save/restore of `currentSubscriber` instead of stackTop push/pop. Steady-state chains avoid Set.delete+add churn.
-
 - **`effect((onCleanup) => { … })`** — canonical teardown pattern now built in. User cleanups run in reverse registration order before every re-run and on dispose; throwing cleanups are isolated and logged.
+
   ```ts
   effect((onCleanup) => {
     const handler = () => { … };
@@ -192,12 +177,10 @@ Major hardening + features release. Spans reactivity, rendering, SSR, widgets, s
     onCleanup(() => window.removeEventListener("resize", handler));
   });
   ```
-
 - **`derived(getter, { equals })`** — custom equality suppresses notifications when the recomputed value is equivalent to the previous.
-
 - **`Dispose` canonical type** exported from `sibu`.
-
 - **Widget ARIA `bind()` layer** — every headless widget now ships a `bind(els)` that wires roles, keyboard, and idempotent teardown per WAI-ARIA APG:
+
   - `Tabs` — role=tablist, roving tabindex, Arrow/Home/End
   - `Accordion` — aria-expanded/controls, Enter/Space
   - `Tooltip` — role=tooltip, aria-describedby splice, Escape dismiss, hoverable grace
@@ -207,15 +190,10 @@ Major hardening + features release. Spans reactivity, rendering, SSR, widgets, s
   - `FileUpload` — labeling, aria-describedby splice, drop-zone keyboard
   - `datePicker` — role=grid, arrow/Home/End, PageUp/Down, Shift+PageUp/Down (year)
   - All `bind()` returns are idempotent via WeakMap and restore every touched attribute on dispose.
-
 - **`takePendingError()` exported** — ErrorBoundary now scans mounted subtrees for stashed errors from `lazy()` rejections that beat any boundary to mount. Multiple pending errors wrapped in `AggregateError`.
-
 - **`trustHTML(html)` + `TrustedHTML` type** re-exported from `sibu` (was only on `sibu/ssr` and `sibu/performance`, which minted incompatible brands).
-
 - **Test-reset helpers** — `__resetQueryCache`, `__resetDialogStack`, `__removeRouterPagehideHandler`.
-
 - **Build/release hardening** — `tsup --clean`; `./cdn` subpath export; `publishConfig.access=public` + `provenance=true`; `publish.mjs` publishes BEFORE git commit/tag (so a publish failure leaves no orphan commit).
-
 - **10 new tests** — `keepAlive.test.ts`, `pluginRegistry.test.ts`, `widgetsAria.test.ts`.
 
 ### Fixed — Reactivity
@@ -316,6 +294,7 @@ Comprehensive bug-fix and hardening release. **30 bugs fixed across 29 files**, 
 ### Breaking
 
 - **`optimistic()` return shape changed** — previously returned a `[getter, setter]` tuple; now returns a named object `{ value, pending, update }`. The `pending` signal was created internally but never exposed (Bug: users had no way to show loading indicators). The `update` method now uses a version counter to prevent stale reverts from concurrent operations. Migration:
+
   ```ts
   // before
   const [value, addOptimistic] = optimistic(0);
@@ -323,7 +302,6 @@ Comprehensive bug-fix and hardening release. **30 bugs fixed across 29 files**, 
   // after
   const { value, pending, update } = optimistic(0);
   ```
-
 - **`optimisticList()` method names shortened** — `addOptimistic` → `add`, `removeOptimistic` → `remove`, `updateOptimistic` → `update`. The old names are kept as deprecated aliases so existing code keeps working.
 
 ### Fixed — Core Reactivity
