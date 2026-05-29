@@ -80,6 +80,36 @@ const text = `Count: ${count()}`; // captured once, never updates
 div({ nodes: text }); // static, won't react to changes
 ```
 
+### Reactive reads are per-run dependency tracking
+
+A reactive getter — a reactive child `() => value`, a `class`/`style` getter, `derived`, `effect`, `watch` — is reactive to exactly the signals it reads on its **most recent** run, not the union of every signal it has ever read. The engine recomputes the dependency set on every evaluation: signals read on the latest run are subscribed (even if a conditional branch read them for the first time), and signals no longer read are unsubscribed.
+
+```ts
+const [total, setTotal] = signal(0);
+const [bytes, setBytes] = signal(0);
+
+const el = div(() => {
+  // First run: total() === 0 → else branch → bytes() is never read.
+  return total() ? `${bytes()} / ${total()}` : "waiting";
+});
+mount(() => el, root);
+
+setTotal(100); // re-runs the getter; NOW bytes() is read for the first time
+setBytes(42);  // text becomes "42 / 100" — bytes is now a tracked dependency
+```
+
+This means two things in practice:
+
+- **You can rely on it.** A branch that becomes live later subscribes its signals automatically; you do not need to "pre-read" every signal to keep them reactive. Conversely, a branch you stop taking is pruned, so abandoned signals no longer trigger re-renders (no over-subscription).
+- **If you want a *stable* subscription regardless of branch**, read the conditionally-needed signal up front:
+
+```ts
+div(() => {
+  const b = bytes(); // always read → always subscribed
+  return total() ? `${b} / ${total()}` : "waiting";
+});
+```
+
 ### Use `batch()` for multiple updates
 
 When updating several signals at once, wrap them in `batch()` to coalesce into a single notification pass.

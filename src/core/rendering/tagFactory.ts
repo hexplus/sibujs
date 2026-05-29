@@ -59,6 +59,30 @@ export interface TagProps {
   [attr: string]: unknown;
 }
 
+// Heuristic: does a lone string argument look like a CSS class list rather
+// than human-readable text? Used ONLY to emit a dev warning — never to change
+// behavior. A lone string is always a text child (see tagFactory), but a value
+// like "space-y-6" or "h-6 w-48" is almost certainly a misplaced className, so
+// we surface the footgun loudly. Conservative on purpose: prose words ("Hello
+// world") never trip it; only strings whose every token is class-shaped AND at
+// least one token carries a class-indicator char (hyphen, colon, slash, digit)
+// — the Tailwind-utility shape that bit downstream users.
+function looksLikeClassList(s: string): boolean {
+  const t = s.trim();
+  if (!t) return false;
+  const tokens = t.split(/\s+/);
+  let sawClassish = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    // Every token must be a plausible CSS class token.
+    if (!/^-?[A-Za-z_][A-Za-z0-9_:/.-]*$/.test(tok)) return false;
+    // A hyphen / colon / slash / digit marks a utility-class token
+    // (h-6, md:flex, w-1/2). Plain words ("Hello") do not qualify.
+    if (/[-:/0-9]/.test(tok)) sawClassish = true;
+  }
+  return sawClassish;
+}
+
 // Cache for camelCase → kebab-case conversions
 const kebabCache = new Map<string, string>();
 
@@ -239,6 +263,15 @@ export const tagFactory = (tag: string, ns?: string) => {
         el.setAttribute("class", first);
         appendChildren(el, second);
         return el;
+      }
+      // Lone string → text child (unchanged). Warn in dev if it looks like a
+      // misplaced class list so a styled empty wrapper doesn't silently render
+      // its class names as visible text.
+      if (_isDev && looksLikeClassList(first)) {
+        devWarn(
+          `tagFactory: lone string "${first}" looks like a class list but is being rendered as TEXT. ` +
+            `For a class, use ${tag}({ class: "${first}" }) — or ${tag}("${first}", children) to set the class AND add children.`,
+        );
       }
       el.textContent = first;
       return el;
