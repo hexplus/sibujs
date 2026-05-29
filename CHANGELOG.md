@@ -6,6 +6,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+- **Per-run dependency tracking for DOM bindings** — a reactive child (`() => value`), a reactive `class`/`style` getter, and `watch` now re-track their dependencies on **every** run, matching `derived` and `effect`. Previously these bindings subscribed only to the signals read on their *first* evaluation: a signal first read on a later run (e.g. a conditional branch that becomes live after a state change) was never subscribed, so updates to it did not re-render. Signals no longer read on the latest run are also pruned (no over-subscription). The fix is centralized in `track()` — any eagerly-re-running binding registered without an explicit subscriber now uses a self-re-tracking subscriber.
+
+  ```ts
+  const [total, setTotal] = signal(0);
+  const [bytes, setBytes] = signal(0);
+  const el = div(() => (total() ? `${bytes()} / ${total()}` : "waiting"));
+  mount(() => el, root);
+  setTotal(100); // re-runs; bytes() first read here
+  setBytes(42);  // now "42 / 100" — previously stayed "0 / 100"
+  ```
+
+  This also fixes `query()` data not reaching a status-branching consumer (`if (q.loading()) …; return List(q.data())`) where `data()` was only read once not loading.
+
+### Added
+
+- **Dev warning for a misplaced lone class string** — `tag("space-y-6")` still renders the string as a text child (unchanged), but development builds now warn when a lone string looks like a CSS class list, hinting `tag({ class: "…" })` or `tag("…", children)`. Prose strings never trigger the warning.
+
+---
+
 ## [3.0.0] — 2026-04-19
 
 ### Breaking

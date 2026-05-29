@@ -1,5 +1,5 @@
 import { devWarn, isDev } from "../core/dev";
-import { track } from "./track";
+import { reactiveBinding } from "./track";
 
 /**
  * Binds a reactive getter to a Text node, updating its content reactively.
@@ -25,7 +25,7 @@ export function bindTextNode(textNode: Text, getter: () => string | number): () 
     textNode.textContent = String(value);
   }
 
-  // Initial render and reactive subscription
-  const teardown = track(commit);
-  return teardown;
+  // Initial render and reactive subscription. Re-tracks deps every run so a
+  // signal first read on a later run is subscribed (per-run dependency tracking).
+  return reactiveBinding(commit);
 }

@@ -1,6 +1,6 @@
 import { devWarn, isDev } from "../core/dev";
 import type { NodeChild } from "../core/rendering/types";
-import { track } from "./track";
+import { reactiveBinding } from "./track";
 
 const _isDev = isDev();
 
@@ -101,6 +101,9 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
     lastNodes = newNodes;
   }
 
-  // Initial render and reactive subscription
-  return track(commit);
+  // Initial render and reactive subscription. `reactiveBinding` re-tracks
+  // dependencies on every run, so a signal first read on a later run (e.g. a
+  // conditional branch that only becomes live after a state change) is still
+  // subscribed.
+  return reactiveBinding(commit);
 }
