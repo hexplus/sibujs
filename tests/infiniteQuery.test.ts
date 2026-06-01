@@ -135,4 +135,53 @@ describe("infiniteQuery", () => {
 
     query.dispose();
   });
+
+  it("caps retained pages with maxPages (sliding window)", async () => {
+    const query = infiniteQuery<number, number>("capped", async ({ pageParam }) => pageParam, {
+      getNextPageParam: (_last, all) => all[all.length - 1] + 1,
+      initialPageParam: 0,
+      maxPages: 2,
+    });
+
+    await tick();
+    expect(query.pages()).toEqual([0]);
+
+    await query.fetchNextPage();
+    expect(query.pages()).toEqual([0, 1]);
+
+    await query.fetchNextPage();
+    // Oldest page dropped — window stays at 2 and tracks the leading edge.
+    expect(query.pages()).toEqual([1, 2]);
+    expect(query.hasNextPage()).toBe(true);
+
+    query.dispose();
+  });
+
+  it("fetchNextPage dedups concurrent calls instead of dropping a page", async () => {
+    let calls = 0;
+    const query = infiniteQuery<number, number>(
+      "dedup",
+      async ({ pageParam }) => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 15));
+        return pageParam;
+      },
+      { getNextPageParam: (_last, all) => all[all.length - 1] + 1, initialPageParam: 0 },
+    );
+
+    await new Promise((r) => setTimeout(r, 30)); // let the initial page fully settle
+    expect(query.pages()).toEqual([0]);
+    const callsAfterInitial = calls;
+
+    const p1 = query.fetchNextPage();
+    const p2 = query.fetchNextPage(); // concurrent — must return the same in-flight promise
+    expect(p2).toBe(p1);
+
+    await Promise.all([p1, p2]);
+    // Only one extra fetch happened (no aborted/dropped duplicate).
+    expect(calls).toBe(callsAfterInitial + 1);
+    expect(query.pages()).toEqual([0, 1]);
+
+    query.dispose();
+  });
 });

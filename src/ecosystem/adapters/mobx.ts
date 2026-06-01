@@ -63,6 +63,22 @@ export function mobXAdapter(options: MobXAdapterOptions): SibuPlugin {
     const { autorun } = options;
     const disposers: MobXReactionDisposer[] = [];
 
+    // Wrap a raw disposer so it is idempotent and self-removing. Every bridge
+    // (fromMobX autoruns AND toMobX effects) is tracked here, so destroy()
+    // tears them all down and a dispose-after-destroy is a safe no-op.
+    function trackDisposer(rawDispose: () => void): () => void {
+      let done = false;
+      const wrapped = () => {
+        if (done) return;
+        done = true;
+        const i = disposers.indexOf(wrapped);
+        if (i >= 0) disposers.splice(i, 1);
+        rawDispose();
+      };
+      disposers.push(wrapped);
+      return wrapped;
+    }
+
     function fromMobX<T>(expression: () => T): (() => T) & { dispose: () => void } {
       // Seed with `undefined` and let autorun's synchronous first invocation
       // populate the signal — autorun calls the view immediately, so calling
@@ -75,27 +91,25 @@ export function mobXAdapter(options: MobXAdapterOptions): SibuPlugin {
           setValue(newValue as T);
         });
       });
-      disposers.push(disposer);
 
       // Attach a per-subscription dispose on the getter so callers can
       // unsubscribe individually without tearing down the whole adapter.
       const getter = (() => getValue() as T) as (() => T) & { dispose: () => void };
-      getter.dispose = () => {
-        const i = disposers.indexOf(disposer);
-        if (i >= 0) disposers.splice(i, 1);
-        disposer();
-      };
+      getter.dispose = trackDisposer(disposer);
       return getter;
     }
 
     function toMobX(sibuGetter: () => unknown, callback: (value: unknown) => void): () => void {
-      return effect(() => {
+      const stop = effect(() => {
         callback(sibuGetter());
       });
+      // Track so destroy() also tears down toMobX reactions (not just fromMobX).
+      return trackDisposer(stop);
     }
 
     function destroy(): void {
-      for (const disposer of disposers) {
+      // Iterate a copy: each wrapped disposer removes itself from `disposers`.
+      for (const disposer of [...disposers]) {
         disposer();
       }
       disposers.length = 0;

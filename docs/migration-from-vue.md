@@ -91,13 +91,10 @@ Vue uses HTML templates (or JSX with a plugin). SibuJS replaces templates with
 import { div, h2, p } from "sibujs";
 
 function Card() {
-  return div({
-    class: "card",
-    nodes: [
-      h2({ nodes: "Title" }),
-      p({ nodes: "Body text" }),
-    ],
-  });
+  return div("card", [
+    h2("Title"),
+    p("Body text"),
+  ]);
 }
 ```
 
@@ -129,13 +126,11 @@ Every HTML and SVG tag is available as a pre-built factory (`div`, `span`, `h1`,
 
 ```ts
 function App() {
-  return div({
-    nodes: [
-      Header(),
-      MainContent({ title: "Hello" }),
-      Footer(),
-    ],
-  });
+  return div([
+    Header(),
+    MainContent({ title: "Hello" }),
+    Footer(),
+  ]);
 }
 ```
 
@@ -198,17 +193,15 @@ cleans up all reactive bindings.
 ```ts
 const [name, setName] = signal("World");
 
-span({
-  nodes: () => `Hello, ${name()}`,
-});
+span(() => `Hello, ${name()}`);
 ```
 
 </td>
 </tr>
 </table>
 
-When `nodes` is a **function**, SibuJS treats it as a reactive binding. The text
-node updates automatically whenever `name` changes. When `nodes` is a plain string,
+When a child is a **function**, SibuJS treats it as a reactive binding. The text
+node updates automatically whenever `name` changes. When a child is a plain string,
 it is static.
 
 ### Dynamic attributes
@@ -535,8 +528,8 @@ import { when } from "sibujs";
 
 when(
   () => isLoggedIn(),
-  () => div({ nodes: "Welcome back!" }),
-  () => div({ nodes: "Please log in." })
+  () => div("Welcome back!"),
+  () => div("Please log in.")
 );
 ```
 
@@ -570,7 +563,7 @@ import { show } from "sibujs";
 
 show(
   () => isVisible(),
-  div({ nodes: "I toggle display" })
+  div("I toggle display")
 );
 ```
 
@@ -605,16 +598,14 @@ when toggling frequently.
 ```ts
 import { ul, li, each } from "sibujs";
 
-ul({
-  nodes: [
-    each(
-      () => items(),
-      (item, index) =>
-        li({ nodes: item.name }),
-      { key: item => item.id }
-    ),
-  ],
-});
+ul([
+  each(
+    () => items(),
+    (item, index) =>
+      li(() => item().name),
+    { key: item => item.id }
+  ),
+]);
 ```
 
 </td>
@@ -652,20 +643,18 @@ import { signal, input, p } from "sibujs";
 
 const [name, setName] = signal("");
 
-div({
-  nodes: [
-    input({
-      value: () => name(),
-      on: {
-        input: (e) =>
-          setName(
-            (e.target as HTMLInputElement).value
-          ),
-      },
-    }),
-    p({ nodes: () => `Hello, ${name()}` }),
-  ],
-});
+div([
+  input({
+    value: () => name(),
+    on: {
+      input: (e) =>
+        setName(
+          (e.target as HTMLInputElement).value
+        ),
+    },
+  }),
+  p(() => `Hello, ${name()}`),
+]);
 ```
 
 </td>
@@ -686,20 +675,19 @@ const { fields, handleSubmit, isValid } = form({
 
 form({
   on: { submit: handleSubmit((values) => save(values)) },
-  nodes: [
-    input({
-      value: () => fields.name.value(),
-      on: {
-        input: (e) => fields.name.set((e.target as HTMLInputElement).value),
-        blur: () => fields.name.touch(),
-      },
-    }),
-    when(
-      () => fields.name.touched() && fields.name.error() !== null,
-      () => span({ class: "error", nodes: () => fields.name.error() })
-    ),
-  ],
-});
+}, [
+  input({
+    value: () => fields.name.value(),
+    on: {
+      input: (e) => fields.name.set((e.target as HTMLInputElement).value),
+      blur: () => fields.name.touch(),
+    },
+  }),
+  when(
+    () => fields.name.touched() && fields.name.error() !== null,
+    () => span("error", () => fields.name.error())
+  ),
+]);
 ```
 
 ### v-bind:class / Class binding
@@ -803,8 +791,7 @@ automatically.
 ```ts
 button({
   on: { click: handleClick },
-  nodes: "Click me",
-});
+}, "Click me");
 
 input({
   on: {
@@ -838,7 +825,7 @@ match(
     error:   () => ErrorMessage(),
     success: () => Content(),
   },
-  () => div({ nodes: "Unknown status" }) // fallback
+  () => div("Unknown status") // fallback
 );
 ```
 
@@ -875,7 +862,7 @@ onUnmounted(() => {
 import { onMount, onUnmount } from "sibujs";
 
 function MyComponent() {
-  const el = div({ nodes: "Hello" });
+  const el = div("Hello");
 
   onMount(() => {
     console.log("Mounted");
@@ -995,16 +982,14 @@ const ThemeContext = context("light");
 function App() {
   ThemeContext.provide("dark");
 
-  return div({ nodes: [Child()] });
+  return div([Child()]);
 }
 
 // Child — consume the value
 function Child() {
   const theme = ThemeContext.use(); // reactive getter
 
-  return div({
-    nodes: () => `Theme: ${theme()}`,
-  });
+  return div(() => `Theme: ${theme()}`);
 }
 ```
 
@@ -1120,16 +1105,13 @@ function Counter() {
   const { count, doubled, increment } =
     counterSetup();
 
-  return div({
-    nodes: [
-      p({ nodes: () => `Count: ${count()}` }),
-      p({ nodes: () => `Doubled: ${doubled()}` }),
-      button({
-        on: { click: increment },
-        nodes: "+",
-      }),
-    ],
-  });
+  return div([
+    p(() => `Count: ${count()}`),
+    p(() => `Doubled: ${doubled()}`),
+    button({
+      on: { click: increment },
+    }, "+"),
+  ]);
 }
 ```
 
@@ -1218,12 +1200,10 @@ const router = createRouter(
 import { Route } from "sibujs/plugins";
 
 function App() {
-  return div({
-    nodes: [
-      Nav(),
-      route(), // renders the matched component
-    ],
-  });
+  return div([
+    Nav(),
+    route(), // renders the matched component
+  ]);
 }
 ```
 
@@ -1491,19 +1471,16 @@ function Counter() {
   const count = counterStore.select(s => s.count);
   const doubled = counterStore.select(s => s.count * 2);
 
-  return div({
-    nodes: [
-      p({ nodes: () => `${count()}` }),
-      p({ nodes: () => `${doubled()}` }),
-      button({
-        on: {
-          click: () =>
-            counterStore.dispatch("increment"),
-        },
-        nodes: "+",
-      }),
-    ],
-  });
+  return div([
+    p(() => `${count()}`),
+    p(() => `${doubled()}`),
+    button({
+      on: {
+        click: () =>
+          counterStore.dispatch("increment"),
+      },
+    }, "+"),
+  ]);
 }
 ```
 
@@ -1560,7 +1537,7 @@ SibuJS.
 - [ ] Convert all `.vue` SFC files to `.ts` / `.js` files
 - [ ] Replace `<template>` blocks with tag factory function calls (`div`, `span`, etc.)
 - [ ] Replace `<script setup>` with plain function components
-- [ ] Replace template interpolation `{{ expr }}` with `nodes: () => expr`
+- [ ] Replace template interpolation `{{ expr }}` with a reactive child `() => expr`
 - [ ] Replace `:attr="expr"` dynamic bindings with `attr: () => expr`
 - [ ] Replace `@event="handler"` with `on: { event: handler }`
 

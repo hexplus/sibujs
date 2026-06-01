@@ -175,22 +175,17 @@ function ProductCard(product: Product): HTMLElement {
   return div({
     class: "product-card",
     "data-track": `product-${product.id}`,
-    nodes: [
-      img({ src: product.image, alt: product.name, class: "product-image" }),
-      div({
-        class: "product-info",
-        nodes: [
-          h3({ nodes: product.name }),
-          p({ class: "price", nodes: `$${product.price.toFixed(2)}` }),
-          button({
-            class: "btn btn-primary",
-            nodes: t("product.addToCart"),
-            on: { click: () => addToCart(product.id) },
-          }),
-        ],
-      }),
-    ],
-  }) as HTMLElement;
+  }, [
+    img({ src: product.image, alt: product.name, class: "product-image" }),
+    div("product-info", [
+      h3(product.name),
+      p("price", `$${product.price.toFixed(2)}`),
+      button({
+        class: "btn btn-primary",
+        on: { click: () => addToCart(product.id) },
+      }, t("product.addToCart")),
+    ]),
+  ]) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
@@ -198,58 +193,45 @@ function ProductCard(product: Product): HTMLElement {
 // ---------------------------------------------------------------------------
 
 function CartPage(): HTMLElement {
-  return div({
-    class: "page cart-page",
-    nodes: [
-      h2({ nodes: Trans("cart.total") }),
-      when(
-        () => cartItems().length === 0,
-        () => p({ nodes: t("cart.empty") }) as HTMLElement,
-        () =>
-          div({
-            nodes: [
-              each(
-                () => cartItems(),
-                (item) => {
-                  const product = products.get(item.productId);
-                  if (!product) return span({ nodes: "Unknown" }) as HTMLElement;
-                  return div({
-                    class: "cart-item",
-                    nodes: [
-                      span({ nodes: product.name }),
-                      input({
-                        type: "number",
-                        value: String(item.quantity),
-                        min: "0",
-                        on: {
-                          change: (e) =>
-                            updateQuantity(
-                              item.productId,
-                              parseInt((e.target as HTMLInputElement).value) || 0
-                            ),
-                        },
-                      }),
-                      span({
-                        nodes: `$${(product.price * item.quantity).toFixed(2)}`,
-                      }),
-                      button({
-                        nodes: "\u00d7",
-                        on: { click: () => removeFromCart(item.productId) },
-                      }),
-                    ],
-                  }) as HTMLElement;
-                },
-                { key: (item) => item.productId }
-              ),
-              div({
-                class: "cart-total",
-                nodes: () => `${t("cart.total")}: $${cartTotal().toFixed(2)}`,
-              }),
-            ],
-          }) as HTMLElement
-      ),
-    ],
-  }) as HTMLElement;
+  return div("page cart-page", [
+    h2(Trans("cart.total")),
+    when(
+      () => cartItems().length === 0,
+      () => p(t("cart.empty")) as HTMLElement,
+      () =>
+        div([
+          each(
+            () => cartItems(),
+            (item) => {
+              const data = item();
+              const product = products.get(data.productId);
+              if (!product) return span("Unknown") as HTMLElement;
+              return div("cart-item", [
+                span(product.name),
+                input({
+                  type: "number",
+                  value: String(data.quantity),
+                  min: "0",
+                  on: {
+                    change: (e) =>
+                      updateQuantity(
+                        data.productId,
+                        parseInt((e.target as HTMLInputElement).value) || 0
+                      ),
+                  },
+                }),
+                span(`$${(product.price * data.quantity).toFixed(2)}`),
+                button({
+                  on: { click: () => removeFromCart(data.productId) },
+                }, "\u00d7"),
+              ]) as HTMLElement;
+            },
+            { key: (item) => item.productId }
+          ),
+          div("cart-total", () => `${t("cart.total")}: $${cartTotal().toFixed(2)}`),
+        ]) as HTMLElement
+    ),
+  ]) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
@@ -276,51 +258,43 @@ function CheckoutPage(): HTMLElement {
   return form({
     class: "checkout-form",
     on: { submit: onSubmit },
-    nodes: [
-      h2({ nodes: t("checkout.title") }),
-      div({
-        class: "form-field",
-        nodes: [
-          label({ nodes: t("checkout.name") }),
-          input({
-            type: "text",
-            value: () => fields.name.value(),
-            on: {
-              input: (e) => fields.name.set((e.target as HTMLInputElement).value),
-              blur: () => fields.name.touch(),
-            },
-          }),
-          when(
-            () => fields.name.touched() && fields.name.error() !== null,
-            () => span({ class: "error", nodes: () => fields.name.error()! }) as HTMLElement
-          ),
-        ],
+  }, [
+    h2(t("checkout.title")),
+    div("form-field", [
+      label(t("checkout.name")),
+      input({
+        type: "text",
+        value: () => fields.name.value(),
+        on: {
+          input: (e) => fields.name.set((e.target as HTMLInputElement).value),
+          blur: () => fields.name.touch(),
+        },
       }),
-      div({
-        class: "form-field",
-        nodes: [
-          label({ nodes: t("checkout.email") }),
-          input({
-            type: "email",
-            value: () => fields.email.value(),
-            on: {
-              input: (e) => fields.email.set((e.target as HTMLInputElement).value),
-              blur: () => fields.email.touch(),
-            },
-          }),
-          when(
-            () => fields.email.touched() && fields.email.error() !== null,
-            () => span({ class: "error", nodes: () => fields.email.error()! }) as HTMLElement
-          ),
-        ],
+      when(
+        () => fields.name.touched() && fields.name.error() !== null,
+        () => span({ class: "error" }, () => fields.name.error()!) as HTMLElement
+      ),
+    ]),
+    div("form-field", [
+      label(t("checkout.email")),
+      input({
+        type: "email",
+        value: () => fields.email.value(),
+        on: {
+          input: (e) => fields.email.set((e.target as HTMLInputElement).value),
+          blur: () => fields.email.touch(),
+        },
       }),
-      button({
-        type: "submit",
-        class: () => `btn btn-primary ${isValid() ? "" : "disabled"}`,
-        nodes: t("checkout.submit"),
-      }),
-    ],
-  }) as HTMLElement;
+      when(
+        () => fields.email.touched() && fields.email.error() !== null,
+        () => span({ class: "error" }, () => fields.email.error()!) as HTMLElement
+      ),
+    ]),
+    button({
+      type: "submit",
+      class: () => `btn btn-primary ${isValid() ? "" : "disabled"}`,
+    }, t("checkout.submit")),
+  ]) as HTMLElement;
 }
 ```
 
@@ -358,59 +332,39 @@ function ProductListPage(): HTMLElement {
     return cat ? all.filter((p) => p.category === cat) : all;
   });
 
-  return div({
-    class: "page",
-    nodes: [
-      h1({ nodes: "Products" }),
-      div({
-        class: "filters",
-        nodes: ["all", "electronics", "sports", "kitchen"].map((cat) =>
-          button({
-            class: () =>
-              `filter-btn ${(cat === "all" ? null : cat) === category() ? "active" : ""}`,
-            nodes: cat,
-            on: { click: () => setCategory(cat === "all" ? null : cat) },
-          })
-        ),
-      }),
-      div({
-        class: "product-grid",
-        nodes: [
-          each(
-            () => filtered(),
-            (product) => ProductCard(product),
-            { key: (p) => p.id }
-          ),
-        ],
-      }),
-    ],
-  }) as HTMLElement;
+  return div("page", [
+    h1("Products"),
+    div("filters", ["all", "electronics", "sports", "kitchen"].map((cat) =>
+      button({
+        class: () =>
+          `filter-btn ${(cat === "all" ? null : cat) === category() ? "active" : ""}`,
+        on: { click: () => setCategory(cat === "all" ? null : cat) },
+      }, cat)
+    )),
+    div("product-grid", [
+      each(
+        () => filtered(),
+        (product) => ProductCard(product()),
+        { key: (p) => p.id }
+      ),
+    ]),
+  ]) as HTMLElement;
 }
 
 function AppNav(): HTMLElement {
-  return nav({
-    class: "main-nav",
-    nodes: [
-      RouterLink({ to: "/", nodes: t("nav.home") }),
-      RouterLink({
-        to: "/cart",
-        nodes: () => `${t("nav.cart")} (${cartCount()})`,
-      }),
-      button({
-        nodes: "EN/ES",
-        on: {
-          click: () => setLocale(t("nav.home") === "Home" ? "es" : "en"),
-        },
-      }),
-    ],
-  }) as HTMLElement;
+  return nav("main-nav", [
+    RouterLink({ to: "/", nodes: t("nav.home") }),
+    RouterLink({ to: "/cart", nodes: () => `${t("nav.cart")} (${cartCount()})` }),
+    button({
+      on: {
+        click: () => setLocale(t("nav.home") === "Home" ? "es" : "en"),
+      },
+    }, "EN/ES"),
+  ]) as HTMLElement;
 }
 
 function App(): HTMLElement {
-  return div({
-    class: "app",
-    nodes: [AppNav(), Outlet()],
-  }) as HTMLElement;
+  return div("app", [AppNav(), Outlet()]) as HTMLElement;
 }
 
 mount(App, document.getElementById("app"));

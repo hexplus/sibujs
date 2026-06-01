@@ -74,6 +74,17 @@ export function deepEqual(a: unknown, b: unknown, seen?: Map<object, Set<object>
     }
     return true;
   }
+  // DataView is an ArrayBuffer view but has no `length` / indexed elements, so
+  // it must be handled before the TypedArray branch — otherwise `length` is
+  // undefined, the loop never runs, and any two DataViews compare equal.
+  if (a instanceof DataView) {
+    if (!(b instanceof DataView)) return false;
+    if (a.byteLength !== b.byteLength) return false;
+    for (let i = 0; i < a.byteLength; i++) {
+      if (a.getUint8(i) !== b.getUint8(i)) return false;
+    }
+    return true;
+  }
   if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
     const ta = a as unknown as { length: number; [i: number]: number };
     const tb = b as unknown as { length: number; [i: number]: number };
@@ -96,8 +107,13 @@ export function deepEqual(a: unknown, b: unknown, seen?: Map<object, Set<object>
   const keysB = Object.keys(objB as Record<string, unknown>);
   if (keysA.length !== keysB.length) return false;
 
-  return keysA.every((key) =>
-    deepEqual((objA as Record<string, unknown>)[key], (objB as Record<string, unknown>)[key], seen),
+  // Equal length is not enough: the key SETS must match. Without the
+  // `hasOwn` check, `{ a: undefined, b: 2 }` and `{ x: undefined, b: 2 }`
+  // compare equal (the missing `a`/`x` both read as undefined) — a missed update.
+  return keysA.every(
+    (key) =>
+      Object.hasOwn(objB as object, key) &&
+      deepEqual((objA as Record<string, unknown>)[key], (objB as Record<string, unknown>)[key], seen),
   );
 }
 

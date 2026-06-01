@@ -74,15 +74,47 @@ function processQueue(): void {
   }
 }
 
-function scheduleFrame(): void {
-  if (scheduledKind !== null || microtaskScheduled) return;
+// Relative latency of each tier (lower = sooner). Used to decide whether an
+// already-scheduled tier is fast enough for the highest-priority pending task.
+const TIER_SPEED: Record<ScheduledKind, number> = { microtask: 0, frame: 1, timeout: 2, idle: 3 };
 
+function cancelScheduled(): void {
+  if (scheduledHandle !== null) {
+    if (scheduledKind === "frame") cancelAnimationFrame(scheduledHandle);
+    else if (scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined") cancelIdleCallback(scheduledHandle);
+    else if (scheduledKind === "timeout") clearTimeout(scheduledHandle);
+  }
+  scheduledHandle = null;
+  scheduledKind = null;
+}
+
+function scheduleFrame(): void {
   const nextTask = taskQueue.find((t) => !t.cancelled);
   if (!nextTask) return;
 
-  if (nextTask.priority <= Priority.USER_BLOCKING) {
-    // High priority — use microtask. Set flag BEFORE queueing to avoid
-    // races where another scheduleFrame() call slips through.
+  const desired: ScheduledKind =
+    nextTask.priority <= Priority.USER_BLOCKING
+      ? "microtask"
+      : nextTask.priority === Priority.IDLE
+        ? typeof requestIdleCallback !== "undefined"
+          ? "idle"
+          : "timeout"
+        : "frame";
+
+  // A microtask is the fastest tier — nothing to re-arm faster.
+  if (microtaskScheduled) return;
+  if (scheduledKind !== null) {
+    // Keep the existing schedule only if it fires at least as soon as needed.
+    // Otherwise a higher-priority task arrived (e.g. USER_BLOCKING behind a
+    // pending rAF) — cancel the slower handle and re-arm at the faster tier,
+    // instead of making the urgent task wait for the next frame.
+    if (TIER_SPEED[scheduledKind] <= TIER_SPEED[desired]) return;
+    cancelScheduled();
+  }
+
+  if (desired === "microtask") {
+    // Set flag BEFORE queueing to avoid races where another scheduleFrame()
+    // call slips through.
     microtaskScheduled = true;
     scheduledKind = "microtask";
     queueMicrotask(() => {
@@ -90,25 +122,21 @@ function scheduleFrame(): void {
       scheduledKind = null;
       processQueue();
     });
-  } else if (nextTask.priority === Priority.IDLE) {
-    // Idle priority — use requestIdleCallback if available
-    if (typeof requestIdleCallback !== "undefined") {
-      scheduledKind = "idle";
-      scheduledHandle = requestIdleCallback(() => {
-        scheduledKind = null;
-        scheduledHandle = null;
-        processQueue();
-      }) as unknown as number;
-    } else {
-      scheduledKind = "timeout";
-      scheduledHandle = setTimeout(() => {
-        scheduledKind = null;
-        scheduledHandle = null;
-        processQueue();
-      }, 50) as unknown as number;
-    }
+  } else if (desired === "idle") {
+    scheduledKind = "idle";
+    scheduledHandle = requestIdleCallback(() => {
+      scheduledKind = null;
+      scheduledHandle = null;
+      processQueue();
+    }) as unknown as number;
+  } else if (desired === "timeout") {
+    scheduledKind = "timeout";
+    scheduledHandle = setTimeout(() => {
+      scheduledKind = null;
+      scheduledHandle = null;
+      processQueue();
+    }, 50) as unknown as number;
   } else {
-    // Normal/Low priority — use requestAnimationFrame
     scheduledKind = "frame";
     scheduledHandle = requestAnimationFrame(() => {
       scheduledKind = null;
@@ -228,7 +256,11 @@ export async function processInChunks<T>(
 ): Promise<void> {
   for (let i = 0; i < items.length; i++) {
     processor(items[i], i);
-    if (i > 0 && i % chunkSize === 0) {
+    // Yield after every full chunk of `chunkSize` items (i.e. once the
+    // (i+1)-th item completes), but not after the final item — there is no
+    // remaining work to yield for. Previously `i % chunkSize` yielded one item
+    // late and processed chunkSize+1 items in the first chunk.
+    if ((i + 1) % chunkSize === 0 && i + 1 < items.length) {
       await yieldToMain();
     }
   }

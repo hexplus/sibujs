@@ -113,30 +113,63 @@ function idbGet<T>(db: IDBDatabase, store: string, key: string | number): Promis
   });
 }
 
-function idbPut<T>(db: IDBDatabase, store: string, item: T): Promise<void> {
+function idbPut<T>(db: IDBDatabase, store: string, item: T, key?: IDBValidKey): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(item);
+    // Out-of-line stores (no keyPath, e.g. "_meta") require an explicit key;
+    // calling put(item) without one throws DataError.
+    if (key !== undefined) tx.objectStore(store).put(item, key);
+    else tx.objectStore(store).put(item);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-function idbPutWithChange<T>(db: IDBDatabase, item: T, change: SyncChange<T>): Promise<void> {
+/**
+ * Within an open `_changes` transaction, drop any prior pending change for the
+ * same item key, then append the new one. This coalesces repeated edits to the
+ * same record into a single pending change (last-write-wins, which matches how
+ * push sends the current item), so the change log stays bounded by the working
+ * set size instead of growing with every edit while offline.
+ */
+function coalesceAndAddChange<T>(tx: IDBTransaction, change: SyncChange<T>, keyPath: string): void {
+  const store = tx.objectStore("_changes");
+  const targetKey = (change.item as Record<string, unknown>)[keyPath];
+  const cursorReq = store.openCursor();
+  cursorReq.onsuccess = () => {
+    const cursor = cursorReq.result;
+    if (cursor) {
+      const existing = cursor.value as SyncChange<T>;
+      const k = (existing.item as Record<string, unknown>)[keyPath];
+      if (targetKey != null && k === targetKey) cursor.delete();
+      cursor.continue();
+    } else {
+      // Append only after the scan so we never delete the change we just added.
+      store.put(change);
+    }
+  };
+}
+
+function idbPutWithChange<T>(db: IDBDatabase, item: T, change: SyncChange<T>, keyPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(["items", "_changes"], "readwrite");
     tx.objectStore("items").put(item);
-    tx.objectStore("_changes").put(change);
+    coalesceAndAddChange(tx, change, keyPath);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
 }
 
-function idbDeleteWithChange<T>(db: IDBDatabase, key: string | number, change: SyncChange<T>): Promise<void> {
+function idbDeleteWithChange<T>(
+  db: IDBDatabase,
+  key: string | number,
+  change: SyncChange<T>,
+  keyPath: string,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(["items", "_changes"], "readwrite");
     tx.objectStore("items").delete(key);
-    tx.objectStore("_changes").put(change);
+    coalesceAndAddChange(tx, change, keyPath);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -227,14 +260,19 @@ export async function offlineStore<T extends Record<string, unknown>>(
   }
 
   async function put(item: T): Promise<void> {
-    await idbPutWithChange(db, item, { type: "put", item, timestamp: Date.now() } as SyncChange<T>);
+    await idbPutWithChange(db, item, { type: "put", item, timestamp: Date.now() } as SyncChange<T>, keyPath);
     await refreshData();
   }
 
   async function remove(key: string | number): Promise<void> {
     const existing = await idbGet<T>(db, "items", key);
     if (existing) {
-      await idbDeleteWithChange(db, key, { type: "delete", item: existing, timestamp: Date.now() } as SyncChange<T>);
+      await idbDeleteWithChange(
+        db,
+        key,
+        { type: "delete", item: existing, timestamp: Date.now() } as SyncChange<T>,
+        keyPath,
+      );
       await refreshData();
     }
   }
@@ -265,6 +303,11 @@ export async function offlineStore<T extends Record<string, unknown>>(
             snapshot.map((e) => e.key),
           );
           if (closed) return;
+        } else if (typeof console !== "undefined") {
+          // Changes are retained for retry (correct), but a permanently
+          // rejecting server would otherwise grow the queue silently — surface
+          // it so the caller can react instead of accumulating forever.
+          console.warn(`[offlineStore] push rejected by adapter${result.error ? `: ${result.error}` : ""}`);
         }
       }
 
@@ -289,7 +332,7 @@ export async function offlineStore<T extends Record<string, unknown>>(
       if (closed) return;
 
       const now = Date.now();
-      await idbPut(db, "_meta", now);
+      await idbPut(db, "_meta", now, "lastSynced");
       if (closed) return;
       setLastSynced(now);
       await refreshData();

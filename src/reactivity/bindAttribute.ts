@@ -1,5 +1,8 @@
 import { devWarn, isDev } from "../core/dev";
-import { isUrlAttribute, sanitizeUrl } from "../utils/sanitize";
+// `isEventHandlerAttr` is the single shared `on*` guard — event-handler
+// attributes evaluate their value as JS via setAttribute, so the framework
+// refuses to bind them (use `on: { click: fn }`, which uses addEventListener).
+import { isEventHandlerAttr, isUrlAttribute, sanitizeUrl } from "../utils/sanitize";
 import { reactiveBinding } from "./track";
 
 const _isDev = isDev();
@@ -10,19 +13,6 @@ const _isDev = isDev();
  */
 function setProp(el: Element, key: string, val: unknown): void {
   (el as unknown as Record<string, unknown>)[key] = val;
-}
-
-/**
- * Is this attribute an `on*` event handler? Event-handler attributes are
- * always a XSS vector when set via `setAttribute` (they evaluate the
- * value as JavaScript on event dispatch), so the framework refuses to
- * bind to them. Use `on: { click: fn }` on the tag factory instead —
- * that path uses `addEventListener` which is safe.
- */
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
 }
 
 /**
@@ -120,9 +110,9 @@ export function bindDynamic(
       return;
     }
 
-    // Block event handler attributes (onclick, onload, onerror, etc.)
-    // to prevent XSS via dynamic attribute name injection
-    if ((name[0] === "o" || name[0] === "O") && (name[1] === "n" || name[1] === "N")) return;
+    // Block event handler attributes (onclick, onload, …) to prevent XSS via
+    // dynamic attribute-name injection (shared guard).
+    if (isEventHandlerAttr(name)) return;
 
     // If the attribute name changed, remove the old one
     if (prevName !== null && prevName !== name) {

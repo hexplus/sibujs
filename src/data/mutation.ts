@@ -42,7 +42,7 @@ export interface MutationResult<TData, TVariables> {
 }
 
 export function mutation<TData, TVariables = void, TContext = unknown>(
-  mutationFn: (variables: TVariables) => Promise<TData>,
+  mutationFn: (variables: TVariables, signal?: AbortSignal) => Promise<TData>,
   options: MutationOptions<TData, TVariables, TContext> = {},
 ): MutationResult<TData, TVariables> {
   const [data, setData] = signal<TData | undefined>(undefined);
@@ -54,8 +54,14 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
   const isIdle = derived(() => status() === "idle");
 
   let runId = 0;
+  let abortController: AbortController | null = null;
 
   async function execute(variables: TVariables): Promise<TData> {
+    // Abort any in-flight mutation (incl. its retry chain) before starting a
+    // new one, so a superseding mutate() doesn't leave a zombie retry loop.
+    abortController?.abort();
+    abortController = new AbortController();
+    const signal = abortController.signal;
     const myRun = ++runId;
     let context: TContext | undefined;
 
@@ -70,7 +76,9 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
         context = await options.onMutate(variables);
       }
 
-      const result = await withRetry(() => mutationFn(variables), options.retry);
+      // Pass the signal both to withRetry (stops scheduling further retries
+      // once aborted) and to mutationFn (lets the caller cancel the request).
+      const result = await withRetry(() => mutationFn(variables, signal), options.retry, undefined, signal);
 
       // Ignore stale responses — a newer mutate() call is in flight
       if (myRun !== runId) return result;
@@ -87,6 +95,10 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       return result;
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));
+
+      // A mutation aborted by reset()/supersession must not surface as an
+      // error state — it was intentionally cancelled.
+      if (errorObj instanceof DOMException && errorObj.name === "AbortError") throw errorObj;
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;
@@ -106,6 +118,9 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
   function reset(): void {
     runId++;
+    // Cancel any in-flight mutation + its pending retries.
+    abortController?.abort();
+    abortController = null;
     batch(() => {
       setData(undefined);
       setError(undefined);
@@ -125,6 +140,8 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       // options.onError — but keep a devWarn so fire-and-forget mutate()
       // failures aren't completely invisible when onError isn't wired.
       execute(variables).catch((err) => {
+        // An abort (reset()/supersession) is intentional — don't warn for it.
+        if (err instanceof DOMException && err.name === "AbortError") return;
         if (typeof console !== "undefined") {
           console.warn("[SibuJS mutation] mutate() failed; check `.error()` signal or onError option.", err);
         }

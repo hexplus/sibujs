@@ -1,4 +1,4 @@
-import { registerDisposer } from "../core/rendering/dispose";
+import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 
@@ -55,8 +55,14 @@ export function VirtualList<T>(props: VirtualListProps<T>): HTMLElement {
 
     content.style.top = `${startIndex * props.itemHeight}px`;
 
-    // Clear and re-render visible items
-    content.innerHTML = "";
+    // Clear and re-render visible items. Dispose the previous item nodes first —
+    // `renderItem` may register reactive bindings/effects on them, and a bare
+    // `innerHTML = ""` would detach them without running those disposers,
+    // leaking a subscription per item on every scroll tick.
+    while (content.firstChild) {
+      dispose(content.firstChild);
+      content.removeChild(content.firstChild);
+    }
     for (let i = startIndex; i < endIndex; i++) {
       const itemEl = props.renderItem(items[i], i);
       itemEl.style.height = `${props.itemHeight}px`;
@@ -65,7 +71,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): HTMLElement {
     }
   };
 
-  effect(update);
+  // Tie the render effect to the container's lifetime; disposing the container
+  // (e.g. when its parent unmounts) stops the items()/scrollTop() subscription
+  // instead of leaking the effect and the whole subtree.
+  registerDisposer(container, effect(update));
 
   return container;
 }

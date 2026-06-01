@@ -22,8 +22,9 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
   let cooldown = false;
   let pending: { value: T } | null = null;
   let lastEmitted: T = getter();
+  let timer: ReturnType<typeof setTimeout> | null = null;
 
-  effect(() => {
+  const stop = effect(() => {
     const value = getter();
 
     if (!cooldown) {
@@ -33,7 +34,8 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
         lastEmitted = value;
         cooldown = true;
         pending = null;
-        setTimeout(() => {
+        timer = setTimeout(() => {
+          timer = null;
           cooldown = false;
           if (pending !== null) {
             const trailingValue = pending.value;
@@ -47,6 +49,19 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
       // Inside cooldown: save latest value for trailing edge
       pending = { value };
     }
+  });
+
+  // Non-enumerable dispose (persist() convention): stop the subscription and
+  // clear any pending cooldown timer so neither outlives the consumer.
+  Object.defineProperty(throttled, "dispose", {
+    value: () => {
+      stop();
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    },
+    enumerable: false,
   });
 
   return throttled;

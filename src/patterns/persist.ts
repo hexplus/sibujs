@@ -1,5 +1,6 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { isUnsafeKey } from "../utils/guards";
 
 /**
  * Creates a reactive state that automatically persists to localStorage
@@ -73,10 +74,7 @@ export function persisted<T>(
   const serialize = options.serialize || JSON.stringify;
   // Reject __proto__ / constructor / prototype keys at parse time to block
   // prototype pollution from a tampered storage entry (CWE-1321).
-  const safeReviver = (k: string, v: unknown): unknown => {
-    if (k === "__proto__" || k === "constructor" || k === "prototype") return undefined;
-    return v;
-  };
+  const safeReviver = (k: string, v: unknown): unknown => (isUnsafeKey(k) ? undefined : v);
   const deserialize = options.deserialize || ((raw: string) => JSON.parse(raw, safeReviver));
   const encrypt = options.encrypt;
   const decrypt = options.decrypt;

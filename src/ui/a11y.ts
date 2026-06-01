@@ -15,9 +15,15 @@ export function aria(element: HTMLElement, attrs: Record<string, string | boolea
 
     if (typeof value === "function") {
       const getter = value as () => string | boolean;
-      track(() => {
-        element.setAttribute(ariaKey, String(getter()));
-      });
+      // Register the teardown so the subscription (and the captured element)
+      // are released when the element is disposed — otherwise every reactive
+      // aria() call leaks a subscriber for the page's lifetime. Mirrors focus().
+      registerDisposer(
+        element,
+        track(() => {
+          element.setAttribute(ariaKey, String(getter()));
+        }),
+      );
     } else {
       element.setAttribute(ariaKey, String(value));
     }

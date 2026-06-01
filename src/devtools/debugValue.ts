@@ -20,7 +20,13 @@ export function debugValue<T>(value: () => T, formatter?: (value: T) => string):
   const dispose = effect(() => {
     const resolved = value();
     entry.value = resolved;
-    entry.label = format(resolved);
+    // A throwing formatter (or String() on a Symbol) must not kill the effect
+    // and stop tracking — fall back to a safe label.
+    try {
+      entry.label = format(resolved);
+    } catch (err) {
+      entry.label = `<format error: ${err instanceof Error ? err.message : String(err)}>`;
+    }
   });
 
   return () => {

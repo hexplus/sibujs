@@ -120,7 +120,14 @@ export function inputMask(options: MaskOptions): {
           }
         }
       }
-      input.setSelectionRange(newCursor, newCursor);
+      // setSelectionRange throws (InvalidStateError) on input types that don't
+      // support selection (number, email, date, …). Masks are normally on text
+      // inputs, but guard so a misapplied mask doesn't throw on every keystroke.
+      try {
+        input.setSelectionRange(newCursor, newCursor);
+      } catch {
+        /* selection not supported on this input type */
+      }
     };
 
     const onFocus = () => {

@@ -1,5 +1,6 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { isUnsafeKey } from "../utils/guards";
 
 type ElementTarget = (() => HTMLElement | null) | { current: HTMLElement | null };
 function resolveTarget(target: ElementTarget): () => HTMLElement | null {
@@ -130,11 +131,9 @@ export function dropZone(
         const raw = e.dataTransfer.getData("application/json");
         if (raw) {
           try {
-            // Reviver blocks __proto__/constructor/prototype to prevent
-            // prototype pollution from a foreign drag source (CWE-1321).
-            transferData = JSON.parse(raw, (k, v) =>
-              k === "__proto__" || k === "constructor" || k === "prototype" ? undefined : v,
-            );
+            // Reviver blocks prototype-pollution keys from a foreign drag
+            // source (CWE-1321) via the shared guard.
+            transferData = JSON.parse(raw, (k, v) => (isUnsafeKey(k) ? undefined : v));
           } catch {
             transferData = raw;
           }

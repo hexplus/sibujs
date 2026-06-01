@@ -1,4 +1,5 @@
 import { signal } from "../core/signals/signal";
+import { stripUnsafeKeys } from "../utils/guards";
 
 // ============================================================================
 // STATE MACHINE
@@ -90,11 +91,7 @@ export function machine<
     // the `Object.prototype` setter through object-spread semantics.
     if (action) {
       const rawPatch = action(ctx) as Record<string, unknown>;
-      const next: Record<string, unknown> = { ...ctx };
-      for (const key of Object.keys(rawPatch)) {
-        if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
-        next[key] = rawPatch[key];
-      }
+      const next = { ...ctx, ...stripUnsafeKeys(rawPatch) };
       setContext(next as C);
     }
 

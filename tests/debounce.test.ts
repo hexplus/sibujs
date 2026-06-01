@@ -93,4 +93,25 @@ describe("debounce", () => {
 
     vi.useRealTimers();
   });
+
+  it("dispose() stops the subscription and cancels the pending timer", async () => {
+    vi.useFakeTimers();
+    const [count, setCount] = signal(0);
+    const debounced = debounce(count, 100) as (() => number) & { dispose: () => void };
+    expect(typeof debounced.dispose).toBe("function");
+
+    setCount(1);
+    await Promise.resolve();
+    debounced.dispose(); // cancels the pending timer + stops tracking
+
+    vi.advanceTimersByTime(200);
+    expect(debounced()).toBe(0); // pending update was cancelled
+
+    setCount(2);
+    await Promise.resolve();
+    vi.advanceTimersByTime(200);
+    expect(debounced()).toBe(0); // no longer tracking the source
+
+    vi.useRealTimers();
+  });
 });

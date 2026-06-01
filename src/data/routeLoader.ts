@@ -59,12 +59,20 @@ export async function preloadRoute(
   if (!route.loader) return undefined;
 
   const controller = new AbortController();
+  let onAbort: (() => void) | null = null;
   if (callerSignal) {
     if (callerSignal.aborted) {
       controller.abort();
     } else {
-      callerSignal.addEventListener("abort", () => controller.abort(), { once: true });
+      onAbort = () => controller.abort();
+      callerSignal.addEventListener("abort", onAbort, { once: true });
     }
   }
-  return route.loader(context, { signal: controller.signal });
+  try {
+    return await route.loader(context, { signal: controller.signal });
+  } finally {
+    // Remove the listener once the loader settles — otherwise a long-lived /
+    // shared callerSignal accumulates one dangling listener per preload.
+    if (onAbort) callerSignal?.removeEventListener("abort", onAbort);
+  }
 }

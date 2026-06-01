@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { describe, expect, it } from "vitest";
-import { disableSSR, isSSR, withSSR } from "../src/core/ssr-context";
+import { disableSSR, getRequestScopedCache, isSSR, runInSSRContext, withSSR } from "../src/core/ssr-context";
 
 describe("withSSR", () => {
   it("enables SSR inside the callback and disables it after", () => {
@@ -58,5 +58,38 @@ describe("withSSR", () => {
       expect(isSSR()).toBe(true);
     });
     expect(isSSR()).toBe(false);
+  });
+});
+
+describe("getRequestScopedCache (per-request data isolation)", () => {
+  it("returns null on the client (process-global cache is correct there)", () => {
+    disableSSR();
+    expect(getRequestScopedCache("query")).toBeNull();
+  });
+
+  it("returns a stable cache within one request", () => {
+    runInSSRContext(() => {
+      const a = getRequestScopedCache("query");
+      const b = getRequestScopedCache("query");
+      expect(a).not.toBeNull();
+      expect(a).toBe(b);
+    });
+  });
+
+  it("isolates caches between concurrent SSR requests (no cross-request bleed)", () => {
+    let cacheA: Map<string, unknown> | null = null;
+    let cacheB: Map<string, unknown> | null = null;
+
+    runInSSRContext(() => {
+      cacheA = getRequestScopedCache<unknown>("query");
+      cacheA?.set("profile", "user-A-secret");
+    });
+    runInSSRContext(() => {
+      cacheB = getRequestScopedCache<unknown>("query");
+    });
+
+    expect(cacheA).not.toBe(cacheB);
+    // Request B must NOT observe request A's cached data.
+    expect((cacheB as unknown as Map<string, unknown>).has("profile")).toBe(false);
   });
 });

@@ -69,12 +69,11 @@ const el = html`<div class=${cls}>
 
 ```ts
 const el = ((v) => div({
-  class: v[0],
-  nodes: [
-    span({ nodes: v[1] }),
-    button({ on: { click: v[2] }, nodes: "Click" })
-  ]
-}))([cls, () => count(), handler]);
+  class: v[0]
+}, [
+  span(v[1]),
+  button({ on: { click: v[2] } }, "Click")
+]))([cls, () => count(), handler]);
 ```
 
 The compiler handles: static/dynamic attributes, event handlers, expression children, nested elements, self-closing/void elements, SVG, and mixed static+dynamic attribute values.
@@ -189,12 +188,10 @@ function SearchPage() {
     });
   };
 
-  return div({
-    nodes: [
-      input({ on: { input: handleInput }, value: () => query() }),
-      each(() => results(), (item) => ResultItem(item), { key: (i) => i.id }),
-    ],
-  }) as HTMLElement;
+  return div([
+    input({ on: { input: handleInput }, value: () => query() }),
+    each(() => results(), (item) => ResultItem(item), { key: (i) => i.id }),
+  ]) as HTMLElement;
 }
 ```
 
@@ -249,8 +246,8 @@ const Settings = lazy(() => import("./pages/Settings"));
 
 function App() {
   return Suspense({
-    fallback: () => Loading(),
     nodes: () => router.outlet(),
+    fallback: () => Loading(),
   });
 }
 ```

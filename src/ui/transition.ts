@@ -63,11 +63,21 @@ export function transition(
 
   const transitionValue = `${property} ${duration}ms ${easing} ${delay}ms`;
   let activeTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingResolve: (() => void) | null = null;
 
   function cancelPending(): void {
     if (activeTimer !== null) {
       clearTimeout(activeTimer);
       activeTimer = null;
+    }
+    // Settle the superseded transition's promise so an interrupted
+    // `await enter()`/`await leave()` never hangs forever. The completion
+    // callback (onEnterDone/onLeaveDone) is intentionally NOT fired — the
+    // transition was cancelled, not completed.
+    if (pendingResolve !== null) {
+      const resolvePrev = pendingResolve;
+      pendingResolve = null;
+      resolvePrev();
     }
   }
 
@@ -86,12 +96,14 @@ export function transition(
 
       const done = () => {
         activeTimer = null;
+        pendingResolve = null;
         if (enterClass) element.classList.remove(enterClass);
         onEnterDone?.();
         resolve();
       };
 
       if (duration > 0) {
+        pendingResolve = resolve;
         activeTimer = setTimeout(done, duration + delay);
       } else {
         done();
@@ -110,12 +122,14 @@ export function transition(
 
       const done = () => {
         activeTimer = null;
+        pendingResolve = null;
         if (leaveClass) element.classList.remove(leaveClass);
         onLeaveDone?.();
         resolve();
       };
 
       if (duration > 0) {
+        pendingResolve = resolve;
         activeTimer = setTimeout(done, duration + delay);
       } else {
         done();
