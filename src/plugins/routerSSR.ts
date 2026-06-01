@@ -14,6 +14,7 @@
 //    supports an optional `nonce` for strict-CSP compatibility.
 
 import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
+import { isUnsafeKey } from "../utils/guards";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
 
@@ -48,19 +49,6 @@ export interface SSRRouteDef {
 // ============================================================================
 // INTERNAL: SECURITY HELPERS
 // ============================================================================
-
-/**
- * Keys that must never be assigned to a params/query object because they
- * would pollute `Object.prototype` or let an attacker override JS machinery.
- *
- * Even with `Object.create(null)` it is still worth blocking these — they
- * prevent confusion in downstream code that does `params.constructor` etc.
- */
-const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-
-function isForbiddenKey(key: string): boolean {
-  return FORBIDDEN_KEYS.has(key);
-}
 
 /** `decodeURIComponent` that never throws. Returns the raw input on malformed percent-sequences. */
 function safeDecode(raw: string): string {
@@ -125,7 +113,7 @@ function parseURL(url: string): { path: string; query: Record<string, string>; h
         key = safeDecode(pair.slice(0, eqIndex));
         value = safeDecode(pair.slice(eqIndex + 1));
       }
-      if (isForbiddenKey(key)) continue;
+      if (isUnsafeKey(key)) continue;
       query[key] = value;
     }
   }
@@ -246,7 +234,7 @@ function matchRoute(
       const params = nullObject();
       for (let i = 0; i < compiled.keys.length; i++) {
         const key = compiled.keys[i];
-        if (isForbiddenKey(key)) continue;
+        if (isUnsafeKey(key)) continue;
         if (match[i + 1] !== undefined) {
           params[key] = safeDecode(match[i + 1]);
         }

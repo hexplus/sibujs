@@ -1,5 +1,6 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
+import { stripUnsafeKeys } from "../utils/guards";
 
 /**
  * Deep-clone a value, preserving Date / Map / Set / typed arrays via
@@ -81,13 +82,8 @@ export function globalStore<
     const execute = () => {
       const current = getState();
       const rawPatch = actionFn(current, payload);
-      // Strip prototype-pollution keys before merging to prevent __proto__ / constructor attacks
-      const patch: Partial<S> = {};
-      for (const key of Object.keys(rawPatch)) {
-        if (key !== "__proto__" && key !== "constructor" && key !== "prototype") {
-          (patch as Record<string, unknown>)[key] = (rawPatch as Record<string, unknown>)[key];
-        }
-      }
+      // Strip prototype-pollution keys before merging (shared guard).
+      const patch = stripUnsafeKeys(rawPatch as Record<string, unknown>) as Partial<S>;
       setState({ ...current, ...patch } as S);
       // Notify listeners
       const newState = getState();

@@ -2,7 +2,13 @@ import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { track } from "../../reactivity/track";
-import { isUrlAttribute, sanitizeCSSValue, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
+import {
+  isEventHandlerAttr,
+  isUrlAttribute,
+  sanitizeCSSValue,
+  sanitizeSrcset,
+  sanitizeUrl,
+} from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
@@ -356,10 +362,10 @@ export const tagFactory = (tag: string, ns?: string) => {
         default: {
           const value = props[key];
           if (value == null) continue;
-          // Block on* event-handler attributes (case-insensitive). The `on`
-          // props object is the supported way to attach listeners.
+          // Block on* event-handler attributes (shared guard). The `on` props
+          // object is the supported way to attach listeners.
           const lkey = key.toLowerCase();
-          if (lkey[0] === "o" && lkey[1] === "n") continue;
+          if (isEventHandlerAttr(key)) continue;
           if (typeof value === "function") {
             registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
           } else if (typeof value === "boolean") {

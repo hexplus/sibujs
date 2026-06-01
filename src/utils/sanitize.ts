@@ -1,4 +1,26 @@
 /**
+ * Strip C0/C1 control characters and ASCII whitespace that browsers silently
+ * ignore while parsing a URL/protocol (e.g. "java\tscript:" or a leading
+ * "\x01"). Centralized so every URL/scheme guard normalizes identically.
+ */
+export function stripControlChars(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — these chars are ignored by browsers during parsing
+  return value.replace(/[\x00-\x20\x7f-\x9f]+/g, "");
+}
+
+/**
+ * Is `name` an intrinsic event-handler attribute (`onclick`, `onerror`, …)?
+ * Their value is evaluated as JavaScript on dispatch, so the framework never
+ * sets them via `setAttribute`. Case-insensitive; matches `on` followed by an
+ * ASCII letter. Single shared definition for every attribute-writing path.
+ */
+export function isEventHandlerAttr(name: string): boolean {
+  if (name.length < 3) return false;
+  const lower = name.toLowerCase();
+  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
+}
+
+/**
  * Escapes HTML entities in a string to prevent XSS injection.
  * Used internally by bindTextNode for safe text node updates.
  * Also exported as a user-facing utility.
@@ -24,11 +46,9 @@ const SAFE_URL_PROTOCOLS = ["http:", "https:", "mailto:", "tel:", "ftp:"];
  * @returns The URL if safe, or empty string if dangerous
  */
 export function sanitizeUrl(url: string): string {
-  // Strip C0/C1 control characters and Unicode whitespace that browsers
-  // may silently ignore, which could bypass protocol checks.
-  // E.g. "\x01javascript:alert(1)" or "java\tscript:alert(1)"
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars to prevent protocol bypass
-  const trimmed = url.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
+  // Strip control chars/whitespace browsers ignore (e.g. "java\tscript:") so
+  // they can't bypass the protocol check, then trim.
+  const trimmed = stripControlChars(url).trim();
   if (!trimmed) return "";
 
   // Detect an explicit scheme: the first ":" before any "/", "?", or "#".

@@ -2,7 +2,7 @@ import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
-import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl } from "../utils/sanitize";
+import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
@@ -24,8 +24,7 @@ function isSafeNavigationTarget(path: string): boolean {
   // when parsing a URL. Normalize the same way *before* the checks, otherwise
   // "\t//evil.com" or "/\/evil.com" slip past the scheme/host guard and the
   // browser resolves them to an off-origin host (open redirect, CWE-601).
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strip chars browsers ignore
-  const normalized = path.replace(/[\x00-\x20\x7f-\x9f]+/g, "").replace(/\\/g, "/");
+  const normalized = stripControlChars(path).replace(/\\/g, "/");
   // Protocol-relative ("//host") navigation points off the current origin.
   if (normalized.startsWith("//")) return false;
   // Dangerous scheme (javascript:, data:, vbscript:, blob:, ...) → empty.

@@ -1,7 +1,7 @@
 import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
+import { isEventHandlerAttr, isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
@@ -387,9 +387,9 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
       case 1: {
         // expr
         const name = attr.name;
-        // Block on* event handler attributes (XSS prevention) — case-insensitive
+        // Block on* event handler attributes (XSS prevention; shared guard).
         const lname = name.toLowerCase();
-        if (lname[0] === "o" && lname[1] === "n") break;
+        if (isEventHandlerAttr(name)) break;
         const val = values[attr.idx];
         if (typeof val === "function") {
           registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));

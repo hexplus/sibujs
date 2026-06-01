@@ -1,5 +1,5 @@
 import { effect } from "../core/signals/effect";
-import { sanitizeUrl } from "../utils/sanitize";
+import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
@@ -30,8 +30,7 @@ function sanitizeHeadAttr(key: string, value: string): string {
  * uses a dangerous protocol.
  */
 function isDangerousRefreshContent(content: string): boolean {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: browsers silently ignore these during protocol parsing
-  const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
+  const normalized = stripControlChars(content).toLowerCase();
   return (
     normalized.includes("url=javascript:") ||
     normalized.includes("url=data:") ||
@@ -62,12 +61,6 @@ function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string
 
 /** Strict attribute-name validation — blocks injection via crafted keys. */
 const SAFE_HEAD_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
-
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
-}
 
 function isSafeHeadAttr(name: string): boolean {
   if (!SAFE_HEAD_ATTR_NAME.test(name)) return false;

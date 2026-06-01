@@ -6,6 +6,41 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.2.0] — 2026-06-01
+
+A broad security-hardening and bug-fix release. No breaking changes.
+
+### Security
+
+- **`RouterLink` output is fully sanitized** — the resolved `href` now goes through the navigation protocol guard (blocking `javascript:`/`data:` click-to-XSS), and spread attributes are checked case-insensitively so `HREF`/`ONCLICK`/`xlink:href` can't bypass it. URL attributes are protocol-checked and inline `style` is CSS-sanitized.
+- **Case-insensitive URL-attribute sanitization** — reactively-bound `HREF`/`SRC`/`xlink:HREF` are now recognized and sanitized (HTML attribute names are case-insensitive).
+- **`stripHtml` uses a real parser** — replaced the naive regex (which left dangerous residue for nested/unclosed tags) with DOM-based text extraction, with a hardened fallback where no DOM exists.
+- **SSR hardening** — `srcset` is sanitized as a candidate list (not a single URL); the `http-equiv="refresh"` guard is case-insensitive and now also applies on the router SSR document path.
+- **Open-redirect** — navigation targets are normalized (control characters, backslashes, protocol-relative `//host`) before the safety check, closing bypasses of the cross-origin guard.
+- **Prototype-pollution / inherited-key hardening** — `store`, `globalStore`, `createSlots`, the state-machine context merge, and `deepClone` now use own-key checks, preventing crashes (`store.constructor`) and pollution via `__proto__`.
+- **Centralized security guards** — the prototype-pollution key filter, the `on*` event-handler check, and the URL control-character strip are now single shared, individually-tested helpers used by every call site (instead of being re-implemented, and occasionally diverging, across `store`/`router`/`SSR`/template paths), so the same hole can't reappear in one path while another stays fixed.
+
+### Fixed
+
+- **htm template parser** — unquoted attribute values containing `/` are preserved (e.g. `href=http://x/y` no longer truncates to `http:`); a bare `<` in text (`a < b`, `I <3`) renders as text instead of crashing; HTML comments / CDATA / doctype / processing instructions are skipped; multi-root templates keep every sibling node.
+- **Reactive children (`bindChildNode`)** — node order is preserved across re-renders (multi-node children no longer reverse), and removed nodes are disposed (no leak on `() => cond ? X : null` toggles).
+- **Disposal correctness** — a disposed `effect` or reactive DOM binding can no longer run or re-subscribe if it was already queued when disposed ("dispose" reliably means "stop").
+- **Reactivity** — `derived` applies a custom `equals` even when the previous value is `undefined`; `deepEqual` distinguishes objects with different key sets and `DataView` contents.
+- **Router** — fixed param interpolation when one param name is a prefix of another, base-path stripping at non-segment boundaries, incomplete `removeRoute` (children/aliases/named entries), malformed `%`-escape decoding, the `KeepAlive` cache key (query/hash), and component-loader cache cardinality (keyed by route definition, not resolved URL).
+- **Scheduler** — fixed a priority inversion (a `USER_BLOCKING` task no longer waits behind a pending frame) and the `processInChunks` chunk boundary.
+- **Animations / transitions** — an interrupted `enter()`/`leave()` promise now settles instead of hanging forever.
+- **Devtools / build** — `formatError` guards cyclic `cause` chains; `compileTemplates` no longer drops sibling root nodes; the `no-signals-in-conditionals` lint rule no longer false-positives after a closed nested callback.
+- **Data** — `offlineStore` coalesces pending changes per key and fixes a broken `_meta` IndexedDB write; `infiniteQuery` dedups concurrent page fetches and fixes window-edge page-param recomputation.
+- **Memory leaks** — directives (`when`/`match`/`show`), `aria`, `VirtualList`, the chunk loader, `Suspense`'s in-flight child, the route-loader abort listener, and the MobX adapter bridges now release their subscriptions/listeners on teardown; `debounce`/`throttle`/`previous` expose a `dispose()` handle; devtools perf samples and the router error cache are bounded.
+
+### Added
+
+- **Request-scoped query cache under SSR** — `query()` no longer shares cached data between concurrent server renders (backed by `AsyncLocalStorage`).
+- **`infiniteQuery` `maxPages`** — optional sliding-window cap on retained pages.
+- **`mutation` cancellation** — `reset()` (and a superseding `mutate()`) aborts the in-flight retry chain; the mutation function now receives an `AbortSignal`.
+
+---
+
 ## [3.1.0] — 2026-05-29
 
 ### Fixed

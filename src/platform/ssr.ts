@@ -29,7 +29,7 @@
 
 import { isDev } from "../core/dev";
 import { getSSRStore } from "../core/ssr-context";
-import { sanitizeSrcset, sanitizeUrl } from "../utils/sanitize";
+import { isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 /**
  * Sanitize a URL-bearing attribute value for SSR emission. `srcset` is a
@@ -49,13 +49,6 @@ const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
 
 function isSafeAttrName(name: string): boolean {
   return SAFE_ATTR_NAME.test(name);
-}
-
-/** Is this attribute an `on*` event handler? The framework never emits these through real DOM attributes, so seeing one during SSR is a smell. */
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
 }
 
 /**
@@ -448,8 +441,7 @@ export function isDangerousMetaRefresh(metaProps: Record<string, string>): boole
   if (typeof httpEquiv !== "string") return false;
   if (httpEquiv.toLowerCase() !== "refresh") return false;
   if (typeof content !== "string") return false;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping chars browsers silently ignore during protocol parsing
-  const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
+  const normalized = stripControlChars(content).toLowerCase();
   return (
     normalized.includes("url=javascript:") ||
     normalized.includes("url=data:") ||
