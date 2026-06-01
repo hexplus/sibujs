@@ -54,6 +54,19 @@ export function derived<T>(
   (markDirty as any)._c = 1;
   (markDirty as any)._sig = cs;
 
+  // Recompute body, allocated ONCE per derived (not per recompute). Hoisting it
+  // out of the getter avoids a closure allocation on every propagation — the
+  // dominant overhead in deep-chain / high-fanout recompute workloads. On entry
+  // to a recompute `cs._d` is always true; this sets it false only after the
+  // getter succeeds, so a throwing getter simply leaves the computed dirty (it
+  // will retry) without any extra `threw` bookkeeping.
+  const recompute = (): void => {
+    const next = getter();
+    cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;
+    cs._d = false;
+    cs._init = true;
+  };
+
   // Initial evaluation — sets up dependencies
   track(() => {
     let threw = true;
@@ -82,21 +95,13 @@ export function derived<T>(
 
     if (trackingSuspended) {
       if (cs._d) {
+        const prev = cs._v;
         evaluating = true;
-        let threw = true;
         try {
-          const prev = cs._v;
-          retrack(() => {
-            const next = getter();
-            cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;
-            cs._d = false;
-            cs._init = true;
-            threw = false;
-          }, markDirty);
+          retrack(recompute, markDirty);
           if (!Object.is(prev, cs._v)) cs.__v++;
         } finally {
           evaluating = false;
-          if (threw) cs._d = true;
         }
       }
       return cs._v;
@@ -109,25 +114,11 @@ export function derived<T>(
       const oldValue = cs._v;
 
       evaluating = true;
-      let threw = true;
       try {
-        retrack(() => {
-          const next = getter();
-          // If caller provided a custom equality fn and the value didn't
-          // change under it, preserve the prior reference — upstream
-          // notifications to subscribers checking `oldValue !== cs._v`
-          // (e.g. the devtools hook below) will correctly skip. Gate on
-          // `_init` (not `_v !== undefined`) so a legitimate `undefined`
-          // previous value still goes through `equals`.
-          cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;
-          cs._d = false;
-          cs._init = true;
-          threw = false;
-        }, markDirty);
+        retrack(recompute, markDirty);
         if (!Object.is(oldValue, cs._v)) cs.__v++;
       } finally {
         evaluating = false;
-        if (threw) cs._d = true;
       }
 
       // DevTools: emit computed recomputation
