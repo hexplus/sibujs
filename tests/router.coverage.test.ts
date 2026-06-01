@@ -945,10 +945,27 @@ describe("ComponentLoader", () => {
       calls++;
       return { default: makeComp("Cached") };
     });
-    const c1 = await r.loadComponent({ path: "/c1", component: ld }, "/c1");
-    const c2 = await r.loadComponent({ path: "/c1", component: ld }, "/c1");
+    // The router always passes the same route-definition object from its table.
+    const def = { path: "/c1", component: ld };
+    const c1 = await r.loadComponent(def, "/c1");
+    const c2 = await r.loadComponent(def, "/c1");
     expect(c1).toBe(c2);
     expect(calls).toBe(1);
+  });
+
+  it("caches by route definition, so different resolved param paths share one load", async () => {
+    const r = createRouter([{ path: "/", component: makeComp("Home") }]);
+    let calls = 0;
+    const ld = lazy(async () => {
+      calls++;
+      return { default: makeComp("User") };
+    });
+    // One route definition (/users/:id) visited at two resolved paths.
+    const def = { path: "/users/:id", component: ld };
+    const c1 = await r.loadComponent(def, "/users/1");
+    const c2 = await r.loadComponent(def, "/users/2");
+    expect(c1).toBe(c2);
+    expect(calls).toBe(1); // not reloaded per-param (cardinality fix)
   });
 
   it("shares an in-flight loading promise for concurrent loads", async () => {
@@ -959,10 +976,8 @@ describe("ComponentLoader", () => {
       await wait(20);
       return { default: makeComp("Shared") };
     });
-    const [a, b] = await Promise.all([
-      r.loadComponent({ path: "/cc", component: ld }, "/cc"),
-      r.loadComponent({ path: "/cc", component: ld }, "/cc"),
-    ]);
+    const def = { path: "/cc", component: ld };
+    const [a, b] = await Promise.all([r.loadComponent(def, "/cc"), r.loadComponent(def, "/cc")]);
     expect(a).toBe(b);
     expect(calls).toBe(1);
   });

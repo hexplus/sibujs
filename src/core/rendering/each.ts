@@ -190,8 +190,14 @@ export function each<T>(
       if (existing !== undefined) {
         node = existing;
       } else {
-        // Create stable getters that close over the key and always read
-        // from the latest array via keyIndexMap, making them reactive.
+        // Create stable getters that close over the key and always read the
+        // CURRENT item/index from the latest array via keyIndexMap. They return
+        // fresh data each time they are evaluated, but — by design — reading
+        // them does NOT itself subscribe to the array signal (see untracked
+        // below), so a row's content does not auto-re-render when the array is
+        // replaced/reordered. For reactive per-row content, drive it from a
+        // per-item signal/store rather than relying on item() to trigger
+        // updates (the fine-grained list model).
         const itemKey = key;
         // Read getArray() inside untracked() so consumers reading item()
         // inside derived/effect do NOT subscribe to the whole-array signal —

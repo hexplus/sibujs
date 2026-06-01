@@ -77,3 +77,22 @@ describe("createSlots", () => {
     expect(result?.textContent).toBe("fallback");
   });
 });
+
+describe("createSlots — prototype-chain safety (regression)", () => {
+  it("hasSlot returns false for inherited Object.prototype keys", () => {
+    const { hasSlot } = createSlots({ header: () => document.createElement("h1") });
+    expect(hasSlot("header")).toBe(true);
+    expect(hasSlot("toString")).toBe(false);
+    expect(hasSlot("constructor")).toBe(false);
+    expect(hasSlot("__proto__")).toBe(false);
+    expect(hasSlot("hasOwnProperty")).toBe(false);
+  });
+
+  it("renderSlot uses the fallback for inherited keys instead of invoking a prototype member", () => {
+    const fallback = document.createElement("div");
+    fallback.textContent = "fallback";
+    const { renderSlot } = createSlots({ header: () => document.createElement("h1") });
+    const out = renderSlot("toString", () => fallback);
+    expect(out).toBe(fallback);
+  });
+});

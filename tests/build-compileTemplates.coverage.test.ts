@@ -137,3 +137,21 @@ describe("compileHtmlTemplates - coverage edge cases", () => {
     expect(result.code).toBeNull();
   });
 });
+
+describe("compileHtmlTemplates - multi-root templates (regression)", () => {
+  it("keeps every top-level sibling node (does not drop after the first)", () => {
+    const out = compileHtmlTemplates("const el = html`<li>a</li><li>b</li>`;").code;
+    // Both siblings must survive; previously only the first <li> was emitted.
+    expect(out).toContain('"a"');
+    expect(out).toContain('"b"');
+    // Multiple roots are wrapped in a div container.
+    expect(out).toContain("div(");
+  });
+
+  it("keeps multiple roots that contain expressions", () => {
+    const out = compileHtmlTemplates("const el = html`<span>${a}</span><span>${b}</span>`;").code;
+    expect(out).toContain("div(");
+    // Two child expressions, not one.
+    expect(out.match(/span\(/g)?.length).toBe(2);
+  });
+});

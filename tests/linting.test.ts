@@ -407,3 +407,31 @@ describe("generateEslintConfig", () => {
     expect(config.overrides[0].rules).toEqual(config.rules);
   });
 });
+
+describe("no-signals-in-conditionals: nested-function false positives (regression)", () => {
+  it("does not flag a top-level signal after an already-closed nested callback", () => {
+    const src = [
+      "function Counter() {",
+      "  [1, 2].forEach((n) => { console.log(n); });",
+      "  const [count, setCount] = signal(0);",
+      "  return count;",
+      "}",
+    ].join("\n");
+    const violations = lintSource(src, ["no-signals-in-conditionals"]);
+    expect(violations.length).toBe(0);
+  });
+
+  it("still flags a signal genuinely inside a nested function", () => {
+    const src = [
+      "function Counter() {",
+      "  function inner() {",
+      "    const [c, setC] = signal(0);",
+      "    return c;",
+      "  }",
+      "  return inner;",
+      "}",
+    ].join("\n");
+    const violations = lintSource(src, ["no-signals-in-conditionals"]);
+    expect(violations.some((v) => v.message.includes("nested function"))).toBe(true);
+  });
+});

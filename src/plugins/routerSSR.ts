@@ -13,7 +13,7 @@
 //  - `serializeRouteState` escapes `<`, `>`, `&`, `U+2028`, `U+2029` and
 //    supports an optional `nonce` for strict-CSP compatibility.
 
-import { escapeScriptJson, renderToString, type TrustedHTML } from "../platform/ssr";
+import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
 
@@ -421,8 +421,12 @@ export function renderRouteToDocument(
   const { html, state } = renderRouteToString(url, routes, options);
   const opts = options || {};
 
-  // Build meta tags — keys validated, values URL-sanitized when applicable.
+  // Build meta tags — keys validated, values URL-sanitized when applicable,
+  // and dangerous `http-equiv="refresh"` directives dropped entirely (matching
+  // renderToDocument; without this a meta-refresh javascript: URL would slip
+  // through on the router document path).
   const metaTags = (opts.meta || [])
+    .filter((attrs) => !isDangerousMetaRefresh(attrs))
     .map((attrs) => {
       const pairs = buildSafeAttrString(attrs);
       return pairs ? `<meta ${pairs} />` : "";

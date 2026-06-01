@@ -40,11 +40,22 @@ function isDangerousRefreshContent(content: string): boolean {
   );
 }
 
+/** Case-insensitive lookup of a meta attribute value (HTML attr names are CI). */
+function getMetaAttr(
+  metaProps: Record<string, string | (() => string)>,
+  name: string,
+): string | (() => string) | undefined {
+  for (const k in metaProps) {
+    if (k.toLowerCase() === name) return metaProps[k];
+  }
+  return undefined;
+}
+
 function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
-  const httpEquiv = metaProps["http-equiv"];
+  const httpEquiv = getMetaAttr(metaProps, "http-equiv");
   if (typeof httpEquiv !== "string") return false;
   if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = metaProps.content;
+  const content = getMetaAttr(metaProps, "content");
   if (typeof content !== "string") return false;
   return isDangerousRefreshContent(content);
 }
@@ -131,7 +142,7 @@ export function Head(props: HeadProps): Comment {
         // above never saw. `http-equiv` itself may be reactive, so resolve it
         // freshly each time `content` is written rather than caching a verdict
         // that could desync if http-equiv later becomes "refresh".
-        const httpEquiv = metaProps["http-equiv"];
+        const httpEquiv = getMetaAttr(metaProps, "http-equiv");
         const isRefreshNow = (): boolean => {
           const eq = typeof httpEquiv === "function" ? (httpEquiv as () => string)() : httpEquiv;
           return typeof eq === "string" && eq.toLowerCase() === "refresh";
@@ -139,7 +150,7 @@ export function Head(props: HeadProps): Comment {
         const el = document.createElement("meta");
         for (const [key, value] of Object.entries(metaProps)) {
           if (!isSafeHeadAttr(key)) continue;
-          const isContent = key === "content";
+          const isContent = key.toLowerCase() === "content";
           if (typeof value === "function") {
             const cleanupFn = effect(() => {
               const resolved = (value as () => string)();

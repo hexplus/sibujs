@@ -156,11 +156,14 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   const [selectedValue, setSelectedValue] = signal<string | null>(null);
   const [activeDescendantId, setActiveDescendantId] = signal<string | null>(null);
 
-  // Stamp every option with a stable id so aria-activedescendant can point at it.
+  // Stamp every option with a stable id so aria-activedescendant can point at
+  // it, and initialize aria-selected so options expose selection state before
+  // the first user selection (ARIA expects it on every role="option").
   function stampIds(): void {
     const opts = Array.from(container.querySelectorAll<HTMLElement>(optionSelector));
     for (const opt of opts) {
       if (!opt.id) opt.id = createId("listbox-option");
+      if (!opt.hasAttribute("aria-selected")) opt.setAttribute("aria-selected", "false");
     }
   }
   stampIds();

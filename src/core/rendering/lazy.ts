@@ -1,5 +1,5 @@
 import { devWarn } from "../dev";
-import { registerDisposer } from "./dispose";
+import { dispose, registerDisposer } from "./dispose";
 import { div, span } from "./html";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
@@ -131,6 +131,11 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
 
   let suspenseDisposed = false;
   let observer: MutationObserver | null = null;
+  // The child is created in a microtask and only attached to `container` once
+  // loaded. If Suspense is disposed mid-load, the child is an orphan that the
+  // container's dispose-walk never reaches, so its teardown (e.g. lazy()'s
+  // load guard) would never run — a leak. Track it and dispose it explicitly.
+  let childEl: HTMLElement | null = null;
 
   registerDisposer(container, () => {
     suspenseDisposed = true;
@@ -138,31 +143,33 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
       observer.disconnect();
       observer = null;
     }
+    if (childEl && !container.contains(childEl)) dispose(childEl);
   });
 
   queueMicrotask(() => {
     if (suspenseDisposed) return;
     try {
-      const childEl = nodes();
+      const el = nodes();
+      childEl = el;
 
-      if (childEl.classList.contains("sibu-lazy")) {
+      if (el.classList.contains("sibu-lazy")) {
         // Already loaded synchronously — swap and skip the observer entirely.
-        if (!childEl.querySelector(".sibu-lazy-loading")) {
-          container.replaceChildren(childEl);
+        if (!el.querySelector(".sibu-lazy-loading")) {
+          container.replaceChildren(el);
           return;
         }
         observer = new MutationObserver(() => {
           if (suspenseDisposed) return;
-          const loading = childEl.querySelector(".sibu-lazy-loading");
+          const loading = el.querySelector(".sibu-lazy-loading");
           if (!loading) {
             observer?.disconnect();
             observer = null;
-            container.replaceChildren(childEl);
+            container.replaceChildren(el);
           }
         });
-        observer.observe(childEl, { childList: true, subtree: true });
+        observer.observe(el, { childList: true, subtree: true });
       } else {
-        container.replaceChildren(childEl);
+        container.replaceChildren(el);
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));

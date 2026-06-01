@@ -222,6 +222,11 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
   // gets the same hidden class, keeping V8's inline caches monomorphic in
   // track / cleanup / recordDep.
   const sub = (() => {
+    // An effect can be queued for notification and then disposed before the
+    // drain reaches it. coreCleanup unlinks its dep edges but does not remove
+    // it from the pending queue, so without this guard the drain would still
+    // invoke the body once after disposal. "dispose" must mean "stop".
+    if (ctx.disposed) return;
     if (ctx.running) {
       ctx.rerunPending = true;
       return;

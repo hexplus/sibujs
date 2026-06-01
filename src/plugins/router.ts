@@ -399,15 +399,29 @@ class RouteMatcher {
   }
 
   removeRoute(path: string): void {
-    this.routeTrie.delete(path);
-    this.parentChain.delete(path);
     this.compiledPatterns.clear();
-    // Remove from named routes
-    for (const [name, route] of this.namedRoutes) {
-      if (route.path === path) {
-        this.namedRoutes.delete(name);
-        break;
-      }
+    const root = this.routeTrie.get(path);
+    if (!root) return;
+
+    // Collect the route and its entire descendant subtree, then delete every
+    // index entry that points at one of those routes. Keying by route identity
+    // (not by `path`) also removes child fullPath entries, alias entries, and
+    // named-route entries — the previous version left all of those matchable.
+    const removed = new Set<RouteDef>();
+    const collect = (r: RouteDef): void => {
+      removed.add(r);
+      if (r.children) for (const child of r.children) collect(child);
+    };
+    collect(root);
+
+    for (const [key, route] of [...this.routeTrie]) {
+      if (removed.has(route)) this.routeTrie.delete(key);
+    }
+    for (const [key, chain] of [...this.parentChain]) {
+      if (chain.length > 0 && removed.has(chain[chain.length - 1])) this.parentChain.delete(key);
+    }
+    for (const [name, route] of [...this.namedRoutes]) {
+      if (removed.has(route)) this.namedRoutes.delete(name);
     }
   }
 }
@@ -563,10 +577,25 @@ class ComponentLoader {
   private errorCache = new Map<string, { timestamp: number; count: number }>();
   private loadingPromises = new Map<string, Promise<Component>>();
   private retryDelay: number;
+  // Stable per-route-definition id. Caching by the RESOLVED path (e.g.
+  // /users/123) gave the cache one entry per visited URL, so parameterized
+  // routes thrashed/evicted and the component was reloaded every navigation.
+  // Keying by route-definition identity makes the cache effective again.
+  private routeKeys = new WeakMap<RouteDef, string>();
+  private keyCounter = 0;
 
   constructor(cacheSize = 50, retryDelay = 1000) {
     this.componentCache = new LRUCache(cacheSize);
     this.retryDelay = retryDelay;
+  }
+
+  private keyFor(route: RouteDef): string {
+    let key = this.routeKeys.get(route);
+    if (key === undefined) {
+      key = `route#${this.keyCounter++}`;
+      this.routeKeys.set(route, key);
+    }
+    return key;
   }
 
   async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
@@ -575,46 +604,46 @@ class ComponentLoader {
     }
 
     const comp = route.component;
+    const cacheKey = this.keyFor(route);
 
     // Return cached component
-    const cached = this.componentCache.get(routePath);
+    const cached = this.componentCache.get(cacheKey);
     if (cached) return cached;
 
     // Check if there's already a loading promise
-    const existingPromise = this.loadingPromises.get(routePath);
+    const existingPromise = this.loadingPromises.get(cacheKey);
     if (existingPromise) return existingPromise;
 
     // Check error cache
-    const errorInfo = this.errorCache.get(routePath);
+    const errorInfo = this.errorCache.get(cacheKey);
     if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
       throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
     }
 
     // Create loading promise
     const loadingPromise = this.doLoadComponent(comp, routePath);
-    this.loadingPromises.set(routePath, loadingPromise);
+    this.loadingPromises.set(cacheKey, loadingPromise);
 
     try {
       const component = await loadingPromise;
-      this.componentCache.set(routePath, component);
-      this.errorCache.delete(routePath); // Clear error on success
+      this.componentCache.set(cacheKey, component);
+      this.errorCache.delete(cacheKey); // Clear error on success
       return component;
     } catch (error) {
-      // Update error cache. `routePath` includes resolved params (e.g.
-      // /users/123), so its cardinality is unbounded — cap the map and evict
-      // the oldest entry to avoid a slow leak in long-lived SPAs.
-      const currentError = this.errorCache.get(routePath) || { timestamp: 0, count: 0 };
-      if (!this.errorCache.has(routePath) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
+      // Keyed by route-definition id, so the error map is bounded by the number
+      // of route definitions; still cap defensively and evict the oldest.
+      const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
+      if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
         const oldest = this.errorCache.keys().next().value;
         if (oldest !== undefined) this.errorCache.delete(oldest);
       }
-      this.errorCache.set(routePath, {
+      this.errorCache.set(cacheKey, {
         timestamp: Date.now(),
         count: currentError.count + 1,
       });
       throw error;
     } finally {
-      this.loadingPromises.delete(routePath);
+      this.loadingPromises.delete(cacheKey);
     }
   }
 
@@ -787,7 +816,9 @@ export class SibuRouter {
     }
 
     let path = window.location.pathname;
-    if (base && path.startsWith(base)) {
+    // Only strip the base when it ends at a segment boundary, so base "/app"
+    // does not corrupt an unrelated path like "/application/x".
+    if (base && (path === base || path.startsWith(`${base}/`))) {
       path = path.slice(base.length);
     }
 
@@ -979,10 +1010,12 @@ export class SibuRouter {
       }
     }
 
-    // Replace parameters
+    // Replace parameters. Match the whole `:name` segment token (bounded by a
+    // path separator or end-of-string) so a param whose name is a prefix of
+    // another (`:id` vs `:idDetail`) doesn't corrupt the longer token.
     if (to.params) {
       for (const [key, value] of Object.entries(to.params)) {
-        path = path.replace(`:${key}`, encodeURIComponent(value));
+        path = path.replace(new RegExp(`:${key}(?=[/?#]|$)`, "g"), encodeURIComponent(value));
       }
     }
 

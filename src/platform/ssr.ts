@@ -434,11 +434,19 @@ function buildAttrString(
  * a dangerous protocol — in which case the entire meta entry must be
  * dropped to avoid an XSS vector via the browser refresh mechanism.
  */
-function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
-  const httpEquiv = metaProps["http-equiv"];
+export function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
+  // HTML attribute names are case-insensitive, so look up http-equiv/content
+  // case-insensitively — otherwise `HTTP-EQUIV`/`CONTENT` bypass the guard
+  // while the browser still honors the refresh directive.
+  let httpEquiv: string | undefined;
+  let content: string | undefined;
+  for (const k in metaProps) {
+    const lk = k.toLowerCase();
+    if (lk === "http-equiv") httpEquiv = metaProps[k];
+    else if (lk === "content") content = metaProps[k];
+  }
   if (typeof httpEquiv !== "string") return false;
   if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = metaProps.content;
   if (typeof content !== "string") return false;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping chars browsers silently ignore during protocol parsing
   const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
@@ -717,6 +725,10 @@ export function hydrateProgressively(
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
+            // Disconnect first: if factory() throws, the observer must still be
+            // torn down, otherwise it stays live and re-fires the failing
+            // hydration on every subsequent intersection (leak + repeat error).
+            observer.disconnect();
             const clientTree = factory();
             // Replace strategy: same fix as `hydrate()` — in-place attribute
             // copy leaves reactive bindings wired to the orphan client tree
@@ -725,7 +737,6 @@ export function hydrateProgressively(
             (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
             (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
             (marker as HTMLElement).replaceWith(clientTree);
-            observer.disconnect();
             break;
           }
         }

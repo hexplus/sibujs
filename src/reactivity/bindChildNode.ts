@@ -1,4 +1,5 @@
 import { devWarn, isDev } from "../core/dev";
+import { dispose } from "../core/rendering/dispose";
 import type { NodeChild } from "../core/rendering/types";
 import { reactiveBinding } from "./track";
 
@@ -25,9 +26,13 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
     }
 
     if (result == null || typeof result === "boolean") {
-      // Remove all previously inserted nodes
+      // Remove and DISPOSE all previously inserted nodes. Once detached they
+      // are no longer reachable by an ancestor dispose-walk, so without
+      // disposing here their reactive bindings/listeners leak (every sibling
+      // helper — each/dynamic/directives — disposes on removal).
       for (let i = 0; i < lastNodes.length; i++) {
         const node = lastNodes[i];
+        dispose(node);
         if (node.parentNode) node.parentNode.removeChild(node);
       }
       lastNodes.length = 0;
@@ -75,27 +80,27 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       }
     }
 
-    // Remove old nodes that are NOT reused
+    // Remove (and dispose) old nodes that are NOT reused.
     for (let i = 0; i < lastNodes.length; i++) {
       const node = lastNodes[i];
       if (reused?.has(node)) continue;
+      dispose(node);
       if (node.parentNode) node.parentNode.removeChild(node);
     }
 
-    // Compute anchor AFTER removal so it's not stale
-    const anchor = placeholder.nextSibling;
-
-    // Insert new nodes in order, skipping nodes already in the correct position
+    // Place new nodes in order using a moving cursor anchored at the
+    // placeholder. Each node is positioned immediately after the previously
+    // placed one (or right after the placeholder for the first). A single
+    // fixed `placeholder.nextSibling` anchor was WRONG: when nodes are reused
+    // (already between the placeholder and the following sibling), inserting
+    // every node before that fixed anchor reverses the tail ([A,B] -> [B,A]).
+    let prev: Node = placeholder;
     for (let i = 0; i < newNodes.length; i++) {
       const node = newNodes[i];
-      if (reused?.has(node) && node.parentNode === parent) {
-        // Reused node: only move if not already before the anchor
-        if (node.nextSibling !== anchor) {
-          parent.insertBefore(node, anchor);
-        }
-      } else {
-        parent.insertBefore(node, anchor);
+      if (prev.nextSibling !== node) {
+        parent.insertBefore(node, prev.nextSibling);
       }
+      prev = node;
     }
 
     lastNodes = newNodes;

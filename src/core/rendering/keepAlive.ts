@@ -85,6 +85,16 @@ export function KeepAlive(
         return;
       }
       node = factory();
+      // A DocumentFragment is emptied by insertBefore (its children move out),
+      // leaving an empty fragment with no parentNode — it could then never be
+      // detached or re-attached, breaking caching. Wrap multi-root/fragment
+      // content in a layout-transparent container so it moves as a unit.
+      if (node instanceof DocumentFragment) {
+        const wrapper = document.createElement("div");
+        wrapper.style.display = "contents";
+        wrapper.appendChild(node);
+        node = wrapper;
+      }
       cache.set(key, node);
       lruOrder.push(key);
 

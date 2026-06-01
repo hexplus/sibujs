@@ -68,34 +68,50 @@ export const lintRules = {
         let braceDepth = 0;
         let insideConditionalOrLoop = false;
         let insideNestedFunction = false;
-        let functionDepth = 0;
+        // Brace depths at which a still-open function body started. Popped when
+        // that scope closes, so a function that opened AND closed before the
+        // hook line no longer counts (the previous code only incremented a
+        // counter, falsely flagging hooks after any earlier nested callback).
+        const fnOpenDepths: number[] = [];
 
         // Scan from the start of the source up to this line
         for (let i = 0; i <= lineIdx; i++) {
-          const scanLine = lines[i].trim();
+          const rawLine = lines[i];
+          const scanLine = rawLine.trim();
 
-          // Track function declarations (depth > 0 means nested)
-          if (/\b(function\s+\w+|function\s*\(|=>\s*\{)/.test(scanLine) && i < lineIdx) {
-            functionDepth++;
-          }
+          const opensFunction = i < lineIdx && /\b(function\s+\w+|function\s*\(|=>\s*\{)/.test(scanLine);
 
           // Track conditional/loop keywords at the current brace depth
-          if (i < lineIdx && /^\s*(if|else\s+if|else|for|while|do|switch)\s*[({]/.test(lines[i])) {
-            // Mark that we entered a conditional/loop block
+          if (i < lineIdx && /^\s*(if|else\s+if|else|for|while|do|switch)\s*[({]/.test(rawLine)) {
             insideConditionalOrLoop = true;
           }
 
           // Track braces for scope
-          for (const ch of lines[i]) {
-            if (ch === "{") braceDepth++;
-            if (ch === "}") {
+          let fnBracePending = opensFunction;
+          for (const ch of rawLine) {
+            if (ch === "{") {
+              braceDepth++;
+              // Associate the first `{` on a function line with that function.
+              if (fnBracePending) {
+                fnOpenDepths.push(braceDepth);
+                fnBracePending = false;
+              }
+            } else if (ch === "}") {
               braceDepth--;
+              // Pop any function scopes that just closed.
+              while (fnOpenDepths.length > 0 && fnOpenDepths[fnOpenDepths.length - 1] > braceDepth) {
+                fnOpenDepths.pop();
+              }
               if (braceDepth <= 1) {
                 insideConditionalOrLoop = false;
               }
             }
           }
         }
+
+        // Currently-open function scopes at the hook line. The component
+        // function itself is depth 1; anything deeper is a nested function.
+        const functionDepth = fnOpenDepths.length;
 
         // Detect signal functions inside inline conditionals (same line)
         const beforeHook = line.substring(0, line.indexOf(hookMatch[0]));
