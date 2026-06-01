@@ -12,6 +12,12 @@ export interface InfiniteQueryOptions<TData, TPageParam = number> {
   getPreviousPageParam?: (firstPage: TData, allPages: TData[]) => TPageParam | undefined;
   /** Initial page param. Default: 0 (for number) */
   initialPageParam?: TPageParam;
+  /**
+   * Maximum number of pages to retain. When exceeded, the oldest page is
+   * dropped from the opposite end (sliding window) to bound memory. Unset =
+   * unbounded.
+   */
+  maxPages?: number;
   /** Whether to fetch on creation. Default: true */
   enabled?: boolean;
   /** Retry options */
@@ -60,6 +66,7 @@ export function infiniteQuery<TData, TPageParam = number>(
     getNextPageParam,
     getPreviousPageParam,
     initialPageParam = 0 as TPageParam,
+    maxPages,
     enabled = true,
     retry: retryOptions,
     onSuccess,
@@ -87,9 +94,12 @@ export function infiniteQuery<TData, TPageParam = number>(
   let abortController: AbortController | null = null;
   let disposed = false;
   let runId = 0;
+  // Tracks the in-flight fetch so the public fetchNextPage/fetchPreviousPage
+  // can dedup instead of aborting a running fetch and silently dropping a page.
+  let inFlight: Promise<void> | null = null;
 
-  async function fetchPage(pageParam: TPageParam, direction: "next" | "prev" | "initial"): Promise<void> {
-    if (disposed) return;
+  function fetchPage(pageParam: TPageParam, direction: "next" | "prev" | "initial"): Promise<void> {
+    if (disposed) return Promise.resolve();
 
     abortController?.abort();
     abortController = new AbortController();
@@ -103,46 +113,57 @@ export function infiniteQuery<TData, TPageParam = number>(
       setError(undefined);
     });
 
-    try {
-      const page = await withRetry(() => fetcher({ signal, pageParam }), retryOptions, undefined, signal);
+    const promise = (async () => {
+      try {
+        const page = await withRetry(() => fetcher({ signal, pageParam }), retryOptions, undefined, signal);
 
-      if (disposed || myRun !== runId) return;
+        if (disposed || myRun !== runId) return;
 
-      const currentPages = pages();
-      let newPages: TData[];
+        const currentPages = pages();
+        let newPages: TData[] = direction === "prev" ? [page, ...currentPages] : [...currentPages, page];
 
-      if (direction === "prev") {
-        newPages = [page, ...currentPages];
-      } else {
-        newPages = [...currentPages, page];
+        // Sliding-window cap: drop from the end opposite to the growth side so
+        // the page array (and its memory) stays bounded.
+        if (maxPages != null && maxPages > 0 && newPages.length > maxPages) {
+          newPages = direction === "prev" ? newPages.slice(0, maxPages) : newPages.slice(newPages.length - maxPages);
+        }
+
+        // Recompute params from the *window edges*, not the page just fetched —
+        // after a previous-page fetch (or a trim) the last page is what governs
+        // hasNextPage, and the first page governs hasPreviousPage.
+        const nextParam = getNextPageParam(newPages[newPages.length - 1], newPages);
+        const prevParam = getPreviousPageParam?.(newPages[0], newPages);
+
+        batch(() => {
+          setPages(newPages);
+          setNextPageParam(nextParam);
+          setPrevPageParam(prevParam);
+          setIsFetching(false);
+          setIsFetchingNext(false);
+          setIsFetchingPrev(false);
+        });
+
+        onSuccess?.(newPages);
+      } catch (err) {
+        if (disposed || myRun !== runId) return;
+        if (err instanceof DOMException && err.name === "AbortError") return;
+
+        const errorObj = err instanceof Error ? err : new Error(String(err));
+        batch(() => {
+          setError(errorObj);
+          setIsFetching(false);
+          setIsFetchingNext(false);
+          setIsFetchingPrev(false);
+        });
+        onError?.(errorObj);
       }
+    })();
 
-      const nextParam = getNextPageParam(page, newPages);
-      const prevParam = getPreviousPageParam?.(newPages[0], newPages);
-
-      batch(() => {
-        setPages(newPages);
-        setNextPageParam(nextParam);
-        setPrevPageParam(prevParam);
-        setIsFetching(false);
-        setIsFetchingNext(false);
-        setIsFetchingPrev(false);
-      });
-
-      onSuccess?.(newPages);
-    } catch (err) {
-      if (disposed || myRun !== runId) return;
-      if (err instanceof DOMException && err.name === "AbortError") return;
-
-      const errorObj = err instanceof Error ? err : new Error(String(err));
-      batch(() => {
-        setError(errorObj);
-        setIsFetching(false);
-        setIsFetchingNext(false);
-        setIsFetchingPrev(false);
-      });
-      onError?.(errorObj);
-    }
+    inFlight = promise;
+    void promise.finally(() => {
+      if (inFlight === promise) inFlight = null;
+    });
+    return promise;
   }
 
   const effectCleanup = effect(() => {
@@ -159,12 +180,16 @@ export function infiniteQuery<TData, TPageParam = number>(
   });
 
   function fetchNextPage(): Promise<void> {
+    // Already fetching (initial load or another page) — return that in-flight
+    // promise instead of aborting it and dropping the page mid-flight.
+    if (inFlight) return inFlight;
     const param = nextPageParam();
     if (param === undefined) return Promise.resolve();
     return fetchPage(param, "next");
   }
 
   function fetchPreviousPage(): Promise<void> {
+    if (inFlight) return inFlight;
     const param = prevPageParam();
     if (param === undefined) return Promise.resolve();
     return fetchPage(param, "prev");

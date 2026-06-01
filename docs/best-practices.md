@@ -1,6 +1,94 @@
 # SibuJS Best Practices Guide
 
-Patterns and anti-patterns for building SibuJS applications.
+Patterns and anti-patterns for building SibuJS applications, current as of the
+latest release.
+
+---
+
+## Authoring Elements
+
+Every element factory (`div`, `span`, `button`, …) accepts a small set of
+positional calling conventions. **Children are passed positionally** — there is
+no `nodes` key. (`nodes:` was an early prop and is deprecated; see the
+anti-patterns table.)
+
+| Call | Meaning |
+|------|---------|
+| `div()` | empty element |
+| `div("Hello")` | a single **text** child |
+| `div(42)` | numeric text child |
+| `div([a, b])` | an array of children |
+| `div(existingNode)` | wraps an existing DOM node |
+| `div(() => value)` | a **reactive** child |
+| `div("card", children)` | first string is the `class`, second is the children |
+| `div({ ...props })` | a props object |
+| `div({ ...props }, children)` | props **and** positional children |
+
+```ts
+import { div, h1, p, span } from "sibujs";
+
+// Props + positional children — the idiomatic "deeply nested" form
+div({ class: "card" }, [
+  h1({ class: "title" }, "Hello"),
+  p({ class: "body" }, "World"),
+  div({ class: "row" }, [span({ id: "x" }, "child")]),
+]);
+
+// Shorthand: a class string plus children, no props object needed
+div("card", [h1("title-text"), p("body-text")]);
+```
+
+### A lone string is always a text child
+
+A single string argument renders as text — never as a class. A value that looks
+like a utility-class list (e.g. `"h-6 w-48"`) is rendered as visible text and
+triggers a dev warning, because it is almost always a misplaced `class`.
+
+```ts
+// Good: text content
+p("Welcome back");
+
+// Good: class on an otherwise empty/styled wrapper
+div({ class: "space-y-6" });
+
+// Good: class + children
+div("space-y-6", [Header(), Body()]);
+
+// Anti-pattern: class list rendered as text (dev warns)
+div("space-y-6"); // renders the literal string "space-y-6"
+```
+
+### Reactive children are functions
+
+Pass a getter (`() => value`) to make a child reactive. It re-renders when the
+signals it reads change.
+
+```ts
+const [count, setCount] = signal(0);
+
+// Reactive text child
+div(() => `Count: ${count()}`);
+
+// Reactive child inside the props form (children is the second argument)
+span({ class: "count" }, () => count());
+```
+
+### Events go through the `on` prop
+
+```ts
+button({ class: "primary", on: { click: () => setCount((c) => c + 1) } }, "Increment");
+```
+
+### Optional: the `html` tagged template
+
+For markup-heavy components you can author with the `html` tagged template.
+Interpolated values are escaped and URL attributes are sanitized automatically.
+
+```ts
+import { html } from "sibujs";
+
+const view = html`<a class="link" href=${url} on:click=${handler}>${label}</a>`;
+```
 
 ---
 
@@ -8,18 +96,12 @@ Patterns and anti-patterns for building SibuJS applications.
 
 ### Keep components as pure functions
 
-Every component is a function that returns an `HTMLElement`. Keep them small and focused.
+Every component is a function that returns an element. Keep them small and
+focused.
 
 ```ts
-// Good: simple, focused component
 function UserCard(user: User): HTMLElement {
-  return div({
-    class: "user-card",
-    nodes: [
-      h2({ nodes: user.name }),
-      p({ nodes: user.email }),
-    ],
-  }) as HTMLElement;
+  return div("user-card", [h2(user.name), p(user.email)]) as HTMLElement;
 }
 ```
 
@@ -29,14 +111,7 @@ Build complex UIs by composing smaller components.
 
 ```ts
 function Dashboard(): HTMLElement {
-  return div({
-    nodes: [
-      Header(),
-      Sidebar(),
-      MainContent(),
-      Footer(),
-    ],
-  }) as HTMLElement;
+  return div([Header(), Sidebar(), MainContent(), Footer()]) as HTMLElement;
 }
 ```
 
@@ -49,10 +124,7 @@ interface AlertProps {
 }
 
 function Alert({ message, type = "info" }: AlertProps): HTMLElement {
-  return div({
-    class: `alert alert-${type}`,
-    nodes: message,
-  }) as HTMLElement;
+  return div({ class: `alert alert-${type}` }, message) as HTMLElement;
 }
 ```
 
@@ -62,57 +134,67 @@ function Alert({ message, type = "info" }: AlertProps): HTMLElement {
 
 ### Call getters inside reactive contexts
 
-Getters register dependencies only when called inside a tracked context (`effect`, `derived`, reactive prop functions, or `nodes: () => ...`).
+Getters register dependencies only when called inside a tracked context
+(`effect`, `derived`, reactive prop functions, or a reactive child `() => …`).
 
 ```ts
 const [count, setCount] = signal(0);
 
-// Good: getter called inside reactive nodes function
-div({ nodes: () => `Count: ${count()}` });
+// Good: getter called inside a reactive child
+div(() => `Count: ${count()}`);
 
-// Good: getter called inside effect
+// Good: getter called inside an effect
 effect(() => {
   console.log("Count changed:", count());
 });
 
-// Anti-pattern: getter called outside tracked context — no updates
-const text = `Count: ${count()}`; // captured once, never updates
-div({ nodes: text }); // static, won't react to changes
+// Anti-pattern: getter read outside a tracked context — captured once
+const text = `Count: ${count()}`; // never updates
+div(text);
 ```
 
-### Reactive reads are per-run dependency tracking
+### Reactive reads use per-run dependency tracking
 
-A reactive getter — a reactive child `() => value`, a `class`/`style` getter, `derived`, `effect`, `watch` — is reactive to exactly the signals it reads on its **most recent** run, not the union of every signal it has ever read. The engine recomputes the dependency set on every evaluation: signals read on the latest run are subscribed (even if a conditional branch read them for the first time), and signals no longer read are unsubscribed.
+A reactive getter — a reactive child `() => value`, a `class`/`style` getter,
+`derived`, `effect`, `watch` — is reactive to exactly the signals it reads on
+its **most recent** run, not the union of every signal it has ever read. The
+engine recomputes the dependency set on every evaluation: signals read on the
+latest run are subscribed (even if a conditional branch reads them for the first
+time), and signals no longer read are unsubscribed.
 
 ```ts
 const [total, setTotal] = signal(0);
 const [bytes, setBytes] = signal(0);
 
 const el = div(() => {
-  // First run: total() === 0 → else branch → bytes() is never read.
+  // First run: total() === 0 -> else branch -> bytes() is never read.
   return total() ? `${bytes()} / ${total()}` : "waiting";
 });
 mount(() => el, root);
 
 setTotal(100); // re-runs the getter; NOW bytes() is read for the first time
-setBytes(42);  // text becomes "42 / 100" — bytes is now a tracked dependency
+setBytes(42); // text becomes "42 / 100" — bytes is now a tracked dependency
 ```
 
 This means two things in practice:
 
-- **You can rely on it.** A branch that becomes live later subscribes its signals automatically; you do not need to "pre-read" every signal to keep them reactive. Conversely, a branch you stop taking is pruned, so abandoned signals no longer trigger re-renders (no over-subscription).
-- **If you want a *stable* subscription regardless of branch**, read the conditionally-needed signal up front:
+- **You can rely on it.** A branch that becomes live later subscribes its
+  signals automatically; you do not need to "pre-read" every signal. A branch
+  you stop taking is pruned, so abandoned signals no longer trigger re-renders.
+- **If you want a *stable* subscription regardless of branch**, read the
+  conditionally-needed signal up front:
 
 ```ts
 div(() => {
-  const b = bytes(); // always read → always subscribed
+  const b = bytes(); // always read -> always subscribed
   return total() ? `${b} / ${total()}` : "waiting";
 });
 ```
 
 ### Use `batch()` for multiple updates
 
-When updating several signals at once, wrap them in `batch()` to coalesce into a single notification pass.
+When updating several signals at once, wrap them in `batch()` to coalesce into a
+single notification pass.
 
 ```ts
 import { batch } from "sibujs";
@@ -132,41 +214,36 @@ setAge(30);
 
 ### Don't create signals in loops or conditionals
 
-Signals should be created at the top level of components or modules.
+Create signals at the top level of a component or module.
 
 ```ts
-// Good: signals at component top level
-function Counter() {
-  const [count, setCount] = signal(0);
-  return div({ nodes: () => `${count()}` });
+// Good
+function Counter(): HTMLElement {
+  const [count] = signal(0);
+  return div(() => `${count()}`) as HTMLElement;
 }
 
 // Anti-pattern: signal inside a conditional
 function Bad(show: boolean) {
   if (show) {
-    const [count, setCount] = signal(0); // inconsistent
+    const [count] = signal(0); // inconsistent lifecycle
   }
 }
 ```
 
-### Use `derived` for derived values
+### Use `derived` for computed values
 
-Don't recalculate derived state in every effect or render.
+`derived` caches its result and only recomputes when its dependencies change.
 
 ```ts
 const [items, setItems] = signal<Item[]>([]);
 const [filter, setFilter] = signal("");
 
-// Good: computed caches and only recalculates when deps change
-const filtered = derived(() =>
-  items().filter((item) => item.name.includes(filter()))
-);
+// Good: computed once per dependency change
+const filtered = derived(() => items().filter((item) => item.name.includes(filter())));
 
-// Anti-pattern: recalculating in every place it's used
-div({ nodes: () => {
-  const result = items().filter(i => i.name.includes(filter())); // repeated work
-  return `${result.length} items`;
-}});
+// Anti-pattern: repeating the work everywhere it is used
+div(() => `${items().filter((i) => i.name.includes(filter())).length} items`);
 ```
 
 ---
@@ -175,25 +252,24 @@ div({ nodes: () => {
 
 ### Choose the right level of state
 
-| Scope | Tool | When to use |
-|-------|------|-------------|
-| Local | `signal` | Single value, one component |
-| Component | `store` | Object with multiple keys, one component |
-| Global | `globalStore` | Shared across components, with actions |
+| Scope | Tool | Import | When to use |
+|-------|------|--------|-------------|
+| Local | `signal` | `sibujs` | Single value, one component |
+| Component | `store` | `sibujs` | Object with multiple keys, one component |
+| Global | `globalStore` | `sibujs/patterns` | Shared across components, with actions |
 
 ```ts
-// Local: simple toggle
+import { signal, store } from "sibujs";
+import { globalStore } from "sibujs/patterns";
+
+// Local: a simple toggle
 const [open, setOpen] = signal(false);
 
-// Component: form with multiple fields
-const [form, { setState }] = store({
-  name: "",
-  email: "",
-  role: "user",
-});
+// Component: a form with multiple fields
+const [form, { setState }] = store({ name: "", email: "", role: "user" });
 
-// Global: app-wide auth state
-const authStore = globalStore({
+// Global: app-wide auth state with actions
+const auth = globalStore({
   state: { user: null, token: null },
   actions: {
     login: (state, payload) => ({ user: payload.user, token: payload.token }),
@@ -202,41 +278,71 @@ const authStore = globalStore({
 });
 ```
 
+`store` exposes the reactive object plus `setState`; reading `form.name` inside a
+reactive context subscribes to that key. Never mutate the store object directly —
+go through `setState`.
+
 ### Don't put everything in global state
 
-Only share state that genuinely needs to be accessed across unrelated components. Local state is simpler and avoids unnecessary coupling.
+Only share state that genuinely needs to be reached across unrelated components.
+Local state is simpler and avoids unnecessary coupling.
 
 ---
 
-## Performance
+## Control Flow & Performance
 
-### Use `show()` for frequently toggled elements
+### `show()` vs `when()` vs `match()`
 
-`show()` hides with CSS (`display: none`) — the element stays in the DOM. `when()` creates and destroys DOM nodes. For frequently toggled UI, `show()` is faster.
+- `show(() => cond, element)` toggles `display` — the element stays in the DOM.
+  Best for frequently toggled UI (dropdowns, tooltips).
+- `when(() => cond, thenFn, elseFn?)` creates and destroys DOM nodes. Best for
+  content shown rarely (modals, error states).
+- `match(() => value, cases, fallback?)` is a reactive switch.
 
 ```ts
-// Good for frequent toggles (dropdown, tooltip)
+import { show, when, match } from "sibujs";
+
 show(() => isOpen(), dropdown());
 
-// Better for rarely shown content (error states, modals)
-when(() => hasError(), () => ErrorMessage(error()));
+when(
+  () => hasError(),
+  () => ErrorMessage(error()),
+);
+
+match(() => status(), {
+  loading: () => Spinner(),
+  error: () => ErrorMessage(error()),
+  success: () => Content(),
+});
 ```
 
-### Always use key functions with `each()`
+### Always use a key function with `each()`
 
-Keys enable the LIS-based reconciliation algorithm. Without keys, list updates are O(n) DOM replacements.
+Keys enable LIS-based reconciliation. Without a stable key, list updates degrade
+to O(n) DOM replacements, and reordering corrupts state. Keys must be unique —
+duplicate keys drop or mis-order rows (and warn in dev).
 
 ```ts
-// Good: keyed by unique identifier
-each(() => users(), (user) => UserCard(user), { key: (u) => u.id });
+import { each } from "sibujs";
 
-// Anti-pattern: using array index (breaks on reorder/insert/delete)
-each(() => users(), (user, i) => UserCard(user), { key: (_, i) => i });
+// Good: keyed by a unique, stable identifier
+each(() => users(), (user) => UserCard(user()), { key: (u) => u.id });
+
+// Anti-pattern: a non-unique key (duplicate names collapse rows)
+each(() => users(), (user) => UserCard(user()), { key: (u) => u.name });
+```
+
+The `key` function receives the raw item and must return a unique, stable id.
+The render callback receives reactive getters — call `user()` / `index()` to read
+the current item and index:
+
+```ts
+each(() => users(), (user, index) => Row({ user: user(), n: index() }), { key: (u) => u.id });
 ```
 
 ### Use `VirtualList` for large datasets
 
-Render only visible items instead of the entire list.
+Render only the visible window instead of the whole list.
 
 ```ts
 import { VirtualList } from "sibujs/ui";
@@ -254,48 +360,47 @@ VirtualList({
 
 ## Memory Management
 
-### Store and call cleanup functions
+### Tie subscriptions to the DOM, and clean up external resources
 
-`effect` returns a cleanup function. Always call it when the component is no longer needed.
+`effect`, `watch`, and the directives register their teardown automatically and
+run it when the owning element is disposed — you usually do not manage that by
+hand. For **external** resources (timers, sockets, listeners on `window`),
+register cleanup with `onUnmount` / `onCleanup`.
 
 ```ts
-function Timer(el: HTMLElement): HTMLElement {
+import { div, signal, effect, onUnmount } from "sibujs";
+
+function Timer(): HTMLElement {
   const [seconds, setSeconds] = signal(0);
-  const cleanup = effect(() => {
-    const id = setInterval(() => setSeconds((s) => s + 1), 1000);
-    return () => clearInterval(id); // inner cleanup
-  });
+  const el = div(() => `${seconds()}s`) as HTMLElement;
 
-  onUnmount(() => cleanup(), el); // outer cleanup on unmount
-
-  return div({ nodes: () => `${seconds()}s` }) as HTMLElement;
-}
-```
-
-### Use `onUnmount` for external resources
-
-Clean up event listeners, WebSocket connections, timers, and other external resources.
-
-```ts
-function LiveFeed(): HTMLElement {
-  const el = div({ class: "feed" }) as HTMLElement;
-  const ws = new WebSocket("wss://api.example.com/feed");
-
-  ws.onmessage = (e) => { /* update UI */ };
-
-  onUnmount(() => {
-    ws.close();
-  }, el);
+  const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+  onUnmount(() => clearInterval(id), el);
 
   return el;
 }
 ```
 
+```ts
+function LiveFeed(): HTMLElement {
+  const el = div({ class: "feed" }) as HTMLElement;
+  const ws = new WebSocket("wss://api.example.com/feed");
+  ws.onmessage = (e) => {
+    /* update UI */
+  };
+  onUnmount(() => ws.close(), el);
+  return el;
+}
+```
+
+If you create a standalone `effect` that is *not* tied to an element, keep its
+returned disposer and call it when you are done.
+
 ---
 
 ## Error Handling
 
-### Wrap components with ErrorBoundary
+### Wrap risky subtrees with `ErrorBoundary`
 
 ```ts
 import { ErrorBoundary, div, p, button } from "sibujs";
@@ -304,15 +409,15 @@ function App(): HTMLElement {
   return ErrorBoundary(
     {
       fallback: (err, retry) =>
-        div([
-          p(`Error: ${err.message}`),
-          button({ on: { click: retry } }, "Retry"),
-        ]) as HTMLElement,
+        div([p(`Error: ${err.message}`), button({ on: { click: retry } }, "Retry")]) as HTMLElement,
     },
     () => MainContent(),
   );
 }
 ```
+
+Error messages are rendered as text (never as HTML), so untrusted error content
+cannot inject markup.
 
 ---
 
@@ -321,23 +426,21 @@ function App(): HTMLElement {
 ### Use the right import path
 
 ```ts
-import { div, signal, mount } from "sibujs";           // Core
-import { VirtualList, form } from "sibujs/ui";         // UI
-import { createRouter, t } from "sibujs/plugins";         // Plugins
-import { sibuVitePlugin } from "sibujs/build";         // Build tools
+import { div, signal, derived, effect, batch, mount, each, show, when } from "sibujs"; // core
+import { globalStore } from "sibujs/patterns"; // patterns
+import { VirtualList, form } from "sibujs/ui"; // UI widgets
+import { createRouter, RouterLink, Route } from "sibujs/plugins"; // router & plugins
+import { render, fireEvent } from "sibujs/testing"; // test utilities
+import { sibuVitePlugin } from "sibujs/build"; // build tooling
 ```
 
-### Group related state into stores
+### Group related state into a store
 
 ```ts
-// Good: related state grouped
-const [settings, { setState }] = store({
-  theme: "light",
-  language: "en",
-  fontSize: 14,
-});
+// Good: related fields in one store
+const [settings, { setState }] = store({ theme: "light", language: "en", fontSize: 14 });
 
-// Anti-pattern: many loose signals for related data
+// Anti-pattern: many loose signals for one logical unit
 const [theme, setTheme] = signal("light");
 const [language, setLanguage] = signal("en");
 const [fontSize, setFontSize] = signal(14);
@@ -347,32 +450,37 @@ const [fontSize, setFontSize] = signal(14);
 
 ## Testing
 
-### Use `createTestHarness()` for DOM tests
+### Render with the test utilities
+
+`render()` mounts a component into a container and returns query helpers plus an
+`unmount`. Pair it with `fireEvent` and `waitFor`.
 
 ```ts
-import { createTestHarness } from "sibujs/plugins";
+import { render, fireEvent, waitFor } from "sibujs/testing";
 
 describe("Counter", () => {
-  const harness = createTestHarness();
+  it("increments on click", () => {
+    const { getByRole, getByTestId, unmount } = render(() => Counter());
 
-  afterEach(() => harness.teardown());
+    fireEvent(getByRole("button")!, "click");
 
-  it("should increment", () => {
-    harness.render(Counter);
-    const btn = harness.query("button")!;
-    btn.click();
-    expect(harness.query(".count")!.textContent).toBe("1");
+    expect(getByTestId("count")!.textContent).toBe("1");
+    unmount();
   });
 });
 ```
 
+`render` exposes `container`, `element`, `getByText`, `getByTestId`, `getByRole`,
+`queryAll`, and `unmount`. Call `unmountAll()` in an `afterEach` to dispose any
+containers a test forgot to clean up.
+
 ### Test behavior, not implementation
 
 ```ts
-// Good: test what the user sees
+// Good: assert what the user sees
 expect(el.textContent).toBe("Hello, World");
 
-// Anti-pattern: test internal signal values
+// Anti-pattern: assert internal signal values
 expect(internalSignal()).toBe(42);
 ```
 
@@ -381,11 +489,14 @@ expect(internalSignal()).toBe(42);
 ## Anti-Patterns Summary
 
 | Anti-pattern | Problem | Fix |
-|-------------|---------|-----|
-| Reading getter outside tracked context | Value captured once, no updates | Wrap in `() => getter()` |
-| Creating signals in loops | Unpredictable behavior | Create at top level |
-| Missing key in `each()` | O(n) DOM replacements | Provide unique key function |
-| Not cleaning up effects | Memory leaks | Call cleanup, use `onUnmount` |
+|--------------|---------|-----|
+| `nodes:` prop for children | Deprecated authoring API | Pass children positionally: `div(props, children)` |
+| Lone string as a class (`div("space-y-6")`) | A lone string is a text child — class names render as visible text | `div({ class: "space-y-6" })`, or `div("space-y-6", children)` |
+| Reading a getter outside a tracked context | Value captured once, no updates | Wrap in `() => getter()` |
+| Creating signals in loops/conditionals | Inconsistent lifecycle | Create at the top level |
+| Missing or non-unique key in `each()` | O(n) replacements, dropped or mis-ordered rows | Provide a unique, stable key function |
+| Mutating a `store` object directly | Bypasses reactivity | Update through `setState` |
+| Not cleaning up external resources | Memory leaks | Use `onUnmount` / keep the `effect` disposer |
 | Everything in global state | Tight coupling, complexity | Use local state where possible |
-| Using `when()` for frequent toggles | Unnecessary DOM churn | Use `show()` instead |
-| Multiple uncoordinated updates | Multiple re-notifications | Wrap in `batch()` |
+| `when()` for frequent toggles | Unnecessary DOM churn | Use `show()` |
+| Multiple uncoordinated updates | Multiple notification passes | Wrap in `batch()` |

@@ -65,7 +65,7 @@ The core shift: in Svelte, the compiler understands your code and generates upda
 import { h1 } from "sibujs";
 
 function Greeting({ name = "World" }: { name?: string }) {
-  return h1({ nodes: `Hello, ${name}!` });
+  return h1(`Hello, ${name}!`);
 }
 ```
 
@@ -96,15 +96,12 @@ import { div, h1, button, signal } from "sibujs";
 function Counter() {
   const [count, setCount] = signal(0);
 
-  return div({
-    nodes: [
-      h1({ nodes: () => `${count()}` }),
-      button({
-        nodes: "Increment",
-        on: { click: () => setCount(c => c + 1) },
-      }),
-    ],
-  });
+  return div([
+    h1(() => `${count()}`),
+    button({
+      on: { click: () => setCount(c => c + 1) },
+    }, "Increment"),
+  ]);
 }
 ```
 
@@ -145,11 +142,10 @@ interface UserCardProps {
 function UserCard({ name, age = 25, active = false }: UserCardProps) {
   return div({
     class: { card: true, active },
-    nodes: [
-      h2({ nodes: name }),
-      p({ nodes: `Age: ${age}` }),
-    ],
-  });
+  }, [
+    h2(name),
+    p(`Age: ${age}`),
+  ]);
 }
 ```
 
@@ -221,7 +217,7 @@ function MyComponent() {
     });
   }
 
-  return p({ nodes: () => `${count()} - ${name()}` });
+  return p(() => `${count()} - ${name()}`);
 }
 ```
 
@@ -250,12 +246,10 @@ function MyComponent() {
   const quadrupled = derived(() => doubled() * 2);
   const isEven = derived(() => count() % 2 === 0);
 
-  return div({
-    nodes: [
-      p({ nodes: () => `${count()} x2 = ${doubled()} x4 = ${quadrupled()}` }),
-      p({ nodes: () => isEven() ? "Even" : "Odd" }),
-    ],
-  });
+  return div([
+    p(() => `${count()} x2 = ${doubled()} x4 = ${quadrupled()}`),
+    p(() => isEven() ? "Even" : "Odd"),
+  ]);
 }
 ```
 
@@ -379,14 +373,11 @@ The most visible change when migrating from Svelte is replacing HTML templates w
 ```ts
 import { div, h2, p, a } from "sibujs";
 
-div({
-  class: "card",
-  nodes: [
-    h2({ nodes: "Title" }),
-    p({ nodes: "Some description text" }),
-    a({ href: "/details", nodes: "Learn more" }),
-  ],
-});
+div("card", [
+  h2("Title"),
+  p("Some description text"),
+  a({ href: "/details" }, "Learn more"),
+]);
 ```
 
 ### Reactive Text
@@ -399,8 +390,8 @@ div({
 
 **SibuJS:**
 ```ts
-h1({ nodes: () => `Hello, ${name()}!` }),
-p({ nodes: () => `You have ${count()} items` }),
+h1(() => `Hello, ${name()}!`),
+p(() => `You have ${count()} items`),
 ```
 
 The `() =>` wrapper tells SibuJS this content is reactive. Static strings (like `"Title"`) need no wrapper.
@@ -434,7 +425,7 @@ when(
 // if only (no else)
 when(
   () => count() > 10,
-  () => p({ nodes: "Count is big!" })
+  () => p("Count is big!")
 );
 ```
 
@@ -456,7 +447,7 @@ import { show } from "sibujs";
 // Keeps the element in the DOM, toggles display
 show(
   () => visible(),
-  div({ nodes: "Content" }) as HTMLElement
+  div("Content") as HTMLElement
 );
 ```
 
@@ -486,7 +477,7 @@ match(
     error: () => ErrorMessage(),
     success: () => Content(),
   },
-  () => p({ nodes: "Unknown" })
+  () => p("Unknown")
 );
 ```
 
@@ -505,15 +496,13 @@ match(
 ```ts
 import { ul, li, each } from "sibujs";
 
-ul({
-  nodes: [
-    each(
-      () => items(),
-      (item, index) => li({ nodes: item.name }),
-      { key: item => item.id }
-    ),
-  ],
-});
+ul([
+  each(
+    () => items(),
+    (item, index) => li(item().name),
+    { key: item => item.id }
+  ),
+]);
 ```
 
 Key points:
@@ -569,8 +558,7 @@ div({
     fontSize: () => `${fontSize()}px`,
     backgroundColor: () => isActive() ? "blue" : "gray",
   },
-  nodes: "Content",
-});
+}, "Content");
 ```
 
 ### Fragments
@@ -583,9 +571,9 @@ import { Fragment } from "sibujs";
 
 function MyComponent() {
   return Fragment([
-    h2({ nodes: "Title" }),
-    p({ nodes: "Paragraph one" }),
-    p({ nodes: "Paragraph two" }),
+    h2("Title"),
+    p("Paragraph one"),
+    p("Paragraph two"),
   ]);
 }
 ```
@@ -608,9 +596,8 @@ function MyComponent() {
 **SibuJS:**
 ```ts
 button({
-  nodes: "Click me",
   on: { click: handleClick },
-});
+}, "Click me");
 
 input({
   on: { input: handleInput },
@@ -623,8 +610,7 @@ form({
       handleSubmit(e);
     },
   },
-  nodes: [/* ... */],
-});
+}, [/* ... */]);
 ```
 
 Note: Svelte event modifiers like `|preventDefault` and `|stopPropagation` do not have a declarative equivalent in SibuJS. Call the methods directly on the event object inside your handler.
@@ -650,8 +636,7 @@ div({
     mouseleave: handleLeave,
     click: handleClick,
   },
-  nodes: "Interactive element",
-});
+}, "Interactive element");
 ```
 
 ### Inline Handlers
@@ -665,14 +650,12 @@ div({
 **SibuJS:**
 ```ts
 button({
-  nodes: "+1",
   on: { click: () => setCount(c => c + 1) },
-});
+}, "+1");
 
 button({
-  nodes: "Remove",
   on: { click: () => onRemove(item.id) },
-});
+}, "Remove");
 ```
 
 ### Component Events / Callbacks
@@ -698,9 +681,8 @@ button({
 // Child.ts
 function Child({ onSubmit }: { onSubmit: (data: { value: number }) => void }) {
   return button({
-    nodes: "Submit",
     on: { click: () => onSubmit({ value: 42 }) },
-  });
+  }, "Submit");
 }
 
 // Parent.ts
@@ -755,20 +737,16 @@ import { p, button, div } from "sibujs";
 import { count, setCount, user, setUser } from "./stores";
 
 function MyComponent() {
-  return div({
-    nodes: [
-      p({ nodes: () => `Count: ${count()}` }),
-      p({ nodes: () => `User: ${user().name}` }),
-      button({
-        nodes: "+1",
-        on: { click: () => setCount(n => n + 1) },
-      }),
-      button({
-        nodes: "Change user",
-        on: { click: () => setUser({ name: "Bob", age: 30 }) },
-      }),
-    ],
-  });
+  return div([
+    p(() => `Count: ${count()}`),
+    p(() => `User: ${user().name}`),
+    button({
+      on: { click: () => setCount(n => n + 1) },
+    }, "+1"),
+    button({
+      on: { click: () => setUser({ name: "Bob", age: 30 }) },
+    }, "Change user"),
+  ]);
 }
 ```
 
@@ -819,7 +797,7 @@ const [time, setTime] = signal(new Date());
 
 // Set up the interval (typically inside a component for lifecycle control)
 function Clock() {
-  const el = span({ nodes: () => time().toLocaleTimeString() });
+  const el = span(() => time().toLocaleTimeString());
 
   onMount(() => {
     const interval = setInterval(() => setTime(new Date()), 1000);
@@ -955,7 +933,7 @@ function MyCanvas() {
 import { onMount, onUnmount } from "sibujs";
 
 function Ticker() {
-  const el = div({ nodes: "Ticking..." }) as HTMLElement;
+  const el = div("Ticking...") as HTMLElement;
   let interval: number;
 
   onMount(() => {
@@ -1005,18 +983,13 @@ Key difference: `onUnmount` requires a reference to the element it watches. It u
 
 **SibuJS:**
 ```ts
-// Card.ts -- using nodes prop
-function Card({ nodes }: { nodes?: NodeChild }) {
-  return div({
-    class: "card",
-    nodes: nodes ?? "Default content",
-  });
+// Card.ts -- using children
+function Card(children?: NodeChild) {
+  return div("card", children ?? "Default content");
 }
 
 // Usage
-Card({
-  nodes: p({ nodes: "Custom content here" }),
-});
+Card(p("Custom content here"));
 ```
 
 ### Named Slots
@@ -1051,28 +1024,19 @@ import type { Slots } from "sibujs";
 
 // Layout.ts
 function Layout({ slots }: { slots?: Slots }) {
-  return div({
-    class: "layout",
-    nodes: [
-      header({
-        nodes: getSlot(slots, "header")?.() ?? "Default header",
-      }),
-      main({
-        nodes: getSlot(slots, "default")?.() ?? "Default body",
-      }),
-      footer({
-        nodes: getSlot(slots, "footer")?.() ?? "Default footer",
-      }),
-    ],
-  });
+  return div("layout", [
+    header(getSlot(slots, "header")?.() ?? "Default header"),
+    main(getSlot(slots, "default")?.() ?? "Default body"),
+    footer(getSlot(slots, "footer")?.() ?? "Default footer"),
+  ]);
 }
 
 // Usage
 Layout({
   slots: {
-    header: () => h1({ nodes: "My Page" }),
-    default: () => p({ nodes: "Main content" }),
-    footer: () => span({ nodes: "Copyright 2025" }),
+    header: () => h1("My Page"),
+    default: () => p("Main content"),
+    footer: () => span("Copyright 2025"),
   },
 });
 ```
@@ -1112,32 +1076,28 @@ function List<T>({
   items: () => T[];
   renderItem?: (item: T) => Element;
 }) {
-  return ul({
-    nodes: [
-      each(
-        items,
-        (item, i) =>
-          li({
-            nodes: renderItem
-              ? renderItem(item)
-              : String((item as any).name),
-          }),
-        { key: (item: any) => item.id }
-      ),
-    ],
-  });
+  return ul([
+    each(
+      items,
+      (item, i) =>
+        li(
+          renderItem
+            ? renderItem(item())
+            : String((item() as any).name)
+        ),
+      { key: (item: any) => item.id }
+    ),
+  ]);
 }
 
 // Usage
 List({
   items: () => items(),
   renderItem: (item) =>
-    span({
-      nodes: [
-        strong({ nodes: item.name }),
-        ` - ${item.description}`,
-      ],
-    }),
+    span([
+      strong(item.name),
+      ` - ${item.description}`,
+    ]),
 });
 ```
 
@@ -1173,7 +1133,7 @@ import { transition } from "sibujs/motion";
 function FadeExample() {
   const [visible, setVisible] = signal(true);
 
-  const content = div({ nodes: "Fading content" }) as HTMLElement;
+  const content = div("Fading content") as HTMLElement;
   const { enter, leave } = transition(content, {
     property: "opacity",
     duration: 300,
@@ -1191,18 +1151,15 @@ function FadeExample() {
     }
   }
 
-  return div({
-    nodes: [
-      button({
-        nodes: "Toggle",
-        on: { click: toggle },
-      }),
-      when(
-        () => visible(),
-        () => content
-      ),
-    ],
-  });
+  return div([
+    button({
+      on: { click: toggle },
+    }, "Toggle"),
+    when(
+      () => visible(),
+      () => content
+    ),
+  ]);
 }
 ```
 
@@ -1218,7 +1175,7 @@ function FadeExample() {
 ```ts
 import { transition } from "sibujs/motion";
 
-const box = div({ nodes: "Animated box" }) as HTMLElement;
+const box = div("Animated box") as HTMLElement;
 
 const { enter, leave } = transition(box, {
   duration: 300,
@@ -1259,7 +1216,7 @@ await leave();
 ```ts
 import { spring } from "sibujs/motion";
 
-const follower = div({ nodes: "Follows mouse" }) as HTMLElement;
+const follower = div("Follows mouse") as HTMLElement;
 
 // Spring animation using Web Animations API
 await spring(follower, [
@@ -1348,7 +1305,7 @@ Use this checklist when converting a Svelte project to SibuJS. Work through each
 
 ### Slots
 
-- [ ] Replace `<slot>` with a `nodes` prop
+- [ ] Replace `<slot>` with positional children
 - [ ] Replace `<slot name="x">` with `getSlot(slots, "x")` and a `slots` prop of type `Slots`
 - [ ] Replace `<Component let:item>` slot props with render prop callbacks
 
@@ -1382,13 +1339,13 @@ Use this checklist when converting a Svelte project to SibuJS. Work through each
 | `count += 1` | `setCount(c => c + 1)` | -- |
 | `$: doubled = count * 2` | `const doubled = derived(() => count() * 2)` | `sibujs` |
 | `$: { console.log(count) }` | `effect(() => { console.log(count()) })` | `sibujs` |
-| `{count}` in template | `() => count()` as nodes | -- |
+| `{count}` in template | `() => count()` as a child | -- |
 | `{#if cond}` | `when(() => cond(), thenFn, elseFn)` | `sibujs` |
 | `{#each arr as item (key)}` | `each(() => arr(), renderFn, { key })` | `sibujs` |
 | `on:click={handler}` | `on: { click: handler }` | -- |
 | `bind:this={el}` | `ref: myRef` | `sibujs` (ref) |
 | `export let prop` | Function parameter | -- |
-| `<slot>` | `nodes` prop | -- |
+| `<slot>` | positional children | -- |
 | `<slot name="x">` | `getSlot(slots, "x")` | `sibujs` |
 | `writable(val)` | `signal(val)` | `sibujs` |
 | `derived(store, fn)` | `derived(() => fn(getter()))` | `sibujs` |
@@ -1519,72 +1476,58 @@ function TodoApp() {
     setTodos(prev => prev.filter(t => t.id !== id));
   }
 
-  return div({
-    class: "app",
-    nodes: [
-      h1({ nodes: () => `Todos (${remaining()} remaining)` }),
+  return div("app", [
+    h1(() => `Todos (${remaining()} remaining)`),
 
-      form({
-        on: { submit: addTodo },
-        nodes: [
-          input({
-            placeholder: "What needs to be done?",
-            value: () => newTodo(),
-            on: {
-              input: (e) => setNewTodo((e.target as HTMLInputElement).value),
-            },
-          }),
-          button({ type: "submit", nodes: "Add" }),
-        ],
+    form({
+      on: { submit: addTodo },
+    }, [
+      input({
+        placeholder: "What needs to be done?",
+        value: () => newTodo(),
+        on: {
+          input: (e) => setNewTodo((e.target as HTMLInputElement).value),
+        },
       }),
+      button({ type: "submit" }, "Add"),
+    ]),
 
-      div({
-        class: "filters",
-        nodes: [
-          button({
-            class: { active: () => filter() === "all" },
-            nodes: "All",
-            on: { click: () => setFilter("all") },
-          }),
-          button({
-            class: { active: () => filter() === "active" },
-            nodes: "Active",
-            on: { click: () => setFilter("active") },
-          }),
-          button({
-            class: { active: () => filter() === "completed" },
-            nodes: "Done",
-            on: { click: () => setFilter("completed") },
-          }),
-        ],
-      }),
+    div("filters", [
+      button({
+        class: { active: () => filter() === "all" },
+        on: { click: () => setFilter("all") },
+      }, "All"),
+      button({
+        class: { active: () => filter() === "active" },
+        on: { click: () => setFilter("active") },
+      }, "Active"),
+      button({
+        class: { active: () => filter() === "completed" },
+        on: { click: () => setFilter("completed") },
+      }, "Done"),
+    ]),
 
-      ul({
-        nodes: [
-          each(
-            filteredTodos,
-            (todo) =>
-              li({
-                class: { done: todo.done },
-                nodes: [
-                  input({
-                    type: "checkbox",
-                    checked: todo.done,
-                    on: { change: () => toggle(todo.id) },
-                  }),
-                  span({ nodes: todo.text }),
-                  button({
-                    nodes: "x",
-                    on: { click: () => remove(todo.id) },
-                  }),
-                ],
-              }),
-            { key: (todo) => todo.id }
-          ),
-        ],
-      }),
-    ],
-  });
+    ul([
+      each(
+        filteredTodos,
+        (todo) =>
+          li({
+            class: { done: () => todo().done },
+          }, [
+            input({
+              type: "checkbox",
+              checked: () => todo().done,
+              on: { change: () => toggle(todo().id) },
+            }),
+            span(() => todo().text),
+            button({
+              on: { click: () => remove(todo().id) },
+            }, "x"),
+          ]),
+        { key: (todo) => todo.id }
+      ),
+    ]),
+  ]);
 }
 
 // Mount the app
@@ -1604,7 +1547,7 @@ mount(TodoApp, document.getElementById("app"));
 
 ### What you trade
 
-- **More verbose templates.** `div({ nodes: ... })` is more characters than `<div>...</div>`. This is the cost of avoiding a compiler.
+- **More verbose templates.** `div([ ... ])` is more characters than `<div>...</div>`. This is the cost of avoiding a compiler.
 - **No automatic style scoping.** Use `scopedStyle()` from `sibujs/ui` or external CSS solutions.
 - **Manual event modifiers.** No `|preventDefault` shorthand -- call methods directly on the event object.
 - **Explicit element references for lifecycle.** `onUnmount` requires you to pass the element, whereas Svelte scopes lifecycle to the component automatically.

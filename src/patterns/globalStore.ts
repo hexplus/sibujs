@@ -29,6 +29,12 @@ function deepClone<T>(value: T): T {
     if (Array.isArray(v)) return v.map(clone);
     const out: Record<string, unknown> = {};
     for (const k of Object.keys(v as Record<string, unknown>)) {
+      // Skip only `__proto__`: `out["__proto__"] = …` invokes the prototype
+      // setter (pollution) rather than creating an own property. `constructor`
+      // / `prototype` are ordinary own keys here, so cloning them is faithful
+      // and safe — the dispatch-time filter is the security boundary for
+      // untrusted patches. A faithful cloner must not drop legitimate data.
+      if (k === "__proto__") continue;
       out[k] = clone((v as Record<string, unknown>)[k]);
     }
     return out;

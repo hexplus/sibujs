@@ -61,12 +61,19 @@ export function store<T extends object>(
 
   // Proxy to expose reactive getters
   const store = new Proxy({} as T, {
-    get(_, prop: string) {
-      if (prop in signals) {
+    get(target, prop) {
+      // Only string keys that are *own* signal entries are reactive. Using
+      // `in` (prototype walk) instead crashed on `store.constructor` /
+      // `store.toString` (read by serializers, devtools, string coercion):
+      // `signals["constructor"]` resolved to `Object`, then `Object[0]()` threw.
+      if (typeof prop === "string" && Object.hasOwn(signals, prop)) {
         const getter = signals[prop as keyof T][0];
         return getter();
       }
-      return undefined;
+      // Everything else (symbols, inherited members like Symbol.toPrimitive /
+      // toString / constructor) falls through to the plain target so the proxy
+      // behaves like a normal object instead of returning undefined.
+      return Reflect.get(target, prop);
     },
     set() {
       throw new Error(
@@ -90,7 +97,10 @@ export function store<T extends object>(
     const nextState = typeof patch === "function" ? patch(current) : patch;
     batch(() => {
       Object.entries(nextState).forEach(([key, value]) => {
-        if (key in signals) {
+        // Own keys only — `key in signals` would match inherited keys like
+        // "toString"/"constructor" and then crash invoking a non-tuple, and
+        // also opens a prototype-pollution-shaped surface for patch objects.
+        if (Object.hasOwn(signals, key)) {
           signals[key as keyof T][1](value as T[keyof T]);
         }
       });

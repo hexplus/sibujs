@@ -89,4 +89,25 @@ describe("bindDynamic (security)", () => {
     bindDynamic(el, "href", "javascript:alert(1)");
     expect(el.getAttribute("href")).toBe("");
   });
+
+  it("should sanitize URL attributes regardless of name case (HTML attrs are case-insensitive)", () => {
+    const a = document.createElement("a");
+    // "HREF"/"Href" must still be recognized as a URL attribute — otherwise the
+    // javascript: URL would reach the live DOM (browser treats HREF as href).
+    bindDynamic(a, "HREF", "javascript:alert(1)");
+    expect(a.getAttribute("HREF")).toBe("");
+
+    const img = document.createElement("img");
+    bindDynamic(img, "SRC", "javascript:alert(1)");
+    expect(img.getAttribute("SRC")).toBe("");
+  });
+});
+
+describe("bindAttribute (URL attr case-insensitivity)", () => {
+  it("sanitizes a reactively-bound uppercase HREF", () => {
+    const [href] = signal("javascript:alert(1)");
+    const a = document.createElement("a");
+    bindAttribute(a, "HREF", href);
+    expect(a.getAttribute("HREF")).toBe("");
+  });
 });

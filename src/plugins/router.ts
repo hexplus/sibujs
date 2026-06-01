@@ -2,7 +2,7 @@ import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
-import { sanitizeUrl } from "../utils/sanitize";
+import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl } from "../utils/sanitize";
 
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
@@ -20,7 +20,16 @@ function isSafeNavigationTarget(path: string): boolean {
   // But an originally-empty input is also legitimate ("" → root relative),
   // so treat those separately.
   if (path === "") return true;
-  return sanitizeUrl(path) !== "";
+  // Browsers ignore leading control chars / whitespace and treat "\" as "/"
+  // when parsing a URL. Normalize the same way *before* the checks, otherwise
+  // "\t//evil.com" or "/\/evil.com" slip past the scheme/host guard and the
+  // browser resolves them to an off-origin host (open redirect, CWE-601).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — strip chars browsers ignore
+  const normalized = path.replace(/[\x00-\x20\x7f-\x9f]+/g, "").replace(/\\/g, "/");
+  // Protocol-relative ("//host") navigation points off the current origin.
+  if (normalized.startsWith("//")) return false;
+  // Dangerous scheme (javascript:, data:, vbscript:, blob:, ...) → empty.
+  return sanitizeUrl(normalized) !== "";
 }
 
 // ============================================================================
@@ -316,8 +325,16 @@ class RouteMatcher {
     if (match) {
       const params: Params = {};
       compiled.keys.forEach((key, i) => {
-        if (match[i + 1] !== undefined) {
-          params[key] = decodeURIComponent(match[i + 1]);
+        const raw = match[i + 1];
+        if (raw !== undefined) {
+          // A malformed percent-escape (e.g. "/users/%E0%A4%A") makes
+          // decodeURIComponent throw URIError, which would abort the whole
+          // match. Fall back to the raw segment instead of breaking routing.
+          try {
+            params[key] = decodeURIComponent(raw);
+          } catch {
+            params[key] = raw;
+          }
         }
       });
       return { params };
@@ -541,6 +558,7 @@ class GuardManager {
  * Component loader with caching and error recovery
  */
 class ComponentLoader {
+  private static readonly MAX_ERROR_ENTRIES = 256;
   private componentCache: LRUCache<string, Component>;
   private errorCache = new Map<string, { timestamp: number; count: number }>();
   private loadingPromises = new Map<string, Promise<Component>>();
@@ -582,8 +600,14 @@ class ComponentLoader {
       this.errorCache.delete(routePath); // Clear error on success
       return component;
     } catch (error) {
-      // Update error cache
+      // Update error cache. `routePath` includes resolved params (e.g.
+      // /users/123), so its cardinality is unbounded — cap the map and evict
+      // the oldest entry to avoid a slow leak in long-lived SPAs.
       const currentError = this.errorCache.get(routePath) || { timestamp: 0, count: 0 };
+      if (!this.errorCache.has(routePath) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
+        const oldest = this.errorCache.keys().next().value;
+        if (oldest !== undefined) this.errorCache.delete(oldest);
+      }
       this.errorCache.set(routePath, {
         timestamp: Date.now(),
         count: currentError.count + 1,
@@ -1578,7 +1602,12 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
 
     if (!("component" in routeDef)) return;
 
-    const cacheKey = route.path;
+    // Key the cached view by the full location, not just `route.path`.
+    // `route.path` strips the query/hash, so "/search?q=a" and "/search?q=b"
+    // would collide and KeepAlive would serve one query's cached DOM/state
+    // for the other.
+    const queryStr = Object.keys(route.query).length > 0 ? `?${new URLSearchParams(route.query).toString()}` : "";
+    const cacheKey = `${route.path}${queryStr}${route.hash ? `#${route.hash}` : ""}`;
 
     // Check if this route should be cached
     const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
@@ -1704,7 +1733,13 @@ export function RouterLink(props: {
   const baseClass = typeof classAttr === "string" ? classAttr : "";
 
   const routeGetter = globalRouter.routeGetter;
-  const href = globalRouter["resolvePath"](to);
+  const rawHref = globalRouter["resolvePath"](to);
+  // Never write an unsanitized URL into the live DOM. A `to` derived from user
+  // data (a record field, a "return URL", an API value) could be
+  // `javascript:…`/`data:…` — clicking the rendered link would execute it
+  // (click-to-XSS). navigate() guards every other entry point; the link must
+  // too. Unsafe targets collapse to "#".
+  const href = isSafeNavigationTarget(rawHref) ? rawHref : "#";
   const hrefPath = href.split("?")[0].split("#")[0];
 
   const link = document.createElement("a");
@@ -1743,11 +1778,28 @@ export function RouterLink(props: {
   });
   registerDisposer(link, effectCleanup);
 
-  // Set other attributes (sanitize to prevent XSS)
+  // Set other attributes (sanitize to prevent XSS). Checks are
+  // case-insensitive: HTML attribute names are, so `HREF`/`ONCLICK` must be
+  // treated like `href`/`onclick` — otherwise a spread prop would bypass the
+  // href sanitization above or set a live event-handler attribute.
   Object.entries(attrs).forEach(([key, value]) => {
-    if (key.startsWith("on") || key === "href") return; // Skip event handlers and href
+    const lkey = key.toLowerCase();
+    // Skip the canonical href (already sanitized) and any on* event handler.
+    if (lkey === "href" || (lkey[0] === "o" && lkey[1] === "n")) return;
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      link.setAttribute(key, String(value));
+      const str = String(value);
+      // Other URL-bearing attributes (src, xlink:href, …) still need protocol
+      // sanitization; drop them when unsafe instead of writing a live URI.
+      if (isUrlAttribute(lkey)) {
+        const safe = sanitizeUrl(str);
+        if (safe) link.setAttribute(key, safe);
+      } else if (lkey === "style") {
+        // Inline style is a CSS-injection sink (url() exfiltration, legacy
+        // expression()/behavior). Match the tagFactory style path.
+        link.setAttribute(key, sanitizeCSSValue(str));
+      } else {
+        link.setAttribute(key, str);
+      }
     }
   });
 

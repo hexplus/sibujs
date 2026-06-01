@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { each } from "../src/core/rendering/each";
 import { signal } from "../src/core/signals/signal";
 
@@ -67,5 +67,23 @@ describe("each", () => {
     // unless wrapped in a reactive binding. The fix ensures the getter is fresh
     // for any reactive bindings (style, class, nodes callbacks) that read item().
     expect(container.querySelectorAll("span").length).toBe(2);
+  });
+
+  describe("duplicate keys", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("warns (dev) when keyFn produces duplicate keys", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const [list] = signal([{ id: 1 }, { id: 1 }, { id: 2 }]);
+
+      const container = document.createElement("div");
+      const anchor = each(list, () => document.createElement("div"), { key: (item) => item.id });
+      container.appendChild(anchor);
+      await Promise.resolve();
+
+      expect(warn).toHaveBeenCalled();
+      const msgs = warn.mock.calls.map((c) => String(c[0]));
+      expect(msgs.some((m) => m.includes("duplicate key"))).toBe(true);
+    });
   });
 });

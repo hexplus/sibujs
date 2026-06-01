@@ -98,4 +98,23 @@ describe("throttle", () => {
 
     vi.useRealTimers();
   });
+
+  it("dispose() stops the subscription and clears the cooldown timer", async () => {
+    vi.useFakeTimers();
+    const [n, setN] = signal(0);
+    const throttled = throttle(n, 100) as (() => number) & { dispose: () => void };
+    expect(typeof throttled.dispose).toBe("function");
+
+    setN(1);
+    await Promise.resolve();
+    expect(throttled()).toBe(1); // leading edge fired
+
+    throttled.dispose();
+    setN(2);
+    await Promise.resolve();
+    vi.advanceTimersByTime(500);
+    expect(throttled()).toBe(1); // no further updates after dispose
+
+    vi.useRealTimers();
+  });
 });

@@ -29,7 +29,18 @@
 
 import { isDev } from "../core/dev";
 import { getSSRStore } from "../core/ssr-context";
-import { sanitizeUrl } from "../utils/sanitize";
+import { sanitizeSrcset, sanitizeUrl } from "../utils/sanitize";
+
+/**
+ * Sanitize a URL-bearing attribute value for SSR emission. `srcset` is a
+ * comma/space-separated candidate list, not a single URL — running it through
+ * `sanitizeUrl` returns the whole string unchanged (its scheme scan fails on
+ * the list), letting blocked schemes survive. Route it through the candidate
+ * parser instead, matching the client-side `tagFactory` behaviour.
+ */
+function sanitizeUrlAttr(name: string, value: string): string {
+  return name === "srcset" ? sanitizeSrcset(value) : sanitizeUrl(value);
+}
 
 const _isDev = isDev();
 
@@ -165,8 +176,8 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     let value = attr.value;
 
     if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrl(value);
-      if (!value) continue; // sanitizeUrl returned empty — drop the attribute entirely
+      value = sanitizeUrlAttr(lowerName, value);
+      if (!value) continue; // sanitizer returned empty — drop the attribute entirely
     }
 
     html += ` ${rawName}="${escapeAttr(value)}"`;
@@ -409,7 +420,7 @@ function buildAttrString(
     const lowerKey = rawKey.toLowerCase();
     let value = String(attrs[rawKey]);
     if (URL_ATTRS.has(lowerKey)) {
-      value = sanitizeUrl(value);
+      value = sanitizeUrlAttr(lowerKey, value);
       if (!value) continue;
     }
     out.push(`${rawKey}="${escapeAttr(value)}"`);
@@ -578,7 +589,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;
     if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrl(value);
+      value = sanitizeUrlAttr(lowerName, value);
       if (!value) continue;
     }
     openTag += ` ${rawName}="${escapeAttr(value)}"`;

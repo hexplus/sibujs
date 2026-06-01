@@ -55,6 +55,23 @@ describe("Head / meta http-equiv refresh", () => {
     Head({ meta: [{ "http-equiv": "refresh", content: "0;url=data:text/html,<svg/onload=alert(1)>" }] });
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
+
+  it("strips a dangerous reactive (function) refresh content", () => {
+    Head({
+      meta: [{ "http-equiv": "refresh", content: () => "0;url=javascript:alert(1)" }],
+    });
+    // The meta element exists (content is a function, so the static guard
+    // can't drop it), but the dangerous content must NOT be written.
+    const el = document.head.querySelector('meta[http-equiv="refresh"]');
+    const content = el?.getAttribute("content") ?? "";
+    expect(content).not.toContain("javascript:");
+  });
+
+  it("keeps a safe reactive refresh content", () => {
+    Head({ meta: [{ "http-equiv": "refresh", content: () => "5;url=/home" }] });
+    const el = document.head.querySelector('meta[http-equiv="refresh"]');
+    expect(el?.getAttribute("content")).toBe("5;url=/home");
+  });
 });
 
 describe("Head / meta — event-handler key rejection", () => {

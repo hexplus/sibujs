@@ -32,11 +32,10 @@ function ThemeToggle(): HTMLElement {
   const theme = ThemeContext.use();
   return button({
     class: () => `theme-toggle ${theme()}`,
-    nodes: () => (theme() === "light" ? "Dark Mode" : "Light Mode"),
     on: {
       click: () => ThemeContext.set(theme() === "light" ? "dark" : "light"),
     },
-  }) as HTMLElement;
+  }, () => (theme() === "light" ? "Dark Mode" : "Light Mode")) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,33 +70,25 @@ function Header(): HTMLElement {
   const notifications = derived(() => state().notifications);
   const userName = derived(() => state().user?.name ?? "Guest");
 
-  return div({
-    class: "header",
-    nodes: [
-      button({
-        class: "menu-btn",
-        nodes: "\u2630",
-        on: { click: () => store.dispatch("toggleSidebar") },
-      }),
-      h1({ nodes: "Dashboard" }),
-      div({
-        class: "header-right",
-        nodes: [
-          when(
-            () => notifications() > 0,
-            () =>
-              span({
-                class: "badge",
-                nodes: () => `${notifications()}`,
-                on: { click: () => store.dispatch("clearNotifications") },
-              }) as HTMLElement
-          ),
-          span({ nodes: () => userName() }),
-          ThemeToggle(),
-        ],
-      }),
-    ],
-  }) as HTMLElement;
+  return div("header", [
+    button({
+      class: "menu-btn",
+      on: { click: () => store.dispatch("toggleSidebar") },
+    }, "\u2630"),
+    h1("Dashboard"),
+    div("header-right", [
+      when(
+        () => notifications() > 0,
+        () =>
+          span({
+            class: "badge",
+            on: { click: () => store.dispatch("clearNotifications") },
+          }, () => `${notifications()}`) as HTMLElement
+      ),
+      span(() => userName()),
+      ThemeToggle(),
+    ]),
+  ]) as HTMLElement;
 }
 
 function Sidebar(): HTMLElement {
@@ -105,13 +96,12 @@ function Sidebar(): HTMLElement {
 
   return nav({
     class: () => `sidebar ${isOpen() ? "open" : "closed"}`,
-    nodes: [
-      RouterLink({ to: "/", nodes: "Overview" }),
-      RouterLink({ to: "/users", nodes: "Users" }),
-      RouterLink({ to: "/analytics", nodes: "Analytics" }),
-      RouterLink({ to: "/settings", nodes: "Settings" }),
-    ],
-  }) as HTMLElement;
+  }, [
+    RouterLink({ to: "/", nodes: "Overview" }),
+    RouterLink({ to: "/users", nodes: "Users" }),
+    RouterLink({ to: "/analytics", nodes: "Analytics" }),
+    RouterLink({ to: "/settings", nodes: "Settings" }),
+  ]) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,31 +110,22 @@ function Sidebar(): HTMLElement {
 
 // Overview page — inline
 function OverviewPage(): HTMLElement {
-  return div({
-    class: "page",
-    nodes: [
-      h2({ nodes: "Overview" }),
-      div({
-        class: "stats-grid",
-        nodes: [
-          StatCard("Users", "1,234"),
-          StatCard("Revenue", "$56,789"),
-          StatCard("Orders", "890"),
-          StatCard("Growth", "+12.5%"),
-        ],
-      }),
-    ],
-  }) as HTMLElement;
+  return div("page", [
+    h2("Overview"),
+    div("stats-grid", [
+      StatCard("Users", "1,234"),
+      StatCard("Revenue", "$56,789"),
+      StatCard("Orders", "890"),
+      StatCard("Growth", "+12.5%"),
+    ]),
+  ]) as HTMLElement;
 }
 
 function StatCard(label: string, value: string): HTMLElement {
-  return div({
-    class: "stat-card",
-    nodes: [
-      p({ class: "stat-value", nodes: value }),
-      p({ class: "stat-label", nodes: label }),
-    ],
-  }) as HTMLElement;
+  return div("stat-card", [
+    p("stat-value", value),
+    p("stat-label", label),
+  ]) as HTMLElement;
 }
 
 // Users page — uses VirtualList for large dataset
@@ -158,27 +139,21 @@ function UsersPage(): HTMLElement {
     }))
   );
 
-  return div({
-    class: "page",
-    nodes: [
-      h2({ nodes: "Users (1,000 entries)" }),
-      VirtualList({
-        items: users,
-        itemHeight: 48,
-        containerHeight: 500,
-        overscan: 5,
-        renderItem: (user) =>
-          div({
-            class: "user-row",
-            nodes: [
-              span({ class: "user-name", nodes: user.name }),
-              span({ class: "user-email", nodes: user.email }),
-              span({ class: "user-role", nodes: user.role }),
-            ],
-          }) as HTMLElement,
-      }),
-    ],
-  }) as HTMLElement;
+  return div("page", [
+    h2("Users (1,000 entries)"),
+    VirtualList({
+      items: users,
+      itemHeight: 48,
+      containerHeight: 500,
+      overscan: 5,
+      renderItem: (user) =>
+        div("user-row", [
+          span("user-name", user.name),
+          span("user-email", user.email),
+          span("user-role", user.role),
+        ]) as HTMLElement,
+    }),
+  ]) as HTMLElement;
 }
 
 // Analytics and Settings — lazy loaded
@@ -205,39 +180,28 @@ function App(): HTMLElement {
 
   return div({
     class: () => `app ${theme()}`,
-    nodes: [
-      Header(),
-      div({
-        class: "main-layout",
-        nodes: [
-          Sidebar(),
-          div({
-            class: "content",
-            nodes: [
-              ErrorBoundary(
-                {
-                  fallback: (err, retry) =>
-                    div({
-                      class: "error-panel",
-                      nodes: [
-                        p({ nodes: `Error: ${err.message}` }),
-                        button({ nodes: "Retry", on: { click: retry } }),
-                      ],
-                    }) as HTMLElement,
-                },
-                () =>
-                  Suspense({
-                    fallback: () =>
-                      div({ class: "loading", nodes: "Loading..." }) as HTMLElement,
-                    nodes: () => Outlet(),
-                  }),
-              ),
-            ],
-          }),
-        ],
-      }),
-    ],
-  }) as HTMLElement;
+  }, [
+    Header(),
+    div("main-layout", [
+      Sidebar(),
+      div("content", [
+        ErrorBoundary(
+          {
+            fallback: (err, retry) =>
+              div("error-panel", [
+                p(`Error: ${err.message}`),
+                button({ on: { click: retry } }, "Retry"),
+              ]) as HTMLElement,
+          },
+          () =>
+            Suspense({
+              nodes: () => Outlet(),
+              fallback: () => div("loading", "Loading...") as HTMLElement,
+            }),
+        ),
+      ]),
+    ]),
+  ]) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------

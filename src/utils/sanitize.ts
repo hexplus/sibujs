@@ -115,11 +115,35 @@ export function sanitizeCSSValue(value: string): string {
 /**
  * Sanitizes HTML by stripping all tags, leaving only text content.
  *
+ * A naive `replace(/<[^>]*>/g, "")` is NOT safe: it leaves dangerous residue
+ * for nested (`<scr<script>ipt>`) and unclosed (`<img onerror=...` with no
+ * `>`) tags, which become a live XSS vector if the result is later assigned
+ * to `innerHTML`. So we prefer a real HTML parser (browser/jsdom) — reading
+ * `textContent` never executes scripts or loads resources and correctly
+ * neutralizes malformed markup — and fall back to a hardened regex only where
+ * no DOM exists (e.g. Node SSR, where the output is serialized as text anyway).
+ *
  * @param html HTML string to strip
  * @returns Plain text with all HTML tags removed
  */
 export function stripHtml(html: string): string {
-  return String(html).replace(/<[^>]*>/g, "");
+  const input = String(html);
+  if (typeof DOMParser !== "undefined") {
+    try {
+      return new DOMParser().parseFromString(input, "text/html").body.textContent ?? "";
+    } catch {
+      // fall through to the regex fallback
+    }
+  }
+  // No-DOM fallback. Loop until stable so nested constructs collapse, then drop
+  // any dangling unclosed tag start (`<img onerror=...` with no closing `>`).
+  let prev: string;
+  let out = input;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]*>/g, "");
+  } while (out !== prev);
+  return out.replace(/<[^>]*$/, "");
 }
 
 // Default safe attributes that can be set without sanitization
@@ -191,9 +215,14 @@ export function isSafeAttribute(attr: string): boolean {
 
 /**
  * Checks if an attribute holds a URL that needs sanitization.
+ *
+ * HTML attribute names are case-insensitive, so we lower-case before the
+ * lookup. Without this, a reactively-bound `HREF`/`SRC`/`xlink:HREF` would
+ * skip URL sanitization (the set is all-lowercase) and a `javascript:` value
+ * would reach the live DOM — the browser treats `HREF` as `href`.
  */
 export function isUrlAttribute(attr: string): boolean {
-  return URL_ATTRIBUTES.has(attr);
+  return URL_ATTRIBUTES.has(attr.toLowerCase());
 }
 
 /**

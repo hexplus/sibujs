@@ -29,12 +29,7 @@ function sanitizeHeadAttr(key: string, value: string): string {
  * Returns true if the meta props describe a refresh directive whose URL
  * uses a dangerous protocol.
  */
-function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
-  const httpEquiv = metaProps["http-equiv"];
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = metaProps.content;
-  if (typeof content !== "string") return false;
+function isDangerousRefreshContent(content: string): boolean {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: browsers silently ignore these during protocol parsing
   const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
   return (
@@ -43,6 +38,15 @@ function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string
     normalized.includes("url=vbscript:") ||
     normalized.includes("url=blob:")
   );
+}
+
+function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
+  const httpEquiv = metaProps["http-equiv"];
+  if (typeof httpEquiv !== "string") return false;
+  if (httpEquiv.toLowerCase() !== "refresh") return false;
+  const content = metaProps.content;
+  if (typeof content !== "string") return false;
+  return isDangerousRefreshContent(content);
 }
 
 /** Strict attribute-name validation — blocks injection via crafted keys. */
@@ -122,15 +126,32 @@ export function Head(props: HeadProps): Comment {
     if (props.meta) {
       for (const metaProps of props.meta) {
         if (isDangerousMetaRefresh(metaProps)) continue;
+        // A `http-equiv="refresh"` meta with a reactive (or function) content
+        // can carry a `javascript:`/`data:` redirect that the static guard
+        // above never saw. `http-equiv` itself may be reactive, so resolve it
+        // freshly each time `content` is written rather than caching a verdict
+        // that could desync if http-equiv later becomes "refresh".
+        const httpEquiv = metaProps["http-equiv"];
+        const isRefreshNow = (): boolean => {
+          const eq = typeof httpEquiv === "function" ? (httpEquiv as () => string)() : httpEquiv;
+          return typeof eq === "string" && eq.toLowerCase() === "refresh";
+        };
         const el = document.createElement("meta");
         for (const [key, value] of Object.entries(metaProps)) {
           if (!isSafeHeadAttr(key)) continue;
+          const isContent = key === "content";
           if (typeof value === "function") {
             const cleanupFn = effect(() => {
-              el.setAttribute(key, sanitizeHeadAttr(key, (value as () => string)()));
+              const resolved = (value as () => string)();
+              if (isContent && isRefreshNow() && isDangerousRefreshContent(resolved)) {
+                el.removeAttribute(key);
+                return;
+              }
+              el.setAttribute(key, sanitizeHeadAttr(key, resolved));
             });
             effectCleanups.push(cleanupFn);
           } else {
+            if (isContent && isRefreshNow() && isDangerousRefreshContent(value)) continue;
             el.setAttribute(key, sanitizeHeadAttr(key, value));
           }
         }

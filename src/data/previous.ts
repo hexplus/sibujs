@@ -23,12 +23,19 @@ export function previous<T>(getter: () => T): () => T | undefined {
   const [previous, setPrevious] = signal<T | undefined>(undefined);
   let current = getter();
 
-  effect(() => {
+  const stop = effect(() => {
     const next = getter();
     if (!Object.is(next, current)) {
       setPrevious(current);
       current = next;
     }
+  });
+
+  // Non-enumerable dispose (persist() convention) so callers can release the
+  // source subscription on unmount instead of leaking it for the page lifetime.
+  Object.defineProperty(previous, "dispose", {
+    value: stop,
+    enumerable: false,
   });
 
   return previous;

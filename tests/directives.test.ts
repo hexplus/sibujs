@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { match, show, when } from "../src/core/rendering/directives";
+import { dispose } from "../src/core/rendering/dispose";
 import { signal } from "../src/core/signals/signal";
 
 describe("show", () => {
@@ -16,6 +17,19 @@ describe("show", () => {
     expect(el.style.display).toBe("none");
 
     setVisible(true);
+    expect(el.style.display).toBe("");
+  });
+
+  it("stops reacting after the element is disposed (no subscription leak)", () => {
+    const [visible, setVisible] = signal(true);
+    const el = document.createElement("div");
+    show(() => visible(), el);
+    expect(el.style.display).toBe("");
+
+    dispose(el);
+    // After dispose the condition subscription must be gone — further changes
+    // are ignored rather than leaking an effect that retains the element.
+    setVisible(false);
     expect(el.style.display).toBe("");
   });
 });
@@ -43,6 +57,34 @@ describe("when", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(container.textContent).toContain("Yes");
+
+    document.body.removeChild(container);
+  });
+
+  it("stops reacting after the anchor is disposed (no subscription leak)", async () => {
+    const [flag, setFlag] = signal(true);
+    let renders = 0;
+    const container = document.createElement("div");
+    const anchor = when(
+      () => flag(),
+      () => {
+        renders++;
+        const s = document.createElement("span");
+        s.textContent = "Yes";
+        return s;
+      },
+    );
+    container.appendChild(anchor);
+    document.body.appendChild(container);
+    await new Promise((r) => setTimeout(r, 10));
+    const rendersBefore = renders;
+
+    dispose(anchor);
+    setFlag(false);
+    setFlag(true);
+    await new Promise((r) => setTimeout(r, 10));
+    // No further re-evaluation after dispose.
+    expect(renders).toBe(rendersBefore);
 
     document.body.removeChild(container);
   });

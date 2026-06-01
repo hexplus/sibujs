@@ -181,15 +181,32 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
       return { kind: "mixed", statics, exprs } as any;
     }
 
-    // Unquoted value: read until whitespace or > or /
-    const valStart = pos;
-    while (pos < len) {
-      const c = template.charCodeAt(pos);
-      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 62 || c === 47) break; // space/tab/nl/cr/>/
-      pos++;
+    // Unquoted value: read until whitespace, > or /. It may still embed
+    // expression markers (e.g. `href=foo${bar}`), so parse statics + exprs the
+    // same way as the quoted branch. Without this the interpolation is silently
+    // dropped and the raw \x00 marker bytes leak into the attribute value.
+    {
+      const statics: string[] = [];
+      const exprs: number[] = [];
+      let current = "";
+      while (pos < len) {
+        const c = template.charCodeAt(pos);
+        if (c === 32 || c === 9 || c === 10 || c === 13 || c === 62 || c === 47) break; // space/tab/nl/cr/>//
+        const innerIdx = tryExprIdx();
+        if (innerIdx >= 0) {
+          statics.push(current);
+          current = "";
+          exprs.push(innerIdx);
+        } else {
+          current += template[pos++];
+        }
+      }
+      statics.push(current);
+      if (exprs.length === 0) {
+        return { kind: "static", value: statics[0] } as any;
+      }
+      return { kind: "mixed", statics, exprs } as any;
     }
-    const val = template.slice(valStart, pos);
-    return { kind: "static", value: val } as any;
   }
 
   function parseAttrs(): TmplAttr[] {

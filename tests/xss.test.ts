@@ -192,6 +192,20 @@ describe("html tagged template XSS prevention", () => {
     expect(href).toBe("");
   });
 
+  it("unquoted attribute mixing literal + expression keeps the interpolation (no marker leak)", () => {
+    const el = html`<div data-x=foo${"bar"}></div>` as HTMLElement;
+    // Previously the unquoted reader dropped the expression and leaked raw
+    // \x00 marker bytes; the value must now be the concatenation "foobar".
+    expect(el.getAttribute("data-x")).toBe("foobar");
+    expect(el.getAttribute("data-x")).not.toContain("\x00");
+  });
+
+  it("unquoted href mixing literal + javascript: expression is still sanitized", () => {
+    const el = html`<a href=java${"script:alert(1)"}>click</a>` as HTMLElement;
+    const href = el.getAttribute("href") || "";
+    expect(href).toBe("");
+  });
+
   it("event handlers via on: are safe (function references, not strings)", () => {
     let called = false;
     const el = html`<button on:click=${() => {

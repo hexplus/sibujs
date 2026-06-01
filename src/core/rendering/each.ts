@@ -171,6 +171,15 @@ export function each<T>(
     // Update key→index mapping so existing item/index getters read fresh data.
     keyIndexMap.clear();
     for (let i = 0; i < newLen; i++) {
+      // Duplicate keys collapse to a single node reference, so two array
+      // positions would share one DOM node — one row silently vanishes and
+      // order can drift. Warn loudly in dev (mirrors bindChildNode).
+      if (_isDev && keyIndexMap.has(newKeys[i])) {
+        devWarn(
+          `each: duplicate key "${String(newKeys[i])}" at index ${i} (first seen at ${keyIndexMap.get(newKeys[i])}). ` +
+            "Keys must be unique — duplicates cause rows to be dropped or mis-ordered.",
+        );
+      }
       keyIndexMap.set(newKeys[i], i);
     }
 

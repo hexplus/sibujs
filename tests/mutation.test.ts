@@ -99,4 +99,38 @@ describe("mutation", () => {
     expect(m.data()).toBe(undefined);
     expect(m.error()).toBe(undefined);
   });
+
+  it("reset() aborts the in-flight mutation (signal + retry chain)", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const m = mutation(async (_n: number, signal?: AbortSignal) => {
+      seenSignal = signal;
+      await new Promise((r) => setTimeout(r, 50));
+      return "done";
+    });
+
+    m.mutate(0);
+    await tick();
+    expect(seenSignal?.aborted).toBe(false);
+
+    m.reset();
+    expect(seenSignal?.aborted).toBe(true); // request signal is aborted
+    expect(m.isIdle()).toBe(true);
+  });
+
+  it("a new mutate() aborts the previous in-flight one", async () => {
+    const signals: AbortSignal[] = [];
+    const m = mutation(async (n: number, signal?: AbortSignal) => {
+      if (signal) signals.push(signal);
+      await new Promise((r) => setTimeout(r, 30));
+      return n;
+    });
+
+    m.mutate(1);
+    await tick();
+    m.mutate(2);
+    await tick();
+
+    expect(signals[0]?.aborted).toBe(true); // first superseded
+    expect(signals[1]?.aborted).toBe(false);
+  });
 });

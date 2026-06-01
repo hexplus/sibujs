@@ -36,6 +36,11 @@ export function derived<T>(
   const equals = options?.equals;
   const cs: any = {};
   cs._d = false;
+  // Becomes true once the getter has produced at least one value. Used to gate
+  // the custom-`equals` short-circuit: comparing against `_v !== undefined`
+  // wrongly disabled `equals` whenever the previous value was a legitimate
+  // `undefined`, causing spurious version bumps / downstream notifications.
+  cs._init = false;
   cs._g = getter;
   // __v: monotonic version counter, bumped only when re-evaluation produces
   // a value different from the previous (Object.is comparison). Kept on the
@@ -55,6 +60,7 @@ export function derived<T>(
     try {
       cs._v = getter();
       cs._d = false;
+      cs._init = true;
       threw = false;
     } finally {
       if (threw) cs._d = true;
@@ -82,8 +88,9 @@ export function derived<T>(
           const prev = cs._v;
           retrack(() => {
             const next = getter();
-            cs._v = equals && cs._v !== undefined ? (equals(cs._v, next) ? cs._v : next) : next;
+            cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;
             cs._d = false;
+            cs._init = true;
             threw = false;
           }, markDirty);
           if (!Object.is(prev, cs._v)) cs.__v++;
@@ -109,9 +116,12 @@ export function derived<T>(
           // If caller provided a custom equality fn and the value didn't
           // change under it, preserve the prior reference — upstream
           // notifications to subscribers checking `oldValue !== cs._v`
-          // (e.g. the devtools hook below) will correctly skip.
-          cs._v = equals && cs._v !== undefined ? (equals(cs._v, next) ? cs._v : next) : next;
+          // (e.g. the devtools hook below) will correctly skip. Gate on
+          // `_init` (not `_v !== undefined`) so a legitimate `undefined`
+          // previous value still goes through `equals`.
+          cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;
           cs._d = false;
+          cs._init = true;
           threw = false;
         }, markDirty);
         if (!Object.is(oldValue, cs._v)) cs.__v++;
