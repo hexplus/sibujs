@@ -44,6 +44,12 @@ argument. This is **the canonical authoring style** — no `nodes:` key
 at any level of the tree. The first argument can be a className string,
 a props object, or the children themselves.
 
+> **Lone string = text child.** A string is treated as a className only when
+> children follow it (`div("card", [...])`). A *lone* string is a text child —
+> `div("Hello")` renders the text "Hello". For a childless styled element use
+> `div({ class: "..." })`. Dev builds warn when a lone string looks like a class
+> list (e.g. `div("space-y-6")`) so the class names don't silently render as text.
+
 ```javascript
 import { div, h1, label, input, button } from "sibujs";
 

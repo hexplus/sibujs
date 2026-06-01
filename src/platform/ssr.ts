@@ -29,7 +29,18 @@
 
 import { isDev } from "../core/dev";
 import { getSSRStore } from "../core/ssr-context";
-import { sanitizeUrl } from "../utils/sanitize";
+import { isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+
+/**
+ * Sanitize a URL-bearing attribute value for SSR emission. `srcset` is a
+ * comma/space-separated candidate list, not a single URL — running it through
+ * `sanitizeUrl` returns the whole string unchanged (its scheme scan fails on
+ * the list), letting blocked schemes survive. Route it through the candidate
+ * parser instead, matching the client-side `tagFactory` behaviour.
+ */
+function sanitizeUrlAttr(name: string, value: string): string {
+  return name === "srcset" ? sanitizeSrcset(value) : sanitizeUrl(value);
+}
 
 const _isDev = isDev();
 
@@ -38,13 +49,6 @@ const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
 
 function isSafeAttrName(name: string): boolean {
   return SAFE_ATTR_NAME.test(name);
-}
-
-/** Is this attribute an `on*` event handler? The framework never emits these through real DOM attributes, so seeing one during SSR is a smell. */
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
 }
 
 /**
@@ -165,8 +169,8 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     let value = attr.value;
 
     if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrl(value);
-      if (!value) continue; // sanitizeUrl returned empty — drop the attribute entirely
+      value = sanitizeUrlAttr(lowerName, value);
+      if (!value) continue; // sanitizer returned empty — drop the attribute entirely
     }
 
     html += ` ${rawName}="${escapeAttr(value)}"`;
@@ -409,7 +413,7 @@ function buildAttrString(
     const lowerKey = rawKey.toLowerCase();
     let value = String(attrs[rawKey]);
     if (URL_ATTRS.has(lowerKey)) {
-      value = sanitizeUrl(value);
+      value = sanitizeUrlAttr(lowerKey, value);
       if (!value) continue;
     }
     out.push(`${rawKey}="${escapeAttr(value)}"`);
@@ -423,14 +427,21 @@ function buildAttrString(
  * a dangerous protocol — in which case the entire meta entry must be
  * dropped to avoid an XSS vector via the browser refresh mechanism.
  */
-function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
-  const httpEquiv = metaProps["http-equiv"];
+export function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
+  // HTML attribute names are case-insensitive, so look up http-equiv/content
+  // case-insensitively — otherwise `HTTP-EQUIV`/`CONTENT` bypass the guard
+  // while the browser still honors the refresh directive.
+  let httpEquiv: string | undefined;
+  let content: string | undefined;
+  for (const k in metaProps) {
+    const lk = k.toLowerCase();
+    if (lk === "http-equiv") httpEquiv = metaProps[k];
+    else if (lk === "content") content = metaProps[k];
+  }
   if (typeof httpEquiv !== "string") return false;
   if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = metaProps.content;
   if (typeof content !== "string") return false;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping chars browsers silently ignore during protocol parsing
-  const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
+  const normalized = stripControlChars(content).toLowerCase();
   return (
     normalized.includes("url=javascript:") ||
     normalized.includes("url=data:") ||
@@ -578,7 +589,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;
     if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrl(value);
+      value = sanitizeUrlAttr(lowerName, value);
       if (!value) continue;
     }
     openTag += ` ${rawName}="${escapeAttr(value)}"`;
@@ -706,6 +717,10 @@ export function hydrateProgressively(
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
+            // Disconnect first: if factory() throws, the observer must still be
+            // torn down, otherwise it stays live and re-fires the failing
+            // hydration on every subsequent intersection (leak + repeat error).
+            observer.disconnect();
             const clientTree = factory();
             // Replace strategy: same fix as `hydrate()` — in-place attribute
             // copy leaves reactive bindings wired to the orphan client tree
@@ -714,7 +729,6 @@ export function hydrateProgressively(
             (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
             (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
             (marker as HTMLElement).replaceWith(clientTree);
-            observer.disconnect();
             break;
           }
         }

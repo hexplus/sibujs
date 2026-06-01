@@ -1,5 +1,5 @@
 import { effect } from "../core/signals/effect";
-import { sanitizeUrl } from "../utils/sanitize";
+import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
@@ -29,14 +29,8 @@ function sanitizeHeadAttr(key: string, value: string): string {
  * Returns true if the meta props describe a refresh directive whose URL
  * uses a dangerous protocol.
  */
-function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
-  const httpEquiv = metaProps["http-equiv"];
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = metaProps.content;
-  if (typeof content !== "string") return false;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: browsers silently ignore these during protocol parsing
-  const normalized = content.replace(/[\x00-\x20\x7f-\x9f]+/g, "").toLowerCase();
+function isDangerousRefreshContent(content: string): boolean {
+  const normalized = stripControlChars(content).toLowerCase();
   return (
     normalized.includes("url=javascript:") ||
     normalized.includes("url=data:") ||
@@ -45,14 +39,28 @@ function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string
   );
 }
 
+/** Case-insensitive lookup of a meta attribute value (HTML attr names are CI). */
+function getMetaAttr(
+  metaProps: Record<string, string | (() => string)>,
+  name: string,
+): string | (() => string) | undefined {
+  for (const k in metaProps) {
+    if (k.toLowerCase() === name) return metaProps[k];
+  }
+  return undefined;
+}
+
+function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
+  const httpEquiv = getMetaAttr(metaProps, "http-equiv");
+  if (typeof httpEquiv !== "string") return false;
+  if (httpEquiv.toLowerCase() !== "refresh") return false;
+  const content = getMetaAttr(metaProps, "content");
+  if (typeof content !== "string") return false;
+  return isDangerousRefreshContent(content);
+}
+
 /** Strict attribute-name validation — blocks injection via crafted keys. */
 const SAFE_HEAD_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
-
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
-}
 
 function isSafeHeadAttr(name: string): boolean {
   if (!SAFE_HEAD_ATTR_NAME.test(name)) return false;
@@ -122,15 +130,32 @@ export function Head(props: HeadProps): Comment {
     if (props.meta) {
       for (const metaProps of props.meta) {
         if (isDangerousMetaRefresh(metaProps)) continue;
+        // A `http-equiv="refresh"` meta with a reactive (or function) content
+        // can carry a `javascript:`/`data:` redirect that the static guard
+        // above never saw. `http-equiv` itself may be reactive, so resolve it
+        // freshly each time `content` is written rather than caching a verdict
+        // that could desync if http-equiv later becomes "refresh".
+        const httpEquiv = getMetaAttr(metaProps, "http-equiv");
+        const isRefreshNow = (): boolean => {
+          const eq = typeof httpEquiv === "function" ? (httpEquiv as () => string)() : httpEquiv;
+          return typeof eq === "string" && eq.toLowerCase() === "refresh";
+        };
         const el = document.createElement("meta");
         for (const [key, value] of Object.entries(metaProps)) {
           if (!isSafeHeadAttr(key)) continue;
+          const isContent = key.toLowerCase() === "content";
           if (typeof value === "function") {
             const cleanupFn = effect(() => {
-              el.setAttribute(key, sanitizeHeadAttr(key, (value as () => string)()));
+              const resolved = (value as () => string)();
+              if (isContent && isRefreshNow() && isDangerousRefreshContent(resolved)) {
+                el.removeAttribute(key);
+                return;
+              }
+              el.setAttribute(key, sanitizeHeadAttr(key, resolved));
             });
             effectCleanups.push(cleanupFn);
           } else {
+            if (isContent && isRefreshNow() && isDangerousRefreshContent(value)) continue;
             el.setAttribute(key, sanitizeHeadAttr(key, value));
           }
         }

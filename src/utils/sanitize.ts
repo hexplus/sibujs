@@ -1,4 +1,26 @@
 /**
+ * Strip C0/C1 control characters and ASCII whitespace that browsers silently
+ * ignore while parsing a URL/protocol (e.g. "java\tscript:" or a leading
+ * "\x01"). Centralized so every URL/scheme guard normalizes identically.
+ */
+export function stripControlChars(value: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — these chars are ignored by browsers during parsing
+  return value.replace(/[\x00-\x20\x7f-\x9f]+/g, "");
+}
+
+/**
+ * Is `name` an intrinsic event-handler attribute (`onclick`, `onerror`, …)?
+ * Their value is evaluated as JavaScript on dispatch, so the framework never
+ * sets them via `setAttribute`. Case-insensitive; matches `on` followed by an
+ * ASCII letter. Single shared definition for every attribute-writing path.
+ */
+export function isEventHandlerAttr(name: string): boolean {
+  if (name.length < 3) return false;
+  const lower = name.toLowerCase();
+  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
+}
+
+/**
  * Escapes HTML entities in a string to prevent XSS injection.
  * Used internally by bindTextNode for safe text node updates.
  * Also exported as a user-facing utility.
@@ -24,11 +46,9 @@ const SAFE_URL_PROTOCOLS = ["http:", "https:", "mailto:", "tel:", "ftp:"];
  * @returns The URL if safe, or empty string if dangerous
  */
 export function sanitizeUrl(url: string): string {
-  // Strip C0/C1 control characters and Unicode whitespace that browsers
-  // may silently ignore, which could bypass protocol checks.
-  // E.g. "\x01javascript:alert(1)" or "java\tscript:alert(1)"
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars to prevent protocol bypass
-  const trimmed = url.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
+  // Strip control chars/whitespace browsers ignore (e.g. "java\tscript:") so
+  // they can't bypass the protocol check, then trim.
+  const trimmed = stripControlChars(url).trim();
   if (!trimmed) return "";
 
   // Detect an explicit scheme: the first ":" before any "/", "?", or "#".
@@ -115,11 +135,35 @@ export function sanitizeCSSValue(value: string): string {
 /**
  * Sanitizes HTML by stripping all tags, leaving only text content.
  *
+ * A naive `replace(/<[^>]*>/g, "")` is NOT safe: it leaves dangerous residue
+ * for nested (`<scr<script>ipt>`) and unclosed (`<img onerror=...` with no
+ * `>`) tags, which become a live XSS vector if the result is later assigned
+ * to `innerHTML`. So we prefer a real HTML parser (browser/jsdom) — reading
+ * `textContent` never executes scripts or loads resources and correctly
+ * neutralizes malformed markup — and fall back to a hardened regex only where
+ * no DOM exists (e.g. Node SSR, where the output is serialized as text anyway).
+ *
  * @param html HTML string to strip
  * @returns Plain text with all HTML tags removed
  */
 export function stripHtml(html: string): string {
-  return String(html).replace(/<[^>]*>/g, "");
+  const input = String(html);
+  if (typeof DOMParser !== "undefined") {
+    try {
+      return new DOMParser().parseFromString(input, "text/html").body.textContent ?? "";
+    } catch {
+      // fall through to the regex fallback
+    }
+  }
+  // No-DOM fallback. Loop until stable so nested constructs collapse, then drop
+  // any dangling unclosed tag start (`<img onerror=...` with no closing `>`).
+  let prev: string;
+  let out = input;
+  do {
+    prev = out;
+    out = out.replace(/<[^>]*>/g, "");
+  } while (out !== prev);
+  return out.replace(/<[^>]*$/, "");
 }
 
 // Default safe attributes that can be set without sanitization
@@ -191,9 +235,14 @@ export function isSafeAttribute(attr: string): boolean {
 
 /**
  * Checks if an attribute holds a URL that needs sanitization.
+ *
+ * HTML attribute names are case-insensitive, so we lower-case before the
+ * lookup. Without this, a reactively-bound `HREF`/`SRC`/`xlink:HREF` would
+ * skip URL sanitization (the set is all-lowercase) and a `javascript:` value
+ * would reach the live DOM — the browser treats `HREF` as `href`.
  */
 export function isUrlAttribute(attr: string): boolean {
-  return URL_ATTRIBUTES.has(attr);
+  return URL_ATTRIBUTES.has(attr.toLowerCase());
 }
 
 /**

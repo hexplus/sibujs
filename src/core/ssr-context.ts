@@ -26,6 +26,12 @@
 export interface SSRStore {
   ssr: boolean;
   suspenseIdCounter: number;
+  /**
+   * Per-request data caches (e.g. the query cache). Lazily created and keyed
+   * by subsystem so request-scoped data never bleeds between concurrent
+   * server renders. Typed loosely to avoid a dependency cycle with data/.
+   */
+  caches?: Map<string, Map<string, unknown>>;
 }
 
 type ALSLike<T> = {
@@ -36,13 +42,22 @@ type ALSLike<T> = {
 let als: ALSLike<SSRStore> | null = null;
 try {
   if (typeof process !== "undefined" && process.versions && process.versions.node) {
-    // Synchronous require to avoid async import rippling through the API.
-    // Wrapped so bundlers targeting the browser silently skip it.
-    const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
-    if (req) {
-      const mod = req("node:async_hooks") as { AsyncLocalStorage: new () => ALSLike<SSRStore> };
-      als = new mod.AsyncLocalStorage();
+    type AHMod = { AsyncLocalStorage: new () => ALSLike<SSRStore> };
+    let mod: AHMod | null = null;
+    // Prefer process.getBuiltinModule (Node 22.3+): synchronous AND works under
+    // ESM. The `require`-based path below only works in CommonJS, so under ESM
+    // bundles (the common SSR setup) ALS would silently never load and the
+    // per-request SSR scope (flag + query cache) would fall back to a shared
+    // module global — i.e. cross-request data bleed. getBuiltinModule fixes that.
+    const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+    if (typeof getBuiltin === "function") {
+      mod = getBuiltin("node:async_hooks") as AHMod;
+    } else {
+      // Fallback for CommonJS runtimes without getBuiltinModule.
+      const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
+      if (req) mod = req("node:async_hooks") as AHMod;
     }
+    if (mod) als = new mod.AsyncLocalStorage();
   }
 } catch {
   als = null;
@@ -63,6 +78,24 @@ export function getSSRStore(): SSRStore {
 /** Returns true when running in SSR mode. */
 export function isSSR(): boolean {
   return getSSRStore().ssr;
+}
+
+/**
+ * Returns a request-scoped cache map for the given subsystem when running
+ * under SSR (so concurrent requests never share it), or `null` on the client
+ * where a process-global cache is correct. On Node the store is backed by
+ * AsyncLocalStorage, giving each request its own caches.
+ */
+export function getRequestScopedCache<V>(name: string): Map<string, V> | null {
+  if (!isSSR()) return null;
+  const store = getSSRStore();
+  const caches = (store.caches ??= new Map<string, Map<string, unknown>>());
+  let c = caches.get(name);
+  if (!c) {
+    c = new Map<string, unknown>();
+    caches.set(name, c);
+  }
+  return c as Map<string, V>;
 }
 
 /** Enable SSR mode. Side effects (effect, watch, onMount) become no-ops. */

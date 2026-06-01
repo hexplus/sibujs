@@ -51,6 +51,15 @@ describe("SSR / renderToString — attribute sanitization", () => {
     expect(html).toContain('href="https://example.com/page"');
   });
 
+  it("sanitizes srcset as a candidate list, not a single URL", () => {
+    const img = document.createElement("img");
+    // sanitizeUrl would pass this multi-candidate list through unchanged.
+    img.setAttribute("srcset", "a.jpg 1x, javascript:alert(1) 2x");
+    const html = renderToString(img);
+    expect(html).not.toContain("javascript:");
+    expect(html).toContain("a.jpg 1x");
+  });
+
   it("drops `on*` event-handler attributes", () => {
     const btn = document.createElement("button");
     btn.setAttribute("onclick", "alert(1)");

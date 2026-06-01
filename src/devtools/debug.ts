@@ -4,6 +4,8 @@
 
 let debugEnabled = false;
 const perfMarks = new Map<string, number[]>();
+// Cap retained timing samples per label (sliding window) to bound memory.
+const MAX_PERF_SAMPLES = 1000;
 
 /**
  * Enable debug mode — enables verbose logging.
@@ -55,7 +57,13 @@ export function perfTracker(label: string): {
 
   function endMeasure(): number {
     const elapsed = globalThis.performance.now() - startTime;
-    perfMarks.get(label)?.push(elapsed);
+    const marks = perfMarks.get(label);
+    if (marks) {
+      marks.push(elapsed);
+      // Bound the sample buffer so a hot, frequently-measured component does
+      // not grow this array without limit (and keep getAverageTime O(window)).
+      if (marks.length > MAX_PERF_SAMPLES) marks.shift();
+    }
     if (debugEnabled) {
       debugLog("Perf", `${label}: ${elapsed.toFixed(2)}ms`);
     }

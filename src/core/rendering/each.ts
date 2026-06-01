@@ -171,6 +171,15 @@ export function each<T>(
     // Update key→index mapping so existing item/index getters read fresh data.
     keyIndexMap.clear();
     for (let i = 0; i < newLen; i++) {
+      // Duplicate keys collapse to a single node reference, so two array
+      // positions would share one DOM node — one row silently vanishes and
+      // order can drift. Warn loudly in dev (mirrors bindChildNode).
+      if (_isDev && keyIndexMap.has(newKeys[i])) {
+        devWarn(
+          `each: duplicate key "${String(newKeys[i])}" at index ${i} (first seen at ${keyIndexMap.get(newKeys[i])}). ` +
+            "Keys must be unique — duplicates cause rows to be dropped or mis-ordered.",
+        );
+      }
       keyIndexMap.set(newKeys[i], i);
     }
 
@@ -181,8 +190,14 @@ export function each<T>(
       if (existing !== undefined) {
         node = existing;
       } else {
-        // Create stable getters that close over the key and always read
-        // from the latest array via keyIndexMap, making them reactive.
+        // Create stable getters that close over the key and always read the
+        // CURRENT item/index from the latest array via keyIndexMap. They return
+        // fresh data each time they are evaluated, but — by design — reading
+        // them does NOT itself subscribe to the array signal (see untracked
+        // below), so a row's content does not auto-re-render when the array is
+        // replaced/reordered. For reactive per-row content, drive it from a
+        // per-item signal/store rather than relying on item() to trigger
+        // updates (the fine-grained list model).
         const itemKey = key;
         // Read getArray() inside untracked() so consumers reading item()
         // inside derived/effect do NOT subscribe to the whole-array signal —

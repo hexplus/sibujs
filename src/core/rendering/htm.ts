@@ -1,7 +1,7 @@
 import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
+import { isEventHandlerAttr, isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
@@ -181,15 +181,35 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
       return { kind: "mixed", statics, exprs } as any;
     }
 
-    // Unquoted value: read until whitespace or > or /
-    const valStart = pos;
-    while (pos < len) {
-      const c = template.charCodeAt(pos);
-      if (c === 32 || c === 9 || c === 10 || c === 13 || c === 62 || c === 47) break; // space/tab/nl/cr/>/
-      pos++;
+    // Unquoted value: read until whitespace or `>`. It may still embed
+    // expression markers (e.g. `href=foo${bar}`), so parse statics + exprs the
+    // same way as the quoted branch. Without this the interpolation is silently
+    // dropped and the raw \x00 marker bytes leak into the attribute value.
+    // NOTE: `/` is NOT a terminator (per the HTML spec, unquoted values may
+    // contain `/`) — terminating on it truncated `href=http://x/y` to `http:`
+    // and spilled the rest into the DOM as text.
+    {
+      const statics: string[] = [];
+      const exprs: number[] = [];
+      let current = "";
+      while (pos < len) {
+        const c = template.charCodeAt(pos);
+        if (c === 32 || c === 9 || c === 10 || c === 13 || c === 62) break; // space/tab/nl/cr/>
+        const innerIdx = tryExprIdx();
+        if (innerIdx >= 0) {
+          statics.push(current);
+          current = "";
+          exprs.push(innerIdx);
+        } else {
+          current += template[pos++];
+        }
+      }
+      statics.push(current);
+      if (exprs.length === 0) {
+        return { kind: "static", value: statics[0] } as any;
+      }
+      return { kind: "mixed", statics, exprs } as any;
     }
-    const val = template.slice(valStart, pos);
-    return { kind: "static", value: val } as any;
   }
 
   function parseAttrs(): TmplAttr[] {
@@ -269,6 +289,39 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
       if (template[pos] === "<" && pos + 1 < len && template[pos + 1] === "/") break;
 
       if (template[pos] === "<") {
+        const next = template[pos + 1];
+
+        // Comments, CDATA, doctype declarations and processing instructions are
+        // skipped, not parsed as elements (previously `<!-- -->` etc. produced
+        // an empty tag name and crashed via createElement("")).
+        if (next === "!") {
+          if (template.startsWith("<!--", pos)) {
+            const end = template.indexOf("-->", pos + 4);
+            pos = end === -1 ? len : end + 3;
+          } else if (template.startsWith("<![CDATA[", pos)) {
+            const end = template.indexOf("]]>", pos + 9);
+            pos = end === -1 ? len : end + 3;
+          } else {
+            const end = template.indexOf(">", pos);
+            pos = end === -1 ? len : end + 1;
+          }
+          continue;
+        }
+        if (next === "?") {
+          const end = template.indexOf(">", pos);
+          pos = end === -1 ? len : end + 1;
+          continue;
+        }
+
+        // Only a `<` immediately followed by an ASCII letter starts a tag.
+        // A bare `<` ("a < b", "I <3 you") is literal text — emitting it as
+        // such avoids crashing on createElement("").
+        if (!(next >= "a" && next <= "z") && !(next >= "A" && next <= "Z")) {
+          children.push({ t: 1, value: "<" });
+          pos++;
+          continue;
+        }
+
         pos++; // skip <
         const tag = readTagName();
         const attrs = parseAttrs();
@@ -334,9 +387,9 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
       case 1: {
         // expr
         const name = attr.name;
-        // Block on* event handler attributes (XSS prevention) — case-insensitive
+        // Block on* event handler attributes (XSS prevention; shared guard).
         const lname = name.toLowerCase();
-        if (lname[0] === "o" && lname[1] === "n") break;
+        if (isEventHandlerAttr(name)) break;
         const val = values[attr.idx];
         if (typeof val === "function") {
           registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));

@@ -1,5 +1,6 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
+import { stripUnsafeKeys } from "../utils/guards";
 
 /**
  * Deep-clone a value, preserving Date / Map / Set / typed arrays via
@@ -29,6 +30,12 @@ function deepClone<T>(value: T): T {
     if (Array.isArray(v)) return v.map(clone);
     const out: Record<string, unknown> = {};
     for (const k of Object.keys(v as Record<string, unknown>)) {
+      // Skip only `__proto__`: `out["__proto__"] = …` invokes the prototype
+      // setter (pollution) rather than creating an own property. `constructor`
+      // / `prototype` are ordinary own keys here, so cloning them is faithful
+      // and safe — the dispatch-time filter is the security boundary for
+      // untrusted patches. A faithful cloner must not drop legitimate data.
+      if (k === "__proto__") continue;
       out[k] = clone((v as Record<string, unknown>)[k]);
     }
     return out;
@@ -75,13 +82,8 @@ export function globalStore<
     const execute = () => {
       const current = getState();
       const rawPatch = actionFn(current, payload);
-      // Strip prototype-pollution keys before merging to prevent __proto__ / constructor attacks
-      const patch: Partial<S> = {};
-      for (const key of Object.keys(rawPatch)) {
-        if (key !== "__proto__" && key !== "constructor" && key !== "prototype") {
-          (patch as Record<string, unknown>)[key] = (rawPatch as Record<string, unknown>)[key];
-        }
-      }
+      // Strip prototype-pollution keys before merging (shared guard).
+      const patch = stripUnsafeKeys(rawPatch as Record<string, unknown>) as Partial<S>;
       setState({ ...current, ...patch } as S);
       // Notify listeners
       const newState = getState();

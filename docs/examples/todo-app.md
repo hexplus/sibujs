@@ -77,98 +77,75 @@ function removeTodo(id: number) {
 // ---------------------------------------------------------------------------
 
 function TodoInput(): HTMLElement {
-  return div({
-    class: "todo-input",
-    nodes: [
-      input({
-        type: "text",
-        placeholder: "What needs to be done?",
-        value: () => inputValue(),
-        on: {
-          input: (e) => setInputValue((e.target as HTMLInputElement).value),
-          keydown: (e) => {
-            if ((e as KeyboardEvent).key === "Enter") addTodo();
-          },
+  return div("todo-input", [
+    input({
+      type: "text",
+      placeholder: "What needs to be done?",
+      value: () => inputValue(),
+      on: {
+        input: (e) => setInputValue((e.target as HTMLInputElement).value),
+        keydown: (e) => {
+          if ((e as KeyboardEvent).key === "Enter") addTodo();
         },
-      }),
-      button({
-        nodes: "Add",
-        on: { click: addTodo },
-      }),
-    ],
-  }) as HTMLElement;
+      },
+    }),
+    button({ on: { click: addTodo } }, "Add"),
+  ]) as HTMLElement;
 }
 
 function TodoItem(todo: Todo): HTMLElement {
   return li({
     class: () => `todo-item ${todo.completed ? "completed" : ""}`,
-    nodes: [
-      label({
-        nodes: [
-          input({
-            type: "checkbox",
-            checked: todo.completed ? "checked" : undefined,
-            on: { change: () => toggleTodo(todo.id) },
-          }),
-          span({ nodes: todo.text }),
-        ],
+  }, [
+    label([
+      input({
+        type: "checkbox",
+        checked: todo.completed ? "checked" : undefined,
+        on: { change: () => toggleTodo(todo.id) },
       }),
-      button({
-        class: "remove-btn",
-        nodes: "\u00d7",
-        on: { click: () => removeTodo(todo.id) },
-      }),
-    ],
-  }) as HTMLElement;
+      span(todo.text),
+    ]),
+    button({
+      class: "remove-btn",
+      on: { click: () => removeTodo(todo.id) },
+    }, "\u00d7"),
+  ]) as HTMLElement;
 }
 
 function FilterButtons(): HTMLElement {
   const filters: Filter[] = ["all", "active", "completed"];
 
-  return div({
-    class: "filters",
-    nodes: filters.map((f) =>
-      button({
-        class: () => `filter-btn ${filter() === f ? "active" : ""}`,
-        nodes: f.charAt(0).toUpperCase() + f.slice(1),
-        on: { click: () => setFilter(f) },
-      })
-    ),
-  }) as HTMLElement;
+  return div("filters", filters.map((f) =>
+    button({
+      class: () => `filter-btn ${filter() === f ? "active" : ""}`,
+      on: { click: () => setFilter(f) },
+    }, f.charAt(0).toUpperCase() + f.slice(1))
+  )) as HTMLElement;
 }
 
 function TodoFooter(): HTMLElement {
-  return footer({
-    class: "todo-footer",
-    nodes: [
-      span({ nodes: () => `${activeCount()} item${activeCount() === 1 ? "" : "s"} left` }),
-      FilterButtons(),
-    ],
-  }) as HTMLElement;
+  return footer("todo-footer", [
+    span(() => `${activeCount()} item${activeCount() === 1 ? "" : "s"} left`),
+    FilterButtons(),
+  ]) as HTMLElement;
 }
 
 function App(): HTMLElement {
-  return div({
-    class: "todo-app",
-    nodes: [
-      h1({ nodes: "Todos" }),
-      TodoInput(),
-      ul({
-        class: "todo-list",
-        nodes: [
-          each(
-            () => filteredTodos(),
-            (todo) => TodoItem(todo),
-            { key: (t) => t.id }
-          ),
-        ],
-      }),
-      when(
-        () => todos().length > 0,
-        () => TodoFooter()
+  return div("todo-app", [
+    h1("Todos"),
+    TodoInput(),
+    ul("todo-list", [
+      each(
+        () => filteredTodos(),
+        (todo) => TodoItem(todo()),
+        { key: (t) => t.id }
       ),
-    ],
-  }) as HTMLElement;
+    ]),
+    when(
+      () => todos().length > 0,
+      () => TodoFooter()
+    ),
+  ]) as HTMLElement;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,5 +164,5 @@ mount(App, document.getElementById("app"));
 | `each()` with key | Rendering todo list with efficient reconciliation |
 | `when()` | Conditionally showing footer |
 | Reactive `class` | Toggle "completed" and "active" classes |
-| Reactive `nodes` | Dynamic count text |
+| Reactive child | Dynamic count text |
 | Event handling | Input, keydown, click, change |

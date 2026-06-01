@@ -488,19 +488,27 @@ export function compileHtmlTemplates(code: string): CompileResult {
 
     // Collect used tags
     collectTags(ast, usedTags);
+    // Multiple top-level roots are wrapped in a <div> (matching the runtime
+    // `html` tag, which builds a div wrapper for multi-root templates), so the
+    // div factory must be imported.
+    if (ast.length > 1) usedTags.add("div");
     if (Array.from(usedTags).some((t) => SVG_TAGS.has(t))) usesSvg = true;
 
     // Generate code
     const valuesVar = "__v";
     const childExprs = ast.map((c) => generateChild(c, valuesVar));
+    // A single root renders directly; multiple roots are wrapped in a div
+    // containing all of them. Previously both branches emitted only the first
+    // child, silently dropping every sibling node.
+    const rootExpr = childExprs.length === 1 ? childExprs[0] : `div([${childExprs.join(", ")}])`;
 
     let compiled: string;
     if (tmpl.exprCount === 0) {
       // No expressions — static template, no wrapper needed
-      compiled = childExprs.length === 1 ? childExprs[0] : childExprs[0];
+      compiled = rootExpr;
     } else {
       // Wrap in IIFE that receives the expression values
-      const body = childExprs.length === 1 ? childExprs[0] : childExprs[0];
+      const body = rootExpr;
       // Extract the original expressions from source
       const exprSource = extractExpressions(code, tmpl.start, tmpl.end, tmpl.exprCount);
       compiled = `((${valuesVar}) => ${body})([${exprSource.join(", ")}])`;

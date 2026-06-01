@@ -50,7 +50,10 @@ export function createSlots(slots: Record<string, () => HTMLElement | HTMLElemen
 } {
   return {
     renderSlot(name: string, fallback?: () => HTMLElement): HTMLElement | null {
-      const slotFn = slots[name];
+      // Own keys only: a bare `slots[name]` for name="toString"/"constructor"
+      // would resolve to an Object.prototype member and be invoked as a slot,
+      // returning a wrong-typed value and bypassing the fallback.
+      const slotFn = Object.hasOwn(slots, name) ? slots[name] : undefined;
       if (slotFn) {
         const result = slotFn();
         if (Array.isArray(result)) {
@@ -64,7 +67,9 @@ export function createSlots(slots: Record<string, () => HTMLElement | HTMLElemen
       return fallback ? fallback() : null;
     },
     hasSlot(name: string): boolean {
-      return name in slots;
+      // `in` walks the prototype chain (hasSlot("toString") would be true);
+      // only count slots that were actually provided.
+      return Object.hasOwn(slots, name);
     },
   };
 }

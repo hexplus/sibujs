@@ -39,4 +39,23 @@ describe("derived", () => {
 
     expect(calls).toBe(0);
   });
+
+  it("applies custom equals even when the previous value is undefined", () => {
+    const [n, setN] = signal(0);
+    let equalsCalls = 0;
+    // The getter legitimately produces `undefined`. The previous gating on
+    // `_v !== undefined` skipped `equals` here, causing spurious version bumps.
+    const d = derived(() => (n() < 0 ? 1 : undefined), {
+      equals: (a, b) => {
+        equalsCalls++;
+        return a === b;
+      },
+    });
+
+    expect(d()).toBeUndefined(); // initial eval
+    setN(1); // still undefined under the getter
+    expect(d()).toBeUndefined();
+    // equals must have been consulted on the recompute (prev was undefined).
+    expect(equalsCalls).toBeGreaterThan(0);
+  });
 });

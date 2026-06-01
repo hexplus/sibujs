@@ -111,13 +111,10 @@ function Greeting({ name }) {
 import { div, h1, p } from "sibujs";
 
 function Greeting({ name }: { name: string }) {
-  return div({
-    class: "greeting",
-    nodes: [
-      h1({ nodes: `Hello, ${name}!` }),
-      p({ nodes: "Welcome to the app." }),
-    ],
-  });
+  return div("greeting", [
+    h1(`Hello, ${name}!`),
+    p("Welcome to the app."),
+  ]);
 }
 
 // Usage
@@ -126,9 +123,9 @@ Greeting({ name: "Alice" })
 
 **Key differences:**
 - No JSX. Use tag factory functions: `div()`, `h1()`, `span()`, `button()`, etc.
-- Props are a plain object: `{ class, style, nodes, on, ref, ...attrs }`.
+- Props are a plain object: `{ class, style, on, ref, ...attrs }`.
 - Use `class` not `className`. Use `for` not `htmlFor`.
-- `nodes` can be a string, number, Node, array of these, or a reactive function.
+- Children are passed positionally: `tag(children)` or `tag(props, children)`. A child can be a string, number, Node, array of these, or a reactive function.
 - Event handlers go under the `on` key: `on: { click: handler }`.
 
 ### Nesting and Composition
@@ -155,20 +152,14 @@ function Card({ title, children }) {
 ```ts
 import { div, h2 } from "sibujs";
 
-function Card({ title, nodes }: { title: string; nodes: any }) {
-  return div({
-    class: "card",
-    nodes: [
-      h2({ nodes: title }),
-      div({ class: "card-body", nodes }),
-    ],
-  });
+function Card({ title }: { title: string }, children: any) {
+  return div("card", [
+    h2(title),
+    div("card-body", children),
+  ]);
 }
 
-Card({
-  title: "My Card",
-  nodes: p({ nodes: "Card content here" }),
-})
+Card({ title: "My Card" }, p("Card content here"))
 ```
 
 ---
@@ -207,19 +198,15 @@ import { signal, div, p, button } from "sibujs";
 function Counter() {
   const [count, setCount] = signal(0);
 
-  return div({
-    nodes: [
-      p({ nodes: () => `Count: ${count()}` }),
-      button({
-        nodes: "Increment",
-        on: { click: () => setCount(count() + 1) },
-      }),
-      button({
-        nodes: "Decrement",
-        on: { click: () => setCount(prev => prev - 1) },
-      }),
-    ],
-  });
+  return div([
+    p(() => `Count: ${count()}`),
+    button({
+      on: { click: () => setCount(count() + 1) },
+    }, "Increment"),
+    button({
+      on: { click: () => setCount(prev => prev - 1) },
+    }, "Decrement"),
+  ]);
 }
 ```
 
@@ -237,10 +224,10 @@ function Counter() {
 
 ```ts
 // REACTIVE — updates when count changes
-p({ nodes: () => `Count: ${count()}` })
+p(() => `Count: ${count()}`)
 
 // STATIC — captures value at creation time, never updates
-p({ nodes: `Count: ${count()}` })
+p(`Count: ${count()}`)
 ```
 
 When you want the DOM to update in response to state changes, wrap the expression in a function: `() => ...`. This is the fundamental pattern that replaces React's re-render model.
@@ -295,7 +282,7 @@ function Timer() {
     document.title = `${seconds()}s elapsed`;
   });
 
-  return p({ nodes: () => `${seconds()}s` });
+  return p(() => `${seconds()}s`);
 }
 ```
 
@@ -357,12 +344,10 @@ function ShoppingCart({ getItems }: { getItems: () => Item[] }) {
     () => subtotal() * (1 + taxRate())
   );
 
-  return div({
-    nodes: [
-      p({ nodes: () => `Subtotal: $${subtotal().toFixed(2)}` }),
-      p({ nodes: () => `Total: $${total().toFixed(2)}` }),
-    ],
-  });
+  return div([
+    p(() => `Subtotal: $${subtotal().toFixed(2)}`),
+    p(() => `Total: $${total().toFixed(2)}`),
+  ]);
 }
 ```
 
@@ -415,7 +400,7 @@ function PriceTracker() {
     }
   );
 
-  return p({ nodes: () => `Current price: $${price()}` });
+  return p(() => `Current price: $${price()}`);
 }
 ```
 
@@ -456,22 +441,19 @@ import { signal, div, p, button, when } from "sibujs";
 function AuthStatus() {
   const [isLoggedIn, setLoggedIn] = signal(false);
 
-  return div({
-    nodes: [
-      when(
-        () => isLoggedIn(),
-        () => p({ nodes: "Welcome back!" }),
-        () => p({ nodes: "Please log in." })
-      ),
-      when(
-        () => isLoggedIn(),
-        () => button({
-          nodes: "Logout",
-          on: { click: () => setLoggedIn(false) },
-        })
-      ),
-    ],
-  });
+  return div([
+    when(
+      () => isLoggedIn(),
+      () => p("Welcome back!"),
+      () => p("Please log in.")
+    ),
+    when(
+      () => isLoggedIn(),
+      () => button({
+        on: { click: () => setLoggedIn(false) },
+      }, "Logout")
+    ),
+  ]);
 }
 ```
 
@@ -485,21 +467,18 @@ import { signal, div, button, span, show } from "sibujs";
 function Tooltip() {
   const [visible, setVisible] = signal(false);
 
-  return div({
-    nodes: [
-      button({
-        nodes: "Hover me",
-        on: {
-          mouseenter: () => setVisible(true),
-          mouseleave: () => setVisible(false),
-        },
-      }),
-      show(
-        () => visible(),
-        span({ nodes: "I am a tooltip!" })
-      ),
-    ],
-  });
+  return div([
+    button({
+      on: {
+        mouseenter: () => setVisible(true),
+        mouseleave: () => setVisible(false),
+      },
+    }, "Hover me"),
+    show(
+      () => visible(),
+      span("I am a tooltip!")
+    ),
+  ]);
 }
 ```
 
@@ -513,19 +492,17 @@ import { signal, match, div } from "sibujs";
 function StatusDisplay() {
   const [status, setStatus] = signal<string>("loading");
 
-  return div({
-    nodes: [
-      match(
-        () => status(),
-        {
-          loading: () => div({ nodes: "Loading..." }),
-          error: () => div({ class: "error", nodes: "Something went wrong." }),
-          success: () => div({ nodes: "Data loaded!" }),
-        },
-        () => div({ nodes: "Unknown status" }) // fallback
-      ),
-    ],
-  });
+  return div([
+    match(
+      () => status(),
+      {
+        loading: () => div("Loading..."),
+        error: () => div("error", "Something went wrong."),
+        success: () => div("Data loaded!"),
+      },
+      () => div("Unknown status") // fallback
+    ),
+  ]);
 }
 ```
 
@@ -566,15 +543,13 @@ function TodoList() {
     { id: 2, text: "Build an app" },
   ]);
 
-  return ul({
-    nodes: [
-      each(
-        () => todos(),
-        (todo, index) => li({ nodes: todo.text }),
-        { key: (todo) => todo.id }
-      ),
-    ],
-  });
+  return ul([
+    each(
+      () => todos(),
+      (todo, index) => li(todo().text),
+      { key: (todo) => todo.id }
+    ),
+  ]);
 }
 ```
 
@@ -642,33 +617,26 @@ function TaskList() {
     setTasks(prev => prev.filter(t => t.id !== id));
   };
 
-  return div({
-    nodes: [
-      input({
-        value: () => inputVal(),
-        on: { input: (e) => setInputVal((e.target as HTMLInputElement).value) },
-      }),
-      button({ nodes: "Add", on: { click: addTask } }),
-      ul({
-        nodes: [
-          each(
-            () => tasks(),
-            (task) =>
-              li({
-                nodes: [
-                  task.text,
-                  button({
-                    nodes: "X",
-                    on: { click: () => removeTask(task.id) },
-                  }),
-                ],
-              }),
-            { key: (task) => task.id }
-          ),
-        ],
-      }),
-    ],
-  });
+  return div([
+    input({
+      value: () => inputVal(),
+      on: { input: (e) => setInputVal((e.target as HTMLInputElement).value) },
+    }),
+    button({ on: { click: addTask } }, "Add"),
+    ul([
+      each(
+        () => tasks(),
+        (task) =>
+          li([
+            task().text,
+            button({
+              on: { click: () => removeTask(task().id) },
+            }, "X"),
+          ]),
+        { key: (task) => task.id }
+      ),
+    ]),
+  ]);
 }
 ```
 
@@ -714,20 +682,17 @@ const ThemeContext = context("light");
 function App() {
   ThemeContext.provide("dark");
 
-  return div({
-    nodes: [
-      Toolbar(),
-      button({
-        nodes: "Toggle Theme",
-        on: {
-          click: () => {
-            const current = ThemeContext.get();
-            ThemeContext.set(current === "dark" ? "light" : "dark");
-          },
+  return div([
+    Toolbar(),
+    button({
+      on: {
+        click: () => {
+          const current = ThemeContext.get();
+          ThemeContext.set(current === "dark" ? "light" : "dark");
         },
-      }),
-    ],
-  });
+      },
+    }, "Toggle Theme"),
+  ]);
 }
 
 function Toolbar() {
@@ -735,8 +700,7 @@ function Toolbar() {
 
   return div({
     class: () => `toolbar ${theme()}`,
-    nodes: "Toolbar",
-  });
+  }, "Toolbar");
 }
 ```
 
@@ -826,7 +790,7 @@ function MyComponent() {
     console.log("Unmounting");
   }, el.current!);
 
-  return div({ ref: el, nodes: "Hello" });
+  return div({ ref: el }, "Hello");
 }
 ```
 
@@ -840,7 +804,7 @@ function MyComponent() {
     console.log("Mounted (deferred to microtask)");
   });
 
-  return div({ nodes: "Hello" });
+  return div("Hello");
 }
 ```
 
@@ -929,43 +893,38 @@ function LoginForm() {
 
   return form({
     on: { submit: onSubmit },
-    nodes: [
-      div({
-        nodes: [
-          input({
-            value: () => fields.email.value(),
-            on: {
-              input: (e) => fields.email.set((e.target as HTMLInputElement).value),
-              blur: () => fields.email.touch(),
-            },
-          }),
-          when(
-            () => fields.email.touched() && fields.email.error() !== null,
-            () => span({ class: "error", nodes: () => fields.email.error()! })
-          ),
-        ],
+  }, [
+    div([
+      input({
+        value: () => fields.email.value(),
+        on: {
+          input: (e) => fields.email.set((e.target as HTMLInputElement).value),
+          blur: () => fields.email.touch(),
+        },
       }),
+      when(
+        () => fields.email.touched() && fields.email.error() !== null,
+        () => span({ class: "error" }, () => fields.email.error()!)
+      ),
+    ]),
 
-      div({
-        nodes: [
-          input({
-            type: "password",
-            value: () => fields.password.value(),
-            on: {
-              input: (e) => fields.password.set((e.target as HTMLInputElement).value),
-              blur: () => fields.password.touch(),
-            },
-          }),
-          when(
-            () => fields.password.touched() && fields.password.error() !== null,
-            () => span({ class: "error", nodes: () => fields.password.error()! })
-          ),
-        ],
+    div([
+      input({
+        type: "password",
+        value: () => fields.password.value(),
+        on: {
+          input: (e) => fields.password.set((e.target as HTMLInputElement).value),
+          blur: () => fields.password.touch(),
+        },
       }),
+      when(
+        () => fields.password.touched() && fields.password.error() !== null,
+        () => span({ class: "error" }, () => fields.password.error()!)
+      ),
+    ]),
 
-      button({ type: "submit", nodes: "Login" }),
-    ],
-  });
+    button({ type: "submit" }, "Login"),
+  ]);
 }
 ```
 
@@ -1023,19 +982,15 @@ function Profile() {
     name: "",
   });
 
-  return div({
-    nodes: [
-      p({ nodes: () => `${store.name} — ${store.count}` }),
-      button({
-        nodes: "+1",
-        on: { click: () => setState({ count: store.count + 1 }) },
-      }),
-      button({
-        nodes: "Reset",
-        on: { click: () => reset() },
-      }),
-    ],
-  });
+  return div([
+    p(() => `${store.name} — ${store.count}`),
+    button({
+      on: { click: () => setState({ count: store.count + 1 }) },
+    }, "+1"),
+    button({
+      on: { click: () => reset() },
+    }, "Reset"),
+  ]);
 }
 ```
 
@@ -1104,23 +1059,19 @@ const router = createRouter([
 ]);
 
 function App() {
-  return div({
-    nodes: [
-      nav({
-        nodes: [
-          RouterLink({ to: "/", nodes: "Home" }),
-          RouterLink({ to: "/about", nodes: "About" }),
-          RouterLink({ to: "/user/42", nodes: "User" }),
-        ],
-      }),
-      Route(), // renders the matched component
-    ],
-  });
+  return div([
+    nav([
+      RouterLink({ to: "/", nodes: "Home" }),
+      RouterLink({ to: "/about", nodes: "About" }),
+      RouterLink({ to: "/user/42", nodes: "User" }),
+    ]),
+    Route(), // renders the matched component
+  ]);
 }
 
 function UserProfile() {
   const r = route();
-  return p({ nodes: `User ID: ${r.params.id}` });
+  return p(`User ID: ${r.params.id}`);
 }
 ```
 
@@ -1158,9 +1109,8 @@ import { router } from "sibujs/plugins";
 function LoginButton() {
   const { push } = router();
   return button({
-    nodes: "Go to Dashboard",
     on: { click: () => push("/dashboard") },
-  });
+  }, "Go to Dashboard");
 }
 ```
 
@@ -1205,20 +1155,17 @@ registerTranslations("en", { greeting: "Hello, {name}!" });
 registerTranslations("es", { greeting: "Hola, {name}!" });
 
 function Greeting() {
-  return div({
-    nodes: [
-      // Option 1: Trans component (auto-updates on locale change)
-      Trans("greeting", { name: "World" }),
+  return div([
+    // Option 1: Trans component (auto-updates on locale change)
+    Trans("greeting", { name: "World" }),
 
-      // Option 2: Reactive text with t()
-      p({ nodes: () => t("greeting", { name: "World" }) }),
+    // Option 2: Reactive text with t()
+    p(() => t("greeting", { name: "World" })),
 
-      button({
-        nodes: "Espanol",
-        on: { click: () => setLocale("es") },
-      }),
-    ],
-  });
+    button({
+      on: { click: () => setLocale("es") },
+    }, "Espanol"),
+  ]);
 }
 ```
 
@@ -1259,7 +1206,7 @@ const Dashboard = lazy(() => import("./Dashboard"));
 function App() {
   return Suspense({
     nodes: () => Dashboard(),
-    fallback: () => div({ nodes: "Loading..." }),
+    fallback: () => div("Loading..."),
   });
 }
 ```
@@ -1286,19 +1233,19 @@ Use this checklist when converting a React component to SibuJS:
 
 ### JSX to Tag Factories
 
-- [ ] Replace `<div className="x">` with `div({ class: "x", nodes: ... })`
+- [ ] Replace `<div className="x">` with `div("x", ...)`
 - [ ] Replace `className` with `class`
 - [ ] Replace `htmlFor` with `for`
 - [ ] Replace `<Component prop={val} />` with `Component({ prop: val })`
 - [ ] Replace `onClick={handler}` with `on: { click: handler }`
 - [ ] Replace `onChange` with `on: { input: handler }` (for text inputs) or `on: { change: handler }`
-- [ ] Replace `{children}` pass-through with `nodes` prop in the props object
+- [ ] Replace `{children}` pass-through with positional children: `tag(props, children)`
 - [ ] Replace self-closing tags like `<img />` with `img({ src: "...", alt: "..." })`
 
 ### State
 
 - [ ] Keep `signal` — but remember the getter is a function: `count()` not `count`
-- [ ] Wrap displayed state in arrow functions for reactivity: `nodes: () => count()`
+- [ ] Wrap displayed state in arrow functions for reactivity: `p(() => count())`
 - [ ] Replace `useReducer` with `store` for multi-key state
 
 ### Effects

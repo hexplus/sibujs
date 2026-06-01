@@ -230,7 +230,11 @@ export function withErrorTracking(
  * }
  * ```
  */
-export function formatError(error: Error, context?: { component?: string }): string {
+export function formatError(
+  error: Error,
+  context?: { component?: string },
+  seen: Set<Error> = new Set([error]),
+): string {
   const lines: string[] = [];
 
   // Header
@@ -263,12 +267,15 @@ export function formatError(error: Error, context?: { component?: string }): str
     lines.push(stackBody);
   }
 
-  // Original cause (if any)
+  // Original cause (if any). Guard against cyclic cause chains
+  // (`a.cause = b; b.cause = a`) which would otherwise overflow the stack
+  // while formatting an error.
   const cause = (error as unknown as { cause?: Error }).cause;
-  if (cause instanceof Error) {
+  if (cause instanceof Error && !seen.has(cause)) {
+    seen.add(cause);
     lines.push("");
     lines.push("Caused by:");
-    lines.push(formatError(cause));
+    lines.push(formatError(cause, context, seen));
   }
 
   return lines.join("\n");

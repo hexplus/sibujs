@@ -2,7 +2,7 @@ import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
-import { sanitizeUrl } from "../utils/sanitize";
+import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
@@ -20,7 +20,15 @@ function isSafeNavigationTarget(path: string): boolean {
   // But an originally-empty input is also legitimate ("" → root relative),
   // so treat those separately.
   if (path === "") return true;
-  return sanitizeUrl(path) !== "";
+  // Browsers ignore leading control chars / whitespace and treat "\" as "/"
+  // when parsing a URL. Normalize the same way *before* the checks, otherwise
+  // "\t//evil.com" or "/\/evil.com" slip past the scheme/host guard and the
+  // browser resolves them to an off-origin host (open redirect, CWE-601).
+  const normalized = stripControlChars(path).replace(/\\/g, "/");
+  // Protocol-relative ("//host") navigation points off the current origin.
+  if (normalized.startsWith("//")) return false;
+  // Dangerous scheme (javascript:, data:, vbscript:, blob:, ...) → empty.
+  return sanitizeUrl(normalized) !== "";
 }
 
 // ============================================================================
@@ -316,8 +324,16 @@ class RouteMatcher {
     if (match) {
       const params: Params = {};
       compiled.keys.forEach((key, i) => {
-        if (match[i + 1] !== undefined) {
-          params[key] = decodeURIComponent(match[i + 1]);
+        const raw = match[i + 1];
+        if (raw !== undefined) {
+          // A malformed percent-escape (e.g. "/users/%E0%A4%A") makes
+          // decodeURIComponent throw URIError, which would abort the whole
+          // match. Fall back to the raw segment instead of breaking routing.
+          try {
+            params[key] = decodeURIComponent(raw);
+          } catch {
+            params[key] = raw;
+          }
         }
       });
       return { params };
@@ -382,15 +398,29 @@ class RouteMatcher {
   }
 
   removeRoute(path: string): void {
-    this.routeTrie.delete(path);
-    this.parentChain.delete(path);
     this.compiledPatterns.clear();
-    // Remove from named routes
-    for (const [name, route] of this.namedRoutes) {
-      if (route.path === path) {
-        this.namedRoutes.delete(name);
-        break;
-      }
+    const root = this.routeTrie.get(path);
+    if (!root) return;
+
+    // Collect the route and its entire descendant subtree, then delete every
+    // index entry that points at one of those routes. Keying by route identity
+    // (not by `path`) also removes child fullPath entries, alias entries, and
+    // named-route entries — the previous version left all of those matchable.
+    const removed = new Set<RouteDef>();
+    const collect = (r: RouteDef): void => {
+      removed.add(r);
+      if (r.children) for (const child of r.children) collect(child);
+    };
+    collect(root);
+
+    for (const [key, route] of [...this.routeTrie]) {
+      if (removed.has(route)) this.routeTrie.delete(key);
+    }
+    for (const [key, chain] of [...this.parentChain]) {
+      if (chain.length > 0 && removed.has(chain[chain.length - 1])) this.parentChain.delete(key);
+    }
+    for (const [name, route] of [...this.namedRoutes]) {
+      if (removed.has(route)) this.namedRoutes.delete(name);
     }
   }
 }
@@ -541,14 +571,30 @@ class GuardManager {
  * Component loader with caching and error recovery
  */
 class ComponentLoader {
+  private static readonly MAX_ERROR_ENTRIES = 256;
   private componentCache: LRUCache<string, Component>;
   private errorCache = new Map<string, { timestamp: number; count: number }>();
   private loadingPromises = new Map<string, Promise<Component>>();
   private retryDelay: number;
+  // Stable per-route-definition id. Caching by the RESOLVED path (e.g.
+  // /users/123) gave the cache one entry per visited URL, so parameterized
+  // routes thrashed/evicted and the component was reloaded every navigation.
+  // Keying by route-definition identity makes the cache effective again.
+  private routeKeys = new WeakMap<RouteDef, string>();
+  private keyCounter = 0;
 
   constructor(cacheSize = 50, retryDelay = 1000) {
     this.componentCache = new LRUCache(cacheSize);
     this.retryDelay = retryDelay;
+  }
+
+  private keyFor(route: RouteDef): string {
+    let key = this.routeKeys.get(route);
+    if (key === undefined) {
+      key = `route#${this.keyCounter++}`;
+      this.routeKeys.set(route, key);
+    }
+    return key;
   }
 
   async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
@@ -557,40 +603,46 @@ class ComponentLoader {
     }
 
     const comp = route.component;
+    const cacheKey = this.keyFor(route);
 
     // Return cached component
-    const cached = this.componentCache.get(routePath);
+    const cached = this.componentCache.get(cacheKey);
     if (cached) return cached;
 
     // Check if there's already a loading promise
-    const existingPromise = this.loadingPromises.get(routePath);
+    const existingPromise = this.loadingPromises.get(cacheKey);
     if (existingPromise) return existingPromise;
 
     // Check error cache
-    const errorInfo = this.errorCache.get(routePath);
+    const errorInfo = this.errorCache.get(cacheKey);
     if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
       throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
     }
 
     // Create loading promise
     const loadingPromise = this.doLoadComponent(comp, routePath);
-    this.loadingPromises.set(routePath, loadingPromise);
+    this.loadingPromises.set(cacheKey, loadingPromise);
 
     try {
       const component = await loadingPromise;
-      this.componentCache.set(routePath, component);
-      this.errorCache.delete(routePath); // Clear error on success
+      this.componentCache.set(cacheKey, component);
+      this.errorCache.delete(cacheKey); // Clear error on success
       return component;
     } catch (error) {
-      // Update error cache
-      const currentError = this.errorCache.get(routePath) || { timestamp: 0, count: 0 };
-      this.errorCache.set(routePath, {
+      // Keyed by route-definition id, so the error map is bounded by the number
+      // of route definitions; still cap defensively and evict the oldest.
+      const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
+      if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
+        const oldest = this.errorCache.keys().next().value;
+        if (oldest !== undefined) this.errorCache.delete(oldest);
+      }
+      this.errorCache.set(cacheKey, {
         timestamp: Date.now(),
         count: currentError.count + 1,
       });
       throw error;
     } finally {
-      this.loadingPromises.delete(routePath);
+      this.loadingPromises.delete(cacheKey);
     }
   }
 
@@ -763,7 +815,9 @@ export class SibuRouter {
     }
 
     let path = window.location.pathname;
-    if (base && path.startsWith(base)) {
+    // Only strip the base when it ends at a segment boundary, so base "/app"
+    // does not corrupt an unrelated path like "/application/x".
+    if (base && (path === base || path.startsWith(`${base}/`))) {
       path = path.slice(base.length);
     }
 
@@ -955,10 +1009,12 @@ export class SibuRouter {
       }
     }
 
-    // Replace parameters
+    // Replace parameters. Match the whole `:name` segment token (bounded by a
+    // path separator or end-of-string) so a param whose name is a prefix of
+    // another (`:id` vs `:idDetail`) doesn't corrupt the longer token.
     if (to.params) {
       for (const [key, value] of Object.entries(to.params)) {
-        path = path.replace(`:${key}`, encodeURIComponent(value));
+        path = path.replace(new RegExp(`:${key}(?=[/?#]|$)`, "g"), encodeURIComponent(value));
       }
     }
 
@@ -1578,7 +1634,12 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
 
     if (!("component" in routeDef)) return;
 
-    const cacheKey = route.path;
+    // Key the cached view by the full location, not just `route.path`.
+    // `route.path` strips the query/hash, so "/search?q=a" and "/search?q=b"
+    // would collide and KeepAlive would serve one query's cached DOM/state
+    // for the other.
+    const queryStr = Object.keys(route.query).length > 0 ? `?${new URLSearchParams(route.query).toString()}` : "";
+    const cacheKey = `${route.path}${queryStr}${route.hash ? `#${route.hash}` : ""}`;
 
     // Check if this route should be cached
     const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
@@ -1704,7 +1765,13 @@ export function RouterLink(props: {
   const baseClass = typeof classAttr === "string" ? classAttr : "";
 
   const routeGetter = globalRouter.routeGetter;
-  const href = globalRouter["resolvePath"](to);
+  const rawHref = globalRouter["resolvePath"](to);
+  // Never write an unsanitized URL into the live DOM. A `to` derived from user
+  // data (a record field, a "return URL", an API value) could be
+  // `javascript:…`/`data:…` — clicking the rendered link would execute it
+  // (click-to-XSS). navigate() guards every other entry point; the link must
+  // too. Unsafe targets collapse to "#".
+  const href = isSafeNavigationTarget(rawHref) ? rawHref : "#";
   const hrefPath = href.split("?")[0].split("#")[0];
 
   const link = document.createElement("a");
@@ -1743,11 +1810,28 @@ export function RouterLink(props: {
   });
   registerDisposer(link, effectCleanup);
 
-  // Set other attributes (sanitize to prevent XSS)
+  // Set other attributes (sanitize to prevent XSS). Checks are
+  // case-insensitive: HTML attribute names are, so `HREF`/`ONCLICK` must be
+  // treated like `href`/`onclick` — otherwise a spread prop would bypass the
+  // href sanitization above or set a live event-handler attribute.
   Object.entries(attrs).forEach(([key, value]) => {
-    if (key.startsWith("on") || key === "href") return; // Skip event handlers and href
+    const lkey = key.toLowerCase();
+    // Skip the canonical href (already sanitized) and any on* event handler.
+    if (lkey === "href" || (lkey[0] === "o" && lkey[1] === "n")) return;
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      link.setAttribute(key, String(value));
+      const str = String(value);
+      // Other URL-bearing attributes (src, xlink:href, …) still need protocol
+      // sanitization; drop them when unsafe instead of writing a live URI.
+      if (isUrlAttribute(lkey)) {
+        const safe = sanitizeUrl(str);
+        if (safe) link.setAttribute(key, safe);
+      } else if (lkey === "style") {
+        // Inline style is a CSS-injection sink (url() exfiltration, legacy
+        // expression()/behavior). Match the tagFactory style path.
+        link.setAttribute(key, sanitizeCSSValue(str));
+      } else {
+        link.setAttribute(key, str);
+      }
     }
   });
 

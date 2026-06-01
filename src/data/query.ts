@@ -1,6 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -60,10 +61,19 @@ interface CacheEntry {
   refetchers: Set<() => Promise<void>>;
 }
 
-const queryCache = new Map<string, CacheEntry>();
+// Process-global cache used on the client. Under SSR the cache must be
+// request-scoped (via AsyncLocalStorage), otherwise one request's fetched
+// data (e.g. user A's profile under key "profile") bleeds into a concurrent
+// request for user B that resolves the same key. `getActiveQueryCache()`
+// returns the request-scoped map under SSR and this global otherwise.
+const globalQueryCache = new Map<string, CacheEntry>();
 
-function getOrCreateEntry(key: string, initialData?: unknown): CacheEntry {
-  let entry = queryCache.get(key);
+function getActiveQueryCache(): Map<string, CacheEntry> {
+  return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;
+}
+
+function getOrCreateEntry(cache: Map<string, CacheEntry>, key: string, initialData?: unknown): CacheEntry {
+  let entry = cache.get(key);
   if (!entry) {
     entry = {
       data: initialData,
@@ -75,7 +85,7 @@ function getOrCreateEntry(key: string, initialData?: unknown): CacheEntry {
       listeners: new Set(),
       refetchers: new Set(),
     };
-    queryCache.set(key, entry);
+    cache.set(key, entry);
   }
   return entry;
 }
@@ -102,6 +112,11 @@ export function query<T>(
 
   const resolveKey = typeof key === "function" ? key : () => key;
 
+  // Bind this query instance to one cache map for its whole lifetime. Resolving
+  // at creation (inside the request's SSR scope) keeps later async resolutions
+  // writing to the same request-scoped map instead of leaking to the global.
+  const cache = getActiveQueryCache();
+
   const [data, setData] = signal<T | undefined>(initialData);
   const [isFetching, setIsFetching] = signal(false);
   const [error, setError] = signal<Error | undefined>(undefined);
@@ -115,7 +130,7 @@ export function query<T>(
   const isStale = derived(() => {
     data();
     if (!currentKey) return true;
-    const entry = queryCache.get(currentKey);
+    const entry = cache.get(currentKey);
     if (!entry || entry.dataUpdatedAt === 0) return true;
     return Date.now() - entry.dataUpdatedAt >= staleTime;
   });
@@ -123,9 +138,9 @@ export function query<T>(
   async function doFetch(): Promise<void> {
     if (disposed || !currentKey || !enabled) return;
     const key = currentKey;
-    let entry = queryCache.get(key);
+    let entry = cache.get(key);
     if (!entry) {
-      entry = getOrCreateEntry(key);
+      entry = getOrCreateEntry(cache, key);
       entry.listeners.add(onCacheUpdate);
       entry.refetchers.add(doFetch);
     }
@@ -216,7 +231,7 @@ export function query<T>(
 
   function onCacheUpdate(): void {
     if (disposed || !currentKey) return;
-    const entry = queryCache.get(currentKey);
+    const entry = cache.get(currentKey);
     if (!entry) {
       batch(() => {
         setData(undefined);
@@ -238,7 +253,7 @@ export function query<T>(
     const key = resolveKey();
 
     if (currentKey !== null && currentKey !== key) {
-      const oldEntry = queryCache.get(currentKey);
+      const oldEntry = cache.get(currentKey);
       if (oldEntry) {
         oldEntry.listeners.delete(onCacheUpdate);
         oldEntry.refetchers.delete(doFetch);
@@ -249,14 +264,14 @@ export function query<T>(
           // rapid key swap doesn't leave two timers racing toward the
           // same cache.delete(oldKey).
           if (oldEntry.gcTimer !== null) clearTimeout(oldEntry.gcTimer);
-          oldEntry.gcTimer = setTimeout(() => queryCache.delete(oldKey), cacheTime);
+          oldEntry.gcTimer = setTimeout(() => cache.delete(oldKey), cacheTime);
         }
       }
     }
 
     const keyChanged = currentKey !== key;
     currentKey = key;
-    const entry = getOrCreateEntry(key, initialData);
+    const entry = getOrCreateEntry(cache, key, initialData);
     if (keyChanged) entry.subscribers++;
     if (entry.gcTimer !== null) {
       clearTimeout(entry.gcTimer);
@@ -322,7 +337,7 @@ export function query<T>(
     effectCleanup();
     if (intervalTimer) clearInterval(intervalTimer);
     if (currentKey) {
-      const entry = queryCache.get(currentKey);
+      const entry = cache.get(currentKey);
       if (entry) {
         entry.listeners.delete(onCacheUpdate);
         entry.refetchers.delete(doFetch);
@@ -330,7 +345,7 @@ export function query<T>(
         if (entry.subscribers <= 0 && cacheTime >= 0) {
           const key = currentKey;
           if (entry.gcTimer !== null) clearTimeout(entry.gcTimer);
-          entry.gcTimer = setTimeout(() => queryCache.delete(key), cacheTime);
+          entry.gcTimer = setTimeout(() => cache.delete(key), cacheTime);
         }
       }
     }
@@ -359,7 +374,7 @@ export function query<T>(
 /** Invalidate queries matching a key or predicate, triggering refetch for active subscribers */
 export function invalidateQueries(keyOrPredicate: string | ((key: string) => boolean)): void {
   const predicate = typeof keyOrPredicate === "function" ? keyOrPredicate : (k: string) => k === keyOrPredicate;
-  for (const [key, entry] of queryCache.entries()) {
+  for (const [key, entry] of getActiveQueryCache().entries()) {
     if (predicate(key)) {
       entry.dataUpdatedAt = 0;
       for (const refetcher of entry.refetchers) refetcher();
@@ -369,12 +384,12 @@ export function invalidateQueries(keyOrPredicate: string | ((key: string) => boo
 
 /** Get cached data for a query key */
 export function getQueryData<T>(key: string): T | undefined {
-  return queryCache.get(key)?.data as T | undefined;
+  return getActiveQueryCache().get(key)?.data as T | undefined;
 }
 
 /** Set cached data for a query key, notifying subscribers */
 export function setQueryData<T>(key: string, data: T | ((prev: T | undefined) => T)): void {
-  const entry = queryCache.get(key);
+  const entry = getActiveQueryCache().get(key);
   if (!entry) return;
   const newData = typeof data === "function" ? (data as (prev: T | undefined) => T)(entry.data as T | undefined) : data;
   entry.data = newData;
@@ -386,14 +401,15 @@ export function setQueryData<T>(key: string, data: T | ((prev: T | undefined) =>
 export function clearQueryCache(): void {
   const activeListeners: Array<() => void> = [];
   const activeRefetchers: Array<() => Promise<void>> = [];
-  for (const entry of queryCache.values()) {
+  const activeCache = getActiveQueryCache();
+  for (const entry of activeCache.values()) {
     if (entry.gcTimer) clearTimeout(entry.gcTimer);
     if (entry.subscribers > 0) {
       for (const listener of entry.listeners) activeListeners.push(listener);
       for (const refetcher of entry.refetchers) activeRefetchers.push(refetcher);
     }
   }
-  queryCache.clear();
+  activeCache.clear();
   for (const listener of activeListeners) listener();
   for (const refetcher of activeRefetchers) {
     refetcher().catch((err) => {
@@ -412,8 +428,9 @@ export function clearQueryCache(): void {
  * @internal
  */
 export function __resetQueryCache(): void {
-  for (const entry of queryCache.values()) {
+  const activeCache = getActiveQueryCache();
+  for (const entry of activeCache.values()) {
     if (entry.gcTimer) clearTimeout(entry.gcTimer);
   }
-  queryCache.clear();
+  activeCache.clear();
 }

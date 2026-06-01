@@ -85,4 +85,20 @@ describe("globalStore", () => {
     expect(log).toEqual(["before:increment", "after:increment"]);
     expect(store.getState()).toEqual({ count: 1 });
   });
+
+  it("does not allow prototype pollution via a dispatched patch", () => {
+    const store = globalStore({
+      state: { count: 0 },
+      actions: {
+        // An action that returns server-shaped data including a __proto__ key.
+        evil: () => JSON.parse('{"count":1,"__proto__":{"polluted":true}}'),
+      },
+    });
+
+    store.dispatch("evil");
+    // The legitimate key applies; the prototype is untouched.
+    expect(store.getState().count).toBe(1);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect((Object.prototype as Record<string, unknown>).polluted).toBeUndefined();
+  });
 });

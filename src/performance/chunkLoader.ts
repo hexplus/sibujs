@@ -3,6 +3,16 @@
  * Provides configurable caching, preloading, retry logic, and loading orchestration.
  */
 
+import { dispose } from "../core/rendering/dispose";
+
+/** Dispose every child of `el` (running reactive teardowns) then detach it. */
+function clearChildren(el: Element): void {
+  while (el.firstChild) {
+    dispose(el.firstChild);
+    el.removeChild(el.firstChild);
+  }
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface ChunkConfig {
@@ -252,11 +262,11 @@ export function lazyChunk(
         return typeof mod === "function" ? mod : (mod as { default: () => HTMLElement }).default;
       })
       .then((component) => {
-        container.innerHTML = "";
+        clearChildren(container);
         container.appendChild(component());
       })
       .catch((err) => {
-        container.innerHTML = "";
+        clearChildren(container);
         const errorEl = document.createElement("div");
         errorEl.textContent = `Failed to load chunk '${id}': ${err.message}`;
         container.appendChild(errorEl);

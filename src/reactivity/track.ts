@@ -399,8 +399,13 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
 // ---------------------------------------------------------------------------
 export function reactiveBinding(commit: () => void): () => void {
   const run = (): void => {
-    const s = subscriber as SubWithList & { _reentrant?: boolean };
-    if (s._reentrant) return;
+    const s = subscriber as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
+    // A binding can be queued for notification and then disposed before the
+    // drain reaches it (e.g. an enclosing when/each row is removed mid-drain).
+    // Without this guard, re-running would re-read its signals and RE-SUBSCRIBE
+    // the just-cleaned-up edges — a zombie binding that fires forever. Mirrors
+    // the effect `disposed` guard so "dispose" reliably means "stop".
+    if (s._disposed || s._reentrant) return;
     s._reentrant = true;
     try {
       retrack(commit, subscriber);
@@ -408,7 +413,7 @@ export function reactiveBinding(commit: () => void): () => void {
       s._reentrant = false;
     }
   };
-  const subscriber = run as SubWithList & { _reentrant?: boolean };
+  const subscriber = run as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
 
   // Pre-initialize every field the core touches so all binding subscribers
   // share one hidden class (monomorphic inline caches in retrack / cleanup).
@@ -419,11 +424,18 @@ export function reactiveBinding(commit: () => void): () => void {
   subscriber._runEpoch = 0;
   subscriber._runs = 0;
   subscriber._reentrant = false;
+  subscriber._disposed = false;
 
   // Initial run establishes the first dependency set (guarded, see above).
   run();
 
-  return subscriber._dispose ?? (subscriber._dispose = () => cleanup(subscriber));
+  return (
+    subscriber._dispose ??
+    (subscriber._dispose = () => {
+      (subscriber as { _disposed?: boolean })._disposed = true;
+      cleanup(subscriber);
+    })
+  );
 }
 
 // ---------- recordDependency ----------------------------------------------

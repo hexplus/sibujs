@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isSafeAttribute, isUrlAttribute, sanitize, sanitizeUrl, stripHtml } from "../src/utils/sanitize";
+import {
+  isSafeAttribute,
+  isUrlAttribute,
+  sanitize,
+  sanitizeSrcset,
+  sanitizeUrl,
+  stripHtml,
+} from "../src/utils/sanitize";
 
 describe("sanitize", () => {
   it("should escape HTML entities", () => {
@@ -64,6 +71,24 @@ describe("stripHtml", () => {
   it("should handle nested tags", () => {
     expect(stripHtml("<div><p>text</p></div>")).toBe("text");
   });
+
+  it("neutralizes a nested-tag bypass that a naive regex leaves dangerous", () => {
+    // A single-pass /<[^>]*>/ leaves "ipt>alert(1)" with a live <script>.
+    const out = stripHtml("<scr<script>ipt>alert(1)</script>");
+    expect(out).not.toContain("<script");
+    expect(out.toLowerCase()).not.toContain("<scr");
+  });
+
+  it("neutralizes an unclosed tag with an event handler", () => {
+    // No closing ">" — a naive regex passes it through verbatim.
+    const out = stripHtml('<img src="x" onerror="alert(1)"');
+    expect(out).not.toContain("onerror");
+    expect(out).not.toContain("<img");
+  });
+
+  it("returns text content for ordinary markup", () => {
+    expect(stripHtml("<a href='/x'>link</a>")).toBe("link");
+  });
 });
 
 describe("isSafeAttribute", () => {
@@ -85,5 +110,27 @@ describe("isUrlAttribute", () => {
   it("should not flag non-URL attributes", () => {
     expect(isUrlAttribute("class")).toBe(false);
     expect(isUrlAttribute("id")).toBe(false);
+  });
+
+  it("should be case-insensitive (HTML attribute names are)", () => {
+    expect(isUrlAttribute("HREF")).toBe(true);
+    expect(isUrlAttribute("Href")).toBe(true);
+    expect(isUrlAttribute("SRC")).toBe(true);
+    expect(isUrlAttribute("XLINK:HREF")).toBe(true);
+  });
+});
+
+describe("sanitizeSrcset", () => {
+  it("drops candidates with dangerous schemes but keeps safe ones", () => {
+    const out = sanitizeSrcset("a.jpg 1x, javascript:alert(1) 2x, https://cdn/b.jpg 3x");
+    expect(out).toContain("a.jpg 1x");
+    expect(out).toContain("https://cdn/b.jpg 3x");
+    expect(out).not.toContain("javascript:");
+  });
+
+  it("does not pass a multi-candidate list through unchanged (the sanitizeUrl bug)", () => {
+    // sanitizeUrl would return the whole list verbatim; sanitizeSrcset must not.
+    const malicious = "x 1x, javascript:alert(1) 2x";
+    expect(sanitizeSrcset(malicious)).not.toContain("javascript:");
   });
 });

@@ -1,5 +1,5 @@
 import { track } from "../../reactivity/track";
-import { dispose } from "./dispose";
+import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
 
 /**
@@ -20,7 +20,10 @@ export function show<T extends Element>(condition: () => boolean, element: T): T
   const update = () => {
     (element as unknown as HTMLElement).style.display = condition() ? "" : "none";
   };
-  track(update);
+  // Register the teardown on the element so disposing the element (e.g. when an
+  // enclosing each/when row is removed) also stops the condition subscription.
+  // Without this the effect — and everything it closes over — leaks forever.
+  registerDisposer(element, track(update));
   return element;
 }
 
@@ -76,7 +79,10 @@ export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBra
     initialized = true;
   };
 
-  track(update);
+  // Tie the reactive subscription to the anchor's lifetime. When the anchor is
+  // disposed the condition subscription, current branch node, and branch
+  // closures are released instead of leaking.
+  registerDisposer(anchor, track(update));
 
   if (!initialized) {
     queueMicrotask(() => {
@@ -149,7 +155,9 @@ export function match<T extends string | number>(
     initialized = true;
   };
 
-  track(update);
+  // Tie the reactive subscription to the anchor's lifetime so disposing the
+  // anchor releases the value subscription and the matched branch.
+  registerDisposer(anchor, track(update));
 
   if (!initialized) {
     queueMicrotask(() => {

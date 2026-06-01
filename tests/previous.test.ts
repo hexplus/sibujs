@@ -82,4 +82,20 @@ describe("previous", () => {
     await Promise.resolve();
     expect(prev()).toBe("bob");
   });
+
+  it("dispose() stops tracking the source", async () => {
+    const [count, setCount] = signal(0);
+    const prev = previous(count) as (() => number | undefined) & { dispose: () => void };
+    expect(typeof prev.dispose).toBe("function");
+
+    setCount(1);
+    await Promise.resolve();
+    expect(prev()).toBe(0);
+
+    prev.dispose();
+    setCount(2);
+    await Promise.resolve();
+    // No longer tracking — previous stays at the last tracked value.
+    expect(prev()).toBe(0);
+  });
 });
