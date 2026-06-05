@@ -6,6 +6,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.2.1] — 2026-06-05
+
+### Fixed
+
+- **Router — `Route`/`Outlet` outlet wedged after leaving a nested route** — navigating from a nested child route (e.g. `/ui/button`) to a top-level route could permanently freeze the `Route` outlet on the old layout, so every later navigation changed the URL but not the rendered page. The async `Route.update` state machine relied on an `isUpdating`/`pendingUpdate` pair plus a `route.path === currentPath` insert guard; under a startup/navigation timing race this could leave `isUpdating` stuck `true` (every later update short-circuited) and could insert stale route content. `Route` and `Outlet` now use a monotonic per-update sequence — a load that is superseded mid-flight is discarded, the latest navigation always commits ("latest wins"), and rapid bursts of navigations can no longer wedge the outlet.
+- **Router — `Outlet` kept stale child content and leaked on navigation** — when the active route no longer matched a nested child, the `Outlet` returned early without removing its previous child; it also removed the old child without disposing it, leaking that subtree's reactive bindings and listeners on every nested navigation. The `Outlet` now clears (and disposes) stale content when leaving the nested area and skips redundant re-renders of the same child.
+
+---
+
 ## [3.2.0] — 2026-06-01
 
 A broad security-hardening and bug-fix release. No breaking changes.
