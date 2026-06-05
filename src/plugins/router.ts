@@ -1347,8 +1347,14 @@ export function Route(): Node {
   let currentNode: Node | null = null;
   let loadingNode: Node | null = null;
   let errorNode: Node | null = null;
-  let isUpdating = false;
-  let currentPath = "";
+  // Monotonic navigation sequence. Every update() invocation claims the next
+  // number; after an `await`, a resolution only commits if it is still the
+  // latest. This replaces the old `isUpdating` / `pendingUpdate` flags, which
+  // could (a) wedge `isUpdating === true` forever if a load was superseded
+  // mid-flight and (b) insert STALE route content because the
+  // `route.path === currentPath` guard compared shared mutable state. With a
+  // per-invocation token, superseded loads are simply dropped — "latest wins".
+  let navSeq = 0;
   let currentTopRoute: RouteDef | null = null;
 
   const cleanupNodes = () => {
@@ -1455,22 +1461,18 @@ export function Route(): Node {
     anchor.parentNode.insertBefore(errorNode, anchor.nextSibling);
   };
 
-  let pendingUpdate = false;
-
   const update = async () => {
     if (!globalRouter) return;
-    if (isUpdating) {
-      pendingUpdate = true;
-      return;
-    }
 
+    // Claim the latest navigation slot. Any update still in flight for an
+    // earlier slot becomes stale and must not mutate the DOM when it resolves.
+    const seq = ++navSeq;
     const route = globalRouter.currentRoute;
 
     try {
       const match = globalRouter["matcher"].match(route.path);
 
       if (!match) {
-        currentPath = route.path;
         currentTopRoute = null;
         cleanupNodes();
         return;
@@ -1482,13 +1484,8 @@ export function Route(): Node {
 
       // Skip re-render if the top-level route is the same (child routes handled by Outlet)
       if (routeDef === currentTopRoute && currentNode) {
-        currentPath = route.path;
         return;
       }
-
-      isUpdating = true;
-      currentPath = route.path;
-      currentTopRoute = routeDef;
 
       // Handle redirect routes (should be handled by router, but safety check)
       if ("redirect" in routeDef) {
@@ -1515,28 +1512,31 @@ export function Route(): Node {
           }
 
           const component = await globalRouter.loadComponent(routeDef, route.path);
+
+          // A newer navigation superseded us while loading — drop this result.
+          // The newer update() owns the DOM and will (or already did) render.
+          if (seq !== navSeq) return;
+
           const node = component();
 
-          if (node && anchor.parentNode && route.path === currentPath) {
+          if (node && anchor.parentNode) {
+            // Commit only now that we know we are the latest resolution.
+            currentTopRoute = routeDef;
             cleanupNodes();
             anchor.parentNode.insertBefore(node, anchor.nextSibling);
             currentNode = node;
           }
         } catch (error) {
+          if (seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
           showError(error instanceof Error ? error : new Error(String(error)), routeDef);
         }
       }
     } catch (error) {
+      if (seq !== navSeq) return;
       console.error("[Route] Update failed:", error);
       showError(error instanceof Error ? error : new Error(String(error)));
-    } finally {
-      isUpdating = false;
-      if (pendingUpdate) {
-        pendingUpdate = false;
-        update();
-      }
     }
   };
 
@@ -2079,30 +2079,62 @@ export function __removeRouterPagehideHandler(): void {
 export function Outlet(): Node {
   const anchor = document.createComment("route-outlet-nested");
   let currentNode: Node | null = null;
+  let currentChild: RouteDef | null = null;
+  // Mirror Route()'s "latest wins" guard so a superseded child load cannot
+  // resurrect stale content after a newer navigation.
+  let navSeq = 0;
+
+  const clearCurrent = () => {
+    if (currentNode) {
+      // Dispose first so the child's reactive bindings/listeners are released —
+      // a bare removeChild would leak them on every nested navigation.
+      dispose(currentNode);
+      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
+      currentNode = null;
+    }
+    currentChild = null;
+  };
 
   const update = async () => {
     if (!globalRouter) return;
+    const seq = ++navSeq;
     const route = globalRouter.currentRoute;
-    if (route.matched.length < 2) return;
+
+    // Left the nested area (or matched a flat route): drop any stale child so
+    // the layout doesn't keep rendering the previous page's content.
+    if (route.matched.length < 2) {
+      clearCurrent();
+      return;
+    }
 
     // Render the deepest matched route's component
     const childRoute = route.matched[route.matched.length - 1];
-    if (!childRoute || !("component" in childRoute)) return;
+    if (!childRoute || !("component" in childRoute)) {
+      clearCurrent();
+      return;
+    }
+
+    // Same child already mounted — nothing to do.
+    if (childRoute === currentChild && currentNode) return;
 
     try {
       // Use a composite cache key so parent and child don't collide
       const cacheKey = `${route.path}\0${childRoute.path}`;
       const component = await globalRouter.loadComponent(childRoute, cacheKey);
+
+      // A newer navigation superseded us while loading — discard.
+      if (seq !== navSeq) return;
+
       const node = component();
 
       if (node && anchor.parentNode) {
-        if (currentNode?.parentNode) {
-          currentNode.parentNode.removeChild(currentNode);
-        }
+        clearCurrent();
         anchor.parentNode.insertBefore(node, anchor.nextSibling);
         currentNode = node;
+        currentChild = childRoute;
       }
     } catch (error) {
+      if (seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
     }
   };
