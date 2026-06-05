@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { div, main as mainTag, a as aTag, span } from "../src/core/rendering/html";
+import { a as aTag, div, main as mainTag, span } from "../src/core/rendering/html";
 import { mount } from "../src/core/rendering/mount";
 import { createRouter, destroyRouter, lazy, navigate, Outlet, Route, route } from "../src/plugins/router";
 
@@ -71,10 +71,7 @@ describe("Navigating from a nested child route to a top-level route", () => {
         ],
         { mode: "history" },
       );
-      return div("app", [
-        div("nav", [NavLink("/features"), NavLink("/ui")]),
-        mainTag({ class: "main" }, Route()),
-      ]);
+      return div("app", [div("nav", [NavLink("/features"), NavLink("/ui")]), mainTag({ class: "main" }, Route())]);
     }
 
     window.history.replaceState({}, "", "/ui/button");
