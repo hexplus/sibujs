@@ -40,6 +40,10 @@ type ALSLike<T> = {
 };
 
 let als: ALSLike<SSRStore> | null = null;
+// One-time runtime detection of AsyncLocalStorage. Exactly one branch runs per
+// environment (Node-with-getBuiltinModule, Node-CommonJS, or non-Node), so the
+// other branches are unreachable in any single coverage run — excluded here.
+/* v8 ignore start */
 try {
   if (typeof process !== "undefined" && process.versions && process.versions.node) {
     type AHMod = { AsyncLocalStorage: new () => ALSLike<SSRStore> };
@@ -53,7 +57,6 @@ try {
     if (typeof getBuiltin === "function") {
       mod = getBuiltin("node:async_hooks") as AHMod;
     } else {
-      // Fallback for CommonJS runtimes without getBuiltinModule.
       const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
       if (req) mod = req("node:async_hooks") as AHMod;
     }
@@ -62,6 +65,7 @@ try {
 } catch {
   als = null;
 }
+/* v8 ignore stop */
 
 // Fallback store used when AsyncLocalStorage is unavailable.
 const fallbackStore: SSRStore = { ssr: false, suspenseIdCounter: 0 };
@@ -118,6 +122,10 @@ export function runInSSRContext<T>(fn: () => T): T {
   if (als) {
     return als.run(store, fn);
   }
+  // Module-global fallback for runtimes without AsyncLocalStorage (browser,
+  // some edge runtimes). Unreachable under the Node test runner where `als`
+  // is always present.
+  /* v8 ignore next 11 */
   const prevSSR = fallbackStore.ssr;
   const prevCounter = fallbackStore.suspenseIdCounter;
   fallbackStore.ssr = true;

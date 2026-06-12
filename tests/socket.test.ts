@@ -150,4 +150,29 @@ describe("socket", () => {
     // Should not have created a new connection after dispose
     expect(MockWebSocket.instances.length).toBe(1);
   });
+
+  it("runs a heartbeat while open and stops it on close", () => {
+    vi.useFakeTimers();
+    const sock = socket("ws://localhost", { heartbeat: { interval: 100, message: "ping" } });
+    const ws = MockWebSocket.instances[0];
+    ws.simulateOpen(); // starts the heartbeat interval
+    vi.advanceTimersByTime(100);
+    expect(ws.send).toHaveBeenCalledWith("ping");
+
+    sock.close(); // stopHeartbeat clears the interval
+    ws.send.mockClear();
+    vi.advanceTimersByTime(500);
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("close() cancels a pending reconnect timer", () => {
+    vi.useFakeTimers();
+    const { close } = socket("ws://localhost", { autoReconnect: true, reconnectDelay: 500 });
+    const ws = MockWebSocket.instances[0];
+    ws.simulateOpen();
+    ws.simulateClose(); // schedules a reconnect
+    close(); // must clear the pending reconnect timer
+    vi.advanceTimersByTime(2000);
+    expect(MockWebSocket.instances.length).toBe(1); // no reconnect fired
+  });
 });

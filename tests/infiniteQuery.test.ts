@@ -184,4 +184,33 @@ describe("infiniteQuery", () => {
 
     query.dispose();
   });
+
+  it("fetches previous pages and no-ops at the start", async () => {
+    const query = infiniteQuery(
+      "prev-pages",
+      async ({ pageParam }: { pageParam: number; signal: AbortSignal }) => ({
+        items: [pageParam],
+        prev: pageParam > 0 ? pageParam - 1 : undefined,
+      }),
+      {
+        getNextPageParam: () => undefined,
+        getPreviousPageParam: (first) => first.prev,
+        initialPageParam: 2,
+      },
+    );
+
+    await tick();
+    expect(query.pages()).toHaveLength(1);
+
+    await query.fetchPreviousPage(); // prev param defined → prepend
+    expect(query.pages()).toHaveLength(2);
+    await query.fetchPreviousPage();
+    expect(query.pages()).toHaveLength(3);
+
+    const len = query.pages().length;
+    await query.fetchPreviousPage(); // first page prev is undefined → no-op
+    expect(query.pages()).toHaveLength(len);
+
+    query.dispose();
+  });
 });

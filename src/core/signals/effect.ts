@@ -140,21 +140,25 @@ function disposeEffect(ctx: EffectCtx): void {
   }
   try {
     if (ctx.userCleanups.length > 0) flushUserCleanups(ctx);
+    /* v8 ignore start -- flushUserCleanups swallows per-cleanup throws internally, so this never fires */
   } catch (err) {
     if (typeof console !== "undefined") {
       console.warn("[SibuJS effect] onCleanup threw during dispose:", err);
     }
   }
+  /* v8 ignore stop */
   try {
     // Call core cleanup directly on the subscriber — no per-subscriber
     // closure allocation, which matters when many effects are disposed
     // in bulk (Memory benchmark).
     coreCleanup(ctx.subscriber);
+    /* v8 ignore start -- coreCleanup only unlinks list nodes and does not throw */
   } catch (err) {
     if (typeof console !== "undefined") {
       console.warn("[SibuJS effect] dispose threw:", err);
     }
   }
+  /* v8 ignore stop */
 }
 
 /**

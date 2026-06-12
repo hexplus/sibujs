@@ -49,6 +49,8 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
               new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
             );
           }
+          // Defensive: dispatchEvent does not throw on a connected target.
+          /* v8 ignore next 3 */
         } catch {
           /* ignore dispatch failure */
         }

@@ -2,13 +2,7 @@ import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { track } from "../../reactivity/track";
-import {
-  isEventHandlerAttr,
-  isUrlAttribute,
-  sanitizeCSSValue,
-  sanitizeSrcset,
-  sanitizeUrl,
-} from "../../utils/sanitize";
+import { isEventHandlerAttr, sanitizeAttributeString, sanitizeCSSValue } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
@@ -22,11 +16,8 @@ const _isDev = isDev();
 // e.g. <script> exists in both HTML and SVG.
 const BLOCKED_TAGS = new Set(["script", "iframe", "object", "embed", "frame", "frameset"]);
 
-function validateTagName(tag: string): void {
-  const lower = tag.toLowerCase();
-  if (BLOCKED_TAGS.has(lower)) {
-    throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
-  }
+function isBlockedTag(tag: string): boolean {
+  return BLOCKED_TAGS.has(tag.toLowerCase());
 }
 
 // IDs matching well-known window/document properties are risky due to DOM
@@ -256,8 +247,16 @@ function appendChildren(el: Element, nodes: NodeChildren) {
  * `children` overrides `props.nodes` when both are present.
  */
 export const tagFactory = (tag: string, ns?: string) => {
+  // Resolve the security blocklist ONCE per factory (the tag is constant) so
+  // element creation pays only a boolean check instead of a `toLowerCase()` +
+  // Set lookup per call. Creating a factory for a blocked tag (e.g. the
+  // `script` export in html.ts) is still allowed; it throws only when called,
+  // preserving the existing throw-on-use semantics.
+  const blocked = isBlockedTag(tag);
   return (first?: TagProps | NodeChildren, second?: NodeChildren): Element => {
-    validateTagName(tag);
+    if (blocked) {
+      throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
+    }
     const el = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
 
     // Fast path: tag() — no arguments
@@ -364,7 +363,6 @@ export const tagFactory = (tag: string, ns?: string) => {
           if (value == null) continue;
           // Block on* event-handler attributes (shared guard). The `on` props
           // object is the supported way to attach listeners.
-          const lkey = key.toLowerCase();
           if (isEventHandlerAttr(key)) continue;
           if (typeof value === "function") {
             registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
@@ -378,14 +376,9 @@ export const tagFactory = (tag: string, ns?: string) => {
               el.removeAttribute(key);
             }
           } else {
-            const str = String(value);
-            if (lkey === "srcset") {
-              el.setAttribute(key, sanitizeSrcset(str));
-            } else if (isUrlAttribute(lkey)) {
-              el.setAttribute(key, sanitizeUrl(str));
-            } else {
-              el.setAttribute(key, str);
-            }
+            // Shared sink-specific sanitization (srcset split, URL allowlist,
+            // or pass-through) — same policy as the reactive bindAttribute path.
+            el.setAttribute(key, sanitizeAttributeString(key, String(value)));
           }
         }
       }

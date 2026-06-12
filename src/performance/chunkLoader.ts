@@ -4,6 +4,7 @@
  */
 
 import { dispose } from "../core/rendering/dispose";
+import { sanitizeUrl } from "../utils/sanitize";
 
 /** Dispose every child of `el` (running reactive teardowns) then detach it. */
 function clearChildren(el: Element): void {
@@ -284,11 +285,21 @@ export function lazyChunk(
  */
 export function preloadModule(url: string): void {
   if (typeof document === "undefined") return;
-  const existing = document.querySelector(`link[href="${url}"][rel="modulepreload"]`);
+  // Defense-in-depth: refuse dangerous schemes (javascript:/data:/blob:) before
+  // priming a module preload, consistent with platform/head.ts.
+  const safe = sanitizeUrl(url);
+  if (!safe) return;
+  // Escape the (sanitized) URL before embedding it in the dedup attribute
+  // selector. A value containing `"`, `]`, or other selector metacharacters
+  // would otherwise throw a SyntaxError or match the wrong link (CSS-selector
+  // injection, CWE-74). Mirrors the guard used in plugins/startup.ts.
+  const safeHref =
+    typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(safe) : safe.replace(/["\\]/g, "\\$&");
+  const existing = document.querySelector(`link[rel="modulepreload"][href="${safeHref}"]`);
   if (existing) return;
   const link = document.createElement("link");
   link.rel = "modulepreload";
-  link.href = url;
+  link.href = safe;
   document.head.appendChild(link);
 }
 

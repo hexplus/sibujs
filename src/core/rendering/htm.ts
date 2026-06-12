@@ -117,6 +117,9 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
       pos++;
     }
     if (pos < len) pos++; // skip closing \x00
+    // Defensive: placeholder indices are generated internally from the tagged
+    // template's expression slots, so an out-of-range index is unreachable.
+    /* v8 ignore next 4 */
     if (idx < 0 || idx >= exprCount) {
       pos = start;
       return -1;

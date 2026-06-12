@@ -123,6 +123,14 @@ function freeNode(node: SubNode): void {
 
 function linkSignal(sig: SignalWithList, node: SubNode): void {
   // Insert at the HEAD of signal.subsHead. O(1).
+  //
+  // NOTE ON FIRING ORDER: because subscribers are prepended and the notify
+  // paths walk subsHead → tail, sibling effects/bindings observing the same
+  // signal fire in *reverse subscription order* (most-recently-subscribed
+  // first / LIFO). This is an intentional consequence of O(1) head insertion.
+  // The system is still glitch-free and converges (computeds are pulled lazily;
+  // effects run to a fixed point), so correctness does not depend on order —
+  // but do NOT rely on two sibling effects running in declaration order.
   const oldHead = sig.subsHead ?? null;
   node.sigPrev = null;
   node.sigNext = oldHead;
@@ -626,6 +634,9 @@ function propagateDirty(sub: Subscriber): void {
               nSig._d = true;
               stack.push(nSig);
             }
+            // Defensive: every `_c` (computed) subscriber carries a `_sig`
+            // (set in derived()), so this fallback is unreachable in practice.
+            /* v8 ignore next 3 */
           } else {
             s();
           }

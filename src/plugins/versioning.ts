@@ -209,6 +209,9 @@ export function createMigrationRunner(config: {
   function getStorage(): Storage | null {
     try {
       return typeof localStorage !== "undefined" ? localStorage : null;
+      // Accessing `localStorage` throws SecurityError in sandboxed iframes /
+      // privacy modes — defensive guard, not reachable under the test runner.
+      /* v8 ignore next 3 */
     } catch {
       return null;
     }

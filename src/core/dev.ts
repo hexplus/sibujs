@@ -17,7 +17,11 @@ declare const __SIBU_DEV__: boolean | undefined;
 export function isDev(): boolean {
   return typeof (globalThis as any).__SIBU_DEV__ !== "undefined"
     ? !!(globalThis as any).__SIBU_DEV__
-    : typeof __SIBU_DEV__ !== "undefined"
+    : // The bare `__SIBU_DEV__` is a bundler define that only exists in
+      // production builds; under the test runner it is always undefined, so
+      // this branch is unreachable here.
+      /* v8 ignore next 2 */
+      typeof __SIBU_DEV__ !== "undefined"
       ? __SIBU_DEV__
       : typeof process !== "undefined" && process.env?.NODE_ENV !== "production"; // safe default: off in browser, on in test/dev Node
 }

@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { devWarn, isDev } from "../core/dev";
+import { sanitizeUrl } from "../utils/sanitize";
 
 const _isDev = isDev();
 
@@ -110,12 +111,16 @@ const preloadedResources = new Set<string>();
  * Preloads a resource (script, style, or generic fetch).
  */
 export function preloadResource(url: string, type: "script" | "style" | "fetch" | "image" = "fetch"): void {
-  if (preloadedResources.has(url)) return;
-  preloadedResources.add(url);
+  // Defense-in-depth: refuse dangerous schemes (javascript:/data:/blob:) before
+  // they reach a resource-hint href, consistent with platform/head.ts.
+  const safe = sanitizeUrl(url);
+  if (!safe) return;
+  if (preloadedResources.has(safe)) return;
+  preloadedResources.add(safe);
 
   const link = document.createElement("link");
   link.rel = "preload";
-  link.href = url;
+  link.href = safe;
 
   switch (type) {
     case "script":
@@ -139,12 +144,14 @@ export function preloadResource(url: string, type: "script" | "style" | "fetch" 
  * Prefetches a URL for future navigation.
  */
 export function prefetch(url: string): void {
-  if (preloadedResources.has(url)) return;
-  preloadedResources.add(url);
+  const safe = sanitizeUrl(url);
+  if (!safe) return;
+  if (preloadedResources.has(safe)) return;
+  preloadedResources.add(safe);
 
   const link = document.createElement("link");
   link.rel = "prefetch";
-  link.href = url;
+  link.href = safe;
   document.head.appendChild(link);
 }
 
