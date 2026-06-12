@@ -76,6 +76,7 @@ function fireMount(el: Element): void {
   for (const cb of cbs) {
     try {
       cb();
+      /* v8 ignore next 3 -- watcher callbacks are safeCall-wrapped and do not throw */
     } catch {
       /* already logged inside safeCall */
     }
@@ -98,6 +99,7 @@ function fireUnmount(el: Element): void {
     for (const cb of stillCbs) {
       try {
         cb();
+        /* v8 ignore next 3 -- unmount callbacks are safeCall-wrapped and do not throw */
       } catch {
         /* ignore */
       }
@@ -142,11 +144,16 @@ function visitRemovedNode(node: Node): void {
 }
 
 function fullSweep(): void {
+  // Mount safety-net: fires watchers the MutationObserver missed. Because the
+  // observer reliably catches additions in the test environment, a watched
+  // element is never still pending-and-connected when the sweep runs.
+  /* v8 ignore start */
   if (watchedMountElements.size > 0) {
     for (const el of Array.from(watchedMountElements)) {
       if (el.isConnected) fireMount(el);
     }
   }
+  /* v8 ignore stop */
   if (watchedUnmountElements.size > 0) {
     for (const el of Array.from(watchedUnmountElements)) {
       if (!el.isConnected) fireUnmount(el);

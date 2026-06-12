@@ -96,6 +96,11 @@ export function sanitizeSrcset(value: string): string {
   return out.join(", ");
 }
 
+// Gate for the sanitizeCSSValue fast path: presence of any character that
+// could begin (or, via `\`, hex-encode) a blocked CSS construct. Allocated
+// once at module load, not per call.
+const CSS_DANGER_GATE = /[(:@\\]/;
+
 /**
  * Sanitizes a CSS value to prevent data exfiltration via url(), expression(),
  * or other injection vectors. Strips url() and expression() calls entirely.
@@ -104,6 +109,15 @@ export function sanitizeSrcset(value: string): string {
  * @returns The sanitized value, or empty string if dangerous
  */
 export function sanitizeCSSValue(value: string): string {
+  // Fast path: every blocked construct is gated by one of `(` (url/expression/
+  // image-set), `:` (javascript:/vbscript:/behavior:/filter:progid), or `@`
+  // (@import) — and a CSS escape that could synthesize them requires `\`. A
+  // value containing none of those four characters is provably safe, so we
+  // skip the decode + lower-case + whitespace-strip allocations and the nine
+  // substring scans. This is the overwhelmingly common case for style values
+  // ("red", "14px", "#fff", "1px solid black", "flex").
+  if (!CSS_DANGER_GATE.test(value)) return value;
+
   // Decode CSS escapes (\xx hex and \uXXXX) so attackers can't bypass checks
   // via e.g. "ex\\70 ression(...)" or "\\75 rl(...)".
   const decoded = value.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex) => {
@@ -111,6 +125,9 @@ export function sanitizeCSSValue(value: string): string {
     if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return "";
     try {
       return String.fromCodePoint(code);
+      // Defensive: the range guard above already excludes every code point
+      // String.fromCodePoint would reject, so this never throws.
+      /* v8 ignore next 3 */
     } catch {
       return "";
     }
@@ -243,6 +260,28 @@ export function isSafeAttribute(attr: string): boolean {
  */
 export function isUrlAttribute(attr: string): boolean {
   return URL_ATTRIBUTES.has(attr.toLowerCase());
+}
+
+/**
+ * Resolve the sanitized string for a plain (non-boolean) attribute write,
+ * applying the correct sink-specific policy:
+ *
+ *   - `srcset` is a comma-separated candidate list, so each URL is split out
+ *     and validated individually (a single `sanitizeUrl` over the whole list
+ *     would see the commas/descriptors and pass it through unchecked).
+ *   - single-URL attributes (`href`, `src`, `xlink:href`, …) get protocol
+ *     allowlist validation.
+ *   - everything else passes through — `setAttribute` stores it as inert text.
+ *
+ * Single source of truth shared by the static write path (`tagFactory`) and
+ * the reactive write paths (`bindAttribute` / `bindDynamic`) so the two can
+ * never drift on which attribute gets which treatment.
+ */
+export function sanitizeAttributeString(attr: string, value: string): string {
+  const lower = attr.toLowerCase();
+  if (lower === "srcset") return sanitizeSrcset(value);
+  if (URL_ATTRIBUTES.has(lower)) return sanitizeUrl(value);
+  return value;
 }
 
 /**

@@ -44,6 +44,15 @@ export function show<T extends Element>(condition: () => boolean, element: T): T
  *   () => div("Please log in")
  * );
  * ```
+ *
+ * GOTCHA — branch factories rebuild only when `condition` changes. A signal
+ * read *eagerly* inside a branch is captured once and never updates:
+ * ```ts
+ * when(() => show(), () => div(`Count: ${count()}`));        // ✗ frozen at first count
+ * when(() => show(), () => div(() => `Count: ${count()}`));  // ✓ reactive text child
+ * ```
+ * Drive per-branch reactivity with a nested getter (or a reactive child), not a
+ * bare read in the factory body.
  */
 export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBranch?: () => NodeChild): Comment {
   const anchor = document.createComment("when");
@@ -114,6 +123,10 @@ export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBra
  *   () => div("Unknown status")
  * );
  * ```
+ *
+ * GOTCHA — like `when()`, a case factory rebuilds only when the matched key
+ * changes. A signal read eagerly inside a case is frozen at build time; use a
+ * nested getter (`() => div(() => label())`) for reactive per-case content.
  */
 export function match<T extends string | number>(
   value: () => T,

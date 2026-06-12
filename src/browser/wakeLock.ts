@@ -71,6 +71,9 @@ export function wakeLock(): {
   // Re-acquire on visibility return (browsers auto-release when hidden)
   const onVisibility = () => {
     if (sentinel?.released && !document.hidden) {
+      // request() catches its own errors internally and never rejects, so the
+      // .catch handler here is defensive and unreachable in practice.
+      /* v8 ignore next 5 */
       request().catch((err) => {
         if (typeof console !== "undefined") {
           console.warn("[SibuJS wakeLock] re-acquire failed:", err);

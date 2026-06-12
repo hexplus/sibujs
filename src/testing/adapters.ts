@@ -3,6 +3,16 @@
  * Provides integration with Jest, Cypress, and Playwright.
  */
 
+/**
+ * Escape a value for safe interpolation inside an `[attr="..."]` selector. Only
+ * `"` and `\` are significant there, so a value containing quotes/brackets can
+ * no longer break the selector or throw a SyntaxError (CSS-selector injection).
+ * For id selectors, query via `[id="..."]` with this escaping rather than `#`.
+ */
+function escSel(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
 // ─── Jest Adapter ───────────────────────────────────────────────────────────
 
 /**
@@ -291,11 +301,11 @@ export function createUniversalAdapter() {
     /** Query helpers */
     queries: {
       byTestId(container: Element, id: string): Element | null {
-        return container.querySelector(`[data-testid="${id}"]`);
+        return container.querySelector(`[data-testid="${escSel(id)}"]`);
       },
 
       byRole(container: Element, role: string): Element | null {
-        return container.querySelector(`[role="${role}"]`);
+        return container.querySelector(`[role="${escSel(role)}"]`);
       },
 
       byText(container: Element, text: string): Element | null {
@@ -315,7 +325,8 @@ export function createUniversalAdapter() {
           if (labelEl.textContent?.includes(label)) {
             const forAttr = labelEl.getAttribute("for");
             if (forAttr) {
-              return container.querySelector(`#${forAttr}`);
+              // Use [id="..."] (not `#`) so ids with special characters match.
+              return container.querySelector(`[id="${escSel(forAttr)}"]`);
             }
             // If no "for" attribute, look for a nested input
             const nested = labelEl.querySelector("input, select, textarea");
@@ -323,11 +334,11 @@ export function createUniversalAdapter() {
           }
         }
         // Fallback: look for aria-label
-        return container.querySelector(`[aria-label="${label}"]`);
+        return container.querySelector(`[aria-label="${escSel(label)}"]`);
       },
 
       allByRole(container: Element, role: string): Element[] {
-        return Array.from(container.querySelectorAll(`[role="${role}"]`));
+        return Array.from(container.querySelectorAll(`[role="${escSel(role)}"]`));
       },
     },
 

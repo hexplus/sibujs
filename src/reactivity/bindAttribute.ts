@@ -2,7 +2,7 @@ import { devWarn, isDev } from "../core/dev";
 // `isEventHandlerAttr` is the single shared `on*` guard — event-handler
 // attributes evaluate their value as JS via setAttribute, so the framework
 // refuses to bind them (use `on: { click: fn }`, which uses addEventListener).
-import { isEventHandlerAttr, isUrlAttribute, sanitizeUrl } from "../utils/sanitize";
+import { isEventHandlerAttr, sanitizeAttributeString } from "../utils/sanitize";
 import { reactiveBinding } from "./track";
 
 const _isDev = isDev();
@@ -65,8 +65,9 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
     if ((attr === "value" || attr === "checked") && attr in el) {
       setProp(el, attr, attr === "checked" ? Boolean(value) : str);
     } else {
-      // URL attributes need protocol sanitization; others are safe via setAttribute
-      el.setAttribute(attr, isUrlAttribute(attr) ? sanitizeUrl(str) : str);
+      // srcset gets per-candidate validation, URL attributes get protocol
+      // sanitization, everything else is safe via setAttribute (shared policy).
+      el.setAttribute(attr, sanitizeAttributeString(attr, str));
     }
   }
 
@@ -125,7 +126,7 @@ export function bindDynamic(
     if ((name === "value" || name === "checked") && name in el) {
       setProp(el, name, name === "checked" ? Boolean(value) : str);
     } else {
-      el.setAttribute(name, isUrlAttribute(name) ? sanitizeUrl(str) : str);
+      el.setAttribute(name, sanitizeAttributeString(name, str));
     }
 
     prevName = name;

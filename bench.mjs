@@ -558,7 +558,10 @@ section("9. List Rendering & Diffing (each)");
     nodes: [
       each(
         getItems,
-        (item) => li({ nodes: [item.label] }),
+        // `item` is a reactive getter — read it (`item().label`) instead of
+        // treating it as a plain object, so each <li> actually renders content
+        // and the per-row item-getter path is exercised.
+        (item) => li({ nodes: [() => item().label] }),
         { key: (item) => item.id }
       ),
     ],

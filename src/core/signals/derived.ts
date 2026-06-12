@@ -60,6 +60,14 @@ export function derived<T>(
   // to a recompute `cs._d` is always true; this sets it false only after the
   // getter succeeds, so a throwing getter simply leaves the computed dirty (it
   // will retry) without any extra `threw` bookkeeping.
+  //
+  // NOTE on stack depth: dirty MARKING is iterative (see propagateDirty in
+  // track.ts), but VALUE recomputation is pull-based and therefore recursive in
+  // chain depth — reading a dirty computed whose upstream is also dirty calls
+  // `getter()` → upstream `computedGetter()` → `retrack(recompute)` → … one JS
+  // frame per level. Practically this only matters for derived-of-derived
+  // chains thousands of levels deep that are fully invalidated and then read;
+  // such depths are unusual (the engine's own stack limit is the bound).
   const recompute = (): void => {
     const next = getter();
     cs._v = equals && cs._init ? (equals(cs._v, next) ? cs._v : next) : next;

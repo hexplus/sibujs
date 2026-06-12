@@ -12,6 +12,8 @@ function dispatchPropagate(node: Element, error: Error): void {
       if (!node.parentNode) return false;
       node.dispatchEvent(new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error } }));
       return true;
+      // Defensive: dispatchEvent on a connected node does not throw.
+      /* v8 ignore next 3 */
     } catch {
       return false;
     }

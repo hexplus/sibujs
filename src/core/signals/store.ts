@@ -1,4 +1,5 @@
 import { batch } from "../../reactivity/batch";
+import { resumeTracking, suspendTracking } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import { effect } from "./effect";
 import { signal } from "./signal";
@@ -126,7 +127,16 @@ export function store<T extends object>(
         first = false;
         return;
       }
-      callback(snapshot);
+      // Callback runs untracked: only the store's own signals (read above) are
+      // dependencies — signals the callback happens to read must not subscribe
+      // this effect and cause spurious re-fires. Inlined suspend/resume avoids a
+      // per-notification closure allocation.
+      suspendTracking();
+      try {
+        callback(snapshot);
+      } finally {
+        resumeTracking();
+      }
     });
   };
 
@@ -144,7 +154,15 @@ export function store<T extends object>(
       if (!Object.is(current, prev)) {
         const oldPrev = prev as T[K];
         prev = current;
-        callback(current, oldPrev);
+        // Untracked so the callback's own signal reads don't subscribe this
+        // effect — it must track only `signals[key]` (read above). Inlined
+        // suspend/resume avoids a per-notification closure allocation.
+        suspendTracking();
+        try {
+          callback(current, oldPrev);
+        } finally {
+          resumeTracking();
+        }
       }
     });
   };

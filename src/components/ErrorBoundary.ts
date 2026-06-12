@@ -431,7 +431,10 @@ export function ErrorBoundary(
       handleError(
         Agg
           ? new Agg(collected, `${collected.length} pre-mount errors caught by ErrorBoundary`)
-          : new Error(collected.map((e) => e.message).join("; ")),
+          : // AggregateError is ES2021 and present in every supported runtime
+            // (matches the browserslist targets), so this fallback is defensive.
+            /* v8 ignore next */
+            new Error(collected.map((e) => e.message).join("; ")),
       );
     }
     return undefined;
