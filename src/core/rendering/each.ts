@@ -227,6 +227,8 @@ export function each<T>(
               } else if (_isDev) {
                 devWarn(`each: error not surfaced — anchor detached: ${errorObj.message}`);
               }
+              // Defensive: dispatchEvent does not throw on a connected target.
+              /* v8 ignore next 3 */
             } catch {
               /* ignore */
             }

@@ -1,4 +1,4 @@
-import { track } from "../../reactivity/track";
+import { resumeTracking, suspendTracking, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import { isSSR } from "../ssr-context";
 
@@ -31,8 +31,21 @@ export function watch<T>(getter: () => T, callback: (value: T, prev: T | undefin
       return;
     }
     if (!Object.is(newValue, oldValue)) {
-      callback(newValue, oldValue);
+      const prev = oldValue;
       oldValue = newValue;
+      // Run the callback OUTSIDE the tracking scope. Without this, signals the
+      // callback reads would be recorded as dependencies of the watcher and
+      // spuriously trigger it — the watcher must react only to `getter`. Inlined
+      // suspend/resume (vs `untracked(fn)`) avoids allocating a closure on every
+      // fire — watchers can notify in tight loops. `oldValue` is advanced first
+      // so a callback that re-enters (writes a watched signal) sees consistent
+      // state.
+      suspendTracking();
+      try {
+        callback(newValue, prev);
+      } finally {
+        resumeTracking();
+      }
     }
   };
 

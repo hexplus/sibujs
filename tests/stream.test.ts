@@ -110,4 +110,28 @@ describe("stream", () => {
     const es = MockEventSource.instances[0];
     expect(es.withCredentials).toBe(true);
   });
+
+  it("reconnects with backoff after an error when autoReconnect is on", () => {
+    vi.useFakeTimers();
+    stream("http://localhost/events", { autoReconnect: true, reconnectBaseMs: 10, maxReconnects: 3 });
+    const es = MockEventSource.instances[0];
+    es.simulateOpen();
+    es.simulateError(); // readyState CLOSED → schedules a backoff reconnect
+    expect(MockEventSource.instances.length).toBe(1);
+    vi.advanceTimersByTime(5000); // exceed the jittered backoff delay
+    expect(MockEventSource.instances.length).toBe(2); // a new connection opened
+    vi.useRealTimers();
+  });
+
+  it("close() cancels a pending reconnect timer", () => {
+    vi.useFakeTimers();
+    const { close } = stream("http://localhost/events", { autoReconnect: true, reconnectBaseMs: 10 });
+    const es = MockEventSource.instances[0];
+    es.simulateOpen();
+    es.simulateError(); // schedules reconnect
+    close(); // must clear the pending reconnect timer
+    vi.advanceTimersByTime(5000);
+    expect(MockEventSource.instances.length).toBe(1); // no reconnect fired
+    vi.useRealTimers();
+  });
 });

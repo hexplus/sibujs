@@ -37,6 +37,10 @@ export function Fragment(nodes: NodeChildren[]): DocumentFragment {
 }
 
 function resolveChild(child: NodeChildren): Node {
+  // Defensive: Fragment() already filters null/boolean before calling
+  // resolveChild, so this branch is unreachable from the public API — kept
+  // only to make resolveChild safe if ever called directly.
+  /* v8 ignore next 3 */
   if (child == null) {
     return document.createTextNode("");
   }
