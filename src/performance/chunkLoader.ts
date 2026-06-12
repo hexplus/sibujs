@@ -294,9 +294,7 @@ export function preloadModule(url: string): void {
   // would otherwise throw a SyntaxError or match the wrong link (CSS-selector
   // injection, CWE-74). Mirrors the guard used in plugins/startup.ts.
   const safeHref =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? CSS.escape(safe)
-      : safe.replace(/["\\]/g, "\\$&");
+    typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(safe) : safe.replace(/["\\]/g, "\\$&");
   const existing = document.querySelector(`link[rel="modulepreload"][href="${safeHref}"]`);
   if (existing) return;
   const link = document.createElement("link");
