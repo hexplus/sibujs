@@ -6,6 +6,33 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.3.0] — 2026-06-11
+
+A security-hardening, correctness, and performance release. No breaking changes.
+
+### Security
+
+- **Resource-hint URLs are sanitized** — `preloadModule`, `preloadResource`, and `prefetch` now run their `href` through the protocol allowlist and refuse dangerous schemes (`javascript:`/`data:`/`blob:`), consistent with the rest of the framework.
+- **CSS-selector injection fixed in `preloadModule` (CWE-74)** — the dedup lookup interpolated the raw URL into a `querySelector` string; a URL containing `"`/`]` could throw or match the wrong element. The value is now escaped (matching the guard already used by the critical-resource preloader).
+- **Testing-helper selectors hardened** — the query helpers in `testing/adapters` and `testing/a11y` escape interpolated values so labels/ids/roles with special characters can no longer break (or inject into) the selector.
+
+### Fixed
+
+- **`watch` / `store.subscribe` / `store.subscribeKey` callbacks run untracked** — signals read inside these callbacks are no longer recorded as dependencies, so a callback reading unrelated state can't cause spurious re-fires.
+- **Reactive `srcset` uses per-candidate validation** — a reactively-bound `srcset` is now split and each candidate URL validated (matching the static path) instead of being passed through a single-URL sanitizer; the static and reactive write paths share one policy and can no longer drift.
+
+### Performance
+
+- **`sanitizeCSSValue` fast-path** — values containing none of the characters that gate a dangerous construct return immediately, skipping the decode + scan (~7× faster on common style values like `red`/`14px`/`#fff`). Affects every static and reactive style write.
+- **`tagFactory` blocked-tag check precomputed** — the security blocklist is resolved once per tag factory instead of per element creation (~4× faster check, one fewer string allocation per element).
+- **No per-notification closures** — `watch` and `store` subscriptions no longer allocate a closure on every notification.
+
+### Removed
+
+- Deleted empty deprecation stubs (`memo`, `memoFn`, and the `createSignal`/`createMemo`/`createEffect` pattern aliases) that had been no-ops since 1.4.0. Use `derived` / the canonical primitives directly.
+
+---
+
 ## [3.2.2] — 2026-06-05
 
 
