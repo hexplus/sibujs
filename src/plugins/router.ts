@@ -1201,7 +1201,18 @@ class NavigationFailureError extends Error {
 // GLOBAL ROUTER INSTANCE (for compatibility)
 // ============================================================================
 
-let globalRouter: SibuRouter | null = null;
+// The global router instance is shared across duplicate copies of this module
+// (first-copy-wins, via a globalThis registry — the same mechanism the reactive
+// core uses). Without it, a bundler that duplicates the `plugins` chunk would
+// leave navigation / `Outlet` / `Link` helpers bundled in a second copy reading
+// a null router ("Router not initialized"), even though `createRouter()` ran in
+// the first copy. `_routerRef.current` is the single source of truth.
+const ROUTER_KEY = Symbol.for("sibujs.router.v1");
+const _routerRef: { current: SibuRouter | null } = ((
+  globalThis as typeof globalThis & {
+    [ROUTER_KEY]?: { current: SibuRouter | null };
+  }
+)[ROUTER_KEY] ??= { current: null });
 
 /**
  * Normalize a route tree so that any `{ lazy: () => import(...) }`
@@ -1234,8 +1245,8 @@ function normalizeRoutes(routes: RouteDef[]): RouteDef[] {
 }
 
 export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, options: RouterOptions = {}): SibuRouter {
-  if (globalRouter) {
-    globalRouter.destroy();
+  if (_routerRef.current) {
+    _routerRef.current.destroy();
   }
 
   // Handle overload: createRouter(options) without routes array
@@ -1247,17 +1258,17 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
     routes = [];
   }
 
-  globalRouter = new SibuRouter(routes, options);
+  _routerRef.current = new SibuRouter(routes, options);
   ensureRouterPagehide();
-  return globalRouter;
+  return _routerRef.current;
 }
 
 /**
  * Set routes on the global router (replaces existing routes).
  */
 export function setRoutes(routes: RouteDef[]): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.updateRoutes(normalizeRoutes(routes));
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.updateRoutes(normalizeRoutes(routes));
 }
 
 // ============================================================================
@@ -1265,25 +1276,25 @@ export function setRoutes(routes: RouteDef[]): void {
 // ============================================================================
 
 export function route(): RouteContext {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.currentRoute;
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.currentRoute;
 }
 
 export function router() {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   return {
-    currentRoute: globalRouter.currentRoute,
-    isReady: globalRouter.isReady,
-    isNavigating: globalRouter.isNavigating,
-    push: (to: NavigationTarget) => globalRouter?.push(to),
-    replace: (to: NavigationTarget) => globalRouter?.replace(to),
-    go: (delta: number) => globalRouter?.go(delta),
-    back: () => globalRouter?.back(),
-    forward: () => globalRouter?.forward(),
-    beforeEach: (guard: NavigationGuard) => globalRouter?.beforeEach(guard),
-    beforeResolve: (guard: NavigationGuard) => globalRouter?.beforeResolve(guard),
-    afterEach: (hook: (to: RouteContext, from: RouteContext) => void) => globalRouter?.afterEach(hook),
+    currentRoute: _routerRef.current.currentRoute,
+    isReady: _routerRef.current.isReady,
+    isNavigating: _routerRef.current.isNavigating,
+    push: (to: NavigationTarget) => _routerRef.current?.push(to),
+    replace: (to: NavigationTarget) => _routerRef.current?.replace(to),
+    go: (delta: number) => _routerRef.current?.go(delta),
+    back: () => _routerRef.current?.back(),
+    forward: () => _routerRef.current?.forward(),
+    beforeEach: (guard: NavigationGuard) => _routerRef.current?.beforeEach(guard),
+    beforeResolve: (guard: NavigationGuard) => _routerRef.current?.beforeResolve(guard),
+    afterEach: (hook: (to: RouteContext, from: RouteContext) => void) => _routerRef.current?.afterEach(hook),
   };
 }
 
@@ -1291,48 +1302,48 @@ export function navigate(
   to: NavigationTarget,
   options?: { replace?: boolean; state?: unknown },
 ): Promise<NavigationResult> {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.navigate(to, options);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.navigate(to, options);
 }
 
 export function push(to: NavigationTarget): Promise<NavigationResult> {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.push(to);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.push(to);
 }
 
 export function replace(to: NavigationTarget): Promise<NavigationResult> {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.replace(to);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.replace(to);
 }
 
 export function go(delta: number): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.go(delta);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.go(delta);
 }
 
 export function back(): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.back();
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.back();
 }
 
 export function forward(): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.forward();
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.forward();
 }
 
 export function beforeEach(guard: NavigationGuard): () => void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.beforeEach(guard);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.beforeEach(guard);
 }
 
 export function beforeResolve(guard: NavigationGuard): () => void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.beforeResolve(guard);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.beforeResolve(guard);
 }
 
 export function afterEach(hook: (to: RouteContext, from: RouteContext) => void): () => void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter.afterEach(hook);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.afterEach(hook);
 }
 
 // ============================================================================
@@ -1443,15 +1454,15 @@ export function Route(): Node {
     retryButton.className = "route-error-retry";
     retryButton.type = "button";
     const onRetryClick = () => {
-      if (globalRouter) {
-        globalRouter.clearErrorCache();
+      if (_routerRef.current) {
+        _routerRef.current.clearErrorCache();
         update();
       }
     };
     retryButton.addEventListener("click", onRetryClick);
     // Pair the listener with a disposer so replacing the error node via
     // cleanupNodes() -> dispose() actually releases the closure capturing
-    // globalRouter/update.
+    // _routerRef.current/update.
     registerDisposer(retryButton, () => retryButton.removeEventListener("click", onRetryClick));
 
     (errorNode as HTMLElement).appendChild(title);
@@ -1462,15 +1473,15 @@ export function Route(): Node {
   };
 
   const update = async () => {
-    if (!globalRouter) return;
+    if (!_routerRef.current) return;
 
     // Claim the latest navigation slot. Any update still in flight for an
     // earlier slot becomes stale and must not mutate the DOM when it resolves.
     const seq = ++navSeq;
-    const route = globalRouter.currentRoute;
+    const route = _routerRef.current.currentRoute;
 
     try {
-      const match = globalRouter["matcher"].match(route.path);
+      const match = _routerRef.current["matcher"].match(route.path);
 
       if (!match) {
         currentTopRoute = null;
@@ -1492,7 +1503,7 @@ export function Route(): Node {
         const redirectPath = typeof routeDef.redirect === "function" ? routeDef.redirect(route) : routeDef.redirect;
 
         queueMicrotask(() => {
-          globalRouter?.navigate(redirectPath).catch((err) => {
+          _routerRef.current?.navigate(redirectPath).catch((err) => {
             if (typeof console !== "undefined") console.error("[router] redirect failed:", err);
           });
         });
@@ -1511,7 +1522,7 @@ export function Route(): Node {
             showLoading();
           }
 
-          const component = await globalRouter.loadComponent(routeDef, route.path);
+          const component = await _routerRef.current.loadComponent(routeDef, route.path);
 
           // A newer navigation superseded us while loading — drop this result.
           // The newer update() owns the DOM and will (or already did) render.
@@ -1592,14 +1603,14 @@ export function Route(): Node {
  * ```
  */
 export function KeepAliveRoute(options?: { max?: number; include?: string[] }): Node {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const anchor = document.createComment("keep-alive-route");
   const cache = new Map<string, Node>();
   const lruOrder: string[] = [];
 
   // Resolve options from router config or explicit args
-  const routerOpts = globalRouter["options"];
+  const routerOpts = _routerRef.current["options"];
   const keepAliveOpt = routerOpts.keepAlive;
   const maxCache = options?.max ?? (typeof keepAliveOpt === "number" ? keepAliveOpt : 20);
   const includeNames = options?.include ?? (Array.isArray(keepAliveOpt) ? keepAliveOpt : undefined);
@@ -1611,21 +1622,21 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   let pendingUpdate = false;
 
   const update = async () => {
-    if (!globalRouter) return;
+    if (!_routerRef.current) return;
     if (isUpdating) {
       pendingUpdate = true;
       return;
     }
 
-    const route = globalRouter.currentRoute;
-    const match = globalRouter["matcher"].match(route.path);
+    const route = _routerRef.current.currentRoute;
+    const match = _routerRef.current["matcher"].match(route.path);
     if (!match) return;
 
     const { route: routeDef } = match;
     if ("redirect" in routeDef) {
       const redirectPath = typeof routeDef.redirect === "function" ? routeDef.redirect(route) : routeDef.redirect;
       queueMicrotask(() => {
-        globalRouter?.navigate(redirectPath).catch((err) => {
+        _routerRef.current?.navigate(redirectPath).catch((err) => {
           if (typeof console !== "undefined") console.error("[router] redirect failed:", err);
         });
       });
@@ -1675,10 +1686,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         lruOrder.push(cacheKey);
       } else {
         // Create new
-        const component = await globalRouter!.loadComponent(routeDef, route.path);
+        const component = await _routerRef.current!.loadComponent(routeDef, route.path);
         const node = component();
 
-        if (!node || route.path !== globalRouter!.currentRoute.path) {
+        if (!node || route.path !== _routerRef.current!.currentRoute.path) {
           isUpdating = false;
           return;
         }
@@ -1759,13 +1770,13 @@ export function RouterLink(props: {
   rel?: string;
   [key: string]: unknown;
 }): HTMLElement {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, class: classAttr, ...attrs } = props;
   const baseClass = typeof classAttr === "string" ? classAttr : "";
 
-  const routeGetter = globalRouter.routeGetter;
-  const rawHref = globalRouter["resolvePath"](to);
+  const routeGetter = _routerRef.current.routeGetter;
+  const rawHref = _routerRef.current["resolvePath"](to);
   // Never write an unsanitized URL into the live DOM. A `to` derived from user
   // data (a record field, a "return URL", an API value) could be
   // `javascript:…`/`data:…` — clicking the rendered link would execute it
@@ -1791,7 +1802,7 @@ export function RouterLink(props: {
   }
 
   // Reactively update active classes when route changes
-  const options = globalRouter["options"];
+  const options = _routerRef.current["options"];
   const effectCleanup = effect(() => {
     const route = routeGetter();
     const isActive = route.path.startsWith(hrefPath);
@@ -1856,7 +1867,7 @@ export function RouterLink(props: {
       return;
     }
     e.preventDefault();
-    globalRouter?.navigate(to, { replace }).catch((err) => {
+    _routerRef.current?.navigate(to, { replace }).catch((err) => {
       if (typeof console !== "undefined") console.error("[router] link navigate failed:", err);
     });
   };
@@ -1980,14 +1991,14 @@ export function lazy(importFn: () => Promise<{ default: Component }>): LazyCompo
  * Preloads a route component
  */
 export async function preloadRoute(to: NavigationTarget): Promise<void> {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
-  const path = globalRouter["resolvePath"](to);
-  const match = globalRouter["matcher"].match(path.split("?")[0].split("#")[0]);
+  const path = _routerRef.current["resolvePath"](to);
+  const match = _routerRef.current["matcher"].match(path.split("?")[0].split("#")[0]);
 
   if (match && "component" in match.route) {
     try {
-      await globalRouter.loadComponent(match.route, path);
+      await _routerRef.current.loadComponent(match.route, path);
     } catch (error) {
       console.warn("[Router] Preload failed:", error);
     }
@@ -1998,24 +2009,24 @@ export async function preloadRoute(to: NavigationTarget): Promise<void> {
  * Validates if a route exists
  */
 export function hasRoute(name: string): boolean {
-  if (!globalRouter) return false;
-  return globalRouter["matcher"].findByName(name) !== null;
+  if (!_routerRef.current) return false;
+  return _routerRef.current["matcher"].findByName(name) !== null;
 }
 
 /**
  * Gets route information by name
  */
 export function getRouteInfo(name: string): RouteDef | null {
-  if (!globalRouter) return null;
-  return globalRouter["matcher"].findByName(name);
+  if (!_routerRef.current) return null;
+  return _routerRef.current["matcher"].findByName(name);
 }
 
 /**
  * Builds a URL for a route
  */
 export function buildURL(to: NavigationTarget): string {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  return globalRouter["resolvePath"](to);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current["resolvePath"](to);
 }
 
 // ============================================================================
@@ -2027,9 +2038,9 @@ export function destroyRouter(): void {
   for (const fn of routeCleanups) fn();
   routeCleanups.length = 0;
 
-  if (globalRouter) {
-    globalRouter.destroy();
-    globalRouter = null;
+  if (_routerRef.current) {
+    _routerRef.current.destroy();
+    _routerRef.current = null;
   }
 }
 
@@ -2096,9 +2107,9 @@ export function Outlet(): Node {
   };
 
   const update = async () => {
-    if (!globalRouter) return;
+    if (!_routerRef.current) return;
     const seq = ++navSeq;
-    const route = globalRouter.currentRoute;
+    const route = _routerRef.current.currentRoute;
 
     // Left the nested area (or matched a flat route): drop any stale child so
     // the layout doesn't keep rendering the previous page's content.
@@ -2120,7 +2131,7 @@ export function Outlet(): Node {
     try {
       // Use a composite cache key so parent and child don't collide
       const cacheKey = `${route.path}\0${childRoute.path}`;
-      const component = await globalRouter.loadComponent(childRoute, cacheKey);
+      const component = await _routerRef.current.loadComponent(childRoute, cacheKey);
 
       // A newer navigation superseded us while loading — discard.
       if (seq !== navSeq) return;
@@ -2164,16 +2175,16 @@ export function Outlet(): Node {
  * Add a route at runtime.
  */
 export function addRoute(route: RouteDef, parentPath?: string): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.addRoute(route, parentPath);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.addRoute(route, parentPath);
 }
 
 /**
  * Remove a route at runtime.
  */
 export function removeRoute(path: string): void {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
-  globalRouter.removeRoute(path);
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  _routerRef.current.removeRoute(path);
 }
 
 // ============================================================================
@@ -2192,9 +2203,9 @@ export function routerState(): {
   isNavigating: () => boolean;
   isReady: () => boolean;
 } {
-  if (!globalRouter) throw new Error("Router not initialized. Call createRouter() first.");
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
-  const router = globalRouter;
+  const router = _routerRef.current;
   return {
     currentPath: () => router.currentRoute.path,
     params: () => router.currentRoute.params,
@@ -2226,14 +2237,14 @@ export function routerPlugin(plugin: RouterPlugin): () => void {
   routerPlugins.push(plugin);
 
   // If router is ready, call onReady
-  if (globalRouter?.isReady && plugin.onReady) {
+  if (_routerRef.current?.isReady && plugin.onReady) {
     plugin.onReady();
   }
 
   // Register afterEach to notify plugins
   let removeGuard: (() => void) | null = null;
-  if (globalRouter && plugin.onNavigate) {
-    removeGuard = globalRouter.afterEach((to, from) => {
+  if (_routerRef.current && plugin.onNavigate) {
+    removeGuard = _routerRef.current.afterEach((to, from) => {
       plugin.onNavigate?.(to, from);
     });
   }
