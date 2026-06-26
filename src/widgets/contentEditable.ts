@@ -29,8 +29,13 @@ export interface SetContentOptions {
  * Uses the modern Selection/Range API instead of the deprecated
  * document.execCommand. Formatting is applied by wrapping the current
  * selection in the appropriate inline element.
+ *
+ * @param element Optional editor element to scope formatting to. When provided,
+ *   `bold()`/`italic()`/`underline()` ignore any selection that lives outside it
+ *   — otherwise a selection elsewhere on the page could be mutated, since the
+ *   Selection API is global.
  */
-export function contentEditable(): {
+export function contentEditable(element?: HTMLElement): {
   content: () => string;
   /**
    * Update the reactive content value.
@@ -81,6 +86,11 @@ export function contentEditable(): {
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return;
 
     const range = selection.getRangeAt(0);
+
+    // Scope formatting to the bound editor: ignore a selection that lives
+    // outside it (e.g. text selected elsewhere on the page) so the formatting
+    // commands can't mutate unrelated DOM.
+    if (element && !element.contains(range.commonAncestorContainer)) return;
 
     // Check if we're already inside the same tag — if so, unwrap
     const ancestor = range.commonAncestorContainer;

@@ -70,12 +70,19 @@ export interface SignalGraphSnapshot {
 }
 
 /**
- * Capture a synchronous snapshot of the reactive graph. The hook
- * provides a `getSignalNodes()` iterator that the core reactivity
- * layer populates; this function walks it and produces a serializable
- * view with dependency counts.
+ * Capture a synchronous snapshot of the reactive graph from the devtools hook's
+ * `getSignalNodes()`, producing a serializable view.
  *
- * Returns an empty snapshot when devtools are not enabled.
+ * Returns an empty snapshot when devtools are not enabled (`initDevTools()` has
+ * not run, so no hook / node registry exists).
+ *
+ * Coverage note: the default devtools hook reports the live node **inventory**
+ * (id / name / kind / current value) — useful for inspecting state and for
+ * leak-detection (how many signals/effects are alive). It does not yet report
+ * the dependency **edges**: the lightweight registry tracks only a subscriber
+ * *count*, not subscriber/dependency identities, so `subscribers`/`dependencies`
+ * are empty and `edgeCount` is 0 unless a richer hook supplies them. Wiring real
+ * edges requires the reactive core to expose its dependency sets.
  */
 export function captureSignalGraph(): SignalGraphSnapshot {
   const hook = getHook();

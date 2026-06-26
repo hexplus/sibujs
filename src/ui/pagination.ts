@@ -23,25 +23,30 @@ export function pagination(options: { totalItems: () => number; pageSize?: numbe
     return Math.max(1, Math.ceil(total / pageSizeValue));
   });
 
+  // The exposed page is clamped to the valid range, so when totalItems shrinks
+  // below the current page, page()/startIndex()/endIndex() stay in bounds
+  // instead of pointing past the data.
+  const currentPage = derived(() => Math.min(Math.max(1, page()), totalPages()));
+
   const startIndex = derived(() => {
-    return (page() - 1) * pageSizeValue;
+    return (currentPage() - 1) * pageSizeValue;
   });
 
   const endIndex = derived(() => {
-    const end = page() * pageSizeValue;
+    const end = currentPage() * pageSizeValue;
     const total = options.totalItems();
     return Math.min(end, total);
   });
 
   function next(): void {
-    if (page() < totalPages()) {
-      setPage((p) => p + 1);
+    if (currentPage() < totalPages()) {
+      setPage(currentPage() + 1);
     }
   }
 
   function prev(): void {
-    if (page() > 1) {
-      setPage((p) => p - 1);
+    if (currentPage() > 1) {
+      setPage(currentPage() - 1);
     }
   }
 
@@ -50,5 +55,5 @@ export function pagination(options: { totalItems: () => number; pageSize?: numbe
     setPage(clamped);
   }
 
-  return { page, pageSize, totalPages, next, prev, goTo, startIndex, endIndex };
+  return { page: currentPage, pageSize, totalPages, next, prev, goTo, startIndex, endIndex };
 }

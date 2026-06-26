@@ -3,6 +3,7 @@ import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
+import { globalSingleton } from "../utils/globalSingleton";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 
@@ -66,7 +67,10 @@ interface CacheEntry {
 // data (e.g. user A's profile under key "profile") bleeds into a concurrent
 // request for user B that resolves the same key. `getActiveQueryCache()`
 // returns the request-scoped map under SSR and this global otherwise.
-const globalQueryCache = new Map<string, CacheEntry>();
+//
+// Shared via globalSingleton so a bundler that duplicates this module doesn't
+// give `query()` and `invalidateQueries`/`setQueryData` two separate caches.
+const globalQueryCache = globalSingleton(Symbol.for("sibujs.query.cache.v1"), () => new Map<string, CacheEntry>());
 
 function getActiveQueryCache(): Map<string, CacheEntry> {
   return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;

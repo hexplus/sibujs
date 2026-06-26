@@ -30,6 +30,10 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     if (options.leave) {
       await options.leave(el);
     }
+    // Drop the cached rect too — otherwise an element removed via remove()
+    // (rather than track(), which clears the whole map) lingers in `positions`
+    // for the group's lifetime.
+    positions.delete(el);
     setElements((prev) => prev.filter((e) => e !== el));
   }
 

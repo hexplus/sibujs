@@ -19,16 +19,15 @@ export function scrollRestoration(options?: ScrollRestorationOptions): {
   let currentKey: string | null = null;
 
   const save = (key: string): void => {
-    positions.set(key, {
-      x: window.scrollX,
-      y: window.scrollY,
-    });
+    if (typeof window !== "undefined") {
+      positions.set(key, { x: window.scrollX, y: window.scrollY });
+    }
     currentKey = key;
   };
 
   const restore = (key: string): void => {
     const pos = positions.get(key);
-    if (pos) {
+    if (pos && typeof window !== "undefined") {
       window.scrollTo(pos.x, pos.y);
     }
     currentKey = key;
@@ -38,8 +37,8 @@ export function scrollRestoration(options?: ScrollRestorationOptions): {
     return positions.get(key);
   };
 
-  // In auto mode, save/restore on popstate events
-  if (mode === "auto") {
+  // In auto mode, save/restore on popstate events (client-only).
+  if (mode === "auto" && typeof window !== "undefined") {
     popstateHandler = () => {
       if (currentKey) {
         save(currentKey);

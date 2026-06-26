@@ -2,6 +2,8 @@
 // PRIORITY-BASED UPDATE SCHEDULER
 // ============================================================================
 
+import { globalSingleton } from "../utils/globalSingleton";
+
 export const Priority = {
   IMMEDIATE: 0,
   USER_BLOCKING: 1,
@@ -19,15 +21,22 @@ interface ScheduledTask {
   cancelled: boolean;
 }
 
-let taskIdCounter = 0;
-const taskQueue: ScheduledTask[] = [];
-let isProcessing = false;
 // Distinguish scheduled work by type so we can cancel the right handle.
 // Microtasks cannot be cancelled — we only track they are scheduled.
 type ScheduledKind = "frame" | "idle" | "timeout" | "microtask";
-let scheduledKind: ScheduledKind | null = null;
-let scheduledHandle: number | null = null;
-let microtaskScheduled = false;
+
+// Scheduler state is shared via globalSingleton so tasks queued through one
+// (possibly duplicated) copy of this module are drained by the same rAF/idle
+// loop, instead of splitting into two independent queues that never flush.
+const _sched = globalSingleton(Symbol.for("sibujs.scheduler.v1"), () => ({
+  taskIdCounter: 0,
+  taskQueue: [] as ScheduledTask[],
+  isProcessing: false,
+  scheduledKind: null as ScheduledKind | null,
+  scheduledHandle: null as number | null,
+  microtaskScheduled: false,
+}));
+const taskQueue = _sched.taskQueue;
 
 function insertTask(task: ScheduledTask): void {
   // Insert in priority order (lower number = higher priority)
@@ -39,8 +48,8 @@ function insertTask(task: ScheduledTask): void {
 }
 
 function processQueue(): void {
-  if (isProcessing || taskQueue.length === 0) return;
-  isProcessing = true;
+  if (_sched.isProcessing || taskQueue.length === 0) return;
+  _sched.isProcessing = true;
 
   const startTime = performance.now();
   const timeSlice = 5; // 5ms time slice per frame
@@ -66,7 +75,7 @@ function processQueue(): void {
     }
   }
 
-  isProcessing = false;
+  _sched.isProcessing = false;
 
   // Schedule next frame if there are remaining tasks
   if (taskQueue.length > 0) {
@@ -79,13 +88,14 @@ function processQueue(): void {
 const TIER_SPEED: Record<ScheduledKind, number> = { microtask: 0, frame: 1, timeout: 2, idle: 3 };
 
 function cancelScheduled(): void {
-  if (scheduledHandle !== null) {
-    if (scheduledKind === "frame") cancelAnimationFrame(scheduledHandle);
-    else if (scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined") cancelIdleCallback(scheduledHandle);
-    else if (scheduledKind === "timeout") clearTimeout(scheduledHandle);
+  if (_sched.scheduledHandle !== null) {
+    if (_sched.scheduledKind === "frame") cancelAnimationFrame(_sched.scheduledHandle);
+    else if (_sched.scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined")
+      cancelIdleCallback(_sched.scheduledHandle);
+    else if (_sched.scheduledKind === "timeout") clearTimeout(_sched.scheduledHandle);
   }
-  scheduledHandle = null;
-  scheduledKind = null;
+  _sched.scheduledHandle = null;
+  _sched.scheduledKind = null;
 }
 
 function scheduleFrame(): void {
@@ -99,48 +109,52 @@ function scheduleFrame(): void {
         ? typeof requestIdleCallback !== "undefined"
           ? "idle"
           : "timeout"
-        : "frame";
+        : // NORMAL/LOW prefer a frame, but rAF is absent under SSR — fall back
+          // to a timeout so startTransition()/deferredValue() don't throw.
+          typeof requestAnimationFrame !== "undefined"
+          ? "frame"
+          : "timeout";
 
   // A microtask is the fastest tier — nothing to re-arm faster.
-  if (microtaskScheduled) return;
-  if (scheduledKind !== null) {
+  if (_sched.microtaskScheduled) return;
+  if (_sched.scheduledKind !== null) {
     // Keep the existing schedule only if it fires at least as soon as needed.
     // Otherwise a higher-priority task arrived (e.g. USER_BLOCKING behind a
     // pending rAF) — cancel the slower handle and re-arm at the faster tier,
     // instead of making the urgent task wait for the next frame.
-    if (TIER_SPEED[scheduledKind] <= TIER_SPEED[desired]) return;
+    if (TIER_SPEED[_sched.scheduledKind] <= TIER_SPEED[desired]) return;
     cancelScheduled();
   }
 
   if (desired === "microtask") {
     // Set flag BEFORE queueing to avoid races where another scheduleFrame()
     // call slips through.
-    microtaskScheduled = true;
-    scheduledKind = "microtask";
+    _sched.microtaskScheduled = true;
+    _sched.scheduledKind = "microtask";
     queueMicrotask(() => {
-      microtaskScheduled = false;
-      scheduledKind = null;
+      _sched.microtaskScheduled = false;
+      _sched.scheduledKind = null;
       processQueue();
     });
   } else if (desired === "idle") {
-    scheduledKind = "idle";
-    scheduledHandle = requestIdleCallback(() => {
-      scheduledKind = null;
-      scheduledHandle = null;
+    _sched.scheduledKind = "idle";
+    _sched.scheduledHandle = requestIdleCallback(() => {
+      _sched.scheduledKind = null;
+      _sched.scheduledHandle = null;
       processQueue();
     }) as unknown as number;
   } else if (desired === "timeout") {
-    scheduledKind = "timeout";
-    scheduledHandle = setTimeout(() => {
-      scheduledKind = null;
-      scheduledHandle = null;
+    _sched.scheduledKind = "timeout";
+    _sched.scheduledHandle = setTimeout(() => {
+      _sched.scheduledKind = null;
+      _sched.scheduledHandle = null;
       processQueue();
     }, 50) as unknown as number;
   } else {
-    scheduledKind = "frame";
-    scheduledHandle = requestAnimationFrame(() => {
-      scheduledKind = null;
-      scheduledHandle = null;
+    _sched.scheduledKind = "frame";
+    _sched.scheduledHandle = requestAnimationFrame(() => {
+      _sched.scheduledKind = null;
+      _sched.scheduledHandle = null;
       processQueue();
     });
   }
@@ -152,7 +166,7 @@ function scheduleFrame(): void {
  */
 export function scheduleUpdate(priority: PriorityLevel, callback: () => void): () => void {
   const task: ScheduledTask = {
-    id: taskIdCounter++,
+    id: _sched.taskIdCounter++,
     priority,
     callback,
     cancelled: false,
@@ -182,15 +196,15 @@ export function scheduleUpdate(priority: PriorityLevel, callback: () => void): (
 export function flushScheduler(): void {
   // Cancel any pending scheduled work. Microtasks are not cancellable, but
   // the callback becomes a no-op once the queue drains.
-  if (scheduledHandle !== null) {
-    if (scheduledKind === "frame") cancelAnimationFrame(scheduledHandle);
-    else if (scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined") {
-      cancelIdleCallback(scheduledHandle);
-    } else if (scheduledKind === "timeout") clearTimeout(scheduledHandle);
+  if (_sched.scheduledHandle !== null) {
+    if (_sched.scheduledKind === "frame") cancelAnimationFrame(_sched.scheduledHandle);
+    else if (_sched.scheduledKind === "idle" && typeof cancelIdleCallback !== "undefined") {
+      cancelIdleCallback(_sched.scheduledHandle);
+    } else if (_sched.scheduledKind === "timeout") clearTimeout(_sched.scheduledHandle);
   }
-  scheduledHandle = null;
-  scheduledKind = null;
-  microtaskScheduled = false;
+  _sched.scheduledHandle = null;
+  _sched.scheduledKind = null;
+  _sched.microtaskScheduled = false;
 
   while (taskQueue.length > 0) {
     const task = taskQueue.shift();
@@ -199,7 +213,7 @@ export function flushScheduler(): void {
       task.callback();
     }
   }
-  isProcessing = false;
+  _sched.isProcessing = false;
 }
 
 /**

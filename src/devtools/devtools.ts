@@ -25,6 +25,7 @@
 
 import { isDev } from "../core/dev";
 import { signal as _sbSignal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 import { stripHtml } from "../utils/sanitize";
 
 // ---------------------------------------------------------------------------
@@ -89,13 +90,29 @@ interface DevNode {
 // Global Hook
 // ---------------------------------------------------------------------------
 
+/** One entry of the reactive node inventory exposed by `getSignalNodes()`.
+ *  Mirrors `SignalNodeSnapshot` in signalGraph.ts structurally. */
+interface SignalNodeInventoryEntry {
+  id: string;
+  name: string | null;
+  kind: string;
+  value: string;
+  subscribers: string[];
+  dependencies: string[];
+  evalCount: number;
+}
+
 interface SibuGlobalHook {
   /** Register an event listener */
-  on: (event: string, fn: (...args: unknown[]) => void) => void;
+  on: (event: string, fn: (...args: unknown[]) => void) => () => void;
   /** Remove an event listener */
   off: (event: string, fn: (...args: unknown[]) => void) => void;
   /** Emit an event */
   emit: (event: string, payload: unknown) => void;
+  /** Snapshot the live reactive node inventory (id/name/kind/value). Edge data
+   *  (subscribers/dependencies/evalCount) is not tracked by this lightweight
+   *  registry — only a subscriber count is available — so those stay empty. */
+  getSignalNodes: () => SignalNodeInventoryEntry[];
   /** All registered nodes */
   nodes: Map<number, DevNode>;
   /** All registered components */
@@ -122,9 +139,52 @@ function createGlobalHook(): SibuGlobalHook {
         listeners.set(event, set);
       }
       set.add(fn);
+      // Return an unsubscribe fn — the trace profiler (and any consumer) relies
+      // on this to stop listening; previously `on()` returned void, so calling
+      // the result threw and the profiler's stop()/stopTrace() always failed.
+      return () => {
+        set?.delete(fn);
+      };
     },
     off(event, fn) {
       listeners.get(event)?.delete(fn);
+    },
+    getSignalNodes() {
+      const out: SignalNodeInventoryEntry[] = [];
+      for (const [, node] of nodes) {
+        let value = "";
+        try {
+          const ref = node.ref as Record<string, unknown> | undefined;
+          let raw: unknown;
+          if (node.type === "effect") {
+            raw = undefined; // effects hold no value
+          } else if (node.type === "computed" && ref) {
+            raw = ref._v; // last cached value — don't force a re-eval in a snapshot
+          } else if (ref && "value" in ref) {
+            raw = ref.value;
+          }
+          if (raw === undefined) value = "undefined";
+          else if (raw === null) value = "null";
+          else if (typeof raw === "object") value = JSON.stringify(raw);
+          else value = String(raw);
+        } catch {
+          value = "?";
+        }
+        if (value.length > 200) value = `${value.slice(0, 200)}...`;
+        out.push({
+          id: String(node.id),
+          name: node.name || null,
+          kind: node.type === "computed" ? "derived" : node.type,
+          value,
+          // Edge identities aren't tracked by this registry (only a subscriber
+          // count, via node.ref.__sc) — left empty until the core exposes the
+          // dependency graph. The node inventory itself is real.
+          subscribers: [],
+          dependencies: [],
+          evalCount: 0,
+        });
+      }
+      return out;
     },
     emit(event, payload) {
       // Buffer for late-connecting panels
@@ -164,17 +224,18 @@ function getOrCreateHook(): SibuGlobalHook {
 // initDevTools
 // ---------------------------------------------------------------------------
 
-let activeDevTools: ReturnType<typeof initDevTools> | null = null;
-let nextNodeId = 0;
-/**
- * Gate for inferName(). Only `true` while devtools are initialized AND we
- * are in dev mode — otherwise we skip the Error-stack walk entirely so prod
- * hot paths don't allocate stacks.
- */
-let inferNameArmed = false;
+// Shared across duplicate module copies so one devtools session and one node-id
+// sequence are observed no matter which copy emitted the event.
+const _dt = globalSingleton(Symbol.for("sibujs.devtools.state.v1"), () => ({
+  active: null as ReturnType<typeof initDevTools> | null,
+  nextNodeId: 0,
+  // Gate for inferName(): only `true` while devtools are initialized AND in dev
+  // mode — otherwise skip the Error-stack walk so prod hot paths don't allocate.
+  inferNameArmed: false,
+}));
 
 export function getActiveDevTools(): ReturnType<typeof initDevTools> | null {
-  return activeDevTools;
+  return _dt.active;
 }
 
 /**
@@ -195,10 +256,10 @@ export function initDevTools(config?: DevToolsConfig) {
 
   // inferName() walks Error stacks — keep it gated so it never runs when
   // devtools are disabled (prod hot paths).
-  inferNameArmed = true;
+  _dt.inferNameArmed = true;
 
   const hook = getOrCreateHook();
-  nextNodeId = 0;
+  _dt.nextNodeId = 0;
 
   // Internal event log (serializable, no DOM refs)
   const eventLog: DevToolsEvent[] = [];
@@ -207,17 +268,17 @@ export function initDevTools(config?: DevToolsConfig) {
 
   hook.on("signal:create", (payload: unknown) => {
     const p = payload as { signal: object; getter: () => unknown; initial: unknown };
-    nextNodeId++;
+    _dt.nextNodeId++;
     const name = inferName();
     const node: DevNode = {
-      id: nextNodeId,
+      id: _dt.nextNodeId,
       type: "signal",
       name,
       ref: p.signal,
       getter: p.getter,
       createdAt: Date.now(),
     };
-    hook.nodes.set(nextNodeId, node);
+    hook.nodes.set(_dt.nextNodeId, node);
     emit();
   });
 
@@ -240,17 +301,17 @@ export function initDevTools(config?: DevToolsConfig) {
 
   hook.on("computed:create", (payload: unknown) => {
     const p = payload as { signal: object; getter: () => unknown };
-    nextNodeId++;
+    _dt.nextNodeId++;
     const name = inferName();
     const node: DevNode = {
-      id: nextNodeId,
+      id: _dt.nextNodeId,
       type: "computed",
       name,
       ref: p.signal,
       getter: p.getter,
       createdAt: Date.now(),
     };
-    hook.nodes.set(nextNodeId, node);
+    hook.nodes.set(_dt.nextNodeId, node);
     emit();
   });
 
@@ -269,11 +330,11 @@ export function initDevTools(config?: DevToolsConfig) {
   });
 
   hook.on("effect:create", (payload: unknown) => {
-    nextNodeId++;
+    _dt.nextNodeId++;
     const name = inferName();
     const p = payload as { effectFn: () => void };
-    const node: DevNode = { id: nextNodeId, type: "effect", name, ref: p.effectFn, createdAt: Date.now() };
-    hook.nodes.set(nextNodeId, node);
+    const node: DevNode = { id: _dt.nextNodeId, type: "effect", name, ref: p.effectFn, createdAt: Date.now() };
+    hook.nodes.set(_dt.nextNodeId, node);
     emit();
   });
 
@@ -461,8 +522,8 @@ export function initDevTools(config?: DevToolsConfig) {
     hook.components.clear();
     hook.events.length = 0;
     isActive = false;
-    inferNameArmed = false;
-    activeDevTools = null;
+    _dt.inferNameArmed = false;
+    _dt.active = null;
 
     const g = globalThis as unknown as {
       __SIBU__?: SibuNamespace;
@@ -687,7 +748,7 @@ export function initDevTools(config?: DevToolsConfig) {
     w.__SIBU_DEVTOOLS_DATA__ = buildData;
   }
 
-  activeDevTools = api;
+  _dt.active = api;
 
   // DOM component auto-discovery
   if (typeof document !== "undefined") {
@@ -777,7 +838,7 @@ export function initDevTools(config?: DevToolsConfig) {
 // ---------------------------------------------------------------------------
 
 function inferName(): string {
-  if (!inferNameArmed || !isDev()) return "anonymous";
+  if (!_dt.inferNameArmed || !isDev()) return "anonymous";
   try {
     const stack = new Error().stack || "";
     for (const line of stack.split("\n")) {
@@ -887,7 +948,7 @@ export function devState<T>(name: string, initial: T): [() => T, (value: T | ((p
     const newValue = get();
 
     // Record with proper component/key names
-    const dt = activeDevTools;
+    const dt = _dt.active;
     if (dt?.isEnabled() && !Object.is(oldValue, newValue)) {
       dt.record({ type: "state-change", component, key, oldValue, newValue, timestamp: Date.now() });
     }

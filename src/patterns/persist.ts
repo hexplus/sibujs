@@ -9,7 +9,10 @@ import { isUnsafeKey } from "../utils/guards";
  * @param key Storage key
  * @param initial Default value when no persisted value exists
  * @param options Storage options
- * @returns Same tuple as signal: [getter, setter]
+ * @returns The same `[getter, setter]` tuple as `signal()`. For localStorage
+ *   (cross-tab sync on), the setter additionally carries a non-enumerable
+ *   `dispose()` method — call `setter.dispose()` on unmount to remove the
+ *   `storage` event listener; otherwise it lives for the page's lifetime.
  *
  * @example
  * ```ts
@@ -70,7 +73,17 @@ export function persisted<T>(
   initial: T,
   options: PersistOptions<T> = {},
 ): [() => T, (next: T | ((prev: T) => T)) => void] {
-  const storage = options.session ? sessionStorage : localStorage;
+  // Resolve storage defensively: under SSR the globals don't exist
+  // (ReferenceError), and even in the browser access can throw in sandboxed /
+  // privacy contexts. When unavailable, persisted() degrades to a plain signal.
+  const storage: Storage | null = (() => {
+    try {
+      if (options.session) return typeof sessionStorage !== "undefined" ? sessionStorage : null;
+      return typeof localStorage !== "undefined" ? localStorage : null;
+    } catch {
+      return null;
+    }
+  })();
   const serialize = options.serialize || JSON.stringify;
   // Reject __proto__ / constructor / prototype keys at parse time to block
   // prototype pollution from a tampered storage entry (CWE-1321).
@@ -84,7 +97,7 @@ export function persisted<T>(
   // Try to restore persisted value
   let restored = initial;
   try {
-    let raw = storage.getItem(key);
+    let raw = storage ? storage.getItem(key) : null;
     if (raw !== null) {
       if (decrypt) raw = decrypt(raw);
       const parsed = deserialize(raw);
@@ -108,7 +121,7 @@ export function persisted<T>(
     try {
       let serialized = serialize(current);
       if (encrypt) serialized = encrypt(serialized);
-      storage.setItem(key, serialized);
+      storage?.setItem(key, serialized);
     } catch {
       // Storage full or unavailable
     }
@@ -120,7 +133,7 @@ export function persisted<T>(
   // that never dispose should be aware that the listener lives for the
   // lifetime of the page.
   let storageListener: ((e: StorageEvent) => void) | null = null;
-  if (syncTabs && typeof window !== "undefined") {
+  if (syncTabs && storage && typeof window !== "undefined") {
     storageListener = (e: StorageEvent) => {
       if (e.storageArea !== storage || e.key !== key) return;
       if (e.newValue === null) {

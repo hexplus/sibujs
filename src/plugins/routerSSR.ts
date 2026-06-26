@@ -501,18 +501,17 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
     return;
   }
 
-  // 2. Create the router with routes but wrap so we can control initialization.
-  //    We use createRouter which sets the global router, then immediately set
-  //    the route state to what the server resolved, preventing a redundant
-  //    initial navigation and re-render.
+  // 2. Create the client router. Its constructor resolves the initial route
+  //    from `window.location`, which on hydration matches the URL the server
+  //    rendered (and therefore `serverState.path`). We intentionally do NOT
+  //    issue an explicit navigate() to `serverState.path` here: a real
+  //    navigation would re-render and discard the server-rendered DOM, which is
+  //    exactly what hydration must avoid. If the address bar and
+  //    `serverState.path` ever diverge (e.g. a server-side normalization), the
+  //    location-driven resolution reconciles to the live URL.
   createRouter(routes as RouteDef[]);
 
-  // 3. Set the current route to the server's resolved state by navigating
-  //    to the server-known path with replace semantics. This synchronizes
-  //    the router's internal state with the server's resolved route without
-  //    causing a DOM update (since the content is already rendered).
-
-  // 4. Hydrate the existing DOM.
+  // 3. Hydrate the existing DOM.
   const container = options?.container || document.getElementById("app");
   if (container && serverState.path) {
     // Find the component that the server rendered for this route

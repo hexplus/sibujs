@@ -47,10 +47,19 @@ export function wakeLock(): {
 
   const api = (navigator as unknown as { wakeLock: WakeLockApi }).wakeLock;
   let sentinel: WakeLockSentinel | null = null;
+  let disposed = false;
 
   async function request(): Promise<void> {
+    if (disposed) return;
     try {
-      sentinel = await api.request("screen");
+      const s = await api.request("screen");
+      // If dispose() ran while the request was in flight, release the sentinel
+      // immediately and don't register it / its listener (which would leak).
+      if (disposed) {
+        s.release().catch(() => {});
+        return;
+      }
+      sentinel = s;
       setActive(true);
       sentinel.addEventListener("release", () => {
         setActive(false);
@@ -84,6 +93,7 @@ export function wakeLock(): {
   document.addEventListener("visibilitychange", onVisibility);
 
   function dispose(): void {
+    disposed = true;
     document.removeEventListener("visibilitychange", onVisibility);
     release().catch((err) => {
       if (typeof console !== "undefined") {

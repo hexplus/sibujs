@@ -52,6 +52,12 @@ export function stream(
 
   function connect(): void {
     if (disposed) return;
+    // EventSource is absent under SSR and some edge runtimes — degrade to a
+    // closed stream instead of throwing at construction.
+    if (typeof EventSource === "undefined") {
+      setStatus("closed");
+      return;
+    }
 
     const safeUrl = validateSseUrl(url);
     if (safeUrl === null) {

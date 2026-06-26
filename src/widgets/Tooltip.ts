@@ -1,7 +1,6 @@
+import { createId } from "../core/rendering/createId";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-
-let tooltipIdCounter = 0;
 
 // Track which trigger elements already have a bind() active so a second
 // call short-circuits rather than corrupting aria-describedby restore.
@@ -71,7 +70,7 @@ export function tooltip(options?: { delay?: number; hideDelay?: number }): {
     // aria-describedby restore on double-bind.
     const existing = boundTriggers.get(els.trigger);
     if (existing) return existing;
-    const id = `sibu-tooltip-${++tooltipIdCounter}`;
+    const id = createId("sibu-tooltip");
     els.tooltip.setAttribute("role", "tooltip");
     els.tooltip.id = id;
     const prevDescribedBy = els.trigger.getAttribute("aria-describedby");

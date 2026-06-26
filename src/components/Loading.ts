@@ -92,6 +92,11 @@ export function Loading(props: LoadingProps = {}): HTMLElement {
   if (variant === "dots") {
     return div({
       class: `sibu-loading${sizeClass}`,
+      role: "status",
+      "aria-live": "polite",
+      // When there's no visible text, give the live region an accessible name
+      // so it isn't announced as an empty status.
+      "aria-label": text ? undefined : "Loading",
       nodes: [
         div({
           class: "sibu-loading-dots",
@@ -108,6 +113,9 @@ export function Loading(props: LoadingProps = {}): HTMLElement {
 
   return div({
     class: `sibu-loading${sizeClass}`,
+    role: "status",
+    "aria-live": "polite",
+    "aria-label": text ? undefined : "Loading",
     nodes: [
       div({ class: "sibu-loading-spinner" }) as HTMLElement,
       text ? (span({ class: "sibu-loading-text", nodes: text }) as HTMLElement) : null,

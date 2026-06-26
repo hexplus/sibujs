@@ -25,8 +25,6 @@ import { signal } from "../core/signals/signal";
 // No dependencies, no JSX, no compilation — every element is built
 // via the tag factories, and styles are injected once per page.
 
-const _isDev = isDev();
-
 export type ErrorSeverity = "error" | "warning" | "info";
 
 export interface ErrorDisplayProps {
@@ -427,7 +425,9 @@ export function ErrorDisplay(props: ErrorDisplayProps): Element {
 
   const severity = props.severity ?? "error";
   const normalized = normalizeError(props.error);
-  const showDetails = props.alwaysShowDetails ?? _isDev;
+  // Read dev state at render time, not module-eval — otherwise a runtime-set
+  // dev config (configured after this module is imported) would be ignored.
+  const showDetails = props.alwaysShowDetails ?? isDev();
   const headline = props.title ?? normalized.message;
   const timestamp = new Date().toISOString().replace("T", " ").slice(0, 19);
 

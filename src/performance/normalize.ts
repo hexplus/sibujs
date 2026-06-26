@@ -203,7 +203,6 @@ export interface NormalizeResult {
  */
 export function normalize<T extends Record<string, unknown>>(data: T | T[], schema: NormalizedSchema): NormalizeResult {
   const entities: NormalizedEntities = {};
-  const idKey = schema.idKey || "id";
 
   function ensureTable(name: string): Record<string, unknown> {
     if (!entities[name]) {
@@ -225,8 +224,10 @@ export function normalize<T extends Record<string, unknown>>(data: T | T[], sche
         const value = entity[field];
         if (value == null) continue;
 
-        // Relation schema: simple schema with just the type name
-        const relSchema: NormalizedSchema = { name: relationType, idKey };
+        // Relation schema: simple schema with just the type name. Children
+        // default to "id" — inheriting the parent's (possibly custom) idKey
+        // would read a missing field and produce `String(undefined)` ids.
+        const relSchema: NormalizedSchema = { name: relationType };
 
         if (Array.isArray(value)) {
           flat[field] = value.map((item) => normalizeEntity(item as Record<string, unknown>, relSchema));
@@ -276,7 +277,6 @@ export function denormalize<T extends Record<string, unknown>>(
   const entity = table[id];
   if (!entity) return undefined;
 
-  const idKey = schema.idKey || "id";
   const result: Record<string, unknown> = { ...(entity as Record<string, unknown>) };
 
   if (schema.relations) {
@@ -284,7 +284,8 @@ export function denormalize<T extends Record<string, unknown>>(
       const value = (entity as Record<string, unknown>)[field];
       if (value == null) continue;
 
-      const relSchema: NormalizedSchema = { name: relationType, idKey };
+      // Children default to "id"; see the matching note in normalize().
+      const relSchema: NormalizedSchema = { name: relationType };
 
       if (Array.isArray(value)) {
         result[field] = value.map((relId: string) => denormalize(relId, entities, relSchema));

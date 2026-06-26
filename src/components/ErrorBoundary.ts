@@ -250,7 +250,10 @@ function getMemoizedFallback(
  *
  * Features:
  * - Catches sync errors thrown by children
- * - Catches async errors (Promise rejections) from children
+ * - Catches the rejection of a Promise *returned* by children (async components)
+ *   — it does NOT observe fire-and-forget async errors (rejections from timers,
+ *   event handlers, or detached/unawaited promises), which surface as global
+ *   `unhandledrejection` events instead.
  * - Supports nested ErrorBoundaries (inner catches first, outer catches propagation)
  * - Retry functionality to clear error and re-render children
  * - Memoized fallback to avoid re-creating fallback UI on every render

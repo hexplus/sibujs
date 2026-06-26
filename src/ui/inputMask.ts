@@ -93,8 +93,6 @@ export function inputMask(options: MaskOptions): {
     return /[^a-zA-Z0-9]/g;
   }
   const stripRegex = buildStripRegex();
-  const rawCharTest = options.pattern.includes("*") ? () => true : (c: string) => /[a-zA-Z0-9]/.test(c);
-
   function bind(input: HTMLInputElement): () => void {
     const onInput = () => {
       const cursorBefore = input.selectionStart ?? input.value.length;
@@ -105,20 +103,24 @@ export function inputMask(options: MaskOptions): {
       setRawValue(extractRaw(masked));
       input.value = masked;
 
-      let rawBefore = 0;
-      for (let i = 0; i < cursorBefore && i < oldValue.length; i++) {
-        if (rawCharTest(oldValue[i])) rawBefore++;
-      }
+      // Count raw (non-literal) chars before the caret using the SAME strip
+      // rule that derives `raw`. This is correct for digit/letter masks, "*"
+      // (keep-all) masks, and patterns with leading literals alike — the old
+      // per-char test counted literals for "*" masks and mis-handled a leading
+      // literal.
+      const rawBefore = oldValue.slice(0, cursorBefore).replace(stripRegex, "").length;
+
+      // Walk the freshly-masked value to the position just after the
+      // rawBefore-th editable slot, stepping over auto-inserted literals.
+      // Stopping once `counted === rawBefore` keeps the caret correct even when
+      // rawBefore is 0 (caret stays before the first slot/leading literal).
       let newCursor = 0;
       let counted = 0;
-      for (; newCursor < masked.length; newCursor++) {
+      while (newCursor < masked.length && counted < rawBefore) {
         if (newCursor < options.pattern.length && isSlot(options.pattern[newCursor])) {
           counted++;
-          if (counted >= rawBefore) {
-            newCursor++;
-            break;
-          }
         }
+        newCursor++;
       }
       // setSelectionRange throws (InvalidStateError) on input types that don't
       // support selection (number, email, date, …). Masks are normally on text

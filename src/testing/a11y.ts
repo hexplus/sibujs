@@ -679,7 +679,7 @@ export function checkAriaAttributes(root: Element): A11yViolation[] {
         if (attr.name === "aria-checked" || attr.name === "aria-pressed") {
           validValues.push("mixed");
         }
-        if (!validValues.includes(attr.value) && attr.value !== "undefined") {
+        if (!validValues.includes(attr.value)) {
           violations.push({
             rule: "aria-valid-attr-value",
             level: "error",

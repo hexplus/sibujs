@@ -243,9 +243,42 @@ class RouteMatcher {
   private parentChain = new Map<string, RouteDef[]>();
   private namedRoutes = new Map<string, RouteDef>();
   private compiledPatterns = new LRUCache<string, { regex: RegExp; keys: string[] }>(50);
+  // Pattern routes (those with params/wildcards) ordered most-specific-first,
+  // rebuilt lazily after any mutation. Static full paths are served by the
+  // exact-match map and excluded here.
+  private patternOrder: [string, RouteDef][] | null = null;
 
   constructor(routes: RouteDef[]) {
     this.buildIndex(routes);
+  }
+
+  // Specificity per segment: static (2) > param `:x` (1) > wildcard `*` (0).
+  private static specificity(path: string): number[] {
+    return path
+      .split("/")
+      .filter(Boolean)
+      .map((seg) => (seg.startsWith(":") ? 1 : seg.includes("*") ? 0 : 2));
+  }
+
+  private getPatternOrder(): [string, RouteDef][] {
+    if (this.patternOrder) return this.patternOrder;
+    const patterns = [...this.routeTrie].filter(([p]) => p.includes(":") || p.includes("*"));
+    // Stable sort: equal-specificity routes keep their registration order, so a
+    // broad route can't shadow a more specific one while existing ties are
+    // unaffected.
+    patterns.sort(([a], [b]) => {
+      const ka = RouteMatcher.specificity(a);
+      const kb = RouteMatcher.specificity(b);
+      const len = Math.max(ka.length, kb.length);
+      for (let i = 0; i < len; i++) {
+        const va = ka[i] ?? -1;
+        const vb = kb[i] ?? -1;
+        if (va !== vb) return vb - va;
+      }
+      return 0;
+    });
+    this.patternOrder = patterns;
+    return patterns;
   }
 
   private buildIndex(routes: RouteDef[], parentPath = "", ancestors: RouteDef[] = []): void {
@@ -285,8 +318,9 @@ class RouteMatcher {
       return { route: exactMatch, params: {}, matched: this.parentChain.get(path) || [exactMatch] };
     }
 
-    // Try pattern matching
-    for (const [routePath, route] of this.routeTrie) {
+    // Try pattern matching, most-specific-first so a broad param/wildcard
+    // route can't shadow a more specific route that also matches.
+    for (const [routePath, route] of this.getPatternOrder()) {
       const match = this.matchPattern(path, routePath);
       if (match) {
         return { route, params: match.params, matched: this.parentChain.get(routePath) || [route] };
@@ -380,10 +414,12 @@ class RouteMatcher {
     this.parentChain.clear();
     this.namedRoutes.clear();
     this.compiledPatterns.clear();
+    this.patternOrder = null;
     this.buildIndex(routes);
   }
 
   addRoute(route: RouteDef, parentPath = ""): void {
+    this.patternOrder = null;
     const fullPath = parentPath + route.path;
     const parentAncestors = this.parentChain.get(parentPath) || [];
     const chain = [...parentAncestors, route];
@@ -399,6 +435,7 @@ class RouteMatcher {
 
   removeRoute(path: string): void {
     this.compiledPatterns.clear();
+    this.patternOrder = null;
     const root = this.routeTrie.get(path);
     if (!root) return;
 
@@ -681,6 +718,11 @@ class ComponentLoader {
   }
 
   private isAsyncComponent(comp: Component | AsyncComponent | LazyComponent): boolean {
+    // Prefer the reliable signals: the LAZY_MARKER stamped by `lazy()` and a
+    // genuine async function. The `toString()` source sniff is a best-effort
+    // fallback for an un-wrapped `() => import("./Page")` shorthand — dynamic
+    // `import(` is preserved verbatim by bundlers (it drives code-splitting), so
+    // it survives minification, but wrapping in `lazy()` is the robust form.
     return (
       (comp as any)[LAZY_MARKER] === true ||
       comp.constructor.name === "AsyncFunction" ||
@@ -771,15 +813,18 @@ export class SibuRouter {
   }
 
   private initialize(): void {
-    // Set up event listeners
-    if (this.options.mode === "history") {
-      const popstateHandler = () => this.handleLocationChange(true);
-      window.addEventListener("popstate", popstateHandler);
-      this.cleanup.push(() => window.removeEventListener("popstate", popstateHandler));
-    } else {
-      const hashHandler = () => this.handleLocationChange(true);
-      window.addEventListener("hashchange", hashHandler);
-      this.cleanup.push(() => window.removeEventListener("hashchange", hashHandler));
+    // Set up event listeners. Guarded so constructing a router under SSR (e.g.
+    // createMemoryRouter, advertised for testing/SSR) doesn't throw on `window`.
+    if (typeof window !== "undefined") {
+      if (this.options.mode === "history") {
+        const popstateHandler = () => this.handleLocationChange(true);
+        window.addEventListener("popstate", popstateHandler);
+        this.cleanup.push(() => window.removeEventListener("popstate", popstateHandler));
+      } else {
+        const hashHandler = () => this.handleLocationChange(true);
+        window.addEventListener("hashchange", hashHandler);
+        this.cleanup.push(() => window.removeEventListener("hashchange", hashHandler));
+      }
     }
 
     // Set initial route
@@ -1566,10 +1611,18 @@ export function Route(): Node {
     });
   }
 
-  routeCleanups.push(() => {
+  let routeTorn = false;
+  const routeCleanup = () => {
+    if (routeTorn) return;
+    routeTorn = true;
     routeTeardown();
     cleanupNodes();
-  });
+  };
+  // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
+  // layout change) releases its tracking + nodes immediately — not only on
+  // destroyRouter(). Idempotent, so the destroyRouter() drain stays safe.
+  registerDisposer(anchor, routeCleanup);
+  routeCleanups.push(routeCleanup);
 
   return anchor;
 }
@@ -1741,7 +1794,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     });
   }
 
-  routeCleanups.push(() => {
+  let kaTorn = false;
+  const kaCleanup = () => {
+    if (kaTorn) return;
+    kaTorn = true;
     kaTeardown();
     for (const node of cache.values()) {
       dispose(node);
@@ -1751,7 +1807,11 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     lruOrder.length = 0;
     if (currentNode?.parentNode) currentNode.parentNode.removeChild(currentNode);
     currentNode = null;
-  });
+  };
+  // The cached detached subtrees are the heaviest leak here — release them when
+  // the outlet's anchor subtree is disposed, not only on destroyRouter().
+  registerDisposer(anchor, kaCleanup);
+  routeCleanups.push(kaCleanup);
 
   return anchor;
 }
@@ -1760,19 +1820,26 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
 // ROUTER LINK COMPONENT
 // ============================================================================
 
-export function RouterLink(props: {
-  to: NavigationTarget;
-  replace?: boolean;
-  activeClass?: string;
-  exactActiveClass?: string;
-  nodes?: string | Node | (string | Node)[];
-  target?: string;
-  rel?: string;
-  [key: string]: unknown;
-}): HTMLElement {
+export function RouterLink(
+  props: {
+    to: NavigationTarget;
+    replace?: boolean;
+    activeClass?: string;
+    exactActiveClass?: string;
+    /** @deprecated Pass children positionally: `RouterLink(props, children)`. */
+    nodes?: string | Node | (string | Node)[];
+    target?: string;
+    rel?: string;
+    [key: string]: unknown;
+  },
+  children?: string | Node | (string | Node)[],
+): HTMLElement {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, class: classAttr, ...attrs } = props;
+  // Children pass positionally (the framework-wide convention); `nodes` is kept
+  // only as a deprecated fallback for existing callers.
+  const content = children !== undefined ? children : nodes;
   const baseClass = typeof classAttr === "string" ? classAttr : "";
 
   const routeGetter = _routerRef.current.routeGetter;
@@ -1847,12 +1914,12 @@ export function RouterLink(props: {
   });
 
   // Set content
-  if (typeof nodes === "string") {
-    link.textContent = nodes;
-  } else if (nodes instanceof Node) {
-    link.appendChild(nodes);
-  } else if (Array.isArray(nodes)) {
-    nodes.forEach((child) => {
+  if (typeof content === "string") {
+    link.textContent = content;
+  } else if (content instanceof Node) {
+    link.appendChild(content);
+  } else if (Array.isArray(content)) {
+    content.forEach((child) => {
       if (typeof child === "string") {
         link.appendChild(document.createTextNode(child));
       } else if (child instanceof Node) {
@@ -2156,14 +2223,19 @@ export function Outlet(): Node {
       if (anchor.parentNode) update();
     });
   }
-  routeCleanups.push(() => {
+  let outletTorn = false;
+  const outletCleanup = () => {
+    if (outletTorn) return;
+    outletTorn = true;
     outletTeardown();
     if (currentNode) {
       dispose(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       currentNode = null;
     }
-  });
+  };
+  registerDisposer(anchor, outletCleanup);
+  routeCleanups.push(outletCleanup);
   return anchor;
 }
 
