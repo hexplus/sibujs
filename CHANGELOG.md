@@ -6,6 +6,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.3.2] — 2026-06-26
+
+Continues the duplicate-runtime hardening from 3.3.1. No breaking changes; no API or behavior change for normal usage.
+
+### Fixed
+
+- **`createId()` no longer collides across a duplicated runtime** — the unique-id counter is now shared across copies (the same first-copy-wins mechanism 3.3.1 introduced for the reactive core), so two copies can't both hand out `sibu-1`. This prevents broken a11y associations (`aria-labelledby`, `for` + `id`) and SSR hydration mismatches when a bundler duplicates the module.
+- **SSR mode is consistent across a duplicated runtime** — the SSR flag/context (AsyncLocalStorage + fallback store) is now shared, so `enableSSR()` taking effect in one copy is observed by `isSSR()` in another. Previously a split could let client-only side effects run during a server render, or leak per-request state across copies.
+
+### Changed
+
+- **Duplicate-runtime dev warning now reports real versions** — the warning added in 3.3.1 now prints the actual package version (e.g. `active: 3.3.2, duplicate: …`) instead of `dev`, making mixed-version duplication easier to diagnose. Dev-only; stripped from production builds.
+
+---
+
 ## [3.3.1] — 2026-06-26
 
 A robustness release. No breaking changes; no API or behavior change for normal usage.

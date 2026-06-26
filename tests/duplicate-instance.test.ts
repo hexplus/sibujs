@@ -24,6 +24,10 @@ interface Instance {
   signal: <T>(v: T) => [() => T, (n: T | ((p: T) => T)) => void];
   reactiveBinding: (commit: () => void) => () => void;
   batch: <T>(fn: () => T) => T;
+  createId: (prefix?: string) => string;
+  enableSSR: () => void;
+  disableSSR: () => void;
+  isSSR: () => boolean;
 }
 
 const REGISTRY_KEY = Symbol.for("sibujs.reactive.v1");
@@ -45,6 +49,8 @@ beforeAll(async () => {
         export { signal } from "./src/core/signals/signal";
         export { reactiveBinding } from "./src/reactivity/track";
         export { batch } from "./src/reactivity/batch";
+        export { createId } from "./src/core/rendering/createId";
+        export { enableSSR, disableSSR, isSSR } from "./src/core/ssr-context";
       `,
       resolveDir: process.cwd(),
       loader: "ts",
@@ -133,5 +139,34 @@ describe("duplicate reactive runtime instances", () => {
 
     const dupWarnings = warnings.filter((w) => w.includes("Multiple instances of the reactive runtime"));
     expect(dupWarnings).toHaveLength(1);
+  });
+});
+
+describe("duplicate instance — other coordination singletons", () => {
+  test("createId yields a continuous, non-colliding sequence across instances", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    // A shared counter means the two copies never hand out the same id —
+    // critical for a11y pairing (aria-labelledby / for+id) and SSR hydration.
+    // Independent module-local counters would both start at 1 and collide.
+    const ids = [a.createId("x"), b.createId("x"), a.createId("x"), b.createId("x")];
+    expect(new Set(ids).size).toBe(ids.length); // all unique
+  });
+
+  test("enableSSR() in instance A is observed by isSSR() in instance B", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    expect(b.isSSR()).toBe(false);
+    a.enableSSR();
+    try {
+      // Split SSR state would let an effect created via instance B run on the
+      // server (B still thinks it's the client), or leak request state.
+      expect(b.isSSR()).toBe(true);
+    } finally {
+      a.disableSSR();
+    }
+    expect(b.isSSR()).toBe(false);
   });
 });

@@ -26,3 +26,4 @@ vitest-cache/
 *.tmp
 *.swp
 notes.txt
+TODO.md
