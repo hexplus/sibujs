@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SibuJS — reactive islands, no build</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem 1.25rem; margin: 1rem 0; }
+      button { font: inherit; padding: 0.35rem 0.75rem; border-radius: 8px; border: 1px solid #ccc; cursor: pointer; }
+      output, .count { font-variant-numeric: tabular-nums; font-weight: 700; }
+      .spacer { height: 90vh; display: grid; place-items: center; color: #999; }
+      [hidden] { display: none; }
+    </style>
+  </head>
+  <body>
+    <h1>Reactive islands, zero build</h1>
+    <p>
+      This entire page is plain server-style HTML. There is no bundler, no JSX, no
+      compiler — one <code>&lt;script&gt;</code> tag wires fine-grained reactivity onto
+      the markup that's already here. <strong>View source.</strong>
+    </p>
+
+    <!-- Island 1 — activates immediately (data-sibu-load defaults to "load"). -->
+    <div class="card" data-sibu-island="counter">
+      <p>Count: <output data-ref="n">0</output></p>
+      <button data-ref="dec">−1</button>
+      <button data-ref="inc">+1</button>
+      <button data-ref="reset">reset</button>
+    </div>
+
+    <!-- Island 2 — JS runs only on first interaction (cheap until then). -->
+    <div class="card" data-sibu-island="newsletter" data-sibu-load="interaction">
+      <label>Email <input data-ref="email" type="email" placeholder="you@example.com" /></label>
+      <button data-ref="sub">Subscribe</button>
+      <p data-ref="msg" hidden></p>
+    </div>
+
+    <div class="spacer">↓ scroll down — the stats island below hydrates only when visible ↓</div>
+
+    <!-- Island 3 — activates when it scrolls into view. -->
+    <div class="card" data-sibu-island="clock" data-sibu-load="visible">
+      <p>Seconds on screen: <span class="count" data-ref="secs">0</span></p>
+    </div>
+
+    <!-- The ONLY script tags on the page. In production, point src at the CDN:
+         https://unpkg.com/sibujs@latest/dist/cdn.global.js -->
+    <script src="../dist/cdn.global.js"></script>
+    <script>
+      // Surface a load failure instead of failing silently. If you see this,
+      // run `npm run build` and make sure `../dist/cdn.global.js` resolves
+      // (file:// works, or serve the package root with e.g. `npx serve`).
+      if (!window.Sibu) {
+        document.body.insertAdjacentHTML(
+          "afterbegin",
+          '<p style="color:#b00;border:1px solid #b00;border-radius:8px;padding:.6rem 1rem">' +
+            "SibuJS did not load from <code>../dist/cdn.global.js</code> — the islands below won't work. " +
+            "Build it (<code>npm run build</code>) and make sure that path resolves.</p>",
+        );
+      }
+    </script>
+    <script>
+      const { signal, registerIsland, mountIslands } = window.Sibu;
+
+      // Island 1 — drives existing nodes in place; never re-renders the markup.
+      registerIsland("counter", (ctx) => {
+        const [n, setN] = signal(0);
+        ctx.text("@n", () => n());
+        ctx.on("@inc", "click", () => setN((v) => v + 1));
+        ctx.on("@dec", "click", () => setN((v) => v - 1));
+        ctx.on("@reset", "click", () => setN(0));
+      });
+
+      // Island 2 — a form, lazily activated on first interaction.
+      registerIsland("newsletter", (ctx) => {
+        const [email, setEmail] = signal("");
+        const [sent, setSent] = signal(false);
+        ctx.model("@email", [email, setEmail]);
+        ctx.on("@sub", "click", () => setSent(true));
+        ctx.show("@msg", () => sent());
+        ctx.text("@msg", () => `Thanks — we'll email ${email() || "you"}.`);
+      });
+
+      // Island 3 — starts a ticking signal only once it's on screen.
+      registerIsland("clock", (ctx) => {
+        const [secs, setSecs] = signal(0);
+        ctx.text("@secs", () => secs());
+        const id = setInterval(() => setSecs((s) => s + 1), 1000);
+        ctx.cleanup(() => clearInterval(id));
+      });
+
+      // One call wires the whole page, honoring each island's strategy.
+      mountIslands();
+    </script>
+  </body>
+</html>
