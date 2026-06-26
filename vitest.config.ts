@@ -5,6 +5,10 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Scope vitest to the jsdom unit tests. Real-browser Playwright specs live
+    // in `tests-browser/` (run via `npm run test:browser`) and must not be
+    // picked up here — they use @playwright/test's incompatible `test`/`expect`.
+    include: ["tests/**/*.test.ts"],
     coverage: {
       reporter: ["text", "html"],
       // Exclude build artifacts, dependencies, test files, and non-source
