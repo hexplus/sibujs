@@ -1,4 +1,6 @@
+import { registerDisposer } from "../core/rendering/dispose";
 import { derived } from "../core/signals/derived";
+import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 
 // ============================================================================
@@ -165,15 +167,42 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
 
   // Merge extras.on with field handlers — field handlers always win so extras
   // can't accidentally clobber the value/change/blur wiring.
-  const { on: extraOn, value: _ignoreValue, ...restExtras } = (extras ?? {}) as Record<string, unknown>;
+  const {
+    on: extraOn,
+    value: _ignoreValue,
+    onElement: extraOnElement,
+    ...restExtras
+  } = (extras ?? {}) as Record<string, unknown>;
   const mergedOn =
     extraOn && typeof extraOn === "object"
       ? { ...(extraOn as Record<string, (e: Event) => void>), ...fieldOn }
       : fieldOn;
 
+  // Write-back: a `<select multiple>` can't be driven by the plain `value` prop
+  // (assigning an array to `el.value` clears the selection), so reflect the
+  // field's array value onto each option's `selected` flag via a reactive
+  // effect bound to the element. Every other control type is handled correctly
+  // by the `value` prop alone, so this only engages for multi-selects.
+  const onElement = (el: HTMLElement): void => {
+    if (el instanceof HTMLSelectElement && el.multiple) {
+      const stop = effect(() => {
+        const v = field.value() as unknown;
+        const selected = Array.isArray(v) ? v.map(String) : [];
+        for (const opt of Array.from(el.options)) {
+          opt.selected = selected.includes(opt.value);
+        }
+      });
+      registerDisposer(el, stop);
+    }
+    if (typeof extraOnElement === "function") {
+      (extraOnElement as (el: HTMLElement) => void)(el);
+    }
+  };
+
   return {
     value: field.value as () => unknown,
     on: mergedOn as BoundFieldProps["on"],
+    onElement,
     ...restExtras,
   };
 }
@@ -244,9 +273,27 @@ export function form<T extends Record<string, unknown>>(config: FormConfig<T>): 
     return true;
   });
 
+  // Dirty-check that doesn't false-positive on array/object initials (e.g. a
+  // multi-select `initial: []`): a fresh array is never `Object.is`-equal to the
+  // original, so fall back to a shallow structural comparison.
+  const valueEquals = (a: unknown, b: unknown): boolean => {
+    if (Object.is(a, b)) return true;
+    if (Array.isArray(a) && Array.isArray(b)) {
+      return a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
+    }
+    if (a && b && typeof a === "object" && typeof b === "object") {
+      const ak = Object.keys(a);
+      const bk = Object.keys(b as object);
+      return (
+        ak.length === bk.length &&
+        ak.every((k) => Object.is((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
+      );
+    }
+    return false;
+  };
   const isDirty = derived(() => {
     for (const [name, cfg] of fieldEntries) {
-      if (!Object.is(fieldMap[name].value(), cfg.initial)) return true;
+      if (!valueEquals(fieldMap[name].value(), cfg.initial)) return true;
     }
     return false;
   });

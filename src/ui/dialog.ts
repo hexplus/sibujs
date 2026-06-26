@@ -1,4 +1,5 @@
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 
 /**
  * dialog provides reactive dialog state management with escape-to-close support.
@@ -16,8 +17,14 @@ type DialogEntry = {
   close: () => void;
 };
 
-const dialogStack: DialogEntry[] = [];
-let globalListenerAttached = false;
+// Shared via globalSingleton so a duplicated copy of this module doesn't keep
+// its own stack + listener — otherwise each copy attaches its own keydown
+// handler and "Escape closes the top dialog" breaks across copies.
+const _dlg = globalSingleton(Symbol.for("sibujs.dialog.v1"), () => ({
+  stack: [] as DialogEntry[],
+  listenerAttached: false,
+}));
+const dialogStack = _dlg.stack;
 
 /**
  * Test-only helper to reset the module-level stack between specs. Client-only:
@@ -28,9 +35,9 @@ let globalListenerAttached = false;
  */
 export function __resetDialogStack(): void {
   while (dialogStack.length > 0) dialogStack.pop();
-  if (typeof window !== "undefined" && globalListenerAttached) {
+  if (typeof window !== "undefined" && _dlg.listenerAttached) {
     window.removeEventListener("keydown", handleGlobalKeydown);
-    globalListenerAttached = false;
+    _dlg.listenerAttached = false;
   }
 }
 
@@ -41,17 +48,17 @@ function handleGlobalKeydown(event: KeyboardEvent): void {
 }
 
 function ensureGlobalListener(): void {
-  if (typeof window === "undefined" || globalListenerAttached) return;
+  if (typeof window === "undefined" || _dlg.listenerAttached) return;
   window.addEventListener("keydown", handleGlobalKeydown);
-  globalListenerAttached = true;
+  _dlg.listenerAttached = true;
 }
 
 function removeGlobalListenerIfIdle(): void {
   if (typeof window === "undefined") return;
-  if (!globalListenerAttached) return;
+  if (!_dlg.listenerAttached) return;
   if (dialogStack.length > 0) return;
   window.removeEventListener("keydown", handleGlobalKeydown);
-  globalListenerAttached = false;
+  _dlg.listenerAttached = false;
 }
 
 export function dialog(): {

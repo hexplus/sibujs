@@ -1,8 +1,8 @@
+import { createId } from "../core/rendering/createId";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
 
-let fileUploadIdCounter = 0;
 const boundFileUploads = new WeakMap<HTMLElement, () => void>();
 
 export interface FileUploadOptions {
@@ -122,7 +122,7 @@ export function fileUpload(options?: FileUploadOptions): {
     const existing = boundFileUploads.get(els.input);
     if (existing) return existing;
 
-    const id = `sibu-fileupload-${++fileUploadIdCounter}`;
+    const id = createId("sibu-fileupload");
     const restore: Array<() => void> = [];
     if (accept) els.input.accept = accept;
     els.input.multiple = multiple;

@@ -175,13 +175,25 @@ export function datePicker(options?: DatePickerOptions): {
     const existing = boundDatePickers.get(els.grid);
     if (existing) return existing;
 
+    // Capture the attributes bind() mutates so teardown can restore them.
+    const prevGridRole = els.grid.getAttribute("role");
+    const prevGridTabIndex = els.grid.getAttribute("tabindex");
+    const prevGridLabel = els.grid.getAttribute("aria-label");
+
     els.grid.setAttribute("role", "grid");
     if (els.grid.tabIndex < 0) els.grid.tabIndex = 0;
+
+    // Set when a keyboard navigation moves the view date, so the effect can move
+    // real focus to the newly-current cell (not just the roving tabindex).
+    let pendingFocus = false;
 
     const fxTeardown = effect(() => {
       const sel = selectedDate();
       const view = viewDate();
       const days = daysInMonth();
+      // Give the grid an accessible name reflecting the month on display.
+      els.grid.setAttribute("aria-label", view.toLocaleDateString(undefined, { month: "long", year: "numeric" }));
+      let viewCell: HTMLElement | null = null;
       for (const d of days) {
         const cell = els.cell(d.date);
         if (!cell) continue;
@@ -190,7 +202,15 @@ export function datePicker(options?: DatePickerOptions): {
         if (d.isDisabled) cell.setAttribute("aria-disabled", "true");
         else cell.removeAttribute("aria-disabled");
         // Roving tabindex on focused-day (view date) cell.
-        cell.tabIndex = isSameCalendarDay(view, d.date) ? 0 : -1;
+        const isView = isSameCalendarDay(view, d.date);
+        cell.tabIndex = isView ? 0 : -1;
+        if (isView) viewCell = cell;
+      }
+      // After a keyboard move, follow the roving tabindex with real focus so
+      // screen-reader / keyboard users land on the day they navigated to.
+      if (pendingFocus && viewCell && typeof viewCell.focus === "function") {
+        pendingFocus = false;
+        viewCell.focus();
       }
     });
 
@@ -203,6 +223,18 @@ export function datePicker(options?: DatePickerOptions): {
     }
 
     const onKey = (e: KeyboardEvent) => {
+      if (
+        e.key === "ArrowLeft" ||
+        e.key === "ArrowRight" ||
+        e.key === "ArrowUp" ||
+        e.key === "ArrowDown" ||
+        e.key === "Home" ||
+        e.key === "End" ||
+        e.key === "PageUp" ||
+        e.key === "PageDown"
+      ) {
+        pendingFocus = true;
+      }
       switch (e.key) {
         case "ArrowLeft":
           e.preventDefault();
@@ -252,6 +284,14 @@ export function datePicker(options?: DatePickerOptions): {
       boundDatePickers.delete(els.grid);
       fxTeardown();
       els.grid.removeEventListener("keydown", onKey);
+      // Restore the grid attributes bind() mutated so the element can be
+      // re-bound or reused cleanly (mirrors Accordion/Tabs/Popover).
+      if (prevGridRole === null) els.grid.removeAttribute("role");
+      else els.grid.setAttribute("role", prevGridRole);
+      if (prevGridTabIndex === null) els.grid.removeAttribute("tabindex");
+      else els.grid.setAttribute("tabindex", prevGridTabIndex);
+      if (prevGridLabel === null) els.grid.removeAttribute("aria-label");
+      else els.grid.setAttribute("aria-label", prevGridLabel);
     };
     boundDatePickers.set(els.grid, teardown);
     return teardown;

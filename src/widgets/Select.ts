@@ -1,9 +1,9 @@
+import { createId } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
 
-let selectIdCounter = 0;
 const boundSelects = new WeakMap<HTMLElement, () => void>();
 
 export interface SelectOptions<T> {
@@ -136,7 +136,13 @@ export function select<T>(options: SelectOptions<T>): {
     const existing = boundSelects.get(els.listbox);
     if (existing) return existing;
 
-    const listboxId = `sibu-select-${++selectIdCounter}`;
+    // Capture the attributes bind() mutates so teardown can restore them.
+    const prevId = els.listbox.id;
+    const prevRole = els.listbox.getAttribute("role");
+    const prevMultiselectable = els.listbox.getAttribute("aria-multiselectable");
+    const prevTabIndex = els.listbox.getAttribute("tabindex");
+
+    const listboxId = createId("sibu-select");
     els.listbox.id = listboxId;
     els.listbox.setAttribute("role", "listbox");
     els.listbox.setAttribute("aria-multiselectable", multiple ? "true" : "false");
@@ -201,6 +207,16 @@ export function select<T>(options: SelectOptions<T>): {
       fxTeardown();
       els.listbox.removeEventListener("keydown", onKey);
       if (typeTimer !== null) clearTimeout(typeTimer);
+      // Restore the attributes bind() mutated (mirrors Accordion/Tabs/Popover).
+      if (prevId === "") els.listbox.removeAttribute("id");
+      else els.listbox.id = prevId;
+      if (prevRole === null) els.listbox.removeAttribute("role");
+      else els.listbox.setAttribute("role", prevRole);
+      if (prevMultiselectable === null) els.listbox.removeAttribute("aria-multiselectable");
+      else els.listbox.setAttribute("aria-multiselectable", prevMultiselectable);
+      if (prevTabIndex === null) els.listbox.removeAttribute("tabindex");
+      else els.listbox.setAttribute("tabindex", prevTabIndex);
+      els.listbox.removeAttribute("aria-activedescendant");
     };
     boundSelects.set(els.listbox, teardown);
     return teardown;

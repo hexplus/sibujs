@@ -1,3 +1,4 @@
+import { registerDisposer } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
 
 /**
@@ -35,6 +36,10 @@ export function hover(target: HTMLElement): {
     target.removeEventListener("pointerenter", onEnter);
     target.removeEventListener("pointerleave", onLeave);
   }
+
+  // Also release when the element is disposed, so the listeners don't leak if
+  // the caller forgets to call dispose() (mirrors a11y.focus()/createListbox).
+  registerDisposer(target, dispose);
 
   return { hovered, dispose };
 }

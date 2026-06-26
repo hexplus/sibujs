@@ -6,6 +6,47 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.3.3] — 2026-06-26
+
+A hardening pass across the non-core subsystems (`ui`, `widgets`, `components`, `plugins`, `data`, `platform`, `patterns`, `performance`, `devtools`): correctness fixes, memory-leak plugs, SSR-safety guards, and accessibility improvements. No breaking changes.
+
+### Added
+
+- **`bindField` reflects an array back to `<select multiple>`** — the field's array value is now written onto each option's `selected` state on render and on update. (3.3.2 added the read side; this completes the two-way binding.)
+- **`captureSignalGraph()` returns a real node inventory** — the devtools hook now implements `getSignalNodes()`, so the snapshot reports live signals/derived/effects (id, name, kind, current value) instead of always being empty. Dependency edges are not yet tracked.
+- **`prefersReducedMotion()`** is now exported from `reducedMotion` (the one-shot check was previously duplicated privately in the spring/preset helpers).
+- **`RouterLink` accepts positional children** — `RouterLink(props, children)` matches the framework's children convention; the `nodes` prop is kept as a deprecated alias.
+
+### Fixed
+
+- **Teardown-tied memory leaks** — `Head()`, the router's route outlets (`Route` / `KeepAliveRoute` / `Outlet`), `transition()`, and `hover()` now release their injected elements / cached subtrees / timers / listeners when their element or subtree is disposed, instead of living for the page's lifetime.
+- **SSR no longer crashes** in `persisted()`, the priority scheduler, `stream()` / `socket()`, the router constructor (`createMemoryRouter`), `scrollRestoration()`, and `battery()` — each guards the browser global it touches and degrades gracefully instead of throwing a `ReferenceError`.
+- **Devtools trace profiler** — `stop()` / `stopTrace()` no longer throw; the hook's `on()` now returns a working unsubscribe, so listeners are removed instead of leaking.
+- **`form().isDirty`** no longer reports a field as dirty when an array/object value is unchanged (e.g. a multi-select with `initial: []`).
+- **`createAction().submit`** — a slow earlier submission can no longer overwrite the result of a newer one (run-sequenced state updates).
+- **`inputMask`** caret restoration — fixed mis-counting of literal characters for `*` masks and patterns with a leading literal.
+- **`pagination`** clamps the current page reactively when the item count shrinks, so indices stay in bounds.
+- **`infiniteScroll`** re-checks intersection after loading, so it doesn't stall when appended content doesn't push the sentinel out of view.
+- **`lazyModule`** caches a loader that resolves to `undefined`/falsy instead of re-invoking it on every `get()`.
+- **`normalize`** — child relations default to `id` instead of inheriting the parent's custom `idKey` (which produced `String(undefined)` ids).
+- **Route matching is specificity-ordered** — a broad parameter route can no longer shadow a more specific route registered after it.
+- Smaller fixes: the test `mockFetch` tolerates non-JSON request bodies; the a11y checker no longer exempts the literal string `"undefined"` from ARIA value validation.
+
+### Accessibility
+
+- **`Loading`** exposes `role="status"` + `aria-live="polite"` and a default label, so it is announced to screen readers.
+- **`datePicker`** gives its grid an accessible name (the displayed month) and moves real focus to follow the roving tabindex during keyboard navigation.
+- **Widget `bind()` is reversible** — `Combobox`, `Select`, and `datePicker` restore the `role` / `aria-*` / `id` / `tabindex` they set when torn down (matching `Accordion` / `Tabs` / `Popover`).
+- **`Combobox`** no longer races a blur-close against an option click (a pointer-down inside the listbox keeps the input focused).
+- **`contentEditable`** can be scoped to an editor element so its formatting commands ignore selections elsewhere on the page.
+
+### Changed
+
+- Internal coordination state for several modules (the `plugin` default registry, the `devtools` session, and the WASM / microfrontend module caches) is now shared across duplicate runtime copies, extending the 3.3.1/3.3.2 first-copy-wins sweep.
+- `ErrorDisplay` reads dev-mode state at render time rather than at module load, so a runtime-configured dev flag is respected.
+
+---
+
 ## [3.3.2] — 2026-06-26
 
 Continues the duplicate-runtime hardening from 3.3.1, plus two small additive enhancements. No breaking changes.

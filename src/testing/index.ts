@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { dispose } from "../core/rendering/dispose";
+import { globalSingleton } from "../utils/globalSingleton";
 
 /**
  * Escape a value for safe embedding in a CSS attribute selector.
@@ -16,8 +17,10 @@ function escapeSelector(value: string): string {
 }
 
 // Tracks containers produced by `render()` so tests can bulk-clean via
-// `unmountAll()` when individual `unmount()` calls were missed.
-const _renderedContainers = new Set<HTMLElement>();
+// `unmountAll()` when individual `unmount()` calls were missed. Shared via
+// globalSingleton so a duplicated copy of this module doesn't register into one
+// Set while `unmountAll()` clears another, leaking mounted containers/effects.
+const _renderedContainers = globalSingleton(Symbol.for("sibujs.testing.containers.v1"), () => new Set<HTMLElement>());
 
 /**
  * Unmount every container still alive from prior `render()` calls.

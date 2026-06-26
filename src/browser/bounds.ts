@@ -70,7 +70,12 @@ export function bounds(target: Element): {
     };
   }
 
+  let disposed = false;
+
   function refresh() {
+    // A queued observer/scroll callback or a manual refresh() after dispose()
+    // must not write to the torn-down instance's signal.
+    if (disposed) return;
     setRect(readRect(target));
   }
 
@@ -86,6 +91,7 @@ export function bounds(target: Element): {
   window.addEventListener("scroll", onScroll, { passive: true, capture: true });
 
   function dispose() {
+    disposed = true;
     resizeObserver?.disconnect();
     window.removeEventListener("scroll", onScroll, { capture: true });
   }

@@ -4,6 +4,8 @@
  * All presets respect reduced motion preferences.
  */
 
+import { prefersReducedMotion } from "./reducedMotion";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface AnimationPreset {
@@ -19,9 +21,6 @@ export interface PresetOptions {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
 function createPreset(
   keyframes: Keyframe[],

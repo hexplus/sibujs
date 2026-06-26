@@ -1,3 +1,4 @@
+import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
@@ -210,6 +211,11 @@ export function Head(props: HeadProps): Comment {
   };
 
   apply();
+
+  // Tie cleanup to the anchor so disposing the enclosing subtree (`dispose()`)
+  // removes this instance's injected <head> elements and stops its title/meta
+  // effects. Without this, every Head() leaked its elements + effects forever.
+  registerDisposer(anchor, cleanup);
 
   return anchor;
 }

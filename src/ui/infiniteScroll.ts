@@ -43,6 +43,14 @@ export function infiniteScroll(options: {
       await onLoadMore();
     } finally {
       setLoading(false);
+      // If the sentinel is still intersecting after the append (e.g. the newly
+      // loaded content didn't push it out of view, or the page isn't full yet),
+      // the observer won't fire again on its own — re-observe to force a fresh
+      // intersection check so loading doesn't stall.
+      if (!disposed && observer && _current && hasMore()) {
+        observer.unobserve(_current);
+        observer.observe(_current);
+      }
     }
   }
 

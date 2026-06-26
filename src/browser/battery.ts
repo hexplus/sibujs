@@ -41,27 +41,34 @@ export function battery(): {
   if (typeof navigator !== "undefined" && "getBattery" in navigator) {
     setSupported(true);
 
-    (navigator as unknown as { getBattery(): Promise<BatteryManager> }).getBattery().then((bm: BatteryManager) => {
-      if (disposed) return;
+    const batteryPromise = (navigator as unknown as { getBattery(): Promise<BatteryManager> })
+      .getBattery()
+      .then((bm: BatteryManager) => {
+        if (disposed) return;
 
-      battery = bm;
+        battery = bm;
 
-      batch(() => {
-        setLevel(bm.level);
-        setCharging(bm.charging);
-        setChargingTime(bm.chargingTime);
-        setDischargingTime(bm.dischargingTime);
+        batch(() => {
+          setLevel(bm.level);
+          setCharging(bm.charging);
+          setChargingTime(bm.chargingTime);
+          setDischargingTime(bm.dischargingTime);
+        });
+
+        onLevelChange = () => setLevel(bm.level);
+        onChargingChange = () => setCharging(bm.charging);
+        onChargingTimeChange = () => setChargingTime(bm.chargingTime);
+        onDischargingTimeChange = () => setDischargingTime(bm.dischargingTime);
+
+        bm.addEventListener("levelchange", onLevelChange);
+        bm.addEventListener("chargingchange", onChargingChange);
+        bm.addEventListener("chargingtimechange", onChargingTimeChange);
+        bm.addEventListener("dischargingtimechange", onDischargingTimeChange);
       });
-
-      onLevelChange = () => setLevel(bm.level);
-      onChargingChange = () => setCharging(bm.charging);
-      onChargingTimeChange = () => setChargingTime(bm.chargingTime);
-      onDischargingTimeChange = () => setDischargingTime(bm.dischargingTime);
-
-      bm.addEventListener("levelchange", onLevelChange);
-      bm.addEventListener("chargingchange", onChargingChange);
-      bm.addEventListener("chargingtimechange", onChargingTimeChange);
-      bm.addEventListener("dischargingtimechange", onDischargingTimeChange);
+    batteryPromise.catch(() => {
+      // getBattery() can reject (insecure context / permission denied) —
+      // degrade quietly instead of surfacing an unhandled rejection.
+      if (!disposed) setSupported(false);
     });
   }
 

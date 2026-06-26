@@ -66,6 +66,12 @@ export function socket(
 
   function connect(): void {
     if (disposed) return;
+    // WebSocket is absent under SSR and some edge runtimes — degrade to a
+    // closed socket instead of throwing at construction.
+    if (typeof WebSocket === "undefined") {
+      setStatus("closed");
+      return;
+    }
 
     const safeUrl = validateWsUrl(getUrl());
     if (safeUrl === null) {

@@ -1,10 +1,10 @@
+import { createId } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { watch } from "../core/signals/watch";
 import { batch } from "../reactivity/batch";
 
-let comboboxIdCounter = 0;
 const boundComboboxes = new WeakMap<HTMLElement, () => void>();
 
 export interface ComboboxOptions<T> {
@@ -111,7 +111,15 @@ export function combobox<T>(options: ComboboxOptions<T>): {
     const existing = boundComboboxes.get(els.input);
     if (existing) return existing;
 
-    const listboxId = `sibu-combobox-listbox-${++comboboxIdCounter}`;
+    // Capture the attributes bind() mutates so teardown can restore them.
+    const prevListboxId = els.listbox.id;
+    const prevListboxRole = els.listbox.getAttribute("role");
+    const prevListboxHidden = els.listbox.hidden;
+    const prevInputRole = els.input.getAttribute("role");
+    const prevInputAutocomplete = els.input.getAttribute("aria-autocomplete");
+    const prevInputControls = els.input.getAttribute("aria-controls");
+
+    const listboxId = createId("sibu-combobox-listbox");
     els.listbox.id = listboxId;
     els.listbox.setAttribute("role", "listbox");
     els.input.setAttribute("role", "combobox");
@@ -180,10 +188,19 @@ export function combobox<T>(options: ComboboxOptions<T>): {
       }, 100);
     };
 
+    // Keep focus on the input when a pointer goes down inside the listbox, so
+    // selecting an option doesn't blur the input and race the blur-close timer.
+    // preventDefault on mousedown stops the focus shift without blocking the
+    // option's subsequent click handler.
+    const onListboxPointerDown = (e: Event) => {
+      e.preventDefault();
+    };
+
     els.input.addEventListener("input", onInput);
     els.input.addEventListener("keydown", onKey);
     els.input.addEventListener("focus", onFocus);
     els.input.addEventListener("blur", onBlur);
+    els.listbox.addEventListener("mousedown", onListboxPointerDown);
 
     const teardown = () => {
       boundComboboxes.delete(els.input);
@@ -192,10 +209,25 @@ export function combobox<T>(options: ComboboxOptions<T>): {
       els.input.removeEventListener("keydown", onKey);
       els.input.removeEventListener("focus", onFocus);
       els.input.removeEventListener("blur", onBlur);
+      els.listbox.removeEventListener("mousedown", onListboxPointerDown);
       if (blurTimer !== null) {
         clearTimeout(blurTimer);
         blurTimer = null;
       }
+      // Restore the attributes bind() mutated (mirrors Accordion/Tabs/Popover).
+      if (prevListboxId === "") els.listbox.removeAttribute("id");
+      else els.listbox.id = prevListboxId;
+      if (prevListboxRole === null) els.listbox.removeAttribute("role");
+      else els.listbox.setAttribute("role", prevListboxRole);
+      els.listbox.hidden = prevListboxHidden;
+      if (prevInputRole === null) els.input.removeAttribute("role");
+      else els.input.setAttribute("role", prevInputRole);
+      if (prevInputAutocomplete === null) els.input.removeAttribute("aria-autocomplete");
+      else els.input.setAttribute("aria-autocomplete", prevInputAutocomplete);
+      if (prevInputControls === null) els.input.removeAttribute("aria-controls");
+      else els.input.setAttribute("aria-controls", prevInputControls);
+      els.input.removeAttribute("aria-expanded");
+      els.input.removeAttribute("aria-activedescendant");
     };
     boundComboboxes.set(els.input, teardown);
     return teardown;

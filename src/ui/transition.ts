@@ -3,6 +3,8 @@
  * Provides declarative transition and spring animations for elements.
  */
 
+import { registerDisposer } from "../core/rendering/dispose";
+
 export interface TransitionOptions {
   /** CSS property to animate (e.g., "opacity", "transform") */
   property?: string;
@@ -136,6 +138,10 @@ export function transition(
       }
     });
   }
+
+  // If the element is disposed mid-transition, clear the pending timer (and
+  // settle any awaited promise) so the timer doesn't retain the element.
+  registerDisposer(element, cancelPending);
 
   return { enter, leave };
 }

@@ -4,6 +4,7 @@
 
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 import { Priority, scheduleUpdate } from "./scheduler";
 
 /**
@@ -71,15 +72,20 @@ export function transitionState(): [isPending: () => boolean, startTransition: (
 // UNIQUE ID GENERATION
 // ============================================================================
 
-let idCounter = 0;
-let idPrefix = "sibu";
+// Counter + prefix shared via globalSingleton so a duplicated copy of this
+// module doesn't restart at 0 and mint colliding ids — which would desync
+// server/client during hydration (the exact thing resetIdCounter guards).
+const _ids = globalSingleton(Symbol.for("sibujs.uniqueId.v1"), () => ({
+  counter: 0,
+  prefix: "sibu",
+}));
 
 /**
  * Reset the ID counter. Call at the start of each SSR request
  * to ensure server and client produce matching IDs.
  */
 export function resetIdCounter(): void {
-  idCounter = 0;
+  _ids.counter = 0;
 }
 
 /**
@@ -87,7 +93,7 @@ export function resetIdCounter(): void {
  * Useful when multiple SibuJS apps coexist on the same page.
  */
 export function setIdPrefix(prefix: string): void {
-  idPrefix = prefix;
+  _ids.prefix = prefix;
 }
 
 /**
@@ -106,6 +112,6 @@ export function setIdPrefix(prefix: string): void {
  * ```
  */
 export function uniqueId(suffix?: string): string {
-  const id = `${idPrefix}-${idCounter++}`;
+  const id = `${_ids.prefix}-${_ids.counter++}`;
   return suffix ? `${id}-${suffix}` : id;
 }

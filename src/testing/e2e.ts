@@ -44,7 +44,17 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
   const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const method = init?.method || "GET";
-    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    let body: unknown;
+    if (init?.body != null) {
+      const raw = String(init.body);
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        // Non-JSON body (plain text, form-encoded, stringified FormData) — keep
+        // the raw value instead of throwing and breaking the mock.
+        body = raw;
+      }
+    }
 
     requestLog.push({ url, method, body, timestamp: Date.now() });
 
