@@ -8,7 +8,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [3.3.2] — 2026-06-26
 
-Continues the duplicate-runtime hardening from 3.3.1. No breaking changes; no API or behavior change for normal usage.
+Continues the duplicate-runtime hardening from 3.3.1, plus two small additive enhancements. No breaking changes.
+
+### Added
+
+- **Name-based action registry** — register reusable actions under a string name with `registerAction(name, fn)`, look them up with `getAction(name)`, or apply one directly by name: `action(el, "longPress", { duration: 500, callback })`. The built-in actions (`clickOutside`, `longPress`, `copyOnClick`, `autoResize`, `trapFocus`) are auto-registered under their export names. The registry is shared across duplicate runtime copies (same first-copy-wins mechanism as the reactive core).
+- **`bindField` supports `<select multiple>`** — a change on a multiple-select now sets the bound field to the array of selected option values (via `selectedOptions`) instead of just the first. Single selects, text inputs, and checkboxes are unchanged.
 
 ### Fixed
 
