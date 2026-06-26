@@ -6,6 +6,48 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.4.0] — 2026-06-26
+
+Reactive islands for HTML-first apps — a third rendering mode that attaches
+fine-grained reactivity to server-rendered HTML with **no build step**, no JSX,
+no compiler, and no dependencies. The whole islands runtime is ~5.2 KB gzipped.
+Additive; nothing existing changes.
+
+### Added
+
+- **`enhance(target, setup)`** — attach reactivity to *existing* DOM without
+  re-rendering it (the third mode alongside `mount` and `hydrate`, which replace
+  markup). The setup receives an `EnhanceContext` to drive server markup in
+  place: `text`, `attr` (a11y-correct literal booleans), `classed`, `show`
+  (toggles the standard `hidden` property, so it reveals server-`hidden`
+  elements), `model` (two-way; checkbox / number / `<select multiple>`), `on`,
+  `ref`/`refs`, and `cleanup`. Targets resolve via `@name` → `data-ref="name"`
+  or a raw selector. Returns a dispose that's also tied to the element. Plus
+  `enhanceAll(selector, setup)`.
+- **Island runtime** — `registerIsland(name, setup)` + `mountIslands(root?)`.
+  Declare islands in server HTML with `data-sibu-island="name"` and choose *when*
+  each activates via `data-sibu-load`: `load` · `idle` · `visible` ·
+  `interaction` · `media` (with `data-sibu-media`). `mountIslands()` wires the
+  whole page in one call and returns a cleanup.
+- **Lazy island code** — `lazyIsland(() => import("./island.js"))` fetches an
+  island's module only when it activates, so a page ships ~0 JS for islands that
+  never trigger.
+- The whole workflow is exported from the package root and the `window.Sibu` CDN
+  global, so it runs from a single `<script>` tag. Runnable examples:
+  `examples/islands.html` and `examples/islands-strategies.html` (a real-browser
+  smoke test for every strategy); guide: `docs/islands.md`; size benchmark:
+  `bench/islands-size.mjs`.
+
+Robustness: `enhance` skips no-op writes so static content is never re-painted
+(no hydration flash when signals are seeded from the server value); re-enhancing
+the same element is refused; a failing island's setup is isolated so it can't
+take down the rest of the page; and a failed lazy `import()` is reported rather
+than surfacing as an unhandled rejection. Every activation strategy — plus lazy
+code-loading over HTTP — is validated in **Chromium, Firefox, and WebKit**
+(Playwright, `npm run test:browser`) in addition to the jsdom unit tests.
+
+---
+
 ## [3.3.3] — 2026-06-26
 
 A hardening pass across the non-core subsystems (`ui`, `widgets`, `components`, `plugins`, `data`, `platform`, `patterns`, `performance`, `devtools`): correctness fixes, memory-leak plugs, SSR-safety guards, and accessibility improvements. No breaking changes.

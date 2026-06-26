@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SibuJS islands — strategy smoke test</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 44rem; margin: 1.5rem auto; padding: 0 1rem; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: .8rem 1rem; margin: .8rem 0; }
+      .state { font-weight: 700; }
+      .pending { color: #b8860b; }
+      .active { color: #178a3a; }
+      #log { position: sticky; top: 0; background: #111; color: #b6f5c2; font: 12px/1.5 ui-monospace, monospace;
+             padding: .5rem .8rem; border-radius: 8px; max-height: 9rem; overflow: auto; }
+      .spacer { height: 95vh; display: grid; place-items: center; color: #999; }
+    </style>
+  </head>
+  <body>
+    <h1>Islands — strategy smoke test</h1>
+    <p>
+      Open this in a real browser. Each card activates by a different
+      <code>data-sibu-load</code> strategy; the log shows the order and timing.
+      Verify: <b>load</b> fires immediately, <b>idle</b> shortly after, <b>media</b>
+      depends on viewport width, <b>interaction</b> waits for you, and <b>visible</b>
+      fires only when you scroll to it.
+    </p>
+
+    <pre id="log">activation log:</pre>
+
+    <div class="card" data-sibu-island="s-load">
+      load → <span class="state pending" data-ref="s">pending</span>
+    </div>
+    <div class="card" data-sibu-island="s-idle" data-sibu-load="idle">
+      idle → <span class="state pending" data-ref="s">pending</span>
+    </div>
+    <div class="card" data-sibu-island="s-media" data-sibu-load="media" data-sibu-media="(min-width: 600px)">
+      media (min-width:600px) → <span class="state pending" data-ref="s">pending</span>
+    </div>
+    <div class="card" data-sibu-island="s-interaction" data-sibu-load="interaction">
+      interaction → <span class="state pending" data-ref="s">pending</span>
+      <button data-ref="b">click / focus me</button>
+    </div>
+
+    <div class="spacer">↓ scroll down for the <code>visible</code> island ↓</div>
+
+    <div class="card" data-sibu-island="s-visible" data-sibu-load="visible">
+      visible → <span class="state pending" data-ref="s">pending</span>
+    </div>
+
+    <script src="../dist/cdn.global.js"></script>
+    <script>
+      if (!window.Sibu) {
+        document.body.insertAdjacentHTML(
+          "afterbegin",
+          '<p style="color:#b00">SibuJS did not load from ../dist/cdn.global.js — run <code>npm run build</code>.</p>',
+        );
+      } else {
+        const { registerIsland, mountIslands } = window.Sibu;
+        const log = (name) => {
+          const t = Math.round(performance.now());
+          document.getElementById("log").textContent += `\n[${String(t).padStart(5)}ms] ${name} activated`;
+        };
+        const make = (name) => (ctx) => {
+          log(name);
+          const s = ctx.ref("@s");
+          if (s) {
+            s.textContent = "active";
+            s.classList.remove("pending");
+            s.classList.add("active");
+          }
+        };
+        for (const n of ["s-load", "s-idle", "s-media", "s-interaction", "s-visible"]) {
+          registerIsland(n, make(n));
+        }
+        mountIslands();
+      }
+    </script>
+  </body>
+</html>

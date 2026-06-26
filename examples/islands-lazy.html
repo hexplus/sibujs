@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SibuJS islands — lazy code loading</title>
+    <style>
+      body { font: 15px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; }
+      button { font: inherit; padding: 0.35rem 0.75rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Lazy island code</h1>
+    <p>
+      The island's module (<code>islands/lazy-hello.js</code>) is not requested
+      until you activate it. Open DevTools → Network and click below: the module
+      is fetched on demand, then the island enhances the markup in place.
+    </p>
+
+    <div class="card" data-sibu-island="hello" data-sibu-load="interaction">
+      <b data-ref="v">pending</b>
+      <button data-ref="go">activate (lazy-load the island)</button>
+    </div>
+
+    <script src="../dist/cdn.global.js"></script>
+    <script>
+      const { registerIsland, mountIslands, lazyIsland } = window.Sibu;
+      // The module is fetched only when the island activates (interaction).
+      registerIsland("hello", lazyIsland(() => import("./islands/lazy-hello.js")));
+      mountIslands();
+    </script>
+  </body>
+</html>
