@@ -39,36 +39,56 @@ type ALSLike<T> = {
   run<R>(store: T, fn: () => R): R;
 };
 
-let als: ALSLike<SSRStore> | null = null;
-// One-time runtime detection of AsyncLocalStorage. Exactly one branch runs per
-// environment (Node-with-getBuiltinModule, Node-CommonJS, or non-Node), so the
-// other branches are unreachable in any single coverage run — excluded here.
-/* v8 ignore start */
-try {
-  if (typeof process !== "undefined" && process.versions && process.versions.node) {
-    type AHMod = { AsyncLocalStorage: new () => ALSLike<SSRStore> };
-    let mod: AHMod | null = null;
-    // Prefer process.getBuiltinModule (Node 22.3+): synchronous AND works under
-    // ESM. The `require`-based path below only works in CommonJS, so under ESM
-    // bundles (the common SSR setup) ALS would silently never load and the
-    // per-request SSR scope (flag + query cache) would fall back to a shared
-    // module global — i.e. cross-request data bleed. getBuiltinModule fixes that.
-    const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
-    if (typeof getBuiltin === "function") {
-      mod = getBuiltin("node:async_hooks") as AHMod;
-    } else {
-      const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
-      if (req) mod = req("node:async_hooks") as AHMod;
-    }
-    if (mod) als = new mod.AsyncLocalStorage();
-  }
-} catch {
-  als = null;
+// The AsyncLocalStorage instance and the fallback store are shared across
+// duplicate copies of this module (as a bundler can produce under dependency
+// pre-bundling) via a globalThis registry. Without sharing, each copy would
+// keep its own `als`/`fallbackStore`, so `enableSSR()` in one copy would not be
+// seen by `isSSR()` in another — letting effects run on the server, or leaking
+// per-request state. The first copy runs the (one-time) ALS detection and
+// publishes the shared state; later copies reuse it.
+interface SSRShared {
+  als: ALSLike<SSRStore> | null;
+  fallbackStore: SSRStore;
 }
-/* v8 ignore stop */
+const SSR_KEY = Symbol.for("sibujs.ssr.v1");
 
-// Fallback store used when AsyncLocalStorage is unavailable.
-const fallbackStore: SSRStore = { ssr: false, suspenseIdCounter: 0 };
+function detectSSRShared(): SSRShared {
+  let detected: ALSLike<SSRStore> | null = null;
+  // One-time runtime detection of AsyncLocalStorage. Exactly one branch runs per
+  // environment (Node-with-getBuiltinModule, Node-CommonJS, or non-Node), so the
+  // other branches are unreachable in any single coverage run — excluded here.
+  /* v8 ignore start */
+  try {
+    if (typeof process !== "undefined" && process.versions && process.versions.node) {
+      type AHMod = { AsyncLocalStorage: new () => ALSLike<SSRStore> };
+      let mod: AHMod | null = null;
+      // Prefer process.getBuiltinModule (Node 22.3+): synchronous AND works under
+      // ESM. The `require`-based path below only works in CommonJS, so under ESM
+      // bundles (the common SSR setup) ALS would silently never load and the
+      // per-request SSR scope (flag + query cache) would fall back to a shared
+      // module global — i.e. cross-request data bleed. getBuiltinModule fixes that.
+      const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
+      if (typeof getBuiltin === "function") {
+        mod = getBuiltin("node:async_hooks") as AHMod;
+      } else {
+        const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
+        if (req) mod = req("node:async_hooks") as AHMod;
+      }
+      if (mod) detected = new mod.AsyncLocalStorage();
+    }
+  } catch {
+    detected = null;
+  }
+  /* v8 ignore stop */
+  return { als: detected, fallbackStore: { ssr: false, suspenseIdCounter: 0 } };
+}
+
+const _shared: SSRShared = ((globalThis as typeof globalThis & { [SSR_KEY]?: SSRShared })[SSR_KEY] ??=
+  detectSSRShared());
+// Stable module-local aliases: `als` is never reassigned after detection, and
+// `fallbackStore` is a shared object every copy mutates/reads in place.
+const als = _shared.als;
+const fallbackStore = _shared.fallbackStore;
 
 /** Returns the active store (ALS or fallback). */
 export function getSSRStore(): SSRStore {

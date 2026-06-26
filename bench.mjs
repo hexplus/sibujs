@@ -211,14 +211,40 @@ section("4. Effect Tracking (effect)");
   let effectCount = 0;
 
   const cleanups = [];
-  results.push(
-    runBench(`Create ${fmt(N_EFFECTS)} effects on 1 signal`, () => {
-      for (let i = 0; i < N_EFFECTS; i++) {
-        cleanups.push(effect(() => { get(); effectCount++; }));
-      }
-    }, { iterations: 1 })
-  );
-  printResult(results.at(-1));
+  // Create-only cost, measured trustworthily: each round creates N_EFFECTS on a
+  // FRESH throwaway signal and disposes them OUTSIDE the timed region, so we
+  // measure creation alone, warmed (WARM rounds discarded) and averaged over
+  // ROUNDS. The previous form ran a single un-warmed shot (`iterations: 1`),
+  // which swung ~10→20 ms run to run and made `bench:check` untrustworthy here.
+  {
+    const ROUNDS = 12;
+    const WARM = 3;
+    let elapsed = 0;
+    for (let r = 0; r < WARM + ROUNDS; r++) {
+      const [cget] = signal(0);
+      const tmp = new Array(N_EFFECTS);
+      const t = performance.now();
+      for (let i = 0; i < N_EFFECTS; i++) tmp[i] = effect(() => { cget(); });
+      const dt = performance.now() - t;
+      if (r >= WARM) elapsed += dt;
+      for (let i = 0; i < N_EFFECTS; i++) tmp[i](); // dispose OUTSIDE timing
+    }
+    const result = {
+      name: `Create ${fmt(N_EFFECTS)} effects on 1 signal`,
+      elapsed,
+      iterations: ROUNDS,
+      perOp: elapsed / ROUNDS,
+      opsPerSec: (ROUNDS / elapsed) * 1000,
+    };
+    results.push(result);
+    printResult(result);
+  }
+
+  // Set up the live effects on `get` that the Trigger bench below measures
+  // (untimed — this is fixture setup, not part of any benchmark).
+  for (let i = 0; i < N_EFFECTS; i++) {
+    cleanups.push(effect(() => { get(); effectCount++; }));
+  }
 
   // Update signal → triggers all effects
   effectCount = 0;

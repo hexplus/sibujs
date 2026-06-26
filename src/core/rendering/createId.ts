@@ -1,4 +1,11 @@
-let idCounter = 0;
+// The id counter is shared across duplicate copies of this module (as a bundler
+// can produce under dependency pre-bundling) via a globalThis registry. Without
+// this, two copies would each count from 0 and hand out colliding ids like
+// `sibu-1` — breaking a11y pairing (aria-labelledby / for+id) and SSR hydration.
+// First copy creates the holder; later copies reuse it.
+const COUNTER_KEY = Symbol.for("sibujs.createId.v1");
+const _counter: { n: number } = ((globalThis as typeof globalThis & { [COUNTER_KEY]?: { n: number } })[COUNTER_KEY] ??=
+  { n: 0 });
 
 /**
  * Generate a stable, framework-unique ID string suitable for a11y pairing
@@ -24,8 +31,8 @@ let idCounter = 0;
  * ```
  */
 export function createId(prefix = "sibu"): string {
-  idCounter++;
-  return `${prefix}-${idCounter}`;
+  _counter.n++;
+  return `${prefix}-${_counter.n}`;
 }
 
 /**
@@ -35,5 +42,5 @@ export function createId(prefix = "sibu"): string {
  * @internal
  */
 export function __resetIdCounter(): void {
-  idCounter = 0;
+  _counter.n = 0;
 }
