@@ -7,30 +7,70 @@ import { registerDisposer } from "./dispose";
  */
 export type ActionFn<T = void> = (element: HTMLElement, param: T) => (() => void) | undefined;
 
+// ─── Action registry ────────────────────────────────────────────────────────
+//
+// A name → action map so actions can be applied by string name (plugins,
+// declarative/serialized usage) and discovered without importing each one. The
+// map is shared across duplicate copies of this module via a globalThis registry
+// (first-copy-wins, matching the reactive core), so an action registered in one
+// copy is visible to `action(el, "name", ...)` resolved through another.
+const ACTIONS_KEY = Symbol.for("sibujs.actions.v1");
+const _actions: Map<string, ActionFn<unknown>> = ((
+  globalThis as typeof globalThis & {
+    [ACTIONS_KEY]?: Map<string, ActionFn<unknown>>;
+  }
+)[ACTIONS_KEY] ??= new Map<string, ActionFn<unknown>>());
+
+/**
+ * Register a reusable action under a name so it can be applied by string —
+ * `action(el, "name", param)` — or looked up via {@link getAction}.
+ *
+ * Re-registering the same name overwrites the previous action. The built-in
+ * actions (`clickOutside`, `longPress`, `copyOnClick`, `autoResize`,
+ * `trapFocus`) are auto-registered under their export names.
+ */
+export function registerAction<T>(name: string, fn: ActionFn<T>): void {
+  _actions.set(name, fn as ActionFn<unknown>);
+}
+
+/** Look up a registered action by name, or `undefined` if none is registered. */
+export function getAction<T = unknown>(name: string): ActionFn<T> | undefined {
+  return _actions.get(name) as ActionFn<T> | undefined;
+}
+
 /**
  * Attach a reusable action (element-level behavior) to an element.
  * The action's cleanup function (if returned) is automatically registered
  * via `registerDisposer`, so it runs when the element is disposed.
  *
- * Actions are composable — multiple can be applied to the same element.
+ * The action may be passed directly, or by the name it was registered under
+ * (see {@link registerAction}). Actions are composable — multiple can be
+ * applied to the same element.
  *
  * @param element The target element
- * @param actionFn The action function
+ * @param action The action function, or the name of a registered action
  * @param param Optional parameter passed to the action
  *
  * @example
  * ```ts
  * div({
  *   onElement: (el) => {
- *     action(el, clickOutside, () => setOpen(false));
- *     action(el, longPress, { duration: 500, callback: onLongPress });
+ *     action(el, clickOutside, () => setOpen(false));     // by reference
+ *     action(el, "longPress", { duration: 500, callback: onLongPress }); // by name
  *   },
  * }, "Content");
  * ```
  */
-export function action<T>(element: HTMLElement, actionFn: ActionFn<T>, param: T): void;
-export function action(element: HTMLElement, actionFn: ActionFn<void>): void;
-export function action<T>(element: HTMLElement, actionFn: ActionFn<T>, param?: T): void {
+export function action<T>(element: HTMLElement, action: ActionFn<T> | string, param: T): void;
+export function action(element: HTMLElement, action: ActionFn<void> | string): void;
+export function action<T>(element: HTMLElement, action: ActionFn<T> | string, param?: T): void {
+  const actionFn = typeof action === "string" ? getAction<T>(action) : action;
+  if (!actionFn) {
+    throw new Error(
+      `[SibuJS] No action registered under the name "${action as string}". ` +
+        "Register it with registerAction() before applying it by name.",
+    );
+  }
   const cleanup = actionFn(element, param as T);
   if (typeof cleanup === "function") {
     registerDisposer(element, cleanup);
@@ -183,3 +223,13 @@ export const trapFocus: ActionFn<void> = (element) => {
   element.addEventListener("keydown", handler);
   return () => element.removeEventListener("keydown", handler);
 };
+
+// ─── Built-in registration ──────────────────────────────────────────────────
+//
+// Make the built-ins discoverable by name so `action(el, "clickOutside", …)`
+// works out of the box and plugins can look them up via getAction().
+registerAction("clickOutside", clickOutside);
+registerAction("longPress", longPress);
+registerAction("copyOnClick", copyOnClick);
+registerAction("autoResize", autoResize);
+registerAction("trapFocus", trapFocus);

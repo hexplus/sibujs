@@ -1,8 +1,9 @@
 # SibuJS — Improvement Plan
 
 Status tracker for improvements detected during the core integrity, performance,
-coverage, and OWASP security audits. Discrete items (§2–§6) are **applied**;
-§1 (drive coverage to 100%) is an ongoing multi-turn effort.
+coverage, and OWASP security audits, plus the duplicate-instance hardening (§8).
+Discrete items (§2–§8) are **applied**; §1 (drive coverage to 100%) is an
+ongoing multi-turn effort.
 
 Priority key: **P1** = do next · **P2** = soon · **P3** = nice-to-have.
 Effort key: **S** ≤1h · **M** half-day · **L** multi-day.
@@ -59,8 +60,14 @@ unreachable defensive code. Remaining gaps are mostly single-branch edges
 
 - Fixed the list benchmark's render callback in `bench.mjs`
   (`(item) => li({ nodes: [() => item().label] })`) so each `<li>` renders real
-  content and the per-row item-getter path is exercised. NOTE: re-run
-  `npm run bench:save` to refresh `bench-baseline.json` (the values shifted).
+  content and the per-row item-getter path is exercised.
+- **Benchmark harness made trustworthy** — the `Create 10,000 effects` bench was
+  a single un-warmed `iterations: 1` shot that swung ~10→20 ms run to run. It now
+  measures create-only cost (disposal outside the timed region), warmed (3 rounds
+  discarded) and averaged over 12 rounds on fresh throwaway signals (~14% spread,
+  under the 20% gate). `bench-baseline.json` was regenerated, so `bench:check`
+  reports no false regressions. (Re-run `npm run bench:save` on the reference
+  machine / CI to set canonical numbers — the baseline is machine-specific.)
 - `each` per-row closure pooling — **deferred** (P3): create-only and
   render-dominated; revisit only if list-create profiling flags it.
 
@@ -109,3 +116,50 @@ Already shipped earlier this cycle: `sanitizeCSSValue` fast-path (7.4×),
   hygiene.
 - **Docs:** `sibujs-web` AGENTS.md `base.css` import instruction + corrected
   theme list.
+
+---
+
+## 8. Duplicate-instance resilience (3.3.1–3.3.2)  ·  ✅ APPLIED
+
+SibuJS's coordination singletons silently broke when a bundler materialized a
+module more than once on a page (Vite `optimizeDeps` / esbuild dependency
+pre-bundling serves the same chunk twice — once with `?v=<hash>`, once raw).
+Each copy kept its own module state, so cross-copy interactions (a `signal()`
+write vs. a binding that tracked through the other copy) never connected and
+reactivity died with no error. Fixed by routing every duplicate copy through the
+**first one loaded**, keyed by versioned `Symbol.for` keys on `globalThis`.
+
+- **Reactive core (`reactive.v1`)** — split into `src/reactivity/track-core.ts`
+  (implementations + module-local state) and a `src/reactivity/track.ts` facade
+  that, on first load, publishes the impls and on every later load **re-exports
+  the first copy's functions**. Only one copy's code runs (plain module-local
+  state, byte-identical to a single-instance build), so there is **no hot-path
+  indirection** — an earlier state-sharing attempt regressed effect/binding
+  creation ~70%; function-sharing avoids it (verified by interleaved cold+warm
+  benchmarks).
+- **Singletons swept** (same first-copy-wins pattern):
+  - `batch` (`reactive.batch.v1`) — `batchDepth` / `pendingSignals`.
+  - `createId` (`createId.v1`) — the id counter, so duplicate copies can't both
+    emit `sibu-1` (broke a11y pairing / SSR hydration).
+  - `ssr-context` (`ssr.v1`) — the AsyncLocalStorage instance + fallback store,
+    so `enableSSR()` in one copy is seen by `isSSR()` in another.
+  - `router` `globalRouter` (`router.v1`) — navigation / `Outlet` / `Link` in a
+    duplicated `plugins` chunk see the router `createRouter()` made.
+  - action registry (`actions.v1`) — `registerAction`/`getAction` lookups.
+  - Audited and already safe: `context()` (instance-owned signal), the devtools
+    hook (`__SIBU_DEVTOOLS_GLOBAL_HOOK__` on `globalThis`).
+- **Dev warning** — loading a second copy logs a one-time, actionable warning
+  (de-dupe via `optimizeDeps.exclude` / `resolve.dedupe`), version-stamped via a
+  `__SIBU_VERSION__` build define added in `tsup.config.ts`. Dev-only; strippable.
+- **Tests** — `tests/duplicate-instance.test.ts` evaluates the bundled core twice
+  to prove cross-instance reactivity / batching / id / SSR sharing and the
+  once-only warning; `tests/duplicate-instance-source.test.ts` covers the
+  source-module duplicate-detection branch (pre-seed the registry, re-import) so
+  `track.ts`/`batch.ts` stay at 100%.
+- **Packaging (deferred)** — the published `dist/` is ~30 small, circularly
+  dependent `chunk-*.js` files (normal multi-entry tsup output), which is what
+  makes optimizers clone the core. Consolidating the core into one non-circular
+  chunk was assessed and **deferred**: function-sharing already makes duplication
+  non-breaking, so a build restructure is real regression risk (tree-shaking /
+  entry points) for marginal benefit. Revisit only if bundle-size profiling
+  flags the duplicated core in a real app.
