@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.3.1] — 2026-06-26
+
+A robustness release. No breaking changes; no API or behavior change for normal usage.
+
+### Fixed
+
+- **Reactivity survives a duplicated runtime** — when a bundler materializes the reactive-core module more than once on a page (e.g. dependency pre-bundling in Vite/esbuild, which can serve the same internal chunk twice — once with an `?v=<hash>` query and once raw), `signal()` writes and reactive bindings landed in two independent worlds: a write notified one copy's queue while a binding had tracked itself through the other's. The binding then silently stopped updating, with no error thrown. The runtime now routes every duplicate copy through the first one loaded on the page, so reactivity keeps working regardless of how many copies a bundler emits — and the hot path is unchanged, so single-instance performance is identical. Raw ESM usage was never affected and is unchanged.
+
+### Added
+
+- **Dev warning for duplicated runtimes** — in development, loading a second copy of the reactive runtime now logs a one-time, actionable warning explaining how to de-duplicate (e.g. Vite `optimizeDeps.exclude: ['sibujs']` or `resolve.dedupe: ['sibujs']`). The warning is stripped from production builds.
+
+---
+
 ## [3.3.0] — 2026-06-11
 
 A security-hardening, correctness, and performance release. No breaking changes.
