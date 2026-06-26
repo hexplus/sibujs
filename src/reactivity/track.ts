@@ -1,752 +1,133 @@
 import { devWarn, isDev } from "../core/dev";
-import type { ReactiveSignal } from "./signal";
+import * as core from "./track-core";
 
 // ---------------------------------------------------------------------------
-// Reactivity core — doubly-linked-list subscription edges.
+// Reactive core — duplicate-instance-resilient facade.
 //
-// Each (signal, subscriber) pair is represented by a `SubNode` allocated once
-// and spliced into two lists:
+// Under bundler dependency pre-bundling (Vite optimizeDeps / esbuild, and
+// similar) this module routinely gets materialized TWICE on one page — once
+// with the optimizer's `?v=<hash>` query and once raw. With plain per-copy
+// module state, the two copies form two independent reactive "worlds": a
+// `signal()` write routed through copy A notifies copy A's queue/subscriber
+// lists, while a `track()` binding registered itself via copy B's
+// `currentSubscriber`. The dependency edge crosses the instance boundary, the
+// notification never lands, and reactivity silently dies.
 //
-//   signal.subsHead ─▶ node ─▶ node ─▶ ...      (via sigNext)
-//                      ↑
-//   subscriber.depsHead ─▶ node ─▶ node ─▶ ...  (via subNext)
+// The fix, WITHOUT touching the hot path: the FIRST copy to load publishes its
+// implementations (from ./track-core) on a `globalThis` registry keyed by a
+// versioned `Symbol.for`; every later copy re-exports THOSE functions instead
+// of its own. So exactly one copy's `track-core` code ever runs — using plain
+// module-local `let`/`const` state, byte-identical to a single-instance build,
+// with no shared-object indirection and therefore no perf cost — and all copies
+// funnel through that single source of truth.
 //
-// This replaces the prior `Set<Subscriber>` on signals plus `Map<Signal,
-// epoch>` on subscribers. Wins:
+// (An earlier attempt that shared the *state* behind property/box access
+// measurably regressed binding/effect creation — the hottest paths read and
+// write the tracking context per edge. Sharing the *functions* avoids that
+// entirely, because the duplicate copies' code simply never runs.)
 //
-//  * O(1) subscribe and O(1) unsubscribe (no hash ops, pointer splice)
-//  * Cache-friendly pointer traversal in propagate / notify / cleanup
-//  * One allocation per edge instead of two (was Set entry + Map entry)
-//  * A node pool eliminates per-edge GC pressure on create/destroy churn
-//
-// The `__f` single-subscriber cache is no longer needed — a signal with one
-// subscriber IS a one-step linked list walk, which already beats the prior
-// Set iteration. `__sc` (subscriber count) is maintained for O(1) devtools
-// reads.
+// The `.v1` suffix is the LAYOUT version: bump it only on an incompatible change
+// to what these functions expect of each other / of signal & subscriber objects,
+// so mixed-version pages that are still layout-compatible keep sharing. Keep it
+// in lockstep with batch.ts's sibling registry key.
 // ---------------------------------------------------------------------------
 
-type Subscriber = () => void;
-
-// Cache dev mode at module load for zero-cost production checks
 const _isDev = isDev();
 
-// ---------- Subscription edge ---------------------------------------------
+// Build version stamped onto the registry. Mirrors the `__SIBU_DEV__` define
+// pattern: the bundler may inline `__SIBU_VERSION__`; under the test runner /
+// raw ESM it is undefined, so we fall back to "dev". Only used to enrich the
+// multi-instance dev warning.
+declare const __SIBU_VERSION__: string | undefined;
+const _runtimeVersion = typeof __SIBU_VERSION__ !== "undefined" ? __SIBU_VERSION__ : "dev";
 
-interface SubNode {
-  // The edge endpoints — null only while the node is sitting in the free pool.
-  sig: ReactiveSignal | null;
-  sub: Subscriber | null;
-  // Epoch stamp refreshed on every recordDependency() call. `retrack()` uses
-  // this to detect deps that were present before the run but not re-read.
-  epoch: number;
-  // Doubly-linked into signal.subsHead (most-recent-first insertion order).
-  sigPrev: SubNode | null;
-  sigNext: SubNode | null;
-  // Doubly-linked into subscriber.depsHead (record order).
-  subPrev: SubNode | null;
-  subNext: SubNode | null;
-  // Saved value of `signal.__activeNode` from when THIS node was activated —
-  // lets nested tracking runs restore the outer context's active marker when
-  // they finish, and lets recordDependency refresh existing edges in O(1).
-  prevActive: SubNode | null;
+interface ReactiveApi {
+  suspendTracking: typeof core.suspendTracking;
+  resumeTracking: typeof core.resumeTracking;
+  isTrackingSuspended: typeof core.isTrackingSuspended;
+  untracked: typeof core.untracked;
+  retrack: typeof core.retrack;
+  track: typeof core.track;
+  reactiveBinding: typeof core.reactiveBinding;
+  recordDependency: typeof core.recordDependency;
+  cleanup: typeof core.cleanup;
+  setMaxSubscriberRepeats: typeof core.setMaxSubscriberRepeats;
+  setMaxDrainIterations: typeof core.setMaxDrainIterations;
+  drainNotificationQueue: typeof core.drainNotificationQueue;
+  queueSignalNotification: typeof core.queueSignalNotification;
+  notifySubscribers: typeof core.notifySubscribers;
+  getSubscriberCount: typeof core.getSubscriberCount;
+  getSubscriberDeps: typeof core.getSubscriberDeps;
+  forEachSubscriber: typeof core.forEachSubscriber;
+  version: string;
+  __dupWarned?: boolean;
 }
 
-type SignalWithList = ReactiveSignal & {
-  subsHead?: SubNode | null;
-  subsTail?: SubNode | null;
-  __sc?: number;
-  __name?: string;
-  // Pointer to the subscription edge whose subscriber is CURRENTLY mid-eval.
-  // Non-null only during a tracking run. Gives recordDependency O(1)
-  // "have I already recorded this signal for the current sub?" detection
-  // without walking the subscriber's dep list.
-  __activeNode?: SubNode | null;
-};
+const REGISTRY_KEY = Symbol.for("sibujs.reactive.v1");
 
-// ---------- Node pool -----------------------------------------------------
-//
-// High-churn workloads (create/destroy cycles, wide track()+cleanup) allocate
-// many edges. Pooling avoids GC pressure by reusing node objects. Cap the
-// pool so a pathological spike doesn't retain memory forever.
-//
-// Shape-stable allocation in `createNode`: every node is born with the same
-// hidden class, which matters for V8 inline caches on property reads.
-// ---------------------------------------------------------------------------
-const POOL_MAX = 4096;
-const nodePool: SubNode[] = [];
-
-function createNode(): SubNode {
-  return {
-    sig: null,
-    sub: null,
-    epoch: 0,
-    sigPrev: null,
-    sigNext: null,
-    subPrev: null,
-    subNext: null,
-    prevActive: null,
+function resolveReactiveApi(): ReactiveApi {
+  const g = globalThis as typeof globalThis & { [REGISTRY_KEY]?: ReactiveApi };
+  const existing = g[REGISTRY_KEY];
+  if (existing) {
+    // A prior copy already published its API. By construction a single instance
+    // evaluates this module exactly once, so reaching here means a SECOND copy
+    // of the reactive runtime was loaded on this page. We delegate to the first
+    // copy (reactivity keeps working), but the duplication is wasteful and a
+    // sign of a bundler misconfig.
+    if (_isDev && !existing.__dupWarned) {
+      existing.__dupWarned = true;
+      devWarn(
+        "Multiple instances of the reactive runtime detected on this page " +
+          `(active: ${existing.version}, duplicate: ${_runtimeVersion}). Reactivity ` +
+          "still works — all copies share the first one — but de-duplicate sibujs in " +
+          "your bundler (e.g. Vite optimizeDeps.exclude: ['sibujs'] or " +
+          "resolve.dedupe: ['sibujs']).",
+      );
+    }
+    return existing;
+  }
+  const local: ReactiveApi = {
+    suspendTracking: core.suspendTracking,
+    resumeTracking: core.resumeTracking,
+    isTrackingSuspended: core.isTrackingSuspended,
+    untracked: core.untracked,
+    retrack: core.retrack,
+    track: core.track,
+    reactiveBinding: core.reactiveBinding,
+    recordDependency: core.recordDependency,
+    cleanup: core.cleanup,
+    setMaxSubscriberRepeats: core.setMaxSubscriberRepeats,
+    setMaxDrainIterations: core.setMaxDrainIterations,
+    drainNotificationQueue: core.drainNotificationQueue,
+    queueSignalNotification: core.queueSignalNotification,
+    notifySubscribers: core.notifySubscribers,
+    getSubscriberCount: core.getSubscriberCount,
+    getSubscriberDeps: core.getSubscriberDeps,
+    forEachSubscriber: core.forEachSubscriber,
+    version: _runtimeVersion,
   };
+  g[REGISTRY_KEY] = local;
+  return local;
 }
 
-function allocNode(sig: ReactiveSignal, sub: Subscriber, epoch: number): SubNode {
-  const n = nodePool.pop();
-  if (n) {
-    n.sig = sig;
-    n.sub = sub;
-    n.epoch = epoch;
-    // prev/next pointers left over from last life are overwritten by link ops.
-    return n;
-  }
-  const fresh = createNode();
-  fresh.sig = sig;
-  fresh.sub = sub;
-  fresh.epoch = epoch;
-  return fresh;
-}
+// Resolved once at module init. In the single-instance case this IS this copy's
+// own functions, so the exports below are exactly the local implementations.
+const API: ReactiveApi = resolveReactiveApi();
 
-function freeNode(node: SubNode): void {
-  node.sig = null;
-  node.sub = null;
-  node.sigPrev = null;
-  node.sigNext = null;
-  node.subPrev = null;
-  node.subNext = null;
-  node.prevActive = null;
-  if (nodePool.length < POOL_MAX) nodePool.push(node);
-}
-
-// ---------- List splice helpers -------------------------------------------
-//
-// Inlined by the JIT in most call sites but factored for correctness — a
-// single point of truth for each list's prev/next/head/tail invariant.
-// ---------------------------------------------------------------------------
-
-function linkSignal(sig: SignalWithList, node: SubNode): void {
-  // Insert at the HEAD of signal.subsHead. O(1).
-  //
-  // NOTE ON FIRING ORDER: because subscribers are prepended and the notify
-  // paths walk subsHead → tail, sibling effects/bindings observing the same
-  // signal fire in *reverse subscription order* (most-recently-subscribed
-  // first / LIFO). This is an intentional consequence of O(1) head insertion.
-  // The system is still glitch-free and converges (computeds are pulled lazily;
-  // effects run to a fixed point), so correctness does not depend on order —
-  // but do NOT rely on two sibling effects running in declaration order.
-  const oldHead = sig.subsHead ?? null;
-  node.sigPrev = null;
-  node.sigNext = oldHead;
-  if (oldHead) oldHead.sigPrev = node;
-  else sig.subsTail = node;
-  sig.subsHead = node;
-  sig.__sc = (sig.__sc ?? 0) + 1;
-}
-
-function unlinkSignal(node: SubNode): void {
-  const sig = node.sig as SignalWithList | null;
-  if (!sig) return;
-  const prev = node.sigPrev;
-  const next = node.sigNext;
-  if (prev) prev.sigNext = next;
-  else sig.subsHead = next;
-  if (next) next.sigPrev = prev;
-  else sig.subsTail = prev;
-  sig.__sc = (sig.__sc ?? 1) - 1;
-  // If the signal currently holds `node` as its active marker (rare — only
-  // if we unlink mid-eval, e.g. during pruneStaleDeps), restore to the
-  // saved prior marker so outer tracking contexts keep working.
-  if (sig.__activeNode === node) sig.__activeNode = node.prevActive;
-  // When a signal has no subscribers at all, clear the head/tail slots so
-  // isolated signals don't pin stale node references through their state
-  // objects' hidden class slots.
-  if (sig.__sc === 0) {
-    sig.subsHead = null;
-    sig.subsTail = null;
-  }
-}
-
-function linkSub(sub: SubWithList, node: SubNode): void {
-  // Append to TAIL of subscriber.depsHead. Appending (vs prepending) keeps
-  // recordDependency order aligned with dep-read order, which helps any
-  // future position-based tracking and keeps cleanup traversal predictable.
-  const oldTail = sub.depsTail ?? null;
-  node.subPrev = oldTail;
-  node.subNext = null;
-  if (oldTail) oldTail.subNext = node;
-  else sub.depsHead = node;
-  sub.depsTail = node;
-}
-
-function unlinkSub(node: SubNode): void {
-  const sub = node.sub as SubWithList | null;
-  if (!sub) return;
-  const prev = node.subPrev;
-  const next = node.subNext;
-  if (prev) prev.subNext = next;
-  else sub.depsHead = next;
-  if (next) next.subPrev = prev;
-  else sub.depsTail = prev;
-}
-
-// ---------- Module state --------------------------------------------------
-
-// `currentSubscriber` is the single source of truth for "who is reading?".
-// track() and retrack() save/restore it around the body via a local prev;
-// suspendTracking() captures it into `suspendSavedSub` and restores on resume.
-// No stack is needed — nested tracking runs each keep their own local prev.
-let currentSubscriber: Subscriber | null = null;
-// Captured by suspendTracking at entry (when suspendDepth transitions 0→1);
-// restored by the matching resumeTracking. Nested suspends just bump depth.
-let suspendSavedSub: Subscriber | null = null;
-
-// Notification queue for cascading propagation with deduplication.
-let notifyDepth = 0;
-const pendingQueue: Subscriber[] = [];
-const pendingSet = new Set<Subscriber>();
-
-// Reusable worklist for iterative propagateDirty.
-const propagateStack: ReactiveSignal[] = [];
-
-// Subscribers carry a `depsHead` / `depsTail` pair plus epoch/cycle fields.
-// Kept as a typed alias for readability — at runtime a Subscriber is just
-// a plain function, we attach these as untyped props.
-type SubWithList = Subscriber & {
-  depsHead?: SubNode | null;
-  depsTail?: SubNode | null;
-  _epoch?: number;
-  _structDirty?: boolean;
-  _runEpoch?: number;
-  _runs?: number;
-  _c?: number;
-  _sig?: ReactiveSignal;
-  __name?: string;
-  // Cached disposer returned by track() — allocated once on first track(),
-  // reused for the life of the subscriber. Avoids per-invocation closure
-  // allocation in hot paths (Wide Graph sink: 10k+ calls, Memory benchmark:
-  // 25k+ effect creations).
-  _dispose?: () => void;
-};
-
-// ---------- Safe invoke ---------------------------------------------------
-
-function safeInvoke(sub: Subscriber): void {
-  try {
-    sub();
-  } catch (err) {
-    if (_isDev) devWarn(`Subscriber threw during notification: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
-// ---------- Tracking suspension -------------------------------------------
-
-let suspendDepth = 0;
-export let trackingSuspended = false;
-
-export function suspendTracking(): void {
-  if (suspendDepth === 0) {
-    // Capture the ACTUAL current subscriber (not null). Resume restores
-    // to this, so `untracked()` inside a tracking context returns control
-    // to that context with the right subscriber, without needing a stack.
-    suspendSavedSub = currentSubscriber;
-    currentSubscriber = null;
-    trackingSuspended = true;
-  }
-  suspendDepth++;
-}
-
-export function resumeTracking(): void {
-  suspendDepth--;
-  if (suspendDepth === 0) {
-    currentSubscriber = suspendSavedSub;
-    suspendSavedSub = null;
-    trackingSuspended = false;
-  }
-}
-
-export function untracked<T>(fn: () => T): T {
-  suspendTracking();
-  try {
-    return fn();
-  } finally {
-    resumeTracking();
-  }
-}
-
-// ---------- Epoch counter for retrack-based pruning -----------------------
-
-let subscriberEpochCounter = 0;
-
-// ---------- retrack -------------------------------------------------------
-//
-// Re-run a subscriber body. Stable deps have their epoch stamp refreshed;
-// deps that are no longer read are pruned at the end. Used by `derived()`
-// to validate / recompute without paying the full Set.delete + re-add cycle
-// of `track()`'s cleanup phase.
-// ---------------------------------------------------------------------------
-export function retrack(effectFn: () => void, subscriber: Subscriber): void {
-  const prev = currentSubscriber;
-  currentSubscriber = subscriber;
-  const sub = subscriber as SubWithList;
-  const epoch = ++subscriberEpochCounter;
-  sub._epoch = epoch;
-  sub._structDirty = false;
-
-  // Pre-walk: activate every existing dep on its signal so in-body
-  // recordDependency hits can refresh the existing edge in O(1) via
-  // `signal.__activeNode === existingNode && existingNode.sub === sub`.
-  // Each node stashes the prior `__activeNode` value in `prevActive` so
-  // outer tracking contexts' markers can be restored at post-walk.
-  for (let n: SubNode | null = sub.depsHead ?? null; n !== null; n = n.subNext) {
-    const sig = n.sig as SignalWithList;
-    n.prevActive = sig.__activeNode ?? null;
-    sig.__activeNode = n;
-  }
-
-  try {
-    effectFn();
-  } finally {
-    currentSubscriber = prev;
-    // Combined post-walk + stale-prune. For each node: restore the signal's
-    // `__activeNode` to whatever outer tracking context had, then drop the
-    // node if it wasn't refreshed during this run.
-    let node = sub.depsHead ?? null;
-    while (node !== null) {
-      const next: SubNode | null = node.subNext;
-      const sig = node.sig as SignalWithList;
-      sig.__activeNode = node.prevActive;
-      node.prevActive = null;
-      if (node.epoch !== epoch) {
-        unlinkSub(node);
-        unlinkSignal(node);
-        freeNode(node);
-      }
-      node = next;
-    }
-  }
-}
-
-// ---------- track ---------------------------------------------------------
-//
-// Full-cleanup + re-run. Used by effects (and one-shot initial setup of
-// computeds). Returns a disposer that clears all remaining subs.
-//
-// Stack-free: saves `currentSubscriber` in a local and restores it in
-// `finally`. Nested tracking runs each keep their own local prev; the old
-// `subscriberStack` was only ever needed because `suspend/resumeTracking`
-// used to push/pop null markers through it. suspend/resume now capture
-// the current subscriber directly, so no shared stack is needed.
-// ---------------------------------------------------------------------------
-export function track(effectFn: () => void, subscriber?: Subscriber): () => void {
-  // No explicit subscriber → this is an eagerly-re-running reactive binding
-  // (the common `track(commit)` form used by class/style getters, directives,
-  // router views, `watch`, `each`, etc.). Route it through `reactiveBinding`
-  // so every re-run re-tracks dependencies. Using the body itself as the
-  // subscriber (the old behavior) meant re-runs were invoked WITHOUT a tracking
-  // context, so signals first read on a later run were never subscribed — the
-  // per-run-tracking correctness bug. An EXPLICIT subscriber (e.g. `derived`'s
-  // `markDirty`) keeps the run-once semantics below; such callers drive their
-  // own re-evaluation via `retrack`.
-  if (!subscriber) return reactiveBinding(effectFn);
-  cleanup(subscriber);
-
-  const prev = currentSubscriber;
-  currentSubscriber = subscriber;
-
-  try {
-    effectFn();
-  } finally {
-    currentSubscriber = prev;
-
-    // Post-walk: restore each signal's `__activeNode` to what outer
-    // tracking contexts had before this track() started. We never do a
-    // pre-walk here because cleanup() emptied the dep list up-front.
-    const sub = subscriber as SubWithList;
-    for (let n: SubNode | null = sub.depsHead ?? null; n !== null; n = n.subNext) {
-      const sig = n.sig as SignalWithList;
-      sig.__activeNode = n.prevActive;
-      n.prevActive = null;
-    }
-  }
-
-  // Cache the disposer on the subscriber so repeated track() calls (effects
-  // re-running, derived re-setup) don't each allocate a fresh `() => cleanup`
-  // closure. For a 10k-subscriber workload this eliminates 10k allocations.
-  const sub = subscriber as SubWithList;
-  return sub._dispose ?? (sub._dispose = () => cleanup(subscriber));
-}
-
-// ---------- reactiveBinding ------------------------------------------------
-//
-// Eagerly re-running reactive binding used by the DOM binding paths
-// (bindChildNode / bindTextNode / bindAttribute). The subtlety it fixes:
-//
-//   A bare `track(commit)` registers `commit` ITSELF as the subscriber. On the
-//   first run `commit` records its deps, but when a signal later notifies, the
-//   drain invokes `commit()` DIRECTLY — with no `currentSubscriber` set and no
-//   epoch reset. So `recordDependency` is a no-op on every re-run: deps read
-//   for the FIRST time on a later run are never subscribed, and deps no longer
-//   read are never pruned. The binding is reactive only to whatever it read on
-//   its very first evaluation.
-//
-// The fix mirrors `effect()` / `derived()`: register a self-retracking
-// subscriber. Every notification re-runs `commit` through `retrack`, which
-// re-establishes the dependency set per run — adding newly-read deps and
-// pruning stale ones. Returns a disposer that tears down all edges.
-//
-// The `_reentrant` guard makes every `retrack` of a given subscriber mutually
-// exclusive. It is REQUIRED for correctness, not just loop safety: a `commit`
-// that writes to one of its own deps mid-run (e.g. ErrorBoundary's content
-// getter calls `setError` when a child render throws) would otherwise trigger
-// the drain to re-invoke the subscriber synchronously, nesting a second
-// `retrack` inside the first. The nested run bumps shared dep edges to a newer
-// epoch, and the OUTER run's post-walk then prunes those edges as "stale" —
-// silently dropping live subscriptions. Skipping the synchronous re-entry
-// keeps the epoch bookkeeping single-threaded; the write still re-enqueues the
-// subscriber, so the drain re-runs it once the outer run unwinds (eventual
-// consistency, bounded by the drain's `tickRepeat` cap).
-//
-// The guard wraps BOTH the initial run and every notification-driven run.
-// ---------------------------------------------------------------------------
-export function reactiveBinding(commit: () => void): () => void {
-  const run = (): void => {
-    const s = subscriber as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
-    // A binding can be queued for notification and then disposed before the
-    // drain reaches it (e.g. an enclosing when/each row is removed mid-drain).
-    // Without this guard, re-running would re-read its signals and RE-SUBSCRIBE
-    // the just-cleaned-up edges — a zombie binding that fires forever. Mirrors
-    // the effect `disposed` guard so "dispose" reliably means "stop".
-    if (s._disposed || s._reentrant) return;
-    s._reentrant = true;
-    try {
-      retrack(commit, subscriber);
-    } finally {
-      s._reentrant = false;
-    }
-  };
-  const subscriber = run as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
-
-  // Pre-initialize every field the core touches so all binding subscribers
-  // share one hidden class (monomorphic inline caches in retrack / cleanup).
-  subscriber.depsHead = null;
-  subscriber.depsTail = null;
-  subscriber._epoch = 0;
-  subscriber._structDirty = false;
-  subscriber._runEpoch = 0;
-  subscriber._runs = 0;
-  subscriber._reentrant = false;
-  subscriber._disposed = false;
-
-  // Initial run establishes the first dependency set (guarded, see above).
-  run();
-
-  return (
-    subscriber._dispose ??
-    (subscriber._dispose = () => {
-      (subscriber as { _disposed?: boolean })._disposed = true;
-      cleanup(subscriber);
-    })
-  );
-}
-
-// ---------- recordDependency ----------------------------------------------
-//
-// Called for every signal read inside a tracking context. O(1) in all cases
-// via the `signal.__activeNode` back-pointer:
-//
-//   * Pre-walk (retrack) or recordDependency-at-first-read (track) sets
-//     `signal.__activeNode` to the edge for the current subscriber.
-//   * Subsequent reads see `__activeNode.sub === currentSubscriber` and
-//     refresh epoch in place — no linked-list walk.
-//
-// This is Preact Signals' approach. Without it, a subscriber with N deps
-// (e.g. a sink effect in a wide fan-out graph) pays O(N²) per track run.
-// ---------------------------------------------------------------------------
-export function recordDependency(signal: ReactiveSignal) {
-  if (!currentSubscriber) return;
-
-  const sub = currentSubscriber as SubWithList;
-  const sig = signal as SignalWithList;
-  const epoch = sub._epoch ?? 0;
-
-  // O(1) dup check: if the signal's active edge already points at us,
-  // it's a re-read within this run. Refresh the epoch and we're done.
-  const active = sig.__activeNode ?? null;
-  if (active !== null && active.sub === sub) {
-    active.epoch = epoch;
-    return;
-  }
-
-  // New edge. Stash whatever `__activeNode` was (may be null, may be an
-  // outer tracking context's node) into `prevActive` so the post-walk
-  // restores it.
-  const node = allocNode(signal, sub, epoch);
-  node.prevActive = active;
-  sig.__activeNode = node;
-  linkSub(sub, node);
-  linkSignal(sig, node);
-  sub._structDirty = true;
-}
-
-// ---------- cleanup --------------------------------------------------------
-//
-// Tear down every edge attached to this subscriber. Called by track() before
-// re-running and by the dispose handle. Nodes are returned to the pool.
-//
-// Exported so callers can dispose a subscriber without track() having to
-// allocate a per-call closure `() => cleanup(sub)`. Effect.ts calls this
-// directly on dispose, eliminating ~1 closure allocation per track() call.
-// ---------------------------------------------------------------------------
-export function cleanup(subscriber: Subscriber): void {
-  const sub = subscriber as SubWithList;
-  let node = sub.depsHead ?? null;
-  // We clear the subscriber's head/tail up-front so we don't have to
-  // repeatedly adjust them while unlinking — each node still needs its own
-  // signal-side unlink to maintain the signal's list invariant.
-  sub.depsHead = null;
-  sub.depsTail = null;
-  while (node) {
-    const next = node.subNext;
-    unlinkSignal(node);
-    freeNode(node);
-    node = next;
-  }
-}
-
-// ---------- Cycle detection -----------------------------------------------
-//
-// Per-subscriber repeat count within a single drain. A subscriber that fires
-// more than `maxSubscriberRepeats` times in one drain is almost certainly a
-// write-reads-self cycle — bail loudly instead of wasting cycles. Counts
-// live on the subscriber itself via an epoch to avoid end-of-drain walks.
-// ---------------------------------------------------------------------------
-let maxSubscriberRepeats = 50;
-let maxDrainIterations = 1_000_000;
-let drainEpoch = 0;
-
-export function setMaxSubscriberRepeats(n: number): number {
-  const prev = maxSubscriberRepeats;
-  if (Number.isFinite(n) && n > 0) maxSubscriberRepeats = Math.floor(n);
-  return prev;
-}
-
-export function setMaxDrainIterations(n: number): number {
-  const prev = maxDrainIterations;
-  if (Number.isFinite(n) && n > 0) maxDrainIterations = Math.floor(n);
-  return prev;
-}
-
-function tickRepeat(sub: Subscriber): boolean {
-  const s = sub as SubWithList;
-  if (s._runEpoch !== drainEpoch) {
-    s._runEpoch = drainEpoch;
-    s._runs = 1;
-    return false;
-  }
-  s._runs = (s._runs ?? 0) + 1;
-  return s._runs > maxSubscriberRepeats;
-}
-
-function cycleError(sub: Subscriber): void {
-  if (typeof console !== "undefined") {
-    const name = (sub as SubWithList).__name ?? "<unnamed>";
-    console.error(
-      `[SibuJS] subscriber "${name}" fired more than ${maxSubscriberRepeats} times — ` +
-        "likely a write-reads-self cycle between effects/signals. Breaking to prevent infinite loop.",
-    );
-  }
-}
-
-function absoluteDrainError(): void {
-  if (typeof console !== "undefined") {
-    console.error(
-      `[SibuJS] Notification drain exceeded ${maxDrainIterations} iterations — ` +
-        "absolute safety net tripped. Breaking to prevent infinite loop.",
-    );
-  }
-}
-
-// ---------- Drain ---------------------------------------------------------
-
-function drainQueue(): void {
-  let i = 0;
-  while (i < pendingQueue.length) {
-    if (i >= maxDrainIterations) {
-      absoluteDrainError();
-      break;
-    }
-    const sub = pendingQueue[i++];
-    if (tickRepeat(sub)) {
-      cycleError(sub);
-      break;
-    }
-    // Remove from pendingSet BEFORE invoking so a cascading write during
-    // this sub's execution can re-enqueue it. Enables sibling-effect
-    // convergence; tickRepeat caps runaway loops.
-    pendingSet.delete(sub);
-    safeInvoke(sub);
-  }
-}
-
-export function drainNotificationQueue(): void {
-  if (notifyDepth > 0) return;
-  notifyDepth++;
-  drainEpoch++;
-  try {
-    drainQueue();
-  } finally {
-    notifyDepth--;
-    if (notifyDepth === 0) {
-      pendingQueue.length = 0;
-      pendingSet.clear();
-    }
-  }
-}
-
-// ---------- propagateDirty ------------------------------------------------
-//
-// Walks downstream from a changed signal, marking computed subscribers dirty
-// and enqueuing effect subscribers. Iterative via a module-level worklist so
-// deep chains (1000+ levels) don't consume the JS call stack.
-// ---------------------------------------------------------------------------
-function propagateDirty(sub: Subscriber): void {
-  sub(); // markDirty: sets the computed's _d flag
-  const rootSig: ReactiveSignal | undefined = (sub as SubWithList)._sig;
-  if (!rootSig) return;
-
-  const stack = propagateStack;
-  const baseLen = stack.length;
-  stack.push(rootSig);
-
-  while (stack.length > baseLen) {
-    const sig = stack.pop() as SignalWithList;
-    let node = sig.subsHead ?? null;
-    while (node) {
-      const s = node.sub as SubWithList | null;
-      // node.sub is null only inside freeNode — shouldn't happen mid-walk,
-      // but the guard keeps us safe against a freed-but-still-linked corner
-      // case during a throwing effect body.
-      if (s) {
-        if (s._c) {
-          const nSig = s._sig as (SignalWithList & { _d?: boolean }) | undefined;
-          if (nSig) {
-            // Avoid redundant downstream walks when the same signal is
-            // reached by multiple diamond paths — mark dirty inline and
-            // only push the signal if it wasn't already dirty.
-            if (!nSig._d) {
-              nSig._d = true;
-              stack.push(nSig);
-            }
-            // Defensive: every `_c` (computed) subscriber carries a `_sig`
-            // (set in derived()), so this fallback is unreachable in practice.
-            /* v8 ignore next 3 */
-          } else {
-            s();
-          }
-        } else if (!pendingSet.has(s)) {
-          pendingSet.add(s);
-          pendingQueue.push(s);
-        }
-      }
-      node = node.sigNext;
-    }
-  }
-}
-
-// ---------- Public notification entrypoints ------------------------------
-
-export function queueSignalNotification(signal: ReactiveSignal): void {
-  const sig = signal as SignalWithList;
-  let node = sig.subsHead ?? null;
-  while (node) {
-    const s = node.sub as SubWithList | null;
-    if (s) {
-      if (s._c) {
-        propagateDirty(s);
-      } else if (!pendingSet.has(s)) {
-        pendingSet.add(s);
-        pendingQueue.push(s);
-      }
-    }
-    node = node.sigNext;
-  }
-}
-
-export function notifySubscribers(signal: ReactiveSignal) {
-  const sig = signal as SignalWithList;
-  const head = sig.subsHead;
-  if (!head) return;
-
-  if (notifyDepth > 0) {
-    // Cascading: enqueue everything with dedup.
-    let node: SubNode | null = head;
-    while (node) {
-      const s = node.sub as SubWithList | null;
-      if (s) {
-        if (s._c) {
-          propagateDirty(s);
-        } else if (!pendingSet.has(s)) {
-          pendingSet.add(s);
-          pendingQueue.push(s);
-        }
-      }
-      node = node.sigNext;
-    }
-    return;
-  }
-
-  // Outermost notification: snapshot direct subs into the queue, then drain.
-  // Using the existing pendingQueue/pendingSet keeps the drain semantics
-  // (eventual-consistency via pre-invoke pendingSet.delete) identical to the
-  // Set-based implementation.
-  notifyDepth++;
-  drainEpoch++;
-  try {
-    let node: SubNode | null = head;
-    while (node) {
-      const s = node.sub as SubWithList | null;
-      if (s) {
-        if (s._c) {
-          propagateDirty(s);
-        } else if (!pendingSet.has(s)) {
-          pendingSet.add(s);
-          pendingQueue.push(s);
-        }
-      }
-      node = node.sigNext;
-    }
-    drainQueue();
-  } finally {
-    notifyDepth--;
-    if (notifyDepth === 0) {
-      pendingQueue.length = 0;
-      pendingSet.clear();
-    }
-  }
-}
-
-// ---------- Devtools helpers ----------------------------------------------
-
-/** O(1) subscriber count for devtools / introspection. */
-export function getSubscriberCount(signal: ReactiveSignal): number {
-  return (signal as SignalWithList).__sc ?? 0;
-}
-
-/** Return the signals a subscriber currently depends on, in record order. */
-export function getSubscriberDeps(subscriber: Subscriber): ReactiveSignal[] {
-  const sub = subscriber as SubWithList;
-  const out: ReactiveSignal[] = [];
-  let node = sub.depsHead ?? null;
-  while (node) {
-    if (node.sig) out.push(node.sig);
-    node = node.subNext;
-  }
-  return out;
-}
-
-/** Iterate subscribers of a signal (devtools graph walk). */
-export function forEachSubscriber(signal: ReactiveSignal, visit: (sub: Subscriber) => void): void {
-  let node = (signal as SignalWithList).subsHead ?? null;
-  while (node) {
-    const s = node.sub;
-    if (s) visit(s);
-    node = node.sigNext;
-  }
-}
+export const suspendTracking: ReactiveApi["suspendTracking"] = API.suspendTracking;
+export const resumeTracking: ReactiveApi["resumeTracking"] = API.resumeTracking;
+export const isTrackingSuspended: ReactiveApi["isTrackingSuspended"] = API.isTrackingSuspended;
+export const untracked: ReactiveApi["untracked"] = API.untracked;
+export const retrack: ReactiveApi["retrack"] = API.retrack;
+export const track: ReactiveApi["track"] = API.track;
+export const reactiveBinding: ReactiveApi["reactiveBinding"] = API.reactiveBinding;
+export const recordDependency: ReactiveApi["recordDependency"] = API.recordDependency;
+export const cleanup: ReactiveApi["cleanup"] = API.cleanup;
+export const setMaxSubscriberRepeats: ReactiveApi["setMaxSubscriberRepeats"] = API.setMaxSubscriberRepeats;
+export const setMaxDrainIterations: ReactiveApi["setMaxDrainIterations"] = API.setMaxDrainIterations;
+export const drainNotificationQueue: ReactiveApi["drainNotificationQueue"] = API.drainNotificationQueue;
+export const queueSignalNotification: ReactiveApi["queueSignalNotification"] = API.queueSignalNotification;
+export const notifySubscribers: ReactiveApi["notifySubscribers"] = API.notifySubscribers;
+export const getSubscriberCount: ReactiveApi["getSubscriberCount"] = API.getSubscriberCount;
+export const getSubscriberDeps: ReactiveApi["getSubscriberDeps"] = API.getSubscriberDeps;
+export const forEachSubscriber: ReactiveApi["forEachSubscriber"] = API.forEachSubscriber;

@@ -1,6 +1,11 @@
 import type { ReactiveSignal } from "./signal";
 import { drainNotificationQueue, queueSignalNotification } from "./track";
 
+// Batch coordination state is plain module-local — the same first-copy-wins
+// function-sharing as track.ts (see its file header) keeps it a single source
+// of truth across duplicate runtime instances: the first copy publishes its
+// batch functions on a globalThis registry and every later copy re-exports
+// them, so all copies funnel through ONE copy's batchDepth / pendingSignals.
 let batchDepth = 0;
 const pendingSignals = new Set<ReactiveSignal>();
 
@@ -26,7 +31,7 @@ const pendingSignals = new Set<ReactiveSignal>();
  * }); // Only one notification pass, result === "done"
  * ```
  */
-export function batch<T>(fn: () => T): T {
+function batchImpl<T>(fn: () => T): T {
   batchDepth++;
   try {
     return fn();
@@ -42,7 +47,7 @@ export function batch<T>(fn: () => T): T {
  * Queue a signal for deferred notification during a batch.
  * If not batching, returns false so the caller can notify immediately.
  */
-export function enqueueBatchedSignal(signal: ReactiveSignal): boolean {
+function enqueueBatchedSignalImpl(signal: ReactiveSignal): boolean {
   if (batchDepth === 0) return false;
   pendingSignals.add(signal);
   return true;
@@ -51,7 +56,7 @@ export function enqueueBatchedSignal(signal: ReactiveSignal): boolean {
 /**
  * Check if we're currently inside a batch.
  */
-export function isBatching(): boolean {
+function isBatchingImpl(): boolean {
   return batchDepth > 0;
 }
 
@@ -74,3 +79,32 @@ function flushBatch(): void {
   }
   drainNotificationQueue();
 }
+
+// ---------- Shared-instance registry (see track.ts) -----------------------
+
+interface BatchApi {
+  batch: typeof batchImpl;
+  enqueueBatchedSignal: typeof enqueueBatchedSignalImpl;
+  isBatching: typeof isBatchingImpl;
+}
+
+const BATCH_REGISTRY_KEY = Symbol.for("sibujs.reactive.batch.v1");
+
+function resolveBatchApi(): BatchApi {
+  const g = globalThis as typeof globalThis & { [BATCH_REGISTRY_KEY]?: BatchApi };
+  const existing = g[BATCH_REGISTRY_KEY];
+  if (existing) return existing;
+  const local: BatchApi = {
+    batch: batchImpl,
+    enqueueBatchedSignal: enqueueBatchedSignalImpl,
+    isBatching: isBatchingImpl,
+  };
+  g[BATCH_REGISTRY_KEY] = local;
+  return local;
+}
+
+const API: BatchApi = resolveBatchApi();
+
+export const batch: BatchApi["batch"] = API.batch;
+export const enqueueBatchedSignal: BatchApi["enqueueBatchedSignal"] = API.enqueueBatchedSignal;
+export const isBatching: BatchApi["isBatching"] = API.isBatching;

@@ -1,5 +1,5 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
-import { recordDependency, retrack, track, trackingSuspended } from "../../reactivity/track";
+import { isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import type { Accessor } from "./signal";
 
@@ -101,7 +101,7 @@ export function derived<T>(
       );
     }
 
-    if (trackingSuspended) {
+    if (isTrackingSuspended()) {
       if (cs._d) {
         const prev = cs._v;
         evaluating = true;
