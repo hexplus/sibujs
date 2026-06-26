@@ -14,6 +14,7 @@ Continues the duplicate-runtime hardening from 3.3.1. No breaking changes; no AP
 
 - **`createId()` no longer collides across a duplicated runtime** — the unique-id counter is now shared across copies (the same first-copy-wins mechanism 3.3.1 introduced for the reactive core), so two copies can't both hand out `sibu-1`. This prevents broken a11y associations (`aria-labelledby`, `for` + `id`) and SSR hydration mismatches when a bundler duplicates the module.
 - **SSR mode is consistent across a duplicated runtime** — the SSR flag/context (AsyncLocalStorage + fallback store) is now shared, so `enableSSR()` taking effect in one copy is observed by `isSSR()` in another. Previously a split could let client-only side effects run during a server render, or leak per-request state across copies.
+- **The router survives a duplicated runtime** — the global router instance is now shared across copies, so navigation, `Outlet`, and `Link` helpers bundled into a second copy of the `plugins` chunk see the router created by `createRouter()` in the first copy, instead of throwing "Router not initialized."
 
 ### Changed
 
