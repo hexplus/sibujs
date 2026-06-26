@@ -143,23 +143,23 @@ export interface BoundFieldProps {
  * ```
  */
 export function bindField<T>(field: FormField<T>, extras?: Record<string, unknown>): BoundFieldProps {
+  // Read the right value off a form control: a checkbox → its `checked` flag, a
+  // `<select multiple>` → the array of selected option values, otherwise the
+  // control's `value`. Shared by the input and change handlers so both events
+  // produce a consistent value (a `<select multiple>` fires both).
+  const readControlValue = (target: HTMLInputElement | HTMLSelectElement): T => {
+    if ("checked" in target && target.type === "checkbox") {
+      return target.checked as unknown as T;
+    }
+    if (target instanceof HTMLSelectElement && target.multiple) {
+      return Array.from(target.selectedOptions, (o) => o.value) as unknown as T;
+    }
+    return target.value as unknown as T;
+  };
+
   const fieldOn: BoundFieldProps["on"] = {
-    input: (e: Event) => {
-      const target = e.target as HTMLInputElement;
-      if (target.type === "checkbox") {
-        field.set(target.checked as unknown as T);
-      } else {
-        field.set(target.value as unknown as T);
-      }
-    },
-    change: (e: Event) => {
-      const target = e.target as HTMLInputElement | HTMLSelectElement;
-      if ("checked" in target && target.type === "checkbox") {
-        field.set(target.checked as unknown as T);
-      } else {
-        field.set(target.value as unknown as T);
-      }
-    },
+    input: (e: Event) => field.set(readControlValue(e.target as HTMLInputElement | HTMLSelectElement)),
+    change: (e: Event) => field.set(readControlValue(e.target as HTMLInputElement | HTMLSelectElement)),
     blur: () => field.touch(),
   };
 
