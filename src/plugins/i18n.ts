@@ -1,12 +1,22 @@
 import { span } from "../core/rendering/html";
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 
 type Translations = Record<string, string>;
 type LocaleMap = Record<string, Translations>;
 type Params = Record<string, string | number>;
 
-const [currentLocale, setLocaleInternal] = signal("en");
-const locales: LocaleMap = {};
+// The active locale and the translation map are shared via globalSingleton so a
+// bundler that duplicates the `plugins` chunk doesn't split i18n into two
+// worlds (where `setLocale()` in one copy never reaches `t()`/`Trans()` in
+// another). NOTE: this state is still process-global — per-request SSR locale
+// isolation is a separate follow-up (see TODO.md §C).
+const _i18n = globalSingleton(Symbol.for("sibujs.i18n.v1"), () => ({
+  locale: signal("en"),
+  locales: {} as LocaleMap,
+}));
+const [currentLocale, setLocaleInternal] = _i18n.locale;
+const locales = _i18n.locales;
 
 export function setLocale(locale: string) {
   setLocaleInternal(locale);

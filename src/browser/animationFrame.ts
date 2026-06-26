@@ -51,6 +51,7 @@ export function animationFrame(options: AnimationFrameOptions = {}): {
   let id: number | null = null;
   let prev = -1;
   let start = -1;
+  let disposed = false;
   const minFrameMs = options.fpsLimit ? 1000 / options.fpsLimit : 0;
 
   const step = (now: number) => {
@@ -66,7 +67,8 @@ export function animationFrame(options: AnimationFrameOptions = {}): {
   };
 
   function resume() {
-    if (id !== null) return;
+    // `disposed` makes dispose() permanent — resume() can't restart the loop.
+    if (disposed || id !== null) return;
     setRunning(true);
     id = requestAnimationFrame(step);
   }
@@ -82,6 +84,7 @@ export function animationFrame(options: AnimationFrameOptions = {}): {
   }
 
   function dispose() {
+    disposed = true;
     pause();
   }
 

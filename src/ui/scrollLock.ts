@@ -18,6 +18,8 @@
  * lock.unlock();
  * ```
  */
+import { globalSingleton } from "../utils/globalSingleton";
+
 export interface ScrollLockHandle {
   /** Activate a lock. Idempotent per-handle if called twice. */
   lock: () => void;
@@ -34,9 +36,14 @@ export interface ScrollLockHandle {
 // the lock is active — if application code assigns `body.style.overflow`
 // during a lock, that value will be clobbered on unlock. Keep modal state
 // in scrollLock handles, not direct style writes.
-let lockCount = 0;
-let savedOverflow: string | null = null;
-let savedPaddingRight: string | null = null;
+// Shared via globalSingleton so a duplicated copy of this module doesn't keep
+// its own counter/snapshot — otherwise one copy's N→0 unlock would restore
+// `overflow` while another copy still holds an open lock.
+const _lock = globalSingleton(Symbol.for("sibujs.scrollLock.v1"), () => ({
+  count: 0,
+  savedOverflow: null as string | null,
+  savedPaddingRight: null as string | null,
+}));
 
 export function scrollLock(): ScrollLockHandle {
   let owned = false;
@@ -44,15 +51,15 @@ export function scrollLock(): ScrollLockHandle {
   function lock() {
     if (owned) return;
     owned = true;
-    lockCount++;
+    _lock.count++;
     // Only the 0 → 1 transition snapshots and mutates the body; nested locks
     // increment the counter and otherwise no-op.
-    if (lockCount !== 1 || typeof document === "undefined") return;
+    if (_lock.count !== 1 || typeof document === "undefined") return;
 
     const body = document.body;
     const scrollBarWidth = window.innerWidth - document.documentElement.clientWidth;
-    savedOverflow = body.style.overflow;
-    savedPaddingRight = body.style.paddingRight;
+    _lock.savedOverflow = body.style.overflow;
+    _lock.savedPaddingRight = body.style.paddingRight;
     body.style.overflow = "hidden";
     if (scrollBarWidth > 0) {
       body.style.paddingRight = `${scrollBarWidth}px`;
@@ -62,15 +69,15 @@ export function scrollLock(): ScrollLockHandle {
   function unlock() {
     if (!owned) return;
     owned = false;
-    lockCount = Math.max(0, lockCount - 1);
+    _lock.count = Math.max(0, _lock.count - 1);
     // Only the N → 0 transition restores the snapshot.
-    if (lockCount !== 0 || typeof document === "undefined") return;
+    if (_lock.count !== 0 || typeof document === "undefined") return;
 
     const body = document.body;
-    body.style.overflow = savedOverflow ?? "";
-    body.style.paddingRight = savedPaddingRight ?? "";
-    savedOverflow = null;
-    savedPaddingRight = null;
+    body.style.overflow = _lock.savedOverflow ?? "";
+    body.style.paddingRight = _lock.savedPaddingRight ?? "";
+    _lock.savedOverflow = null;
+    _lock.savedPaddingRight = null;
   }
 
   return { lock, unlock };

@@ -153,9 +153,10 @@ export function lazyModule<T>(loader: () => Promise<T>): { get: () => Promise<T>
       return loadedFlag;
     },
     async get(): Promise<T> {
-      if (loadedFlag && cached !== undefined) {
-        return cached;
-      }
+      // Gate on the flag alone — a loader that legitimately resolves to
+      // `undefined` (or a falsy module) must still be cached, not re-invoked
+      // (which would re-run side-effectful imports) on every get().
+      if (loadedFlag) return cached as T;
       cached = await loader();
       loadedFlag = true;
       return cached;

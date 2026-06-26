@@ -1,6 +1,7 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
+import { globalSingleton } from "../utils/globalSingleton";
 
 // ============================================================================
 // ACCESSIBILITY
@@ -258,14 +259,15 @@ export function hotkey(
  * queue so that each message has a chance to be read before the next one
  * overwrites the live region.
  */
-const announceQueues: Record<"polite" | "assertive", string[]> = {
-  polite: [],
-  assertive: [],
-};
-const announceDraining: Record<"polite" | "assertive", boolean> = {
-  polite: false,
-  assertive: false,
-};
+// Shared via globalSingleton: the queues and the draining flags both target the
+// single `#sibu-announce-*` live region in the DOM, so a duplicated copy of this
+// module must not run its own parallel drain loop against the same region.
+const _announce = globalSingleton(Symbol.for("sibujs.a11y.announce.v1"), () => ({
+  queues: { polite: [] as string[], assertive: [] as string[] },
+  draining: { polite: false, assertive: false },
+}));
+const announceQueues: Record<"polite" | "assertive", string[]> = _announce.queues;
+const announceDraining: Record<"polite" | "assertive", boolean> = _announce.draining;
 const ANNOUNCE_INTERVAL_MS = 150;
 
 function ensureLiveRegion(priority: "polite" | "assertive"): HTMLElement {

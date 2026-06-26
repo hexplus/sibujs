@@ -1,4 +1,5 @@
 import { signal } from "../core/signals/signal";
+import { prefersReducedMotion } from "./reducedMotion";
 
 /**
  * Options for springSignal.
@@ -11,9 +12,6 @@ export interface SpringOptions {
   /** Precision threshold to stop the animation. Default: 0.01 */
   precision?: number;
 }
-
-const prefersReducedMotion = (): boolean =>
-  typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
 /**
  * Creates a reactive spring-animated value. The getter returns the

@@ -20,7 +20,13 @@ export function createAction<T>(actionFn: ActionFn<T>): ActionResult<T> {
   const [error, setError] = signal<Error | undefined>(undefined);
   const [loading, setLoading] = signal<boolean>(false);
 
+  // Sequence concurrent submits so a slower earlier call can't clobber the
+  // reactive state of a faster later one. Each caller still gets its own
+  // result/throw — only the shared signals are gated to the latest run.
+  let activeRun = 0;
+
   const submit = async (input: FormData | Record<string, unknown>): Promise<T> => {
+    const runId = ++activeRun;
     batch(() => {
       setLoading(true);
       setError(undefined);
@@ -28,17 +34,21 @@ export function createAction<T>(actionFn: ActionFn<T>): ActionResult<T> {
 
     try {
       const result = await actionFn(input);
-      batch(() => {
-        setData(result);
-        setLoading(false);
-      });
+      if (runId === activeRun) {
+        batch(() => {
+          setData(result);
+          setLoading(false);
+        });
+      }
       return result;
     } catch (err) {
       const actionError = err instanceof Error ? err : new Error(String(err));
-      batch(() => {
-        setError(actionError);
-        setLoading(false);
-      });
+      if (runId === activeRun) {
+        batch(() => {
+          setError(actionError);
+          setLoading(false);
+        });
+      }
       throw actionError;
     }
   };

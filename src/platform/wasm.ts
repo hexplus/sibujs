@@ -5,6 +5,7 @@
  */
 
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -28,8 +29,16 @@ export interface WasmConfig {
 
 // ─── Module Cache ───────────────────────────────────────────────────────────
 
-const moduleCache = new Map<string, WebAssembly.Module>();
-const instanceCache = new Map<string, WebAssembly.Instance>();
+// Shared across duplicate module copies so a double-loaded bundle doesn't
+// re-fetch/recompile the same WASM, and a keyed instance stays a true singleton.
+const moduleCache = globalSingleton(
+  Symbol.for("sibujs.wasm.moduleCache.v1"),
+  () => new Map<string, WebAssembly.Module>(),
+);
+const instanceCache = globalSingleton(
+  Symbol.for("sibujs.wasm.instanceCache.v1"),
+  () => new Map<string, WebAssembly.Instance>(),
+);
 
 // ─── wasm Hook ───────────────────────────────────────────────────────────
 
@@ -94,7 +103,14 @@ export function wasm<T extends Record<string, unknown> = Record<string, unknown>
 /**
  * Load and instantiate a WebAssembly module.
  * Supports loading from URL, ArrayBuffer, or Uint8Array.
- * Caches compiled modules for reuse.
+ *
+ * Caching: keyed by `cacheKey` (or, for a URL source, the URL itself). A keyed
+ * load is memoized as a **singleton instance** — every caller with the same key
+ * receives the *same* `WebAssembly.Instance`, which shares one linear memory and
+ * mutable globals. This is intentional (load-once / reuse), but it means callers
+ * that need isolated state must use distinct cache keys, or pass a non-URL source
+ * with no `cacheKey` (which instantiates fresh every call). Compiled modules are
+ * immutable and always safe to share.
  */
 export interface LoadWasmOptions {
   imports?: WebAssembly.Imports;

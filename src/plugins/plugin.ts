@@ -2,6 +2,8 @@
 // PLUGIN ARCHITECTURE
 // ============================================================================
 
+import { globalSingleton } from "../utils/globalSingleton";
+
 export interface PluginContext {
   /** Register a global hook */
   onInit: (callback: () => void) => void;
@@ -123,8 +125,12 @@ export function createPluginRegistry(): PluginRegistry {
 }
 
 // Default singleton registry (kept for back-compat with existing public API).
-let defaultRegistry: PluginRegistry = createPluginRegistry();
-let defaultRegistryTouched = false;
+// Shared across duplicate module copies so plugins installed through one copy
+// are visible to `inject()` called through another.
+const _defaults = globalSingleton(Symbol.for("sibujs.plugins.defaultRegistry.v1"), () => ({
+  registry: createPluginRegistry(),
+  touched: false,
+}));
 
 /**
  * Creates a plugin definition.
@@ -137,44 +143,44 @@ export function createPlugin(name: string, install: (ctx: PluginContext, options
  * Installs a plugin into the default (singleton) registry.
  */
 export function plugin(plugin: SibuPlugin, options?: unknown): void {
-  defaultRegistryTouched = true;
-  defaultRegistry.plugin(plugin, options);
+  _defaults.touched = true;
+  _defaults.registry.plugin(plugin, options);
 }
 
 /**
  * Retrieve a value provided by a plugin (from the default registry).
  */
 export function inject<T = unknown>(key: string, defaultValue?: T): T {
-  return defaultRegistry.inject<T>(key, defaultValue);
+  return _defaults.registry.inject<T>(key, defaultValue);
 }
 
 /**
  * Trigger mount hooks for an element (default registry).
  */
 export function triggerPluginMount(element: HTMLElement): void {
-  defaultRegistry.triggerMount(element);
+  _defaults.registry.triggerMount(element);
 }
 
 /**
  * Trigger unmount hooks for an element (default registry).
  */
 export function triggerPluginUnmount(element: HTMLElement): void {
-  defaultRegistry.triggerUnmount(element);
+  _defaults.registry.triggerUnmount(element);
 }
 
 /**
  * Trigger error hooks (default registry).
  */
 export function triggerPluginError(error: Error): void {
-  defaultRegistry.triggerError(error);
+  _defaults.registry.triggerError(error);
 }
 
 /**
  * Reset the default plugin registry (useful for testing).
  */
 export function resetPlugins(): void {
-  defaultRegistry.reset();
-  defaultRegistryTouched = false;
+  _defaults.registry.reset();
+  _defaults.touched = false;
 }
 
 /**
@@ -183,12 +189,12 @@ export function resetPlugins(): void {
  * accidental interleaving of singleton + registry use).
  */
 export function setDefaultPluginRegistry(registry: PluginRegistry): void {
-  if (defaultRegistryTouched && defaultRegistry.installedPlugins.size > 0) {
+  if (_defaults.touched && _defaults.registry.installedPlugins.size > 0) {
     console.warn(
       "[Plugin] Replacing default plugin registry while plugins are already installed on the singleton. " +
         "This may indicate mixed singleton/registry usage.",
     );
   }
-  defaultRegistry = registry;
-  defaultRegistryTouched = true;
+  _defaults.registry = registry;
+  _defaults.touched = true;
 }

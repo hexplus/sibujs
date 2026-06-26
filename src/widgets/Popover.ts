@@ -1,7 +1,7 @@
+import { createId } from "../core/rendering/createId";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 
-let popoverIdCounter = 0;
 const boundPopovers = new WeakMap<HTMLElement, () => void>();
 
 /**
@@ -35,7 +35,7 @@ export function popover(): {
     const existing = boundPopovers.get(els.trigger);
     if (existing) return existing;
 
-    const id = `sibu-popover-${++popoverIdCounter}`;
+    const id = createId("sibu-popover");
     // Capture prior attribute state so teardown can restore (or remove)
     // every attribute we touch — bind() should be reversible.
     const prevPopoverRole = els.popover.getAttribute("role");

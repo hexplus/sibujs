@@ -1,5 +1,6 @@
 import { div, span } from "../core/rendering/html";
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
 
 // ============================================================================
 // MICRO-FRONTEND / MODULE FEDERATION
@@ -40,7 +41,12 @@ export interface SharedScope<T extends Record<string, unknown>> {
 // Module cache for loadRemoteModule
 // --------------------------------------------------------------------------
 
-const moduleCache = new Map<string, Promise<unknown>>();
+// Shared across duplicate module copies so a double-loaded bundle dedups the
+// in-flight import of the same remote URL instead of fetching it twice.
+const moduleCache = globalSingleton(
+  Symbol.for("sibujs.microfrontend.moduleCache.v1"),
+  () => new Map<string, Promise<unknown>>(),
+);
 
 // --------------------------------------------------------------------------
 // createMicroApp

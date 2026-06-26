@@ -1,4 +1,3 @@
-import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { stripUnsafeKeys } from "../utils/guards";
 
@@ -111,7 +110,12 @@ export function globalStore<
   }
 
   function select<R>(selector: Selector<S, R>): () => R {
-    return derived(() => selector(getState()));
+    // Return a plain reactive getter, not a standalone derived(): a derived
+    // subscribes to the store for the app's lifetime, which leaks when select()
+    // is called per-component. Reading getState() inside the CALLER's own
+    // effect/derived ties the subscription to the caller's lifecycle instead,
+    // and stays fully reactive.
+    return () => selector(getState());
   }
 
   function subscribe(callback: (state: S) => void): () => void {

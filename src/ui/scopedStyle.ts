@@ -2,7 +2,11 @@
 // SCOPED STYLE ISOLATION
 // ============================================================================
 
-let scopeCounter = 0;
+import { globalSingleton } from "../utils/globalSingleton";
+
+// Shared via globalSingleton so a duplicated copy of this module doesn't restart
+// at 0 and emit colliding `sibu-s*` scope ids (cross-bundle style collisions).
+const _scope = globalSingleton(Symbol.for("sibujs.scopedStyle.v1"), () => ({ n: 0 }));
 
 /**
  * Decode CSS escape sequences so the sanitizer can catch obfuscated
@@ -75,7 +79,7 @@ function sanitizeCSS(css: string): string {
  * background images, use inline styles via the `style` prop instead.
  */
 export function scopedStyle(css: string): { scope: string; attr: string } {
-  const id = `sibu-s${scopeCounter++}`;
+  const id = `sibu-s${_scope.n++}`;
   const attr = `data-${id}`;
 
   // Sanitize CSS to prevent data exfiltration attacks

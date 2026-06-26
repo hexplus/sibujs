@@ -1,6 +1,16 @@
 import { signal } from "../core/signals/signal";
 
 /**
+ * One-shot check of the `prefers-reduced-motion: reduce` media query. Returns
+ * false under SSR / where `matchMedia` is unavailable. Use this for imperative
+ * "should I animate right now?" decisions; use {@link reducedMotion} when you
+ * need a value that reacts to the user changing the setting.
+ */
+export function prefersReducedMotion(): boolean {
+  return typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+}
+
+/**
  * reducedMotion returns a reactive boolean tracking whether the user
  * prefers reduced motion via the `prefers-reduced-motion` media query.
  */
