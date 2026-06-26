@@ -39,6 +39,9 @@ const _isDev = isDev();
 // raw ESM it is undefined, so we fall back to "dev". Only used to enrich the
 // multi-instance dev warning.
 declare const __SIBU_VERSION__: string | undefined;
+// The `__SIBU_VERSION__` branch only runs when a bundler inlined the define; the
+// source test runner always takes the "dev" fallback, so that side is excluded.
+/* v8 ignore next */
 const _runtimeVersion = typeof __SIBU_VERSION__ !== "undefined" ? __SIBU_VERSION__ : "dev";
 
 interface ReactiveApi {
