@@ -1,17 +1,46 @@
 # .github/workflows/ci.yml
+name: CI
+
 on:
-    pull_request:
-    workflow_dispatch:
+  push:
+  pull_request:
+  workflow_dispatch:
 
 jobs:
-    ci:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v4
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 20
-            - run: npm install
-            - run: npm run lint
-            - run: npm run build
-            - run: npm run test
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -r --if-present run lint
+      - run: pnpm -r exec tsc --noEmit
+      - run: pnpm -r --if-present run test -- --run
+      - run: pnpm -r --if-present run build
+
+  # Reactive-core microbenchmarks vs. the committed baseline. Kept
+  # non-blocking (continue-on-error): these benchmarks are sensitive to CI
+  # runner load and would flake as a hard gate. Treat a failure here as a
+  # signal to investigate, then re-baseline on an idle machine with
+  # `pnpm --filter @sibujs/core exec node bench.mjs --save`.
+  bench:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @sibujs/core run build
+      - run: pnpm --filter @sibujs/core exec node bench.mjs --compare
