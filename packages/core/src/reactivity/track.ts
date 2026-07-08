@@ -74,17 +74,23 @@ function resolveReactiveApi(): ReactiveApi {
   if (existing) {
     // A prior copy already published its API. By construction a single instance
     // evaluates this module exactly once, so reaching here means a SECOND copy
-    // of the reactive runtime was loaded on this page. We delegate to the first
-    // copy (reactivity keeps working), but the duplication is wasteful and a
-    // sign of a bundler misconfig.
+    // of the reactive runtime was loaded on this page.
+    //
+    // Since v4 the engine ships as its own package (@sibujs/core), so proper
+    // dedup is a PACKAGING guarantee — a single resolved @sibujs/core means this
+    // branch never runs. This registry is therefore a dev-only TRIPWIRE: it
+    // surfaces a duplicate install (usually a bundler misconfig or a version
+    // mismatch pulling two @sibujs/core copies) and, best-effort, delegates to
+    // the first copy so reactivity keeps working. Correctness in supported
+    // single-install setups does NOT depend on it.
     if (_isDev && !existing.__dupWarned) {
       existing.__dupWarned = true;
       devWarn(
         "Multiple instances of the reactive runtime detected on this page " +
           `(active: ${existing.version}, duplicate: ${_runtimeVersion}). Reactivity ` +
-          "still works — all copies share the first one — but de-duplicate sibujs in " +
-          "your bundler (e.g. Vite optimizeDeps.exclude: ['sibujs'] or " +
-          "resolve.dedupe: ['sibujs']).",
+          "still works — all copies share the first one — but de-duplicate " +
+          "@sibujs/core in your bundler (e.g. Vite resolve.dedupe: ['@sibujs/core'], " +
+          "or ensure a single version resolves across packages).",
       );
     }
     return existing;
