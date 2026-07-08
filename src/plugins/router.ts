@@ -827,9 +827,14 @@ export class SibuRouter {
       }
     }
 
-    // Set initial route
+    // Set initial route. This runs in a microtask so the caller can finish
+    // wiring up (e.g. mount the tree) first. If the app already issued a
+    // navigation before this fires, that navigation owns the initial route —
+    // don't clobber it by re-navigating to the current location.
     queueMicrotask(() => {
-      this.handleLocationChange(true);
+      if (!this.navigator.isNavigating) {
+        this.handleLocationChange(true);
+      }
       this.isReadySetter(true);
     });
   }
@@ -1077,6 +1082,14 @@ export class SibuRouter {
   }
 
   private isSameRoute(from: RouteContext, to: RouteContext): boolean {
+    // The router seeds `currentRoute` with an uninitialized placeholder
+    // (matched: []). Its path/params/query/hash can coincide with the first
+    // real target — most obviously the root "/" — so a pure path/params/query/
+    // hash comparison would treat the placeholder as a "duplicated" navigation
+    // and discard the genuine match, leaving `route().matched` empty forever.
+    // A placeholder that has resolved to nothing is never the same route as a
+    // target that resolved to a real match.
+    if (from.matched.length === 0 && to.matched.length > 0) return false;
     return (
       from.path === to.path &&
       JSON.stringify(from.params) === JSON.stringify(to.params) &&
