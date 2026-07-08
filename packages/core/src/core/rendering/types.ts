@@ -7,6 +7,20 @@
  */
 export type Dispose = () => void;
 
+/**
+ * A getter that returns the CURRENT value each time it is called but does NOT
+ * subscribe the caller to changes — reading it inside an effect/binding creates
+ * no reactive dependency. This is deliberately distinct from `Accessor<T>`
+ * (the reactive signal getter): a `StaticGetter` is used where the framework
+ * hands you fresh-on-read data whose changes are driven by another mechanism.
+ *
+ * The `item`/`index` getters passed to an `each()` render callback are
+ * `StaticGetter`s: they always return the row's current item/index, but a row's
+ * content does NOT auto-re-render when the backing array changes. For reactive
+ * per-row content, drive it from a per-item `signal`/`store`, not from `item()`.
+ */
+export type StaticGetter<T> = () => T;
+
 export type NodeChild =
   | Node
   | Element

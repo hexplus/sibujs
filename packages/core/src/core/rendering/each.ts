@@ -1,7 +1,7 @@
 import { track, untracked } from "../../reactivity/track";
 import { devAssert, devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import type { NodeChild } from "./types";
+import type { NodeChild, StaticGetter } from "./types";
 
 const _isDev = isDev();
 
@@ -85,19 +85,22 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
  * 4. Walk the new key list in reverse and insert/position each node,
  *    skipping DOM operations for nodes that are part of the LIS.
  *
- * The render callback receives reactive getters `() => T` and `() => number`
- * instead of plain values. This ensures the callback always reads fresh data
- * when a keyed item's data changes but its key stays the same, since the DOM
- * is reused without re-calling render.
+ * The render callback receives `item` and `index` as `StaticGetter`s — calling
+ * them returns the row's CURRENT item/index (fresh on every read, so the DOM
+ * node can be reused across data changes without re-calling render), but they
+ * do NOT subscribe: reading `item()` inside an effect/binding creates no
+ * reactive dependency, so a row's content does not auto-re-render when the
+ * backing array is replaced or reordered. For reactive per-row content, drive
+ * it from a per-item `signal`/`store` rather than from `item()`.
  *
  * @param getArray A reactive getter returning an array.
- * @param render A function that receives reactive item and index getters and returns a NodeChild.
+ * @param render Receives non-subscribing `item`/`index` getters (`StaticGetter`s); returns a NodeChild.
  * @param options A key function for unique identity of items.
  * @returns A Comment node serving as the anchor for the list.
  */
 export function each<T>(
   getArray: () => T[],
-  render: (item: () => T, index: () => number) => NodeChild,
+  render: (item: StaticGetter<T>, index: StaticGetter<number>) => NodeChild,
   options: { key: (item: T) => string | number },
 ): Comment {
   devAssert(typeof getArray === "function", "each: first argument must be a function that returns an array.");

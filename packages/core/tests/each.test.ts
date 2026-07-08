@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { each } from "../src/core/rendering/each";
+import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
 
 describe("each", () => {
@@ -44,7 +45,8 @@ describe("each", () => {
       list,
       (item) => {
         const el = document.createElement("span");
-        // item() is a reactive getter — reads fresh data on each access
+        // item() is a StaticGetter — reads fresh data on each access but does
+        // NOT subscribe the caller (see the non-subscribing contract test below).
         el.textContent = item().label;
         return el;
       },
@@ -67,6 +69,40 @@ describe("each", () => {
     // unless wrapped in a reactive binding. The fix ensures the getter is fresh
     // for any reactive bindings (style, class, nodes callbacks) that read item().
     expect(container.querySelectorAll("span").length).toBe(2);
+  });
+
+  it("item() is a StaticGetter: reading it in an effect creates NO dependency on the array", async () => {
+    // Locks the deliberate sharp edge documented on each()/StaticGetter: item()
+    // reads fresh but does not subscribe, so per-row content must be driven by a
+    // per-item signal, not by item(). If item() ever started subscribing, this
+    // effect would re-run on setList and the assertion would fail.
+    const [list, setList] = signal([{ id: 1, label: "A" }]);
+    let effectRuns = 0;
+
+    const container = document.createElement("div");
+    const anchor = each(
+      list,
+      (item) => {
+        const el = document.createElement("span");
+        effect(() => {
+          item(); // read the StaticGetter inside a reactive scope
+          effectRuns++;
+        });
+        return el;
+      },
+      { key: (i) => i.id },
+    );
+    container.appendChild(anchor);
+
+    await Promise.resolve();
+    const runsAfterMount = effectRuns;
+    expect(runsAfterMount).toBeGreaterThan(0); // initial effect run happened
+
+    // Same key, new data: render is not re-called and — crucially — the effect
+    // that read item() must NOT re-run, proving item() did not subscribe.
+    setList([{ id: 1, label: "B" }]);
+    await Promise.resolve();
+    expect(effectRuns).toBe(runsAfterMount);
   });
 
   describe("duplicate keys", () => {

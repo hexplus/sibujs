@@ -54,7 +54,7 @@ export type {
   VideoProps,
 } from "./src/core/rendering/tagPropTypes";
 // Rendering types
-export type { Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
+export type { Dispose, NodeChild, NodeChildren, StaticGetter } from "./src/core/rendering/types";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/asyncDerived";
 export * from "./src/core/signals/deepSignal";
