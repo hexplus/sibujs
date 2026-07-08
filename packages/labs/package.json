@@ -1,0 +1,33 @@
+{
+  "name": "@sibujs/labs",
+  "version": "4.0.0-alpha.0",
+  "description": "SibuJS labs — opt-in long-tail modules (browser APIs, widgets, patterns, ecosystem adapters, motion, performance, devtools). Lower support guarantee than sibujs core/std.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" },
+    "./browser": { "types": "./dist/browser.d.ts", "import": "./dist/browser.js", "require": "./dist/browser.cjs" },
+    "./widgets": { "types": "./dist/widgets.d.ts", "import": "./dist/widgets.js", "require": "./dist/widgets.cjs" },
+    "./patterns": { "types": "./dist/patterns.d.ts", "import": "./dist/patterns.js", "require": "./dist/patterns.cjs" },
+    "./ecosystem": { "types": "./dist/ecosystem.d.ts", "import": "./dist/ecosystem.js", "require": "./dist/ecosystem.cjs" },
+    "./performance": { "types": "./dist/performance.d.ts", "import": "./dist/performance.js", "require": "./dist/performance.cjs" },
+    "./devtools": { "types": "./dist/devtools.d.ts", "import": "./dist/devtools.js", "require": "./dist/devtools.cjs" },
+    "./motion": { "types": "./dist/motion.d.ts", "import": "./dist/motion.js", "require": "./dist/motion.cjs" }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup browser.ts widgets.ts patterns.ts ecosystem.ts performance.ts devtools.ts motion.ts index.ts --dts --format esm,cjs --out-dir dist --clean",
+    "test": "vitest",
+    "lint": "biome check --max-diagnostics=500 src/ tests/"
+  },
+  "dependencies": {
+    "@sibujs/core": "workspace:*",
+    "sibujs": "workspace:*"
+  },
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=18.0.0" }
+}

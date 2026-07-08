@@ -9,3 +9,4 @@ export * from "./src/reactivity/bindAttribute";
 export type { ReactiveSignal } from "./src/reactivity/signal";
 export * from "./src/utils/sanitize";
 export * from "./src/utils/globalSingleton";
+export * from "./src/utils/guards";

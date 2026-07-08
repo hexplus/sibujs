@@ -44,6 +44,15 @@ importers:
 
   packages/core: {}
 
+  packages/labs:
+    dependencies:
+      '@sibujs/core':
+        specifier: workspace:*
+        version: link:../core
+      sibujs:
+        specifier: workspace:*
+        version: link:../sibujs
+
   packages/sibujs:
     dependencies:
       '@sibujs/core':

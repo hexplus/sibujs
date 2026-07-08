@@ -14,7 +14,7 @@
 //    supports an optional `nonce` for strict-CSP compatibility.
 
 import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
-import { isUnsafeKey } from "../utils/guards";
+import { isUnsafeKey } from "@sibujs/core/internal";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
 

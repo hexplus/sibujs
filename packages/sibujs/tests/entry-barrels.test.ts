@@ -6,21 +6,15 @@ import { describe, expect, it } from "vitest";
 // a broken/renamed export silently disappearing from the public surface.
 describe("entry barrels", () => {
   const barrels: [string, () => Promise<Record<string, unknown>>][] = [
+    // Std tier only — long-tail barrels (browser, widgets, patterns, motion,
+    // devtools, performance, ecosystem, extras) moved to @sibujs/labs.
     ["index", () => import("../index")],
-    ["browser", () => import("../browser")],
     ["data", () => import("../data")],
-    ["patterns", () => import("../patterns")],
-    ["motion", () => import("../motion")],
     ["ui", () => import("../ui")],
-    ["widgets", () => import("../widgets")],
     ["ssr", () => import("../ssr")],
-    ["devtools", () => import("../devtools")],
-    ["performance", () => import("../performance")],
-    ["ecosystem", () => import("../ecosystem")],
     ["plugins", () => import("../plugins")],
     ["build", () => import("../build")],
     ["testing", () => import("../testing")],
-    ["extras", () => import("../extras")],
     ["cdn", () => import("../cdn")],
   ];
 

@@ -35,7 +35,7 @@
     "test:ui": "vitest --ui",
     "test:browser": "npm run build && playwright test",
     "test:browser:install": "playwright install chromium firefox webkit",
-    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup cdn.ts --config tsup.cdn.config.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
+    "build": "tsup index.ts data.ts ui.ts ssr.ts plugins.ts build.ts testing.ts --dts --format esm,cjs --out-dir dist --clean && tsup cdn.ts --config tsup.cdn.config.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
     "publish:npm": "node publish.mjs",
     "prepublishOnly": "npm run build"
   },
@@ -51,50 +51,15 @@
       "import": "./dist/data.js",
       "require": "./dist/data.cjs"
     },
-    "./browser": {
-      "types": "./dist/browser.d.ts",
-      "import": "./dist/browser.js",
-      "require": "./dist/browser.cjs"
-    },
-    "./patterns": {
-      "types": "./dist/patterns.d.ts",
-      "import": "./dist/patterns.js",
-      "require": "./dist/patterns.cjs"
-    },
-    "./motion": {
-      "types": "./dist/motion.d.ts",
-      "import": "./dist/motion.js",
-      "require": "./dist/motion.cjs"
-    },
     "./ui": {
       "types": "./dist/ui.d.ts",
       "import": "./dist/ui.js",
       "require": "./dist/ui.cjs"
     },
-    "./widgets": {
-      "types": "./dist/widgets.d.ts",
-      "import": "./dist/widgets.js",
-      "require": "./dist/widgets.cjs"
-    },
     "./ssr": {
       "types": "./dist/ssr.d.ts",
       "import": "./dist/ssr.js",
       "require": "./dist/ssr.cjs"
-    },
-    "./devtools": {
-      "types": "./dist/devtools.d.ts",
-      "import": "./dist/devtools.js",
-      "require": "./dist/devtools.cjs"
-    },
-    "./performance": {
-      "types": "./dist/performance.d.ts",
-      "import": "./dist/performance.js",
-      "require": "./dist/performance.cjs"
-    },
-    "./ecosystem": {
-      "types": "./dist/ecosystem.d.ts",
-      "import": "./dist/ecosystem.js",
-      "require": "./dist/ecosystem.cjs"
     },
     "./plugins": {
       "types": "./dist/plugins.d.ts",
@@ -110,11 +75,6 @@
       "types": "./dist/testing.d.ts",
       "import": "./dist/testing.js",
       "require": "./dist/testing.cjs"
-    },
-    "./extras": {
-      "types": "./dist/extras.d.ts",
-      "import": "./dist/extras.js",
-      "require": "./dist/extras.cjs"
     },
     "./cdn": {
       "default": "./dist/cdn.global.js"

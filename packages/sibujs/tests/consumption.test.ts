@@ -10,11 +10,9 @@ describe("Package consumption", () => {
   describe("ESM entry points", () => {
     const esmFiles = [
       "index.js",
-      "extras.js",
       "data.js",
-      "browser.js",
-      "patterns.js",
-      "motion.js",
+      "ui.js",
+      "ssr.js",
       "plugins.js",
       "build.js",
       "testing.js",
@@ -35,11 +33,9 @@ describe("Package consumption", () => {
   describe("CJS entry points", () => {
     const cjsFiles = [
       "index.cjs",
-      "extras.cjs",
       "data.cjs",
-      "browser.cjs",
-      "patterns.cjs",
-      "motion.cjs",
+      "ui.cjs",
+      "ssr.cjs",
       "plugins.cjs",
       "build.cjs",
       "testing.cjs",
@@ -60,11 +56,9 @@ describe("Package consumption", () => {
   describe("Type declarations", () => {
     const dtsFiles = [
       "index.d.ts",
-      "extras.d.ts",
       "data.d.ts",
-      "browser.d.ts",
-      "patterns.d.ts",
-      "motion.d.ts",
+      "ui.d.ts",
+      "ssr.d.ts",
       "plugins.d.ts",
       "build.d.ts",
       "testing.d.ts",
@@ -111,17 +105,12 @@ describe("Package consumption", () => {
       const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
       const exports = pkg.exports;
 
+      // Std tier only. The long-tail subpaths (browser, widgets, patterns,
+      // motion, devtools, performance, ecosystem, extras) moved to @sibujs/labs.
       expect(exports["."]).toBeDefined();
       expect(exports["./data"]).toBeDefined();
-      expect(exports["./browser"]).toBeDefined();
-      expect(exports["./patterns"]).toBeDefined();
-      expect(exports["./motion"]).toBeDefined();
       expect(exports["./ui"]).toBeDefined();
-      expect(exports["./widgets"]).toBeDefined();
       expect(exports["./ssr"]).toBeDefined();
-      expect(exports["./devtools"]).toBeDefined();
-      expect(exports["./performance"]).toBeDefined();
-      expect(exports["./ecosystem"]).toBeDefined();
       expect(exports["./plugins"]).toBeDefined();
       expect(exports["./build"]).toBeDefined();
       expect(exports["./testing"]).toBeDefined();

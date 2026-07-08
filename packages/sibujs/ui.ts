@@ -23,7 +23,5 @@ export * from "./src/ui/timers";
 export * from "./src/ui/hover";
 export * from "./src/ui/scrollLock";
 export * from "./src/platform/customElement";
-export * from "./src/patterns/composable";
-export * from "./src/patterns/hoc";
-export * from "./src/patterns/componentProps";
-export * from "./src/patterns/contracts";
+// Component patterns (composable, hoc, componentProps, contracts) moved to
+// @sibujs/labs/patterns in v4.
