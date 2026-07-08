@@ -6,6 +6,16 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [3.4.1] — 2026-07-07
+
+A router correctness fix. No breaking changes.
+
+### Fixed
+
+- **The initial route now resolves its match on load** — the router seeds `currentRoute` with an uninitialized placeholder (`matched: []`) and then navigates to the current location on init. For the root path `/` — and any path whose `path`/`params`/`query`/`hash` coincided with that placeholder — `isSameRoute` treated the first navigation as a duplicate and discarded the real match, so `route().matched` stayed empty forever and `Outlet` (which renders a nested child only when `matched.length >= 2`) rendered nothing at `/`. `isSameRoute` now treats a placeholder that resolved to no match as never equal to a target that resolved to a real one, so the first navigation commits. The deferred initial navigation is additionally skipped when the app already issued its own navigation before the router finished initializing, so it can no longer clobber a route the app set first.
+
+---
+
 ## [3.4.0] — 2026-06-26
 
 Reactive islands for HTML-first apps — a third rendering mode that attaches
