@@ -17,6 +17,12 @@ export default defineConfig({
   // `export * from "@sibujs/core"` into a side-effect-imported shared chunk and
   // drops the re-exported names from the entry. Self-contained entries keep the
   // star re-export intact so `import { signal } from "sibujs"` resolves.
+  //
+  // TRADEOFF: without splitting, code shared across the entry points is
+  // duplicated in each output file, enlarging the *published* package (consumer
+  // bundlers still tree-shake, so end-user bundle size is unaffected). A future
+  // optimization: build only `index.ts` (the sole `export * from "@sibujs/core"`
+  // entry) unsplit, and the remaining entries with splitting enabled.
   splitting: false,
   // Keep @sibujs/core EXTERNAL for the ESM/CJS module builds so `sibujs`
   // re-exports a SINGLE shared engine and never bundles its own copy — this is

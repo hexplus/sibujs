@@ -6,6 +6,36 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.0.0-alpha.0]
+
+Package restructure. `sibujs` is now the batteries-included tier on top of the
+extracted `@sibujs/core` engine. See `MIGRATION.md` for upgrade steps.
+
+### Changed
+
+- The reactivity + rendering engine now lives in `@sibujs/core` and is
+  re-exported from the `sibujs` root, so `import { signal, div, mount } from "sibujs"`
+  is unchanged. `@sibujs/core` is kept external in the build, so a correct install
+  ships a single shared engine copy.
+- The `each()` render callback's `item`/`index` getters are typed as
+  `StaticGetter<T>`. Behaviour is unchanged (fresh-on-read, non-subscribing);
+  the type makes the contract explicit.
+
+### Removed / Moved
+
+- The long-tail subpaths moved to the new `@sibujs/labs` package:
+  `browser`, `widgets`, `patterns`, `motion`, `ecosystem`, `performance`,
+  `devtools`, and the `extras` aggregate.
+- `composable`, `hoc`, `componentProps`, and `contracts` left `sibujs/ui`;
+  they are now in `@sibujs/labs/patterns`.
+
+### Unchanged subpaths
+
+- `sibujs/data`, `sibujs/ui`, `sibujs/plugins`, `sibujs/ssr`, `sibujs/build`,
+  `sibujs/testing`, `sibujs/cdn`.
+
+---
+
 ## [3.4.1] — 2026-07-07
 
 A router correctness fix. No breaking changes.

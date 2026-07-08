@@ -92,9 +92,17 @@ For full documentation, guides, and advanced examples, visit our official websit
 
 ---
 
-## Core (`sibujs`)
+## Packages
 
-The lean core: reactivity, rendering, and components. Everything below imports from the root.
+SibuJS v4 ships as three packages:
+
+- **`@sibujs/core`** — the reactivity + rendering engine. Re-exported by `sibujs`, so everything in the "Core" section below is available from `sibujs` directly.
+- **`sibujs`** — batteries-included: `@sibujs/core` plus the router, i18n, SSR, data, and UI layers (the `sibujs/*` subpaths).
+- **`@sibujs/labs`** — opt-in long-tail modules (browser wrappers, widgets, motion, patterns, ecosystem adapters, performance, devtools), with a lower support guarantee. Install separately.
+
+## Core (re-exported from `@sibujs/core`)
+
+The lean engine: reactivity, rendering, and components. Everything below imports from the `sibujs` root.
 
 ### Reactivity
 - **`signal`** — reactive value returned as a `[get, set]` tuple; reads inside effects auto-track.
@@ -141,45 +149,24 @@ The lean core: reactivity, rendering, and components. Everything below imports f
 
 ---
 
-## Subpath Modules
+## `sibujs` Subpath Modules
 
-Import advanced features from focused entry points for optimal tree-shaking. `sibujs/extras` re-exports all of them for convenience.
+Import first-party features from focused entry points for optimal tree-shaking.
 
 ### `sibujs/data` — Data fetching & realtime
 `query` (cached async fetching), `mutation`, `infiniteQuery`, `resource`, `routeLoader`, `offlineStore`, `retry`, `debounce`, `throttle`, `previous`, plus `socket` and `stream` for realtime connections.
 
-### `sibujs/browser` — Reactive browser APIs
-Reactive wrappers for `media` queries, `resize`, `scroll`, `online`/`network`, `geo`, `battery`, `idle`, `permissions`, `clipboard`, `dragDrop`, `title`/`favicon`, `colorScheme`, `visibility`, `mouse`/`swipe`, `windowSize`, `urlState`, `broadcast`, `fullscreen`, `wakeLock`, `animationFrame`, `mutationObserver`, `bounds`, `keyboard`, `speech`, `gamepad`, `pointerLock`, `vibrate`, `textSelection`, `imageLoader`, and `format`.
-
 ### `sibujs/ui` — UI utilities
-`form` & `formAction` (validation/binding), `virtualList`, `intersection`, `inputMask`, `a11y` / `a11yPrimitives`, `scopedStyle`, `reactiveAttr`, `dialog`, `toast`, `infiniteScroll`, `pagination`, `eventBus`, `timers`, `hover`, `scrollLock`, `lazyEffect`, plus composable/HOC patterns.
-
-### `sibujs/widgets` — Pre-built components
-Accessible `Combobox`, `Tabs`, `Accordion`, `Popover`, `Select`, `Tooltip`, `FileUpload`, `contentEditable`, and `datePicker`.
-
-### `sibujs/motion` — Transitions & animation
-`transition`, `TransitionGroup`, `animationPresets`, `viewTransition`, `springSignal`, and `reducedMotion`.
-
-### `sibujs/patterns` — State & component patterns
-`machine` (finite state machines), `persist`, `optimistic`, `timeTravel`, `globalStore`; plus `hoc`, `composable`, `componentProps`, and `contracts`.
+`form` & `formAction` (validation/binding), `virtualList`, `intersection`, `inputMask`, `a11y` / `a11yPrimitives`, `scopedStyle`, `reactiveAttr`, `dialog`, `toast`, `infiniteScroll`, `pagination`, `eventBus`, `timers`, `hover`, `scrollLock`, `lazyEffect`, and `customElement`.
 
 ### `sibujs/plugins` — First-party plugins
-**Router** — `createRouter`, `Route`/`Outlet`/`RouterLink`, nested routes, guards (`beforeEach`, `beforeResolve`, `afterEach`), programmatic navigation, `preloadRoute`, memory router, and per-route transitions. **i18n** — `setLocale`, `t`, `Trans`, `registerTranslations`, reactive locale switching. Plus the plugin system (`modular`, `ecosystem`, `versioning`, `startup`).
+**Router** — `createRouter`, `Route`/`Outlet`/`RouterLink`, nested routes, guards (`beforeEach`, `beforeResolve`, `afterEach`), programmatic navigation, `preloadRoute`, memory router, and per-route transitions. **i18n** — `setLocale`, `t`, `Trans`, `registerTranslations`, reactive locale switching. Plus the plugin system (`modular`, `versioning`, `startup`).
 
 ### `sibujs/ssr` — Server rendering
 `renderToString`, `renderToReadableStream`, `renderToDocument`, `hydrate`, streaming `Suspense`, `head` management, static site generation, incremental regeneration, route actions/middleware, scroll restoration, service worker & web/wasm workers, and microfrontend helpers.
 
-### `sibujs/performance` — Scheduling & optimization
-Concurrent rendering (`startTransition`, `scheduleUpdate`), cooperative `scheduler`, `domRecycler`, `compiled` templates, `chunkLoader`, `bundleOptimize`, and `normalize`.
-
-### `sibujs/devtools` — Developer tools
-`debug`, `debugValue`, `componentProfiler`, `signalGraph`, `introspect`, `devtoolsOverlay`, HMR support, and source maps.
-
 ### `sibujs/build` — Build tooling
 Bundler plugins (`vite`, `webpack`), template compilation, route splitting, static analysis, linting, `.d.ts` declaration generation, CDN helpers, and IDE integration.
-
-### `sibujs/ecosystem` — Adapters
-Adapters bridging third-party state managers (e.g. Redux, MobX) and UI component libraries.
 
 ### `sibujs/testing` — Test helpers
 Utilities for testing components and reactivity.
@@ -188,11 +175,26 @@ Utilities for testing components and reactivity.
 Self-registering IIFE build exposing `window.Sibu`, for use without a bundler.
 
 ```html
-<script src="https://unpkg.com/sibujs@latest/dist/sibu.global.js"></script>
+<script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
 <script>
   const { signal, effect, div, mount } = window.Sibu;
 </script>
 ```
+
+---
+
+## `@sibujs/labs` — opt-in long-tail modules
+
+Installed separately (`npm install @sibujs/labs`). Lower support guarantee than
+`@sibujs/core` and `sibujs`. See the [`@sibujs/labs` README](https://www.npmjs.com/package/@sibujs/labs) for details.
+
+- **`@sibujs/labs/browser`** — reactive browser-API wrappers (`media`, `resize`, `scroll`, `geo`, `clipboard`, `keyboard`, `gamepad`, and ~30 more).
+- **`@sibujs/labs/widgets`** — accessible prebuilt components (`Combobox`, `Tabs`, `Accordion`, `Popover`, `Select`, `Tooltip`, `FileUpload`, `datePicker`, …).
+- **`@sibujs/labs/motion`** — `transition`, `TransitionGroup`, `viewTransition`, `springSignal`, `animationPresets`, `reducedMotion`.
+- **`@sibujs/labs/patterns`** — `machine`, `persist`, `optimistic`, `timeTravel`, `globalStore`, `hoc`, `composable`, `componentProps`, `contracts`.
+- **`@sibujs/labs/performance`** — concurrent rendering, `scheduler`, `domRecycler`, `compiled` templates, `chunkLoader`.
+- **`@sibujs/labs/devtools`** — `debug`, `componentProfiler`, `signalGraph`, `introspect`, `devtoolsOverlay`, HMR.
+- **`@sibujs/labs/ecosystem`** — adapters for third-party state/UI libraries.
 
 ---
 

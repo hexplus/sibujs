@@ -1,37 +1,48 @@
 name: Publish to npm
 
 on:
-    release:
-        types: [published]
+  release:
+    types: [published]
 
 permissions:
-    id-token: write
-    contents: read
+  id-token: write
+  contents: read
 
 jobs:
-    publish:
-        runs-on: ubuntu-latest
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v4
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-            - name: Setup Node.js
-              uses: actions/setup-node@v4
-              with:
-                  node-version: "22"
-                  registry-url: "https://registry.npmjs.org"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
 
-            - name: Upgrade npm
-              run: npm install -g npm@latest
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          cache: "pnpm"
 
-            - name: Install dependencies
-              run: npm install
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-            - name: Build
-              run: npm run build
+      - name: Typecheck
+        run: pnpm -r exec tsc --noEmit
 
-            - name: Run tests
-              run: npm test
+      - name: Test
+        run: pnpm -r --if-present run test -- --run
 
-            - name: Publish to npm
-              run: npm publish --access public
+      - name: Build
+        run: pnpm -r --if-present run build
+
+      # Publishes every public workspace package in topological order
+      # (@sibujs/core -> sibujs -> @sibujs/labs). pnpm rewrites the
+      # `workspace:*` dependency ranges to the concrete published versions.
+      - name: Publish to npm
+        run: pnpm -r publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
