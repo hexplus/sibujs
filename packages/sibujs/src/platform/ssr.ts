@@ -27,9 +27,8 @@
 //  - `hydrateIslands` / `hydrateProgressively` use `hasOwnProperty.call`
 //    to block prototype-pollution lookups on the islands map.
 
-import { isDev } from "@sibujs/core/internal";
 import { getSSRStore } from "@sibujs/core";
-import { isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "@sibujs/core/internal";
+import { isDev, isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "@sibujs/core/internal";
 
 /**
  * Sanitize a URL-bearing attribute value for SSR emission. `srcset` is a

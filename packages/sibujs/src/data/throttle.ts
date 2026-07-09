@@ -1,5 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { effect, signal } from "@sibujs/core";
 
 /**
  * Returns a throttled reactive getter that updates at most once per `interval` ms.

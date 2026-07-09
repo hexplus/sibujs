@@ -1,6 +1,5 @@
+import { div, signal } from "@sibujs/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { div } from "@sibujs/core";
-import { signal } from "@sibujs/core";
 import { clearQueryCache, query } from "../src/data/query";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));

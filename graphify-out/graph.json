@@ -1,0 +1,3173 @@
+{
+  "directed": false,
+  "multigraph": false,
+  "graph": {},
+  "nodes": [
+    {
+      "label": "core: components/ErrorBoundary",
+      "file_type": "code",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_components_errorboundary",
+      "community": 0,
+      "norm_label": "core: components/errorboundary"
+    },
+    {
+      "label": "core: components/ErrorDisplay",
+      "file_type": "code",
+      "source_file": "packages/core/src/components/ErrorDisplay.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_components_errordisplay",
+      "community": 0,
+      "norm_label": "core: components/errordisplay"
+    },
+    {
+      "label": "core: components/Loading",
+      "file_type": "code",
+      "source_file": "packages/core/src/components/Loading.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_components_loading",
+      "community": 13,
+      "norm_label": "core: components/loading"
+    },
+    {
+      "label": "core: core/dev",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/dev.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_dev",
+      "community": 0,
+      "norm_label": "core: core/dev"
+    },
+    {
+      "label": "core: core/rendering/action",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/action.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_action",
+      "community": 0,
+      "norm_label": "core: core/rendering/action"
+    },
+    {
+      "label": "core: core/rendering/catch",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/catch.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_catch",
+      "community": 14,
+      "norm_label": "core: core/rendering/catch"
+    },
+    {
+      "label": "core: core/rendering/context",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/context.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_context",
+      "community": 1,
+      "norm_label": "core: core/rendering/context"
+    },
+    {
+      "label": "core: core/rendering/createId",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/createId.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_createid",
+      "community": 15,
+      "norm_label": "core: core/rendering/createid"
+    },
+    {
+      "label": "core: core/rendering/directives",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/directives.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_directives",
+      "community": 0,
+      "norm_label": "core: core/rendering/directives"
+    },
+    {
+      "label": "core: core/rendering/dispose",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/dispose.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_dispose",
+      "community": 0,
+      "norm_label": "core: core/rendering/dispose"
+    },
+    {
+      "label": "core: core/rendering/dynamic",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/dynamic.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_dynamic",
+      "community": 0,
+      "norm_label": "core: core/rendering/dynamic"
+    },
+    {
+      "label": "core: core/rendering/each",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/each.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_each",
+      "community": 0,
+      "norm_label": "core: core/rendering/each"
+    },
+    {
+      "label": "core: core/rendering/fragment",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/fragment.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_fragment",
+      "community": 5,
+      "norm_label": "core: core/rendering/fragment"
+    },
+    {
+      "label": "core: core/rendering/htm",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_htm",
+      "community": 2,
+      "norm_label": "core: core/rendering/htm"
+    },
+    {
+      "label": "core: core/rendering/keepAlive",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/keepAlive.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_keepalive",
+      "community": 0,
+      "norm_label": "core: core/rendering/keepalive"
+    },
+    {
+      "label": "core: core/rendering/lazy",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/lazy.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_lazy",
+      "community": 0,
+      "norm_label": "core: core/rendering/lazy"
+    },
+    {
+      "label": "core: core/rendering/lifecycle",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/lifecycle.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_lifecycle",
+      "community": 0,
+      "norm_label": "core: core/rendering/lifecycle"
+    },
+    {
+      "label": "core: core/rendering/mount",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/mount.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_mount",
+      "community": 0,
+      "norm_label": "core: core/rendering/mount"
+    },
+    {
+      "label": "core: core/rendering/portal",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/portal.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_portal",
+      "community": 0,
+      "norm_label": "core: core/rendering/portal"
+    },
+    {
+      "label": "core: core/rendering/slots",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/slots.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_slots",
+      "community": 16,
+      "norm_label": "core: core/rendering/slots"
+    },
+    {
+      "label": "core: core/rendering/tagFactory",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_tagfactory",
+      "community": 5,
+      "norm_label": "core: core/rendering/tagfactory"
+    },
+    {
+      "label": "core: core/rendering/tagPropTypes",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/tagPropTypes.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_tagproptypes",
+      "community": 5,
+      "norm_label": "core: core/rendering/tagproptypes"
+    },
+    {
+      "label": "core: core/rendering/types",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/rendering/types.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_types",
+      "community": 5,
+      "norm_label": "core: core/rendering/types"
+    },
+    {
+      "label": "core: core/signals/array",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/array.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_array",
+      "community": 1,
+      "norm_label": "core: core/signals/array"
+    },
+    {
+      "label": "core: core/signals/asyncDerived",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/asyncDerived.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_asyncderived",
+      "community": 1,
+      "norm_label": "core: core/signals/asyncderived"
+    },
+    {
+      "label": "core: core/signals/deepSignal",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/deepSignal.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_deepsignal",
+      "community": 1,
+      "norm_label": "core: core/signals/deepsignal"
+    },
+    {
+      "label": "core: core/signals/derived",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/derived.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_derived",
+      "community": 1,
+      "norm_label": "core: core/signals/derived"
+    },
+    {
+      "label": "core: core/signals/effect",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/effect.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_effect",
+      "community": 1,
+      "norm_label": "core: core/signals/effect"
+    },
+    {
+      "label": "core: core/signals/ref",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/ref.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_ref",
+      "community": 1,
+      "norm_label": "core: core/signals/ref"
+    },
+    {
+      "label": "core: core/signals/signal",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/signal.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_signal",
+      "community": 1,
+      "norm_label": "core: core/signals/signal"
+    },
+    {
+      "label": "core: core/signals/store",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/store.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_store",
+      "community": 1,
+      "norm_label": "core: core/signals/store"
+    },
+    {
+      "label": "core: core/signals/watch",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/watch.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_watch",
+      "community": 1,
+      "norm_label": "core: core/signals/watch"
+    },
+    {
+      "label": "core: core/signals/writable",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/signals/writable.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_signals_writable",
+      "community": 1,
+      "norm_label": "core: core/signals/writable"
+    },
+    {
+      "label": "core: core/ssr-context",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/ssr-context.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_ssr_context",
+      "community": 1,
+      "norm_label": "core: core/ssr-context"
+    },
+    {
+      "label": "core: core/strict",
+      "file_type": "code",
+      "source_file": "packages/core/src/core/strict.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_strict",
+      "community": 1,
+      "norm_label": "core: core/strict"
+    },
+    {
+      "label": "core: platform/enhance",
+      "file_type": "code",
+      "source_file": "packages/core/src/platform/enhance.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_platform_enhance",
+      "community": 2,
+      "norm_label": "core: platform/enhance"
+    },
+    {
+      "label": "core: platform/islands",
+      "file_type": "code",
+      "source_file": "packages/core/src/platform/islands.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_platform_islands",
+      "community": 2,
+      "norm_label": "core: platform/islands"
+    },
+    {
+      "label": "core: reactivity/bindAttribute",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/bindAttribute.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_bindattribute",
+      "community": 2,
+      "norm_label": "core: reactivity/bindattribute"
+    },
+    {
+      "label": "core: reactivity/bindChildNode",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/bindChildNode.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_bindchildnode",
+      "community": 2,
+      "norm_label": "core: reactivity/bindchildnode"
+    },
+    {
+      "label": "core: reactivity/bindTextNode",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/bindTextNode.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_bindtextnode",
+      "community": 0,
+      "norm_label": "core: reactivity/bindtextnode"
+    },
+    {
+      "label": "core: reactivity/concurrent",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/concurrent.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_concurrent",
+      "community": 1,
+      "norm_label": "core: reactivity/concurrent"
+    },
+    {
+      "label": "core: reactivity/nextTick",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/nextTick.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_nexttick",
+      "community": 17,
+      "norm_label": "core: reactivity/nexttick"
+    },
+    {
+      "label": "core: reactivity/signal",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/signal.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_signal",
+      "community": 1,
+      "norm_label": "core: reactivity/signal"
+    },
+    {
+      "label": "core: reactivity/track-core",
+      "file_type": "code",
+      "source_file": "packages/core/src/reactivity/track-core.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_track_core",
+      "community": 0,
+      "norm_label": "core: reactivity/track-core"
+    },
+    {
+      "label": "core: utils/globalSingleton",
+      "file_type": "code",
+      "source_file": "packages/core/src/utils/globalSingleton.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_utils_globalsingleton",
+      "community": 2,
+      "norm_label": "core: utils/globalsingleton"
+    },
+    {
+      "label": "core: utils/guards",
+      "file_type": "code",
+      "source_file": "packages/core/src/utils/guards.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_utils_guards",
+      "community": 18,
+      "norm_label": "core: utils/guards"
+    },
+    {
+      "label": "core: utils/sanitize",
+      "file_type": "code",
+      "source_file": "packages/core/src/utils/sanitize.ts",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_utils_sanitize",
+      "community": 2,
+      "norm_label": "core: utils/sanitize"
+    },
+    {
+      "label": "labs: browser/animationFrame",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/animationFrame.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_animationframe",
+      "community": 19,
+      "norm_label": "labs: browser/animationframe"
+    },
+    {
+      "label": "labs: browser/battery",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/battery.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_battery",
+      "community": 20,
+      "norm_label": "labs: browser/battery"
+    },
+    {
+      "label": "labs: browser/bounds",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/bounds.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_bounds",
+      "community": 21,
+      "norm_label": "labs: browser/bounds"
+    },
+    {
+      "label": "labs: browser/broadcast",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/broadcast.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_broadcast",
+      "community": 22,
+      "norm_label": "labs: browser/broadcast"
+    },
+    {
+      "label": "labs: browser/clipboard",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/clipboard.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_clipboard",
+      "community": 23,
+      "norm_label": "labs: browser/clipboard"
+    },
+    {
+      "label": "labs: browser/colorScheme",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/colorScheme.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_colorscheme",
+      "community": 24,
+      "norm_label": "labs: browser/colorscheme"
+    },
+    {
+      "label": "labs: browser/dragDrop",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/dragDrop.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_dragdrop",
+      "community": 25,
+      "norm_label": "labs: browser/dragdrop"
+    },
+    {
+      "label": "labs: browser/favicon",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/favicon.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_favicon",
+      "community": 26,
+      "norm_label": "labs: browser/favicon"
+    },
+    {
+      "label": "labs: browser/format",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/format.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_format",
+      "community": 27,
+      "norm_label": "labs: browser/format"
+    },
+    {
+      "label": "labs: browser/fullscreen",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/fullscreen.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_fullscreen",
+      "community": 28,
+      "norm_label": "labs: browser/fullscreen"
+    },
+    {
+      "label": "labs: browser/gamepad",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/gamepad.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_gamepad",
+      "community": 29,
+      "norm_label": "labs: browser/gamepad"
+    },
+    {
+      "label": "labs: browser/geo",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/geo.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_geo",
+      "community": 30,
+      "norm_label": "labs: browser/geo"
+    },
+    {
+      "label": "labs: browser/idle",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/idle.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_idle",
+      "community": 31,
+      "norm_label": "labs: browser/idle"
+    },
+    {
+      "label": "labs: browser/imageLoader",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/imageLoader.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_imageloader",
+      "community": 32,
+      "norm_label": "labs: browser/imageloader"
+    },
+    {
+      "label": "labs: browser/keyboard",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/keyboard.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_keyboard",
+      "community": 33,
+      "norm_label": "labs: browser/keyboard"
+    },
+    {
+      "label": "labs: browser/media",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/media.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_media",
+      "community": 34,
+      "norm_label": "labs: browser/media"
+    },
+    {
+      "label": "labs: browser/mouse",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/mouse.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_mouse",
+      "community": 35,
+      "norm_label": "labs: browser/mouse"
+    },
+    {
+      "label": "labs: browser/mutationObserver",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/mutationObserver.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_mutationobserver",
+      "community": 36,
+      "norm_label": "labs: browser/mutationobserver"
+    },
+    {
+      "label": "labs: browser/network",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/network.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_network",
+      "community": 37,
+      "norm_label": "labs: browser/network"
+    },
+    {
+      "label": "labs: browser/online",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/online.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_online",
+      "community": 38,
+      "norm_label": "labs: browser/online"
+    },
+    {
+      "label": "labs: browser/permissions",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/permissions.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_permissions",
+      "community": 39,
+      "norm_label": "labs: browser/permissions"
+    },
+    {
+      "label": "labs: browser/pointerLock",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/pointerLock.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_pointerlock",
+      "community": 40,
+      "norm_label": "labs: browser/pointerlock"
+    },
+    {
+      "label": "labs: browser/resize",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/resize.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_resize",
+      "community": 41,
+      "norm_label": "labs: browser/resize"
+    },
+    {
+      "label": "labs: browser/scroll",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/scroll.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_scroll",
+      "community": 42,
+      "norm_label": "labs: browser/scroll"
+    },
+    {
+      "label": "labs: browser/speech",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/speech.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_speech",
+      "community": 43,
+      "norm_label": "labs: browser/speech"
+    },
+    {
+      "label": "labs: browser/swipe",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/swipe.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_swipe",
+      "community": 44,
+      "norm_label": "labs: browser/swipe"
+    },
+    {
+      "label": "labs: browser/textSelection",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/textSelection.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_textselection",
+      "community": 45,
+      "norm_label": "labs: browser/textselection"
+    },
+    {
+      "label": "labs: browser/title",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/title.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_title",
+      "community": 46,
+      "norm_label": "labs: browser/title"
+    },
+    {
+      "label": "labs: browser/urlState",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/urlState.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_urlstate",
+      "community": 47,
+      "norm_label": "labs: browser/urlstate"
+    },
+    {
+      "label": "labs: browser/vibrate",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/vibrate.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_vibrate",
+      "community": 48,
+      "norm_label": "labs: browser/vibrate"
+    },
+    {
+      "label": "labs: browser/visibility",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/visibility.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_visibility",
+      "community": 49,
+      "norm_label": "labs: browser/visibility"
+    },
+    {
+      "label": "labs: browser/wakeLock",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/wakeLock.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_wakelock",
+      "community": 50,
+      "norm_label": "labs: browser/wakelock"
+    },
+    {
+      "label": "labs: browser/windowSize",
+      "file_type": "code",
+      "source_file": "packages/labs/src/browser/windowSize.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_browser_windowsize",
+      "community": 51,
+      "norm_label": "labs: browser/windowsize"
+    },
+    {
+      "label": "labs: devtools/componentProfiler",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/componentProfiler.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_componentprofiler",
+      "community": 10,
+      "norm_label": "labs: devtools/componentprofiler"
+    },
+    {
+      "label": "labs: devtools/debug",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/debug.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_debug",
+      "community": 52,
+      "norm_label": "labs: devtools/debug"
+    },
+    {
+      "label": "labs: devtools/debugValue",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/debugValue.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_debugvalue",
+      "community": 53,
+      "norm_label": "labs: devtools/debugvalue"
+    },
+    {
+      "label": "labs: devtools/devtools",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/devtools.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_devtools",
+      "community": 54,
+      "norm_label": "labs: devtools/devtools"
+    },
+    {
+      "label": "labs: devtools/devtoolsOverlay",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/devtoolsOverlay.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_devtoolsoverlay",
+      "community": 55,
+      "norm_label": "labs: devtools/devtoolsoverlay"
+    },
+    {
+      "label": "labs: devtools/hmr",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/hmr.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_hmr",
+      "community": 56,
+      "norm_label": "labs: devtools/hmr"
+    },
+    {
+      "label": "labs: devtools/introspect",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/introspect.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_introspect",
+      "community": 57,
+      "norm_label": "labs: devtools/introspect"
+    },
+    {
+      "label": "labs: devtools/signalGraph",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/signalGraph.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_signalgraph",
+      "community": 58,
+      "norm_label": "labs: devtools/signalgraph"
+    },
+    {
+      "label": "labs: devtools/sourceMaps",
+      "file_type": "code",
+      "source_file": "packages/labs/src/devtools/sourceMaps.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_devtools_sourcemaps",
+      "community": 59,
+      "norm_label": "labs: devtools/sourcemaps"
+    },
+    {
+      "label": "labs: ecosystem/adapters/mobx",
+      "file_type": "code",
+      "source_file": "packages/labs/src/ecosystem/adapters/mobx.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_adapters_mobx",
+      "community": 8,
+      "norm_label": "labs: ecosystem/adapters/mobx"
+    },
+    {
+      "label": "labs: ecosystem/adapters/redux",
+      "file_type": "code",
+      "source_file": "packages/labs/src/ecosystem/adapters/redux.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_adapters_redux",
+      "community": 8,
+      "norm_label": "labs: ecosystem/adapters/redux"
+    },
+    {
+      "label": "labs: ecosystem/adapters/zustand",
+      "file_type": "code",
+      "source_file": "packages/labs/src/ecosystem/adapters/zustand.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_adapters_zustand",
+      "community": 8,
+      "norm_label": "labs: ecosystem/adapters/zustand"
+    },
+    {
+      "label": "labs: ecosystem/ui/componentAdapter",
+      "file_type": "code",
+      "source_file": "packages/labs/src/ecosystem/ui/componentAdapter.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_ui_componentadapter",
+      "community": 6,
+      "norm_label": "labs: ecosystem/ui/componentadapter"
+    },
+    {
+      "label": "labs: motion/TransitionGroup",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/TransitionGroup.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_transitiongroup",
+      "community": 61,
+      "norm_label": "labs: motion/transitiongroup"
+    },
+    {
+      "label": "labs: motion/animationPresets",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/animationPresets.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_animationpresets",
+      "community": 7,
+      "norm_label": "labs: motion/animationpresets"
+    },
+    {
+      "label": "labs: motion/reducedMotion",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/reducedMotion.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_reducedmotion",
+      "community": 7,
+      "norm_label": "labs: motion/reducedmotion"
+    },
+    {
+      "label": "labs: motion/springSignal",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/springSignal.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_springsignal",
+      "community": 7,
+      "norm_label": "labs: motion/springsignal"
+    },
+    {
+      "label": "labs: motion/transition",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/transition.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_transition",
+      "community": 60,
+      "norm_label": "labs: motion/transition"
+    },
+    {
+      "label": "labs: motion/viewTransition",
+      "file_type": "code",
+      "source_file": "packages/labs/src/motion/viewTransition.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_motion_viewtransition",
+      "community": 62,
+      "norm_label": "labs: motion/viewtransition"
+    },
+    {
+      "label": "labs: patterns/componentProps",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/componentProps.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_componentprops",
+      "community": 63,
+      "norm_label": "labs: patterns/componentprops"
+    },
+    {
+      "label": "labs: patterns/composable",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/composable.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_composable",
+      "community": 64,
+      "norm_label": "labs: patterns/composable"
+    },
+    {
+      "label": "labs: patterns/contracts",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/contracts.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_contracts",
+      "community": 65,
+      "norm_label": "labs: patterns/contracts"
+    },
+    {
+      "label": "labs: patterns/globalStore",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/globalStore.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_globalstore",
+      "community": 66,
+      "norm_label": "labs: patterns/globalstore"
+    },
+    {
+      "label": "labs: patterns/hoc",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/hoc.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_hoc",
+      "community": 67,
+      "norm_label": "labs: patterns/hoc"
+    },
+    {
+      "label": "labs: patterns/machine",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/machine.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_machine",
+      "community": 68,
+      "norm_label": "labs: patterns/machine"
+    },
+    {
+      "label": "labs: patterns/optimistic",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/optimistic.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_optimistic",
+      "community": 69,
+      "norm_label": "labs: patterns/optimistic"
+    },
+    {
+      "label": "labs: patterns/persist",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/persist.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_persist",
+      "community": 70,
+      "norm_label": "labs: patterns/persist"
+    },
+    {
+      "label": "labs: patterns/timeTravel",
+      "file_type": "code",
+      "source_file": "packages/labs/src/patterns/timeTravel.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_patterns_timetravel",
+      "community": 71,
+      "norm_label": "labs: patterns/timetravel"
+    },
+    {
+      "label": "labs: performance/bundleOptimize",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/bundleOptimize.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_bundleoptimize",
+      "community": 72,
+      "norm_label": "labs: performance/bundleoptimize"
+    },
+    {
+      "label": "labs: performance/chunkLoader",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/chunkLoader.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_chunkloader",
+      "community": 73,
+      "norm_label": "labs: performance/chunkloader"
+    },
+    {
+      "label": "labs: performance/compiled",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/compiled.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_compiled",
+      "community": 11,
+      "norm_label": "labs: performance/compiled"
+    },
+    {
+      "label": "labs: performance/concurrent",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/concurrent.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_concurrent",
+      "community": 12,
+      "norm_label": "labs: performance/concurrent"
+    },
+    {
+      "label": "labs: performance/domRecycler",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/domRecycler.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_domrecycler",
+      "community": 74,
+      "norm_label": "labs: performance/domrecycler"
+    },
+    {
+      "label": "labs: performance/normalize",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/normalize.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_normalize",
+      "community": 75,
+      "norm_label": "labs: performance/normalize"
+    },
+    {
+      "label": "labs: performance/scheduler",
+      "file_type": "code",
+      "source_file": "packages/labs/src/performance/scheduler.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_performance_scheduler",
+      "community": 12,
+      "norm_label": "labs: performance/scheduler"
+    },
+    {
+      "label": "labs: widgets/Accordion",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Accordion.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_accordion",
+      "community": 76,
+      "norm_label": "labs: widgets/accordion"
+    },
+    {
+      "label": "labs: widgets/Combobox",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Combobox.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_combobox",
+      "community": 77,
+      "norm_label": "labs: widgets/combobox"
+    },
+    {
+      "label": "labs: widgets/FileUpload",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/FileUpload.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_fileupload",
+      "community": 80,
+      "norm_label": "labs: widgets/fileupload"
+    },
+    {
+      "label": "labs: widgets/Popover",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Popover.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_popover",
+      "community": 81,
+      "norm_label": "labs: widgets/popover"
+    },
+    {
+      "label": "labs: widgets/Select",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Select.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_select",
+      "community": 82,
+      "norm_label": "labs: widgets/select"
+    },
+    {
+      "label": "labs: widgets/Tabs",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Tabs.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_tabs",
+      "community": 83,
+      "norm_label": "labs: widgets/tabs"
+    },
+    {
+      "label": "labs: widgets/Tooltip",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/Tooltip.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_tooltip",
+      "community": 84,
+      "norm_label": "labs: widgets/tooltip"
+    },
+    {
+      "label": "labs: widgets/contentEditable",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/contentEditable.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_contenteditable",
+      "community": 78,
+      "norm_label": "labs: widgets/contenteditable"
+    },
+    {
+      "label": "labs: widgets/datePicker",
+      "file_type": "code",
+      "source_file": "packages/labs/src/widgets/datePicker.ts",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_widgets_datepicker",
+      "community": 79,
+      "norm_label": "labs: widgets/datepicker"
+    },
+    {
+      "label": "sibujs: data/debounce",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/debounce.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_debounce",
+      "community": 85,
+      "norm_label": "sibujs: data/debounce"
+    },
+    {
+      "label": "sibujs: data/infiniteQuery",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/infiniteQuery.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_infinitequery",
+      "community": 4,
+      "norm_label": "sibujs: data/infinitequery"
+    },
+    {
+      "label": "sibujs: data/mutation",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/mutation.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_mutation",
+      "community": 4,
+      "norm_label": "sibujs: data/mutation"
+    },
+    {
+      "label": "sibujs: data/offlineStore",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/offlineStore.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_offlinestore",
+      "community": 86,
+      "norm_label": "sibujs: data/offlinestore"
+    },
+    {
+      "label": "sibujs: data/previous",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/previous.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_previous",
+      "community": 87,
+      "norm_label": "sibujs: data/previous"
+    },
+    {
+      "label": "sibujs: data/query",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/query.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_query",
+      "community": 4,
+      "norm_label": "sibujs: data/query"
+    },
+    {
+      "label": "sibujs: data/resource",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/resource.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_resource",
+      "community": 4,
+      "norm_label": "sibujs: data/resource"
+    },
+    {
+      "label": "sibujs: data/retry",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/retry.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_retry",
+      "community": 4,
+      "norm_label": "sibujs: data/retry"
+    },
+    {
+      "label": "sibujs: data/routeLoader",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/routeLoader.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_routeloader",
+      "community": 4,
+      "norm_label": "sibujs: data/routeloader"
+    },
+    {
+      "label": "sibujs: data/throttle",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/data/throttle.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_data_throttle",
+      "community": 88,
+      "norm_label": "sibujs: data/throttle"
+    },
+    {
+      "label": "sibujs: platform/customElement",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/customElement.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_customelement",
+      "community": 89,
+      "norm_label": "sibujs: platform/customelement"
+    },
+    {
+      "label": "sibujs: platform/head",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/head.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_head",
+      "community": 90,
+      "norm_label": "sibujs: platform/head"
+    },
+    {
+      "label": "sibujs: platform/incrementalRegeneration",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/incrementalRegeneration.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_incrementalregeneration",
+      "community": 91,
+      "norm_label": "sibujs: platform/incrementalregeneration"
+    },
+    {
+      "label": "sibujs: platform/microfrontend",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/microfrontend.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_microfrontend",
+      "community": 92,
+      "norm_label": "sibujs: platform/microfrontend"
+    },
+    {
+      "label": "sibujs: platform/routeActions",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/routeActions.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_routeactions",
+      "community": 93,
+      "norm_label": "sibujs: platform/routeactions"
+    },
+    {
+      "label": "sibujs: platform/routeMiddleware",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/routeMiddleware.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_routemiddleware",
+      "community": 94,
+      "norm_label": "sibujs: platform/routemiddleware"
+    },
+    {
+      "label": "sibujs: platform/scrollRestoration",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/scrollRestoration.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_scrollrestoration",
+      "community": 95,
+      "norm_label": "sibujs: platform/scrollrestoration"
+    },
+    {
+      "label": "sibujs: platform/serviceWorker",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/serviceWorker.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_serviceworker",
+      "community": 96,
+      "norm_label": "sibujs: platform/serviceworker"
+    },
+    {
+      "label": "sibujs: platform/ssr",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/ssr.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_ssr",
+      "community": 9,
+      "norm_label": "sibujs: platform/ssr"
+    },
+    {
+      "label": "sibujs: platform/staticSiteGenerator",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/staticSiteGenerator.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_staticsitegenerator",
+      "community": 97,
+      "norm_label": "sibujs: platform/staticsitegenerator"
+    },
+    {
+      "label": "sibujs: platform/wasm",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/wasm.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_wasm",
+      "community": 98,
+      "norm_label": "sibujs: platform/wasm"
+    },
+    {
+      "label": "sibujs: platform/worker",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/platform/worker.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_platform_worker",
+      "community": 99,
+      "norm_label": "sibujs: platform/worker"
+    },
+    {
+      "label": "sibujs: plugins/ecosystem",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/ecosystem.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_ecosystem",
+      "community": 100,
+      "norm_label": "sibujs: plugins/ecosystem"
+    },
+    {
+      "label": "sibujs: plugins/i18n",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/i18n.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_i18n",
+      "community": 101,
+      "norm_label": "sibujs: plugins/i18n"
+    },
+    {
+      "label": "sibujs: plugins/modular",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/modular.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_modular",
+      "community": 102,
+      "norm_label": "sibujs: plugins/modular"
+    },
+    {
+      "label": "sibujs: plugins/plugin",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/plugin.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_plugin",
+      "community": 103,
+      "norm_label": "sibujs: plugins/plugin"
+    },
+    {
+      "label": "sibujs: plugins/router",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/router.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_router",
+      "community": 9,
+      "norm_label": "sibujs: plugins/router"
+    },
+    {
+      "label": "sibujs: plugins/routerSSR",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/routerSSR.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_routerssr",
+      "community": 9,
+      "norm_label": "sibujs: plugins/routerssr"
+    },
+    {
+      "label": "sibujs: plugins/startup",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/startup.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_startup",
+      "community": 9,
+      "norm_label": "sibujs: plugins/startup"
+    },
+    {
+      "label": "sibujs: plugins/versioning",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/plugins/versioning.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_plugins_versioning",
+      "community": 104,
+      "norm_label": "sibujs: plugins/versioning"
+    },
+    {
+      "label": "sibujs: testing/a11y",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/a11y.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_a11y",
+      "community": 3,
+      "norm_label": "sibujs: testing/a11y"
+    },
+    {
+      "label": "sibujs: testing/adapters",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/adapters.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_adapters",
+      "community": 3,
+      "norm_label": "sibujs: testing/adapters"
+    },
+    {
+      "label": "sibujs: testing/e2e",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/e2e.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_e2e",
+      "community": 3,
+      "norm_label": "sibujs: testing/e2e"
+    },
+    {
+      "label": "sibujs: testing/index",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_index",
+      "community": 3,
+      "norm_label": "sibujs: testing/index"
+    },
+    {
+      "label": "sibujs: testing/queries",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/queries.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_queries",
+      "community": 3,
+      "norm_label": "sibujs: testing/queries"
+    },
+    {
+      "label": "sibujs: testing/snapshot",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/snapshot.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_snapshot",
+      "community": 3,
+      "norm_label": "sibujs: testing/snapshot"
+    },
+    {
+      "label": "sibujs: testing/visualRegression",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/testing/visualRegression.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_testing_visualregression",
+      "community": 3,
+      "norm_label": "sibujs: testing/visualregression"
+    },
+    {
+      "label": "sibujs: ui/a11y",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/a11y.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_a11y",
+      "community": 105,
+      "norm_label": "sibujs: ui/a11y"
+    },
+    {
+      "label": "sibujs: ui/a11yPrimitives",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/a11yPrimitives.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_a11yprimitives",
+      "community": 106,
+      "norm_label": "sibujs: ui/a11yprimitives"
+    },
+    {
+      "label": "sibujs: ui/dialog",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/dialog.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_dialog",
+      "community": 107,
+      "norm_label": "sibujs: ui/dialog"
+    },
+    {
+      "label": "sibujs: ui/eventBus",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/eventBus.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_eventbus",
+      "community": 108,
+      "norm_label": "sibujs: ui/eventbus"
+    },
+    {
+      "label": "sibujs: ui/form",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/form.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_form",
+      "community": 109,
+      "norm_label": "sibujs: ui/form"
+    },
+    {
+      "label": "sibujs: ui/formAction",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/formAction.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_formaction",
+      "community": 110,
+      "norm_label": "sibujs: ui/formaction"
+    },
+    {
+      "label": "sibujs: ui/hover",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/hover.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_hover",
+      "community": 111,
+      "norm_label": "sibujs: ui/hover"
+    },
+    {
+      "label": "sibujs: ui/infiniteScroll",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/infiniteScroll.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_infinitescroll",
+      "community": 112,
+      "norm_label": "sibujs: ui/infinitescroll"
+    },
+    {
+      "label": "sibujs: ui/inputMask",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/inputMask.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_inputmask",
+      "community": 113,
+      "norm_label": "sibujs: ui/inputmask"
+    },
+    {
+      "label": "sibujs: ui/intersection",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/intersection.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_intersection",
+      "community": 114,
+      "norm_label": "sibujs: ui/intersection"
+    },
+    {
+      "label": "sibujs: ui/lazyEffect",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/lazyEffect.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_lazyeffect",
+      "community": 115,
+      "norm_label": "sibujs: ui/lazyeffect"
+    },
+    {
+      "label": "sibujs: ui/pagination",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/pagination.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_pagination",
+      "community": 116,
+      "norm_label": "sibujs: ui/pagination"
+    },
+    {
+      "label": "sibujs: ui/reactiveAttr",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/reactiveAttr.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_reactiveattr",
+      "community": 117,
+      "norm_label": "sibujs: ui/reactiveattr"
+    },
+    {
+      "label": "sibujs: ui/scopedStyle",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/scopedStyle.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_scopedstyle",
+      "community": 118,
+      "norm_label": "sibujs: ui/scopedstyle"
+    },
+    {
+      "label": "sibujs: ui/scrollLock",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/scrollLock.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_scrolllock",
+      "community": 119,
+      "norm_label": "sibujs: ui/scrolllock"
+    },
+    {
+      "label": "sibujs: ui/socket",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/socket.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_socket",
+      "community": 120,
+      "norm_label": "sibujs: ui/socket"
+    },
+    {
+      "label": "sibujs: ui/stream",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/stream.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_stream",
+      "community": 121,
+      "norm_label": "sibujs: ui/stream"
+    },
+    {
+      "label": "sibujs: ui/timers",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/timers.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_timers",
+      "community": 122,
+      "norm_label": "sibujs: ui/timers"
+    },
+    {
+      "label": "sibujs: ui/toast",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/toast.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_toast",
+      "community": 123,
+      "norm_label": "sibujs: ui/toast"
+    },
+    {
+      "label": "sibujs: ui/virtualList",
+      "file_type": "code",
+      "source_file": "packages/sibujs/src/ui/virtualList.ts",
+      "package": "sibujs",
+      "_origin": "ast",
+      "id": "packages_sibujs_src_ui_virtuallist",
+      "community": 124,
+      "norm_label": "sibujs: ui/virtuallist"
+    },
+    {
+      "label": "labs: ecosystem/adapters/index",
+      "file_type": "code",
+      "source_file": "",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_adapters_index",
+      "community": 8,
+      "norm_label": "labs: ecosystem/adapters/index"
+    },
+    {
+      "label": "labs: ecosystem/ui/index",
+      "file_type": "code",
+      "source_file": "",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_ui_index",
+      "community": 6,
+      "norm_label": "labs: ecosystem/ui/index"
+    },
+    {
+      "label": "labs: ecosystem/ui/antd",
+      "file_type": "code",
+      "source_file": "",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_ui_antd",
+      "community": 6,
+      "norm_label": "labs: ecosystem/ui/antd"
+    },
+    {
+      "label": "labs: ecosystem/ui/chakra",
+      "file_type": "code",
+      "source_file": "",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_ui_chakra",
+      "community": 6,
+      "norm_label": "labs: ecosystem/ui/chakra"
+    },
+    {
+      "label": "labs: ecosystem/ui/material",
+      "file_type": "code",
+      "source_file": "",
+      "package": "labs",
+      "_origin": "ast",
+      "id": "packages_labs_src_ecosystem_ui_material",
+      "community": 6,
+      "norm_label": "labs: ecosystem/ui/material"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/sibujs/dist/ssr/d/ts",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_sibujs_dist_ssr_d_ts",
+      "community": 11,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/sibujs/dist/ssr/d/ts"
+    },
+    {
+      "label": "core: core/rendering/html",
+      "file_type": "code",
+      "source_file": "",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_core_rendering_html",
+      "community": 5,
+      "norm_label": "core: core/rendering/html"
+    },
+    {
+      "label": "core: reactivity/batch",
+      "file_type": "code",
+      "source_file": "",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_batch",
+      "community": 1,
+      "norm_label": "core: reactivity/batch"
+    },
+    {
+      "label": "core: reactivity/track",
+      "file_type": "code",
+      "source_file": "",
+      "package": "core",
+      "_origin": "ast",
+      "id": "packages_core_src_reactivity_track",
+      "community": 0,
+      "norm_label": "core: reactivity/track"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/htm/executeelement",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "community": 2,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/htm/executeelement"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/lifecycle/safecall",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_safecall",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/lifecycle/safecall"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/lifecycle/runmountcallback",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_runmountcallback",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/lifecycle/runmountcallback"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/applystyle",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applystyle",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/applystyle"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/applyclass",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applyclass",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/applyclass"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/appendchildren",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_appendchildren",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/core/rendering/tagfactory/appendchildren"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/core/safeinvoke",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_safeinvoke",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/core/safeinvoke"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/resolvereactiveapi",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_resolvereactiveapi",
+      "community": 0,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/resolvereactiveapi"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/labs/src/motion/animationpresets/createpreset",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_labs_src_motion_animationpresets_createpreset",
+      "community": 7,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/labs/src/motion/animationpresets/createpreset"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/core/subnode",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_subnode",
+      "community": 1,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/core/src/reactivity/track/core/subnode"
+    },
+    {
+      "label": "c/projects/mine/sibujs/sibujs/packages/labs/src/devtools/componentprofiler/profilerinternal",
+      "file_type": "code",
+      "source_file": "",
+      "package": "?",
+      "_origin": "ast",
+      "id": "c_projects_mine_sibujs_sibujs_packages_labs_src_devtools_componentprofiler_profilerinternal",
+      "community": 10,
+      "norm_label": "c/projects/mine/sibujs/sibujs/packages/labs/src/devtools/componentprofiler/profilerinternal"
+    }
+  ],
+  "links": [
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_components_errordisplay",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_core_rendering_lazy",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_core_rendering_lifecycle",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_core_signals_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorBoundary.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errorboundary",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorDisplay.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errordisplay",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/components/ErrorDisplay.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_components_errordisplay",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lifecycle.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_safecall",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track-core.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_safeinvoke",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_resolvereactiveapi",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/dispose.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_dispose",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/each.ts",
+      "weight": 3.0,
+      "source": "packages_core_src_core_rendering_each",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/keepAlive.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_keepalive",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lazy.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_lazy",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lifecycle.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_lifecycle",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/mount.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_mount",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/derived.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_derived",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/effect.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_effect",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/signal.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_signal",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/store.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_store",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/watch.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_watch",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/strict.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_strict",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/enhance.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_platform_enhance",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindAttribute.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_bindattribute",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindChildNode.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_bindchildnode",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindTextNode.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_bindtextnode",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_track",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track-core.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_track_core",
+      "target": "packages_core_src_core_dev",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/action.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_action",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/context.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_context",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/directives.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_directives",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/directives.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_directives",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lifecycle.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_runmountcallback",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_appendchildren",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applyclass",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applystyle",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/dynamic.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_dynamic",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/each.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_each",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/keepAlive.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_keepalive",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lazy.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_lazy",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/lifecycle.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_lifecycle",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/mount.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_mount",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/portal.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_portal",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/enhance.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_platform_enhance",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindChildNode.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_reactivity_bindchildnode",
+      "target": "packages_core_src_core_rendering_dispose",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/each.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_rendering_each",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/fragment.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_fragment",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_core_rendering_tagfactory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_reactivity_bindattribute",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_reactivity_bindchildnode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 4.0,
+      "source": "packages_core_src_core_rendering_htm",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_core_rendering_tagfactory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 3.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_reactivity_bindattribute",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_reactivity_bindchildnode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 3.0,
+      "source": "packages_core_src_core_rendering_tagfactory",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagPropTypes.ts",
+      "weight": 11.0,
+      "source": "packages_core_src_core_rendering_tagproptypes",
+      "target": "packages_core_src_core_rendering_tagfactory",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/html.ts",
+      "weight": 12.0,
+      "source": "packages_core_src_core_rendering_html",
+      "target": "packages_core_src_core_rendering_tagproptypes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagPropTypes.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_rendering_tagproptypes",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindChildNode.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_reactivity_bindchildnode",
+      "target": "packages_core_src_core_rendering_types",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/array.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_core_signals_array",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/array.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_array",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/asyncDerived.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_asyncderived",
+      "target": "packages_core_src_core_signals_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/asyncDerived.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_asyncderived",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/deepSignal.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_deepsignal",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/derived.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_derived",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/derived.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_derived",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/writable.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_writable",
+      "target": "packages_core_src_core_signals_derived",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/effect.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_effect",
+      "target": "packages_core_src_core_ssr_context",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/store.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_store",
+      "target": "packages_core_src_core_signals_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/strict.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_strict",
+      "target": "packages_core_src_core_signals_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/enhance.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_platform_enhance",
+      "target": "packages_core_src_core_signals_effect",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/ref.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_ref",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/signal.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_signal",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/store.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_store",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/writable.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_writable",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/concurrent.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_reactivity_concurrent",
+      "target": "packages_core_src_core_signals_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/signals/watch.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_core_signals_watch",
+      "target": "packages_core_src_core_ssr_context",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/enhance.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_platform_enhance",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/islands.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_platform_islands",
+      "target": "packages_core_src_platform_enhance",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/platform/islands.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_platform_islands",
+      "target": "packages_core_src_utils_globalsingleton",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_reactivity_bindattribute",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/bindAttribute.ts",
+      "weight": 2.0,
+      "source": "packages_core_src_reactivity_bindattribute",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_reactivity_bindchildnode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_appendchildren",
+      "target": "packages_core_src_reactivity_bindchildnode",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "references",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track-core.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_subnode",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/batch.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_reactivity_batch",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/reactivity/track-core.ts",
+      "weight": 1.0,
+      "source": "packages_core_src_reactivity_track_core",
+      "target": "packages_core_src_reactivity_signal",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/htm.ts",
+      "weight": 4.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/core/src/core/rendering/tagFactory.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applystyle",
+      "target": "packages_core_src_utils_sanitize",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "inherits",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/devtools/componentProfiler.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_labs_src_devtools_componentprofiler_profilerinternal",
+      "target": "packages_labs_src_devtools_componentprofiler",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/adapters/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_adapters_index",
+      "target": "packages_labs_src_ecosystem_adapters_mobx",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/adapters/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_adapters_index",
+      "target": "packages_labs_src_ecosystem_adapters_redux",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/adapters/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_adapters_index",
+      "target": "packages_labs_src_ecosystem_adapters_zustand",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/antd.ts",
+      "weight": 2.0,
+      "source": "packages_labs_src_ecosystem_ui_antd",
+      "target": "packages_labs_src_ecosystem_ui_componentadapter",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/chakra.ts",
+      "weight": 2.0,
+      "source": "packages_labs_src_ecosystem_ui_chakra",
+      "target": "packages_labs_src_ecosystem_ui_componentadapter",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_ui_index",
+      "target": "packages_labs_src_ecosystem_ui_componentadapter",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/material.ts",
+      "weight": 2.0,
+      "source": "packages_labs_src_ecosystem_ui_material",
+      "target": "packages_labs_src_ecosystem_ui_componentadapter",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/motion/animationPresets.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_motion_animationpresets",
+      "target": "packages_labs_src_motion_reducedmotion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/motion/animationPresets.ts",
+      "weight": 1.0,
+      "source": "c_projects_mine_sibujs_sibujs_packages_labs_src_motion_animationpresets_createpreset",
+      "target": "packages_labs_src_motion_reducedmotion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/motion/springSignal.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_motion_springsignal",
+      "target": "packages_labs_src_motion_reducedmotion",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/performance/compiled.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_performance_compiled",
+      "target": "c_projects_mine_sibujs_sibujs_packages_sibujs_dist_ssr_d_ts",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/performance/concurrent.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_performance_concurrent",
+      "target": "packages_labs_src_performance_scheduler",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/data/infiniteQuery.ts",
+      "weight": 3.0,
+      "source": "packages_sibujs_src_data_infinitequery",
+      "target": "packages_sibujs_src_data_retry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/data/mutation.ts",
+      "weight": 3.0,
+      "source": "packages_sibujs_src_data_mutation",
+      "target": "packages_sibujs_src_data_retry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/data/query.ts",
+      "weight": 3.0,
+      "source": "packages_sibujs_src_data_query",
+      "target": "packages_sibujs_src_data_retry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/data/resource.ts",
+      "weight": 3.0,
+      "source": "packages_sibujs_src_data_resource",
+      "target": "packages_sibujs_src_data_retry",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/data/routeLoader.ts",
+      "weight": 2.0,
+      "source": "packages_sibujs_src_data_routeloader",
+      "target": "packages_sibujs_src_data_resource",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/plugins/routerSSR.ts",
+      "weight": 4.0,
+      "source": "packages_sibujs_src_plugins_routerssr",
+      "target": "packages_sibujs_src_platform_ssr",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/plugins/startup.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_plugins_startup",
+      "target": "packages_sibujs_src_platform_ssr",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "imports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/plugins/routerSSR.ts",
+      "weight": 2.0,
+      "source": "packages_sibujs_src_plugins_routerssr",
+      "target": "packages_sibujs_src_plugins_router",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_a11y",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_adapters",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_e2e",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_queries",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_snapshot",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/sibujs/src/testing/index.ts",
+      "weight": 1.0,
+      "source": "packages_sibujs_src_testing_index",
+      "target": "packages_sibujs_src_testing_visualregression",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_ui_index",
+      "target": "packages_labs_src_ecosystem_ui_antd",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_ui_index",
+      "target": "packages_labs_src_ecosystem_ui_chakra",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "re_exports",
+      "confidence": "EXTRACTED",
+      "source_file": "packages/labs/src/ecosystem/ui/index.ts",
+      "weight": 1.0,
+      "source": "packages_labs_src_ecosystem_ui_index",
+      "target": "packages_labs_src_ecosystem_ui_material",
+      "confidence_score": 1.0
+    }
+  ],
+  "hyperedges": [],
+  "built_at_commit": "51b709d7064f4cd1f53a0b40f0c71e3e687cd802"
+}

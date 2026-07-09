@@ -1,7 +1,4 @@
-import { registerDisposer } from "@sibujs/core";
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { derived, effect, registerDisposer, signal } from "@sibujs/core";
 
 // ============================================================================
 // TYPES

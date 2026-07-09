@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { describe, expect, it, vi } from "vitest";
 import { throttle } from "../src/data/throttle";
 
 describe("throttle", () => {

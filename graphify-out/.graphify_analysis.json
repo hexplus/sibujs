@@ -1,0 +1,723 @@
+{
+  "communities": {
+    "0": [
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_runmountcallback",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_lifecycle_safecall",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_appendchildren",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applyclass",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_tagfactory_applystyle",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_safeinvoke",
+      "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_resolvereactiveapi",
+      "packages_core_src_components_errorboundary",
+      "packages_core_src_components_errordisplay",
+      "packages_core_src_core_dev",
+      "packages_core_src_core_rendering_action",
+      "packages_core_src_core_rendering_directives",
+      "packages_core_src_core_rendering_dispose",
+      "packages_core_src_core_rendering_dynamic",
+      "packages_core_src_core_rendering_each",
+      "packages_core_src_core_rendering_keepalive",
+      "packages_core_src_core_rendering_lazy",
+      "packages_core_src_core_rendering_lifecycle",
+      "packages_core_src_core_rendering_mount",
+      "packages_core_src_core_rendering_portal",
+      "packages_core_src_reactivity_bindtextnode",
+      "packages_core_src_reactivity_track",
+      "packages_core_src_reactivity_track_core"
+    ],
+    "1": [
+      "c_projects_mine_sibujs_sibujs_packages_core_src_reactivity_track_core_subnode",
+      "packages_core_src_core_rendering_context",
+      "packages_core_src_core_signals_array",
+      "packages_core_src_core_signals_asyncderived",
+      "packages_core_src_core_signals_deepsignal",
+      "packages_core_src_core_signals_derived",
+      "packages_core_src_core_signals_effect",
+      "packages_core_src_core_signals_ref",
+      "packages_core_src_core_signals_signal",
+      "packages_core_src_core_signals_store",
+      "packages_core_src_core_signals_watch",
+      "packages_core_src_core_signals_writable",
+      "packages_core_src_core_ssr_context",
+      "packages_core_src_core_strict",
+      "packages_core_src_reactivity_batch",
+      "packages_core_src_reactivity_concurrent",
+      "packages_core_src_reactivity_signal"
+    ],
+    "2": [
+      "c_projects_mine_sibujs_sibujs_packages_core_src_core_rendering_htm_executeelement",
+      "packages_core_src_core_rendering_htm",
+      "packages_core_src_platform_enhance",
+      "packages_core_src_platform_islands",
+      "packages_core_src_reactivity_bindattribute",
+      "packages_core_src_reactivity_bindchildnode",
+      "packages_core_src_utils_globalsingleton",
+      "packages_core_src_utils_sanitize"
+    ],
+    "3": [
+      "packages_sibujs_src_testing_a11y",
+      "packages_sibujs_src_testing_adapters",
+      "packages_sibujs_src_testing_e2e",
+      "packages_sibujs_src_testing_index",
+      "packages_sibujs_src_testing_queries",
+      "packages_sibujs_src_testing_snapshot",
+      "packages_sibujs_src_testing_visualregression"
+    ],
+    "4": [
+      "packages_sibujs_src_data_infinitequery",
+      "packages_sibujs_src_data_mutation",
+      "packages_sibujs_src_data_query",
+      "packages_sibujs_src_data_resource",
+      "packages_sibujs_src_data_retry",
+      "packages_sibujs_src_data_routeloader"
+    ],
+    "5": [
+      "packages_core_src_core_rendering_fragment",
+      "packages_core_src_core_rendering_html",
+      "packages_core_src_core_rendering_tagfactory",
+      "packages_core_src_core_rendering_tagproptypes",
+      "packages_core_src_core_rendering_types"
+    ],
+    "6": [
+      "packages_labs_src_ecosystem_ui_antd",
+      "packages_labs_src_ecosystem_ui_chakra",
+      "packages_labs_src_ecosystem_ui_componentadapter",
+      "packages_labs_src_ecosystem_ui_index",
+      "packages_labs_src_ecosystem_ui_material"
+    ],
+    "7": [
+      "c_projects_mine_sibujs_sibujs_packages_labs_src_motion_animationpresets_createpreset",
+      "packages_labs_src_motion_animationpresets",
+      "packages_labs_src_motion_reducedmotion",
+      "packages_labs_src_motion_springsignal"
+    ],
+    "8": [
+      "packages_labs_src_ecosystem_adapters_index",
+      "packages_labs_src_ecosystem_adapters_mobx",
+      "packages_labs_src_ecosystem_adapters_redux",
+      "packages_labs_src_ecosystem_adapters_zustand"
+    ],
+    "9": [
+      "packages_sibujs_src_platform_ssr",
+      "packages_sibujs_src_plugins_router",
+      "packages_sibujs_src_plugins_routerssr",
+      "packages_sibujs_src_plugins_startup"
+    ],
+    "10": [
+      "c_projects_mine_sibujs_sibujs_packages_labs_src_devtools_componentprofiler_profilerinternal",
+      "packages_labs_src_devtools_componentprofiler"
+    ],
+    "11": [
+      "c_projects_mine_sibujs_sibujs_packages_sibujs_dist_ssr_d_ts",
+      "packages_labs_src_performance_compiled"
+    ],
+    "12": [
+      "packages_labs_src_performance_concurrent",
+      "packages_labs_src_performance_scheduler"
+    ],
+    "13": [
+      "packages_core_src_components_loading"
+    ],
+    "14": [
+      "packages_core_src_core_rendering_catch"
+    ],
+    "15": [
+      "packages_core_src_core_rendering_createid"
+    ],
+    "16": [
+      "packages_core_src_core_rendering_slots"
+    ],
+    "17": [
+      "packages_core_src_reactivity_nexttick"
+    ],
+    "18": [
+      "packages_core_src_utils_guards"
+    ],
+    "19": [
+      "packages_labs_src_browser_animationframe"
+    ],
+    "20": [
+      "packages_labs_src_browser_battery"
+    ],
+    "21": [
+      "packages_labs_src_browser_bounds"
+    ],
+    "22": [
+      "packages_labs_src_browser_broadcast"
+    ],
+    "23": [
+      "packages_labs_src_browser_clipboard"
+    ],
+    "24": [
+      "packages_labs_src_browser_colorscheme"
+    ],
+    "25": [
+      "packages_labs_src_browser_dragdrop"
+    ],
+    "26": [
+      "packages_labs_src_browser_favicon"
+    ],
+    "27": [
+      "packages_labs_src_browser_format"
+    ],
+    "28": [
+      "packages_labs_src_browser_fullscreen"
+    ],
+    "29": [
+      "packages_labs_src_browser_gamepad"
+    ],
+    "30": [
+      "packages_labs_src_browser_geo"
+    ],
+    "31": [
+      "packages_labs_src_browser_idle"
+    ],
+    "32": [
+      "packages_labs_src_browser_imageloader"
+    ],
+    "33": [
+      "packages_labs_src_browser_keyboard"
+    ],
+    "34": [
+      "packages_labs_src_browser_media"
+    ],
+    "35": [
+      "packages_labs_src_browser_mouse"
+    ],
+    "36": [
+      "packages_labs_src_browser_mutationobserver"
+    ],
+    "37": [
+      "packages_labs_src_browser_network"
+    ],
+    "38": [
+      "packages_labs_src_browser_online"
+    ],
+    "39": [
+      "packages_labs_src_browser_permissions"
+    ],
+    "40": [
+      "packages_labs_src_browser_pointerlock"
+    ],
+    "41": [
+      "packages_labs_src_browser_resize"
+    ],
+    "42": [
+      "packages_labs_src_browser_scroll"
+    ],
+    "43": [
+      "packages_labs_src_browser_speech"
+    ],
+    "44": [
+      "packages_labs_src_browser_swipe"
+    ],
+    "45": [
+      "packages_labs_src_browser_textselection"
+    ],
+    "46": [
+      "packages_labs_src_browser_title"
+    ],
+    "47": [
+      "packages_labs_src_browser_urlstate"
+    ],
+    "48": [
+      "packages_labs_src_browser_vibrate"
+    ],
+    "49": [
+      "packages_labs_src_browser_visibility"
+    ],
+    "50": [
+      "packages_labs_src_browser_wakelock"
+    ],
+    "51": [
+      "packages_labs_src_browser_windowsize"
+    ],
+    "52": [
+      "packages_labs_src_devtools_debug"
+    ],
+    "53": [
+      "packages_labs_src_devtools_debugvalue"
+    ],
+    "54": [
+      "packages_labs_src_devtools_devtools"
+    ],
+    "55": [
+      "packages_labs_src_devtools_devtoolsoverlay"
+    ],
+    "56": [
+      "packages_labs_src_devtools_hmr"
+    ],
+    "57": [
+      "packages_labs_src_devtools_introspect"
+    ],
+    "58": [
+      "packages_labs_src_devtools_signalgraph"
+    ],
+    "59": [
+      "packages_labs_src_devtools_sourcemaps"
+    ],
+    "60": [
+      "packages_labs_src_motion_transition"
+    ],
+    "61": [
+      "packages_labs_src_motion_transitiongroup"
+    ],
+    "62": [
+      "packages_labs_src_motion_viewtransition"
+    ],
+    "63": [
+      "packages_labs_src_patterns_componentprops"
+    ],
+    "64": [
+      "packages_labs_src_patterns_composable"
+    ],
+    "65": [
+      "packages_labs_src_patterns_contracts"
+    ],
+    "66": [
+      "packages_labs_src_patterns_globalstore"
+    ],
+    "67": [
+      "packages_labs_src_patterns_hoc"
+    ],
+    "68": [
+      "packages_labs_src_patterns_machine"
+    ],
+    "69": [
+      "packages_labs_src_patterns_optimistic"
+    ],
+    "70": [
+      "packages_labs_src_patterns_persist"
+    ],
+    "71": [
+      "packages_labs_src_patterns_timetravel"
+    ],
+    "72": [
+      "packages_labs_src_performance_bundleoptimize"
+    ],
+    "73": [
+      "packages_labs_src_performance_chunkloader"
+    ],
+    "74": [
+      "packages_labs_src_performance_domrecycler"
+    ],
+    "75": [
+      "packages_labs_src_performance_normalize"
+    ],
+    "76": [
+      "packages_labs_src_widgets_accordion"
+    ],
+    "77": [
+      "packages_labs_src_widgets_combobox"
+    ],
+    "78": [
+      "packages_labs_src_widgets_contenteditable"
+    ],
+    "79": [
+      "packages_labs_src_widgets_datepicker"
+    ],
+    "80": [
+      "packages_labs_src_widgets_fileupload"
+    ],
+    "81": [
+      "packages_labs_src_widgets_popover"
+    ],
+    "82": [
+      "packages_labs_src_widgets_select"
+    ],
+    "83": [
+      "packages_labs_src_widgets_tabs"
+    ],
+    "84": [
+      "packages_labs_src_widgets_tooltip"
+    ],
+    "85": [
+      "packages_sibujs_src_data_debounce"
+    ],
+    "86": [
+      "packages_sibujs_src_data_offlinestore"
+    ],
+    "87": [
+      "packages_sibujs_src_data_previous"
+    ],
+    "88": [
+      "packages_sibujs_src_data_throttle"
+    ],
+    "89": [
+      "packages_sibujs_src_platform_customelement"
+    ],
+    "90": [
+      "packages_sibujs_src_platform_head"
+    ],
+    "91": [
+      "packages_sibujs_src_platform_incrementalregeneration"
+    ],
+    "92": [
+      "packages_sibujs_src_platform_microfrontend"
+    ],
+    "93": [
+      "packages_sibujs_src_platform_routeactions"
+    ],
+    "94": [
+      "packages_sibujs_src_platform_routemiddleware"
+    ],
+    "95": [
+      "packages_sibujs_src_platform_scrollrestoration"
+    ],
+    "96": [
+      "packages_sibujs_src_platform_serviceworker"
+    ],
+    "97": [
+      "packages_sibujs_src_platform_staticsitegenerator"
+    ],
+    "98": [
+      "packages_sibujs_src_platform_wasm"
+    ],
+    "99": [
+      "packages_sibujs_src_platform_worker"
+    ],
+    "100": [
+      "packages_sibujs_src_plugins_ecosystem"
+    ],
+    "101": [
+      "packages_sibujs_src_plugins_i18n"
+    ],
+    "102": [
+      "packages_sibujs_src_plugins_modular"
+    ],
+    "103": [
+      "packages_sibujs_src_plugins_plugin"
+    ],
+    "104": [
+      "packages_sibujs_src_plugins_versioning"
+    ],
+    "105": [
+      "packages_sibujs_src_ui_a11y"
+    ],
+    "106": [
+      "packages_sibujs_src_ui_a11yprimitives"
+    ],
+    "107": [
+      "packages_sibujs_src_ui_dialog"
+    ],
+    "108": [
+      "packages_sibujs_src_ui_eventbus"
+    ],
+    "109": [
+      "packages_sibujs_src_ui_form"
+    ],
+    "110": [
+      "packages_sibujs_src_ui_formaction"
+    ],
+    "111": [
+      "packages_sibujs_src_ui_hover"
+    ],
+    "112": [
+      "packages_sibujs_src_ui_infinitescroll"
+    ],
+    "113": [
+      "packages_sibujs_src_ui_inputmask"
+    ],
+    "114": [
+      "packages_sibujs_src_ui_intersection"
+    ],
+    "115": [
+      "packages_sibujs_src_ui_lazyeffect"
+    ],
+    "116": [
+      "packages_sibujs_src_ui_pagination"
+    ],
+    "117": [
+      "packages_sibujs_src_ui_reactiveattr"
+    ],
+    "118": [
+      "packages_sibujs_src_ui_scopedstyle"
+    ],
+    "119": [
+      "packages_sibujs_src_ui_scrolllock"
+    ],
+    "120": [
+      "packages_sibujs_src_ui_socket"
+    ],
+    "121": [
+      "packages_sibujs_src_ui_stream"
+    ],
+    "122": [
+      "packages_sibujs_src_ui_timers"
+    ],
+    "123": [
+      "packages_sibujs_src_ui_toast"
+    ],
+    "124": [
+      "packages_sibujs_src_ui_virtuallist"
+    ]
+  },
+  "cohesion": {
+    "0": 0.11857707509881422,
+    "1": 0.14705882352941177,
+    "2": 0.35714285714285715,
+    "3": 0.2857142857142857,
+    "4": 0.3333333333333333,
+    "5": 0.5,
+    "6": 0.7,
+    "7": 0.5,
+    "8": 0.5,
+    "9": 0.5,
+    "10": 1.0,
+    "11": 1.0,
+    "12": 1.0,
+    "13": 1.0,
+    "14": 1.0,
+    "15": 1.0,
+    "16": 1.0,
+    "17": 1.0,
+    "18": 1.0,
+    "19": 1.0,
+    "20": 1.0,
+    "21": 1.0,
+    "22": 1.0,
+    "23": 1.0,
+    "24": 1.0,
+    "25": 1.0,
+    "26": 1.0,
+    "27": 1.0,
+    "28": 1.0,
+    "29": 1.0,
+    "30": 1.0,
+    "31": 1.0,
+    "32": 1.0,
+    "33": 1.0,
+    "34": 1.0,
+    "35": 1.0,
+    "36": 1.0,
+    "37": 1.0,
+    "38": 1.0,
+    "39": 1.0,
+    "40": 1.0,
+    "41": 1.0,
+    "42": 1.0,
+    "43": 1.0,
+    "44": 1.0,
+    "45": 1.0,
+    "46": 1.0,
+    "47": 1.0,
+    "48": 1.0,
+    "49": 1.0,
+    "50": 1.0,
+    "51": 1.0,
+    "52": 1.0,
+    "53": 1.0,
+    "54": 1.0,
+    "55": 1.0,
+    "56": 1.0,
+    "57": 1.0,
+    "58": 1.0,
+    "59": 1.0,
+    "60": 1.0,
+    "61": 1.0,
+    "62": 1.0,
+    "63": 1.0,
+    "64": 1.0,
+    "65": 1.0,
+    "66": 1.0,
+    "67": 1.0,
+    "68": 1.0,
+    "69": 1.0,
+    "70": 1.0,
+    "71": 1.0,
+    "72": 1.0,
+    "73": 1.0,
+    "74": 1.0,
+    "75": 1.0,
+    "76": 1.0,
+    "77": 1.0,
+    "78": 1.0,
+    "79": 1.0,
+    "80": 1.0,
+    "81": 1.0,
+    "82": 1.0,
+    "83": 1.0,
+    "84": 1.0,
+    "85": 1.0,
+    "86": 1.0,
+    "87": 1.0,
+    "88": 1.0,
+    "89": 1.0,
+    "90": 1.0,
+    "91": 1.0,
+    "92": 1.0,
+    "93": 1.0,
+    "94": 1.0,
+    "95": 1.0,
+    "96": 1.0,
+    "97": 1.0,
+    "98": 1.0,
+    "99": 1.0,
+    "100": 1.0,
+    "101": 1.0,
+    "102": 1.0,
+    "103": 1.0,
+    "104": 1.0,
+    "105": 1.0,
+    "106": 1.0,
+    "107": 1.0,
+    "108": 1.0,
+    "109": 1.0,
+    "110": 1.0,
+    "111": 1.0,
+    "112": 1.0,
+    "113": 1.0,
+    "114": 1.0,
+    "115": 1.0,
+    "116": 1.0,
+    "117": 1.0,
+    "118": 1.0,
+    "119": 1.0,
+    "120": 1.0,
+    "121": 1.0,
+    "122": 1.0,
+    "123": 1.0,
+    "124": 1.0
+  },
+  "gods": [
+    {
+      "id": "packages_core_src_core_dev",
+      "label": "core: core/dev",
+      "degree": 25
+    },
+    {
+      "id": "packages_core_src_core_rendering_dispose",
+      "label": "core: core/rendering/dispose",
+      "degree": 20
+    },
+    {
+      "id": "packages_core_src_core_signals_signal",
+      "label": "core: core/signals/signal",
+      "degree": 13
+    },
+    {
+      "id": "packages_core_src_core_rendering_tagfactory",
+      "label": "core: core/rendering/tagFactory",
+      "degree": 9
+    },
+    {
+      "id": "packages_core_src_core_rendering_htm",
+      "label": "core: core/rendering/htm",
+      "degree": 7
+    },
+    {
+      "id": "packages_core_src_core_rendering_types",
+      "label": "core: core/rendering/types",
+      "degree": 7
+    },
+    {
+      "id": "packages_core_src_core_signals_effect",
+      "label": "core: core/signals/effect",
+      "degree": 7
+    },
+    {
+      "id": "packages_core_src_reactivity_bindchildnode",
+      "label": "core: reactivity/bindChildNode",
+      "degree": 7
+    },
+    {
+      "id": "packages_core_src_components_errorboundary",
+      "label": "core: components/ErrorBoundary",
+      "degree": 6
+    },
+    {
+      "id": "packages_core_src_reactivity_signal",
+      "label": "core: reactivity/signal",
+      "degree": 6
+    }
+  ],
+  "surprises": [
+    {
+      "source": "sibujs: testing/index",
+      "target": "sibujs: testing/a11y",
+      "source_files": [
+        "packages/sibujs/src/testing/index.ts",
+        "packages/sibujs/src/testing/a11y.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "re_exports",
+      "why": "peripheral node `sibujs: testing/a11y` unexpectedly reaches hub `sibujs: testing/index`"
+    },
+    {
+      "source": "sibujs: testing/index",
+      "target": "sibujs: testing/adapters",
+      "source_files": [
+        "packages/sibujs/src/testing/index.ts",
+        "packages/sibujs/src/testing/adapters.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "re_exports",
+      "why": "peripheral node `sibujs: testing/adapters` unexpectedly reaches hub `sibujs: testing/index`"
+    },
+    {
+      "source": "sibujs: testing/index",
+      "target": "sibujs: testing/e2e",
+      "source_files": [
+        "packages/sibujs/src/testing/index.ts",
+        "packages/sibujs/src/testing/e2e.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "re_exports",
+      "why": "peripheral node `sibujs: testing/e2e` unexpectedly reaches hub `sibujs: testing/index`"
+    },
+    {
+      "source": "sibujs: testing/index",
+      "target": "sibujs: testing/queries",
+      "source_files": [
+        "packages/sibujs/src/testing/index.ts",
+        "packages/sibujs/src/testing/queries.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "re_exports",
+      "why": "peripheral node `sibujs: testing/queries` unexpectedly reaches hub `sibujs: testing/index`"
+    },
+    {
+      "source": "sibujs: testing/index",
+      "target": "sibujs: testing/snapshot",
+      "source_files": [
+        "packages/sibujs/src/testing/index.ts",
+        "packages/sibujs/src/testing/snapshot.ts"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "re_exports",
+      "why": "peripheral node `sibujs: testing/snapshot` unexpectedly reaches hub `sibujs: testing/index`"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `core: core/dev` connect `Community 0` to `Community 1`, `Community 2`, `Community 5`?",
+      "why": "High betweenness centrality (0.039) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `core: core/rendering/dispose` connect `Community 0` to `Community 2`, `Community 5`?",
+      "why": "High betweenness centrality (0.020) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `core: core/signals/signal` connect `Community 1` to `Community 0`?",
+      "why": "High betweenness centrality (0.017) - this node is a cross-community bridge."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `core: components/Loading`, `core: core/rendering/action`, `core: core/rendering/catch` to the rest of the system?",
+      "why": "143 weakly-connected nodes found - possible documentation gaps or missing edges."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 0` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.11857707509881422 - nodes in this community are weakly interconnected."
+    },
+    {
+      "type": "low_cohesion",
+      "question": "Should `Community 1` be split into smaller, more focused modules?",
+      "why": "Cohesion score 0.14705882352941177 - nodes in this community are weakly interconnected."
+    }
+  ]
+}

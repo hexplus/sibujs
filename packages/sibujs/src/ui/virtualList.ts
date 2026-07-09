@@ -1,6 +1,4 @@
-import { dispose, registerDisposer } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { dispose, effect, registerDisposer, signal } from "@sibujs/core";
 
 // ============================================================================
 // VIRTUAL SCROLLING

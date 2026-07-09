@@ -11,6 +11,15 @@ limited blast radius.
 
 Summary: 5 critical, 17 major, 31 minor.
 
+> **Status (Round 1 — resolved).** All findings in sections 1–6 below have been
+> fixed, **except** three intentionally deferred: core minor **#2** (barrel
+> name collisions — renaming is a breaking public-API change), core minor **#6**
+> (`each`/`DynamicComponent` render not wrapped in `untracked` — incompatible
+> with the engine's suspend-depth model; reverted), and core minor **#13** (the
+> leftover scratch test file — deletion blocked by the sandbox). A second review
+> pass then verified every applied fix still holds and surfaced further issues;
+> see **Section 8 — Round 2** at the bottom.
+
 ---
 
 ## 1. Critical
@@ -246,3 +255,114 @@ Summary: 5 critical, 17 major, 31 minor.
 - **Import hygiene, all packages**: no deep imports into another package's `src/**`; everything goes through `@sibujs/core`, `@sibujs/core/internal`, or published `sibujs` subpaths; dependency direction strictly labs → sibujs → core; all imported internal names verified to exist.
 - **Exports maps vs dist**: all subpaths in all three packages correspond 1:1 to tsup entries; tsup external/noExternal split (module builds external, CDN inlined) correct; `pnpm -r publish` order is topological.
 - **Docs accuracy**: README/MIGRATION subpath tables match real exports maps; CHANGELOGs correctly scoped per package; all English.
+
+---
+
+## 8. Round 2 — fix verification + new findings
+
+A second, independent review pass (three reviewers) re-audited the **current
+post-fix code**. Every round-1 fix was adversarially retested and **all hold**;
+the pass then hunted for issues the first pass missed, especially in areas
+round 1 marked "clean". Ten new findings surfaced (1 critical, 5 major, 4 minor).
+
+> **Status (Round 2 — resolved).** 9 of the 10 round-2 findings are fixed with
+> tests: **R2-CRIT** (biome config + 44 masked issues), **R2-M1/M2** (query
+> dedup callbacks + no redundant fetch), **R2-M3** (SSR matcher now mirrors the
+> client's specificity ranking), **R2-m1** (lifecycle observer disconnect),
+> **R2-m2** (worker blob URL kept until `terminate`), **R2-m3** (webpack JSDoc),
+> **R2-m4** (testing selector escaping). **R2-M4** (`bindChildNode` sibling
+> order) is **deferred**: its correct fix needs trailing end-sentinels across
+> `when`/`match`/`Portal` in the core rendering hot path — architecturally
+> invasive, high regression risk, and narrow-trigger (a stable reactive-child
+> anchor reused inside a reactive array). Same category as the deferred round-1
+> minor #6; tracked for a dedicated change, not a rushed one.
+
+### 8.1 Round-1 fix verification — all CONFIRMED
+
+Every applied fix was re-verified against the live source, several reproduced
+empirically:
+
+- **Core** — C1 (orphan disposal: triple-nested `when`, `each`-in-`match`-in-`when`, no double-dispose), CO-1 (fragment children, incl. empty/nested), CO-2, CO-3 (no reintroduced render loop), CO-5, CO-6 (`ONCLICK`/`onClick`/namespaced/property-path all blocked), minors #3, #7, #8, #10, #11, #12 — all HOLD.
+- **Std** — SD-1 (original wedge gone, but see 8.2 NEW-1/2), SD-2 (hash written + Back/Forward), SD-3 (SSR microtask guard + `_initialPath` honored), SD-4, SD-5 (final abort guard), SD-6 (SVG serialized), SD-7 (code-gen paths), SD-8, SD-9 (all three conflict strategies implemented) — all HOLD.
+- **Labs** — LB-1 (non-enumerable `dispose` tears down subscription; pre-dispose task writes last value once, no leak), LB-2 (plain getter still reactive inside an effect — no regression), minors 28–31 — all HOLD.
+- **Packaging** — C2, C3, C4, PK-1, PK-2 (every dist file referenced exists), PK-3 (`workspace:^` → `^4.0.0-alpha.0` **does** cover `4.0.0-alpha.1` under npm prerelease semver), minor 39 (tag guard) — all HOLD. **Exception: C5 does not hold — see 8.2 R2-CRIT.**
+
+### 8.2 New findings
+
+#### Critical
+
+**R2-CRIT (packaging).** `pnpm -r run lint` still fails — regression introduced
+by the round-1 Biome reconciliation.
+- `packages/sibujs/biome.json` (`{ "root": false, "extends": "//" }`) + root `biome.json`
+- When the sibujs package's own `biome check src/ tests/` runs, the nested stub makes Biome treat `packages/sibujs` as the project root and re-bases the inherited `packages/*/src/**` globs relative to it, matching **zero** files → exit 1. `packages/core`/`packages/labs` (no nested config) lint fine off the root config, so the root config itself is correct. The stub also **masked ~44 real diagnostics** (mostly `assist/source/organizeImports` across `src/data|ui|platform|plugins`, plus a `format` issue in `offlineStore.ts`).
+- Fix: delete `packages/sibujs/biome.json` (or give it `files.includes: ["src/**","tests/**"]`), then run `biome check --write` in that package.
+
+#### Major
+
+**R2-M1 (std) — `packages/sibujs/src/data/query.ts:160-189`.** Deduped `query()`
+subscribers never invoke their `onSuccess`/`onError` callbacks. The
+`entry.promise === captured` guard is effectively always false — the fetch owner
+nulls `entry.promise` on resume before any deduped awaiter runs. Verified:
+subscriber B joining an in-flight fetch received data via its signal but
+`onSuccess` fired 0 times. Fix: drive dedup-path callbacks off resolved cache
+state (`entry.data`/`entry.error`), not promise identity.
+
+**R2-M2 (std) — `packages/sibujs/src/data/query.ts:176-184`.** Consequence of
+R2-M1: a genuine shared-fetch **error** routes every no-data deduped subscriber
+into the else-branch and issues a redundant second fetch. Verified: 2 subscribers,
+one shared fetch, `maxRetries:0`, rejected once → `fetchCount=2` (should be 1),
+plus error-state flicker and a fetch beyond the retry policy. Fix: re-issue only
+on true abort recovery (`entry.error === undefined && entry.data === undefined`).
+
+**R2-M3 (std, medium confidence) — `packages/sibujs/src/plugins/routerSSR.ts:211-251`
+vs `router.ts:319-336`.** The SSR and client route matchers use different
+algorithms (client: exact-first then specificity-sorted; SSR: declaration-order,
+children-first, no exact-first), so the same URL can resolve to different
+components → hydration mismatch. Example: routes `/users/:id` + `/users/new` on
+`/users/new` — client picks `/users/new`, SSR picks `/users/:id`. Fix: share one
+matching implementation.
+
+**R2-M4 (core) — `packages/core/src/reactivity/bindChildNode.ts:107-114`.** A
+reactive-child array that reuses a stable `when()`/`each()`/`Portal()` anchor
+mis-orders siblings, because the moving cursor inserts the next sibling at
+`anchor.nextSibling` — which is the anchor's own managed branch content.
+Reproduced: `div(() => [w, ...items()])` renders `"WB"`, then after `setItems`
+renders `"CW"` instead of `"WC"`. Silent, no warning. Narrow trigger (stable
+anchor reference reused inside a reactive array). Same latent assumption at
+`each.ts:325`. Fix: position relative to the managed content's trailing
+end-sentinel, or have `when`/`match` insert branch content before their anchor.
+
+#### Minor
+
+**R2-m1 (core) — `packages/core/src/core/rendering/lifecycle.ts:93-107`.** After
+the last `onUnmount`-tracked element is removed, the shared `document.body`
+`MutationObserver` stays attached with zero watchers until the next DOM mutation
+(the deferred delete microtask never calls `maybeDisconnectObserver()`).
+Self-heals on any later mutation; a lingering observer only in a quiescent tab.
+
+**R2-m2 (std) — `packages/sibujs/src/platform/worker.ts:250-296`.** In
+`createWorkerPool`, the shared blob URL is revoked on the first message/error from
+any worker; other pool workers may not have fetched their script yet, so a later
+`execute()` routed to a not-yet-loaded worker can fail to start. Fix: revoke only
+in `terminate()` / after all workers signal ready.
+
+**R2-m3 (std) — `packages/sibujs/src/build/webpack.ts:44,180`.** Residual
+SD-7-class drift in JSDoc examples: `require('sibu/src/build/webpack')` — wrong
+package name and a non-published deep path (should be `sibujs/build`). Renders in
+IDE hovers.
+
+**R2-m4 (std) — `packages/sibujs/src/testing/queries.ts:33,37`.**
+`queryByTestId`/`queryByRole` interpolate the raw value into a selector with no
+escaping (round 1 fixed the adapter path but not here); a value containing `"`
+throws a selector `SyntaxError`. Test-only.
+
+### 8.3 Re-audited and confirmed clean (round 2)
+
+The reactivity engine under re-entrancy (`track-core` active-node save/restore,
+`propagateDirty` diamond short-circuit, cycle capping, `batch` clear-before-drain,
+`dispose` mid-traversal snapshot), `signal`/`writable`/`context`/`ref`/`watch`/
+`deepEqual`/`reactiveArray`/`store`, `KeepAlive`/`Portal`/`lazy`/`islands`; the
+std data/ui utilities (`retry`, `resource`, `mutation`, `throttle`, `debounce`,
+`infiniteQuery`, `toast`, `eventBus`, `pagination`, `socket`, `stream`,
+`formAction`, `form`), the SSR escaping pipeline (no XSS breakout constructed),
+and the labs browser/widgets/patterns/scheduler/motion modules — all sound.

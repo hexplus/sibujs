@@ -41,7 +41,7 @@ function addPureAnnotations(source: string): string {
  *
  * Usage:
  * ```js
- * const { sibuWebpackPlugin } = require('sibu/src/build/webpack');
+ * const { sibuWebpackPlugin } = require('sibujs/build');
  * module.exports = {
  *   plugins: [sibuWebpackPlugin()],
  * };
@@ -177,7 +177,7 @@ export function createPureAnnotationsLoader(): (source: string) => string {
  *
  * Usage:
  * ```js
- * const { createWebpackConfig } = require('sibu/src/build/webpack');
+ * const { createWebpackConfig } = require('sibujs/build');
  * module.exports = createWebpackConfig({
  *   entry: './src/index.ts',
  *   mode: 'production',

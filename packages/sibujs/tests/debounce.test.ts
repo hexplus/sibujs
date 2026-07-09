@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { describe, expect, it, vi } from "vitest";
 import { debounce } from "../src/data/debounce";
 
 describe("debounce", () => {

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   findByRole,
   findByTestId,

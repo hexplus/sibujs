@@ -6,6 +6,8 @@ import { offlineStore, type SyncAdapter, type SyncConflict } from "../src/data/o
 import { clearQueryCache, query, setQueryData } from "../src/data/query";
 import { renderToString } from "../src/platform/ssr";
 import { createMemoryRouter, createRouter, destroyRouter } from "../src/plugins/router";
+import { resolveServerRoute, type SSRRouteDef } from "../src/plugins/routerSSR";
+import { queryByTestId } from "../src/testing/queries";
 import { scopedStyle } from "../src/ui/scopedStyle";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -66,7 +68,13 @@ describe("SD-2: hash mode writes location.hash, not the pathname", () => {
 
   it("updates the hash and leaves the pathname intact", async () => {
     window.history.replaceState({}, "", "/");
-    const r = createRouter([{ path: "/", component: cmp }, { path: "/about", component: cmp }], { mode: "hash" });
+    const r = createRouter(
+      [
+        { path: "/", component: cmp },
+        { path: "/about", component: cmp },
+      ],
+      { mode: "hash" },
+    );
     await r.push("/about");
     expect(window.location.hash).toBe("#/about");
     expect(window.location.pathname).toBe("/");
@@ -77,7 +85,13 @@ describe("SD-2: hash mode writes location.hash, not the pathname", () => {
 
 describe("SD-3/SD-4: memory router", () => {
   it("honors _initialPath instead of reading window.location", async () => {
-    const m = createMemoryRouter([{ path: "/", component: cmp }, { path: "/foo", component: cmp }], "/foo");
+    const m = createMemoryRouter(
+      [
+        { path: "/", component: cmp },
+        { path: "/foo", component: cmp },
+      ],
+      "/foo",
+    );
     await m.ready;
     expect(m.currentPath()).toBe("/foo");
     m.router.destroy();
@@ -180,7 +194,10 @@ describe("SD-9: offlineStore honors conflictStrategy", () => {
 
   // A rejected push keeps the local change queued, so it collides with the
   // pulled remote row and the strategy actually gets exercised.
-  const makeAdapter = (strategy: SyncAdapter<Todo>["conflictStrategy"], onConflict?: SyncAdapter<Todo>["onConflict"]): SyncAdapter<Todo> => ({
+  const makeAdapter = (
+    strategy: SyncAdapter<Todo>["conflictStrategy"],
+    onConflict?: SyncAdapter<Todo>["onConflict"],
+  ): SyncAdapter<Todo> => ({
     push: async () => ({ ok: false }),
     pull: async () => [{ id: "1", text: "server" }],
     conflictStrategy: strategy,
@@ -245,5 +262,87 @@ describe("minor fixes", () => {
     const { scope, attr } = scopedStyle(".toolbar { color: red }");
     const styleEl = document.head.querySelector(`[data-sibu-scope="${scope}"]`);
     expect(styleEl?.textContent).toContain(`.toolbar[${attr}]`);
+  });
+});
+
+// ─── Round 2 ───────────────────────────────────────────────────────────────
+
+describe("R2-M1/M2: deduped query subscribers fire callbacks and don't double-fetch", () => {
+  beforeEach(() => clearQueryCache());
+
+  it("R2-M1: a deduped subscriber's onSuccess fires with the shared result", async () => {
+    let calls = 0;
+    let release!: (v: string) => void;
+    const fetcher = () => {
+      calls++;
+      return new Promise<string>((res) => {
+        release = res;
+      });
+    };
+    const bData: string[] = [];
+    const a = query("k", fetcher, { retry: { maxRetries: 0 } });
+    const b = query("k", fetcher, { retry: { maxRetries: 0 }, onSuccess: (d) => bData.push(d) });
+    await tick();
+    expect(calls).toBe(1); // b deduped onto a's in-flight fetch
+
+    release("hello");
+    await tick();
+    await tick();
+
+    expect(bData).toEqual(["hello"]); // previously never fired
+    expect(b.data()).toBe("hello");
+    a.dispose();
+    b.dispose();
+  });
+
+  it("R2-M2: a shared-fetch error fires onError once and does NOT trigger a redundant fetch", async () => {
+    let calls = 0;
+    let reject!: (e: Error) => void;
+    const fetcher = () => {
+      calls++;
+      return new Promise<string>((_res, rej) => {
+        reject = rej;
+      });
+    };
+    const bErrors: Error[] = [];
+    const a = query("ek", fetcher, { retry: { maxRetries: 0 } });
+    const b = query("ek", fetcher, { retry: { maxRetries: 0 }, onError: (e) => bErrors.push(e) });
+    await tick();
+    expect(calls).toBe(1);
+
+    reject(new Error("boom"));
+    await tick();
+    await tick();
+
+    expect(calls).toBe(1); // previously 2 — b re-issued a redundant fetch on error
+    expect(bErrors.map((e) => e.message)).toEqual(["boom"]);
+    expect(b.error()?.message).toBe("boom");
+    a.dispose();
+    b.dispose();
+  });
+});
+
+describe("R2-M3: SSR route matcher resolves the same route the client would", () => {
+  it("prefers a static route over a param route declared before it", () => {
+    // Param route declared FIRST; a declaration-order matcher would pick it.
+    const routes: SSRRouteDef[] = [
+      { path: "/users/:id", component: () => document.createElement("div") },
+      { path: "/users/new", component: () => document.createElement("span") },
+    ];
+    const resolved = resolveServerRoute("/users/new", routes);
+    // Static route wins (client exact-match parity): no `id` param captured.
+    expect(resolved.route.params).not.toHaveProperty("id");
+    expect(resolved.route.path).toBe("/users/new");
+  });
+});
+
+describe("R2-m4: testing selector queries escape the interpolated value", () => {
+  it("does not throw and matches when the value contains a double quote", () => {
+    const container = document.createElement("div");
+    const el = document.createElement("div");
+    el.setAttribute("data-testid", 'a"b');
+    container.appendChild(el);
+    expect(() => queryByTestId(container, 'a"b')).not.toThrow();
+    expect(queryByTestId(container, 'a"b')).toBe(el);
   });
 });

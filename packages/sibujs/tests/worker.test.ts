@@ -274,13 +274,18 @@ describe("createWorkerPool", () => {
     await expect(p).rejects.toThrow("pool-error");
   });
 
-  it("revokes the shared blob URL only once across workers", async () => {
+  it("keeps the shared blob URL live until terminate, then revokes it once", async () => {
     const pool = createWorkerPool<number, number>(() => {}, 2);
     const p1 = pool.execute(1);
     const p2 = pool.execute(2);
     instances[0].emitMessage("x");
     instances[1].emitMessage("y");
     await Promise.all([p1, p2]);
+    // Not revoked on the first message: other pool workers may still be loading
+    // their script from that blob URL, so revoking early would break them.
+    expect(revokedUrls.filter((u) => u === createdUrls[0])).toHaveLength(0);
+    pool.terminate();
+    // Revoked exactly once on teardown.
     expect(revokedUrls.filter((u) => u === createdUrls[0])).toHaveLength(1);
   });
 

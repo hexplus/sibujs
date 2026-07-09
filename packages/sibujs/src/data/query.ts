@@ -1,8 +1,4 @@
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { getRequestScopedCache } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, derived, effect, getRequestScopedCache, signal } from "@sibujs/core";
 import { globalSingleton } from "@sibujs/core/internal";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -161,26 +157,30 @@ export function query<T>(
       setIsFetching(true);
       const captured = entry.promise;
       try {
-        await captured;
-        if (disposed || currentKey !== key) return;
-        if (entry.promise === captured) {
-          onCacheUpdate();
-          if (entry.error) onError?.(entry.error);
-          else if (entry.data !== undefined) onSuccess?.(entry.data as T);
+        try {
+          await captured;
+        } catch {
+          // Shared fetch rejected — the owner records the error on the entry
+          // before we resume, so we read the outcome from the cache below.
         }
-      } catch {
         if (disposed || currentKey !== key) return;
-        if (entry.promise === captured) {
+        // The owner nulls `entry.promise` on resume, so an `=== captured`
+        // identity check always misses here — drive our signals and callbacks
+        // off the resolved cache state instead.
+        if (entry.error !== undefined || entry.data !== undefined) {
           onCacheUpdate();
-          if (entry.error) onError?.(entry.error);
-        } else {
-          // The awaited promise was aborted or swapped by another subscriber
-          // (e.g. its owner changed key or disposed). Never leave this
-          // subscriber wedged in the fetching state: reflect the current
-          // cache, and re-issue our own fetch when there's no data and no
-          // fresh in-flight promise to await.
+          if (entry.error !== undefined) onError?.(entry.error);
+          else onSuccess?.(entry.data as T);
+        } else if (!entry.promise && enabled) {
+          // The owner aborted/disposed before producing any result — recover
+          // so we never wedge in the fetching state. (Only here: a genuine
+          // error leaves `entry.error` set and takes the branch above, so it
+          // no longer triggers a redundant second fetch.)
           setIsFetching(false);
-          if (entry.data === undefined && !entry.promise && enabled) doFetch();
+          doFetch();
+        } else {
+          // A newer fetch is already in flight; it will notify us on completion.
+          setIsFetching(false);
         }
       } finally {
         if (!disposed && currentKey === key) onSettled?.();

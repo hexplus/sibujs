@@ -238,7 +238,6 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
   let currentIndex = 0;
   let alive = true;
   let blobUrl: string | null = null;
-  let firedOnce = false;
 
   const revokeBlobUrl = () => {
     if (blobUrl) {
@@ -252,10 +251,6 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
     const w = workers[idx];
     const slot = queues[idx].shift() as Slot;
     const onMsg = (e: MessageEvent<TOutput>) => {
-      if (!firedOnce) {
-        firedOnce = true;
-        revokeBlobUrl();
-      }
       w.removeEventListener("message", onMsg);
       w.removeEventListener("error", onErr);
       inflight[idx] = null;
@@ -263,10 +258,6 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
       dispatchNext(idx);
     };
     const onErr = (e: ErrorEvent) => {
-      if (!firedOnce) {
-        firedOnce = true;
-        revokeBlobUrl();
-      }
       w.removeEventListener("message", onMsg);
       w.removeEventListener("error", onErr);
       inflight[idx] = null;

@@ -1,5 +1,4 @@
-import { span } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { signal, span } from "@sibujs/core";
 import { globalSingleton } from "@sibujs/core/internal";
 
 type Translations = Record<string, string>;

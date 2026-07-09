@@ -1,6 +1,4 @@
-import { createId } from "@sibujs/core";
-import { registerDisposer } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { createId, registerDisposer, signal } from "@sibujs/core";
 
 // ============================================================================
 // ACCESSIBILITY PRIMITIVES

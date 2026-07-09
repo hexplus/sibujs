@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { describe, expect, it, vi } from "vitest";
 import { resource } from "../src/data/resource";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));

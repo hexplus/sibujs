@@ -1,5 +1,4 @@
-import { registerDisposer } from "@sibujs/core";
-import { effect } from "@sibujs/core";
+import { effect, registerDisposer } from "@sibujs/core";
 import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "@sibujs/core/internal";
 
 // ============================================================================

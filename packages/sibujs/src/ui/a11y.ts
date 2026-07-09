@@ -1,7 +1,5 @@
-import { registerDisposer } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { track } from "@sibujs/core/internal";
-import { globalSingleton } from "@sibujs/core/internal";
+import { registerDisposer, signal } from "@sibujs/core";
+import { globalSingleton, track } from "@sibujs/core/internal";
 
 // ============================================================================
 // ACCESSIBILITY

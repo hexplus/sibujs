@@ -1,5 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { effect, signal } from "@sibujs/core";
 
 /**
  * Returns a debounced reactive getter that only updates after `delay` ms

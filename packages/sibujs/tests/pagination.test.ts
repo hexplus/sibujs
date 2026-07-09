@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { signal } from "@sibujs/core";
+import { describe, expect, it } from "vitest";
 import { pagination } from "../src/ui/pagination";
 
 describe("pagination", () => {

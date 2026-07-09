@@ -104,6 +104,10 @@ function fireUnmount(el: Element): void {
         /* ignore */
       }
     }
+    // The observer callback's own maybeDisconnectObserver() ran before this
+    // deferred delete, so without this the shared observer would stay attached
+    // to document.body with zero watchers until the next DOM mutation.
+    maybeDisconnectObserver();
   });
 }
 

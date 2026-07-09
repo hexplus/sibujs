@@ -103,7 +103,9 @@ function openDB(name: string, version: number, keyPath: string): Promise<IDBData
     // A version upgrade blocked by another open connection (e.g. a second tab)
     // never fires onsuccess; reject instead of leaving the promise pending.
     request.onblocked = () =>
-      reject(new Error(`[offlineStore] Opening "${name}" is blocked by another open connection (pending version upgrade).`));
+      reject(
+        new Error(`[offlineStore] Opening "${name}" is blocked by another open connection (pending version upgrade).`),
+      );
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains("items")) {

@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dispose } from "@sibujs/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { announce, aria, FocusTrap, hotkey } from "../src/ui/a11y";
 
 describe("aria reactive getter", () => {

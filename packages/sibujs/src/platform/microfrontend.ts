@@ -1,5 +1,4 @@
-import { div, span } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { div, signal, span } from "@sibujs/core";
 import { globalSingleton } from "@sibujs/core/internal";
 
 // ============================================================================

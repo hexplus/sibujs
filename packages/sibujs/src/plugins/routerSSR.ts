@@ -13,8 +13,8 @@
 //  - `serializeRouteState` escapes `<`, `>`, `&`, `U+2028`, `U+2029` and
 //    supports an optional `nonce` for strict-CSP compatibility.
 
-import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "@sibujs/core/internal";
+import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import type { RouteDef } from "./router";
 import { createRouter } from "./router";
 
@@ -203,8 +203,54 @@ interface MatchResult {
 }
 
 /**
- * Match a path against a single route definition (and its children).
- * Returns the matched route, extracted params, and the chain of matched routes.
+ * Per-segment specificity: static (2) beats `:param` (1) beats `*` wildcard (0).
+ * MUST mirror `RouteMatcher.specificity` in router.ts so SSR and the client rank
+ * candidate routes identically.
+ */
+function routeSpecificity(fullPath: string): number[] {
+  return fullPath
+    .split("/")
+    .filter(Boolean)
+    .map((seg) => (seg.startsWith(":") ? 1 : seg.includes("*") ? 0 : 2));
+}
+
+/** Compare two specificity vectors; > 0 means `a` is strictly more specific. */
+function compareSpecificity(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const va = a[i] ?? -1;
+    const vb = b[i] ?? -1;
+    if (va !== vb) return va - vb;
+  }
+  return 0;
+}
+
+/** Flatten a nested route tree into `{ fullPath, route, chain }` entries (pre-order). */
+function collectRoutes(
+  routes: SSRRouteDef[],
+  parentPath: string,
+  parentChain: SSRRouteDef[],
+  out: Array<{ fullPath: string; route: SSRRouteDef; chain: SSRRouteDef[] }>,
+): void {
+  for (const route of routes) {
+    const fullPath = normalizePath(`${parentPath}/${route.path}`);
+    const chain = [...parentChain, route];
+    out.push({ fullPath, route, chain });
+    if (route.children && route.children.length > 0) {
+      collectRoutes(route.children, fullPath, chain, out);
+    }
+  }
+}
+
+/**
+ * Match a path against the route tree, returning the matched route, extracted
+ * params, and the chain of matched routes.
+ *
+ * Ranks all matching routes most-specific-first (static > :param > * per
+ * segment) so SSR resolves a URL to the SAME route the client `RouteMatcher`
+ * would — otherwise e.g. `/users/new` could hydrate as `/users/:id`. A fully
+ * static route equal to the URL scores highest, subsuming the client's
+ * exact-match step. Ties keep declaration order (first match wins).
  *
  * Security: params object is prototype-free; forbidden keys are silently dropped.
  */
@@ -214,40 +260,34 @@ function matchRoute(
   parentPath: string = "",
   parentChain: SSRRouteDef[] = [],
 ): MatchResult | null {
-  for (const route of routes) {
-    const fullPath = normalizePath(`${parentPath}/${route.path}`);
+  const flat: Array<{ fullPath: string; route: SSRRouteDef; chain: SSRRouteDef[] }> = [];
+  collectRoutes(routes, parentPath, parentChain, flat);
 
-    // If this route has children, try to match against them first
-    // using the parent path prefix
-    if (route.children && route.children.length > 0) {
-      const childResult = matchRoute(path, route.children, fullPath, [...parentChain, route]);
-      if (childResult) {
-        return childResult;
-      }
-    }
+  let best: MatchResult | null = null;
+  let bestSpec: number[] | null = null;
 
-    // Try matching the full path
-    const compiled = compilePattern(fullPath);
+  for (const entry of flat) {
+    const compiled = compilePattern(entry.fullPath);
     const match = path.match(compiled.regex);
+    if (!match) continue;
 
-    if (match) {
-      const params = nullObject();
-      for (let i = 0; i < compiled.keys.length; i++) {
-        const key = compiled.keys[i];
-        if (isUnsafeKey(key)) continue;
-        if (match[i + 1] !== undefined) {
-          params[key] = safeDecode(match[i + 1]);
-        }
+    const spec = routeSpecificity(entry.fullPath);
+    // Strictly-more-specific wins; equal keeps the earlier (declaration-order) match.
+    if (bestSpec && compareSpecificity(spec, bestSpec) <= 0) continue;
+
+    const params = nullObject();
+    for (let i = 0; i < compiled.keys.length; i++) {
+      const key = compiled.keys[i];
+      if (isUnsafeKey(key)) continue;
+      if (match[i + 1] !== undefined) {
+        params[key] = safeDecode(match[i + 1]);
       }
-      return {
-        route,
-        params,
-        matched: [...parentChain, route],
-      };
     }
+    best = { route: entry.route, params, matched: entry.chain };
+    bestSpec = spec;
   }
 
-  return null;
+  return best;
 }
 
 /**

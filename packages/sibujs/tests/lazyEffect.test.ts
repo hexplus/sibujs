@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { lazyEffect } from "../src/ui/lazyEffect";
 
 // ---------------------------------------------------------------------------

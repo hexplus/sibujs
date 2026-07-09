@@ -1,6 +1,5 @@
+import { a as aTag, div, main as mainTag, mount, span } from "@sibujs/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { a as aTag, div, main as mainTag, span } from "@sibujs/core";
-import { mount } from "@sibujs/core";
 import { createRouter, destroyRouter, lazy, navigate, Outlet, Route, route } from "../src/plugins/router";
 
 const wait = (ms = 250) => new Promise((r) => setTimeout(r, ms));

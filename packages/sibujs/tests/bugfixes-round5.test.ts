@@ -1,7 +1,7 @@
 // Regression tests for the round-5 deep-review fixes.
+
+import { dispose, signal } from "@sibujs/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { dispose } from "@sibujs/core";
-import { signal } from "@sibujs/core";
 import { renderToDocument } from "../src/platform/ssr";
 import { createRouter, destroyRouter, RouterLink } from "../src/plugins/router";
 import { createSSRRouter } from "../src/plugins/routerSSR";

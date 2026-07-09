@@ -1,8 +1,5 @@
-import { dispose, registerDisposer } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { track } from "@sibujs/core/internal";
-import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from "@sibujs/core/internal";
+import { dispose, effect, registerDisposer, signal } from "@sibujs/core";
+import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars, track } from "@sibujs/core/internal";
 
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //

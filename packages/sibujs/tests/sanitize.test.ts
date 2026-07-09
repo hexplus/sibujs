@@ -1,4 +1,3 @@
-import { describe, expect, it } from "vitest";
 import {
   isSafeAttribute,
   isUrlAttribute,
@@ -7,6 +6,7 @@ import {
   sanitizeUrl,
   stripHtml,
 } from "@sibujs/core/internal";
+import { describe, expect, it } from "vitest";
 
 describe("sanitize", () => {
   it("should escape HTML entities", () => {

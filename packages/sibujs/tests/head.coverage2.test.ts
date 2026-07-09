@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it } from "vitest";
 import { signal } from "@sibujs/core";
+import { beforeEach, describe, expect, it } from "vitest";
 import { Head, setCanonical, setStructuredData } from "../src/platform/head";
 
 function cleanHead() {

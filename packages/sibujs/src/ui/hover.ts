@@ -1,5 +1,4 @@
-import { registerDisposer } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { registerDisposer, signal } from "@sibujs/core";
 
 /**
  * hover attaches reactive hover tracking to an element. Uses `pointerenter`

@@ -29,12 +29,18 @@ export function queryByText(container: HTMLElement, text: string): HTMLElement |
   return walk(container);
 }
 
+// Escape a value for use inside a double-quoted attribute selector so a value
+// containing `"` or `\` cannot break the selector (a raw `"` throws SyntaxError).
+function escAttrValue(value: string): string {
+  return value.replace(/["\\]/g, "\\$&");
+}
+
 export function queryByTestId(container: HTMLElement, testId: string): HTMLElement | null {
-  return container.querySelector(`[data-testid="${testId}"]`);
+  return container.querySelector(`[data-testid="${escAttrValue(testId)}"]`);
 }
 
 export function queryByRole(container: HTMLElement, role: string): HTMLElement | null {
-  return container.querySelector(`[role="${role}"]`);
+  return container.querySelector(`[role="${escAttrValue(role)}"]`);
 }
 
 /**

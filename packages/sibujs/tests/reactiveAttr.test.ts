@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
 import { signal } from "@sibujs/core";
 import { bindDynamic } from "@sibujs/core/internal";
+import { describe, expect, it } from "vitest";
 import { bindAttrs, bindBoolAttr, bindData } from "../src/ui/reactiveAttr";
 
 describe("bindAttrs", () => {

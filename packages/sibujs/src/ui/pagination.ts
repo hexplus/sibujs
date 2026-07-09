@@ -1,5 +1,4 @@
-import { derived } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { derived, signal } from "@sibujs/core";
 
 /**
  * pagination provides reactive pagination state and controls.

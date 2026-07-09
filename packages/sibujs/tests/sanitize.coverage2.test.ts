@@ -1,4 +1,3 @@
-import { describe, expect, it } from "vitest";
 import {
   isSafeAttribute,
   isUrlAttribute,
@@ -8,6 +7,7 @@ import {
   sanitizeUrl,
   stripHtml,
 } from "@sibujs/core/internal";
+import { describe, expect, it } from "vitest";
 
 describe("sanitizeUrl (coverage2)", () => {
   it("returns empty for whitespace-only / control-only input", () => {

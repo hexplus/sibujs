@@ -8,15 +8,7 @@ describe("Package consumption", () => {
   // ── ESM entry points exist ───────────────────────────────────────────────
 
   describe("ESM entry points", () => {
-    const esmFiles = [
-      "index.js",
-      "data.js",
-      "ui.js",
-      "ssr.js",
-      "plugins.js",
-      "build.js",
-      "testing.js",
-    ];
+    const esmFiles = ["index.js", "data.js", "ui.js", "ssr.js", "plugins.js", "build.js", "testing.js"];
 
     for (const file of esmFiles) {
       it(`dist/${file} exists and is non-empty`, () => {
@@ -31,15 +23,7 @@ describe("Package consumption", () => {
   // ── CJS entry points exist ─────────────────────────────────────────────
 
   describe("CJS entry points", () => {
-    const cjsFiles = [
-      "index.cjs",
-      "data.cjs",
-      "ui.cjs",
-      "ssr.cjs",
-      "plugins.cjs",
-      "build.cjs",
-      "testing.cjs",
-    ];
+    const cjsFiles = ["index.cjs", "data.cjs", "ui.cjs", "ssr.cjs", "plugins.cjs", "build.cjs", "testing.cjs"];
 
     for (const file of cjsFiles) {
       it(`dist/${file} exists and is non-empty`, () => {
@@ -54,15 +38,7 @@ describe("Package consumption", () => {
   // ── Type declaration files exist ───────────────────────────────────────
 
   describe("Type declarations", () => {
-    const dtsFiles = [
-      "index.d.ts",
-      "data.d.ts",
-      "ui.d.ts",
-      "ssr.d.ts",
-      "plugins.d.ts",
-      "build.d.ts",
-      "testing.d.ts",
-    ];
+    const dtsFiles = ["index.d.ts", "data.d.ts", "ui.d.ts", "ssr.d.ts", "plugins.d.ts", "build.d.ts", "testing.d.ts"];
 
     for (const file of dtsFiles) {
       it(`dist/${file} exists`, () => {

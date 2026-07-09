@@ -1,5 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@sibujs/core";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   collectStream,
   deserializeState,

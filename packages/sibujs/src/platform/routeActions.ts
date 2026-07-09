@@ -1,5 +1,4 @@
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, signal } from "@sibujs/core";
 
 export type ActionFn<T = unknown> = (data: FormData | Record<string, unknown>) => Promise<T>;
 

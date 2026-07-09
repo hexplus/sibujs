@@ -1,5 +1,4 @@
-import { bindAttribute } from "@sibujs/core/internal";
-import { track } from "@sibujs/core/internal";
+import { bindAttribute, track } from "@sibujs/core/internal";
 
 /**
  * Bind multiple reactive attributes to an element.

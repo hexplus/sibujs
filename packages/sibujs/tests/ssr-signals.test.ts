@@ -1,10 +1,5 @@
+import { derived, disableSSR, effect, enableSSR, isSSR, signal, store, watch, withSSR } from "@sibujs/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { store } from "@sibujs/core";
-import { watch } from "@sibujs/core";
-import { disableSSR, enableSSR, isSSR, withSSR } from "@sibujs/core";
 import { deserializeState, renderToString, serializeState } from "../src/platform/ssr";
 
 afterEach(() => {
