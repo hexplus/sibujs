@@ -1,8 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { inject, plugin, resetPlugins } from "sibujs/plugins";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { MobXAdapterAPI } from "../src/ecosystem/adapters/mobx";
 import { mobXAdapter } from "../src/ecosystem/adapters/mobx";
-import { inject, plugin, resetPlugins } from "sibujs/plugins";
 
 function createMockAutorun() {
   const disposers: ReturnType<typeof vi.fn>[] = [];

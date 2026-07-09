@@ -131,13 +131,18 @@ export function query<T>(
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
   const loading = derived(() => isFetching() && data() === undefined);
-  const isStale = derived(() => {
+  // A plain function (not `derived`): a derived caches its result and only
+  // recomputes when a reactive dependency changes, so a `Date.now()`-based
+  // staleness check would stay frozen until `data()` next changed. Reading
+  // `data()` here still subscribes callers that read `isStale()` inside a
+  // reactive scope, while each call re-evaluates the clock.
+  const isStale = () => {
     data();
     if (!currentKey) return true;
     const entry = cache.get(currentKey);
     if (!entry || entry.dataUpdatedAt === 0) return true;
     return Date.now() - entry.dataUpdatedAt >= staleTime;
-  });
+  };
 
   async function doFetch(): Promise<void> {
     if (disposed || !currentKey || !enabled) return;
@@ -168,6 +173,14 @@ export function query<T>(
         if (entry.promise === captured) {
           onCacheUpdate();
           if (entry.error) onError?.(entry.error);
+        } else {
+          // The awaited promise was aborted or swapped by another subscriber
+          // (e.g. its owner changed key or disposed). Never leave this
+          // subscriber wedged in the fetching state: reflect the current
+          // cache, and re-issue our own fetch when there's no data and no
+          // fresh in-flight promise to await.
+          setIsFetching(false);
+          if (entry.data === undefined && !entry.promise && enabled) doFetch();
         }
       } finally {
         if (!disposed && currentKey === key) onSettled?.();
@@ -398,6 +411,9 @@ export function setQueryData<T>(key: string, data: T | ((prev: T | undefined) =>
   const newData = typeof data === "function" ? (data as (prev: T | undefined) => T)(entry.data as T | undefined) : data;
   entry.data = newData;
   entry.dataUpdatedAt = Date.now();
+  // Fresh data supersedes any prior error; clearing it prevents listeners from
+  // re-applying a stale error alongside the new data.
+  entry.error = undefined;
   for (const listener of entry.listeners) listener();
 }
 

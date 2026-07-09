@@ -11,6 +11,13 @@ export interface AsyncDerivedState<T> {
   error: () => unknown | null;
   /** Manually re-run the async computation. */
   refresh: () => void;
+  /**
+   * Tear down the internal effect: unsubscribes from every reactive dependency
+   * and stops future re-fetches. Call this when the owning component unmounts —
+   * otherwise the effect (and any late-resolving fetch writing back to state)
+   * lives for the life of the source signals.
+   */
+  dispose: () => void;
 }
 
 /**
@@ -49,7 +56,7 @@ export function asyncDerived<T>(factory: () => Promise<T>, initial: T): AsyncDer
 
   let runId = 0;
 
-  effect(() => {
+  const teardown = effect(() => {
     tick(); // track so `refresh()` re-runs
     const currentRun = ++runId;
     batch(() => {
@@ -91,5 +98,11 @@ export function asyncDerived<T>(factory: () => Promise<T>, initial: T): AsyncDer
     loading,
     error,
     refresh: () => setTick((n) => n + 1),
+    dispose: () => {
+      // Stop tracking dependencies; bump runId so any in-flight promise's
+      // resolution is treated as stale and never writes back to state.
+      runId++;
+      teardown();
+    },
   };
 }

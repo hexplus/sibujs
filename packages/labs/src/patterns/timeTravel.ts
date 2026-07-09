@@ -1,6 +1,4 @@
-import { derived } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, derived, signal } from "@sibujs/core";
 
 // ============================================================================
 // TIME-TRAVEL DEBUGGING

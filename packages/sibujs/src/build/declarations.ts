@@ -76,7 +76,7 @@ const SUGGESTED_OPTIONS: Record<string, { value: unknown; reason: string }> = {
  *
  * @example
  * ```ts
- * import { generateTsConfig } from 'sibu/src/build/declarations';
+ * import { generateTsConfig } from 'sibujs/build';
  * import { writeFileSync } from 'fs';
  *
  * const config = generateTsConfig({ outDir: './dist' });
@@ -106,9 +106,9 @@ export function generateTsConfig(options?: {
   if (paths && Object.keys(paths).length > 0) {
     compilerOptions.baseUrl = ".";
     compilerOptions.paths = {
-      // Default sibu alias
-      sibu: ["node_modules/sibu/dist/index.d.ts"],
-      "sibu/*": ["node_modules/sibu/dist/*"],
+      // Default sibujs alias
+      sibujs: ["node_modules/sibujs/dist/index.d.ts"],
+      "sibujs/*": ["node_modules/sibujs/dist/*"],
       // User-provided paths
       ...paths,
     };
@@ -132,7 +132,7 @@ export function generateTsConfig(options?: {
  *
  * @example
  * ```ts
- * import { validateTsConfig } from 'sibu/src/build/declarations';
+ * import { validateTsConfig } from 'sibujs/build';
  * import { readFileSync } from 'fs';
  *
  * const tsconfig = JSON.parse(readFileSync('tsconfig.json', 'utf-8'));

@@ -24,6 +24,23 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
   let lastEmitted: T = getter();
   let timer: ReturnType<typeof setTimeout> | null = null;
 
+  // Runs when a cooldown ends. Emits the trailing value (if any) and, crucially,
+  // starts a fresh cooldown around that emission — otherwise a change arriving
+  // right after the trailing emit would fire a leading edge less than `interval`
+  // later, violating "at most once per interval".
+  const onCooldownEnd = () => {
+    if (pending !== null) {
+      const trailingValue = pending.value;
+      pending = null;
+      setThrottled(trailingValue);
+      lastEmitted = trailingValue;
+      timer = setTimeout(onCooldownEnd, interval);
+    } else {
+      cooldown = false;
+      timer = null;
+    }
+  };
+
   const stop = effect(() => {
     const value = getter();
 
@@ -34,16 +51,7 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
         lastEmitted = value;
         cooldown = true;
         pending = null;
-        timer = setTimeout(() => {
-          timer = null;
-          cooldown = false;
-          if (pending !== null) {
-            const trailingValue = pending.value;
-            pending = null;
-            setThrottled(trailingValue);
-            lastEmitted = trailingValue;
-          }
-        }, interval);
+        timer = setTimeout(onCooldownEnd, interval);
       }
     } else {
       // Inside cooldown: save latest value for trailing edge

@@ -10,9 +10,9 @@
 // ---------------------------------------------------------------------------
 
 export * from "./browser";
-export * from "./widgets";
-export * from "./patterns";
-export * from "./ecosystem";
-export * from "./performance";
 export * from "./devtools";
+export * from "./ecosystem";
 export * from "./motion";
+export * from "./patterns";
+export * from "./performance";
+export * from "./widgets";

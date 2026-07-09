@@ -148,6 +148,14 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
     if (childEl && !container.contains(childEl)) dispose(childEl);
   });
 
+  // Swap content in and dispose the detached fallback subtree. `replaceChildren`
+  // removes `fallbackEl` from the tree without disposing it, so a reactive
+  // fallback would otherwise leak its bindings/listeners.
+  const swapIn = (el: HTMLElement) => {
+    container.replaceChildren(el);
+    dispose(fallbackEl);
+  };
+
   queueMicrotask(() => {
     if (suspenseDisposed) return;
     try {
@@ -157,7 +165,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
       if (el.classList.contains("sibu-lazy")) {
         // Already loaded synchronously — swap and skip the observer entirely.
         if (!el.querySelector(".sibu-lazy-loading")) {
-          container.replaceChildren(el);
+          swapIn(el);
           return;
         }
         observer = new MutationObserver(() => {
@@ -166,12 +174,12 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
           if (!loading) {
             observer?.disconnect();
             observer = null;
-            container.replaceChildren(el);
+            swapIn(el);
           }
         });
         observer.observe(el, { childList: true, subtree: true });
       } else {
-        container.replaceChildren(el);
+        swapIn(el);
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));

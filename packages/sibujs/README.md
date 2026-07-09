@@ -175,7 +175,7 @@ Utilities for testing components and reactivity.
 Self-registering IIFE build exposing `window.Sibu`, for use without a bundler.
 
 ```html
-<script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
+<script src="https://unpkg.com/sibujs@4.0.0-alpha.0/dist/cdn.global.js"></script>
 <script>
   const { signal, effect, div, mount } = window.Sibu;
 </script>
@@ -197,6 +197,14 @@ Installed separately (`npm install @sibujs/labs`). Lower support guarantee than
 - **`@sibujs/labs/ecosystem`** — adapters for third-party state/UI libraries.
 
 ---
+
+## Migrating to v4
+
+`sibujs` v4 is the batteries-included tier built on the extracted `@sibujs/core`
+engine, and the long-tail modules moved to `@sibujs/labs`. Root imports such as
+`import { signal, div, mount } from "sibujs"` are unchanged. See
+[`MIGRATION.md`](./MIGRATION.md) for the full upgrade steps and
+[`CHANGELOG.md`](./CHANGELOG.md) for the complete list of changes.
 
 ## Ecosystem
 

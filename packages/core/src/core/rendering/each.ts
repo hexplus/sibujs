@@ -16,6 +16,16 @@ function resolveNodeChild(child: NodeChild): Node {
     return resolveNodeChild((child as () => NodeChild)());
   }
   if (child instanceof Node) {
+    // A DocumentFragment is emptied when inserted (its children spill out),
+    // leaving an empty, parentless fragment — the row could then never be
+    // moved, removed, or disposed as a unit. Wrap in a layout-transparent
+    // container so the row moves as one node (mirrors KeepAlive).
+    if (child instanceof DocumentFragment) {
+      const wrapper = document.createElement("div");
+      wrapper.style.display = "contents";
+      wrapper.appendChild(child);
+      return wrapper;
+    }
     return child;
   }
   return document.createTextNode(String(child));
@@ -243,11 +253,15 @@ export function each<T>(
     }
 
     // --- Phase 2: Remove old nodes not present in new keys ---
+    // Remove via the node's OWN parent, not the anchor's current parent: if the
+    // anchor was reparented between updates, a stale row may still live under
+    // the previous parent, and `parent.removeChild(node)` would throw
+    // NotFoundError mid-reconciliation.
     for (const [key, node] of nodeMap) {
       if (!workMap.has(key)) {
         dispose(node);
         if (node.parentNode) {
-          parent.removeChild(node);
+          node.parentNode.removeChild(node);
         }
       }
     }
@@ -331,7 +345,20 @@ export function each<T>(
   // has no parent yet (getArray() runs before the parent check).
   // Capture teardown so disposing the anchor unsubscribes the effect.
   const untrack = track(update);
-  registerDisposer(anchor, untrack);
+  // Rows and the `end` sentinel live as SIBLINGS of the anchor. An enclosing
+  // primitive (nested when/match/each or a reactive child) that swaps this
+  // anchor out only removes the comment, so dispose AND remove every live row
+  // plus the sentinel here too — otherwise stale rows stay visible and their
+  // bindings leak (mirrors KeepAlive/Portal).
+  registerDisposer(anchor, () => {
+    untrack();
+    for (const node of nodeMap.values()) {
+      dispose(node);
+      if (node.parentNode) node.parentNode.removeChild(node);
+    }
+    nodeMap.clear();
+    if (end.parentNode) end.parentNode.removeChild(end);
+  });
 
   // Fallback: if the anchor wasn't in the DOM during the initial track
   // (common when each() is called inside tagFactory nodes), schedule

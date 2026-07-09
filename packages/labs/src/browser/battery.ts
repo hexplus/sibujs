@@ -1,5 +1,4 @@
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, signal } from "@sibujs/core";
 
 /**
  * Battery manager interface matching the Battery Status API.

@@ -98,14 +98,16 @@ function injectPureAnnotations(code: string): string {
  * Adds enableDebug() calls and performance instrumentation in dev mode.
  */
 function injectDevHelpers(code: string): string {
-  // Add dev-mode global flag if the file imports from sibu
+  // Add dev-mode global flag if the file imports from sibujs
   if (
-    code.includes('from "sibu"') ||
-    code.includes("from 'sibu'") ||
-    code.includes('from "sibu/') ||
-    code.includes("from 'sibu/")
+    code.includes('from "sibujs"') ||
+    code.includes("from 'sibujs'") ||
+    code.includes('from "sibujs/') ||
+    code.includes("from 'sibujs/")
   ) {
-    return `/* SibuJS Dev Mode */\nif (typeof globalThis !== 'undefined') { (globalThis as unknown as Record<string, unknown>).__SIBU_DEV__ = true; }\n${code}`;
+    // Emit plain JS: this transform also runs on `.js`/`.jsx` files, so a
+    // TypeScript cast here would be a syntax error in dev mode.
+    return `/* SibuJS Dev Mode */\nif (typeof globalThis !== 'undefined') { globalThis.__SIBU_DEV__ = true; }\n${code}`;
   }
   return code;
 }
@@ -143,13 +145,13 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
 
     config() {
       return {
-        // Optimize dependency pre-bundling for sibu
+        // Optimize dependency pre-bundling for sibujs
         optimizeDeps: {
-          include: ["sibu"],
+          include: ["sibujs"],
         },
-        // Ensure sibu is treated correctly for SSR
+        // Ensure sibujs is treated correctly for SSR
         ssr: {
-          noExternal: ["sibu"],
+          noExternal: ["sibujs"],
         },
         // Define global constants for dead code elimination
         define: {
@@ -200,10 +202,10 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
           const needsSvg = compiled.usesSvg;
           const imports: string[] = [];
           if (tagImports.length > 0) {
-            imports.push(`import { ${tagImports.join(", ")} } from "sibu";`);
+            imports.push(`import { ${tagImports.join(", ")} } from "sibujs";`);
           }
           if (needsSvg) {
-            imports.push(`import { tagFactory as __sbTagFactory, SVG_NS as __sbSVG_NS } from "sibu";`);
+            imports.push(`import { tagFactory as __sbTagFactory, SVG_NS as __sbSVG_NS } from "sibujs";`);
           }
           // Only add imports that aren't already present
           const newImports = imports.filter((imp) => !transformed.includes(imp));
@@ -228,7 +230,7 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
           }
           // Ensure staticTemplate import exists
           if (!transformed.includes("import") || !transformed.includes("staticTemplate")) {
-            transformed = `import { staticTemplate } from "sibu";\n${transformed}`;
+            transformed = `import { staticTemplate } from "sibujs";\n${transformed}`;
           }
           modified = true;
         }
@@ -329,7 +331,7 @@ export function createViteConfig(
     ...(ssr
       ? {
           ssr: {
-            noExternal: ["sibu"],
+            noExternal: ["sibujs"],
             target: "node",
           },
           build: {
@@ -348,8 +350,8 @@ export function createViteConfig(
 
     // Optimize dependency handling
     optimizeDeps: {
-      include: ["sibu"],
-      // Force pre-bundling of sibu for faster dev startup
+      include: ["sibujs"],
+      // Force pre-bundling of sibujs for faster dev startup
       force: false,
     },
 

@@ -266,10 +266,10 @@ export function createWebpackConfig(
         : {
             chunks: "all",
             cacheGroups: {
-              // Separate sibu framework code into its own chunk
-              sibu: {
-                test: /[\\/]node_modules[\\/]sibu[\\/]/,
-                name: "sibu",
+              // Separate sibujs framework code into its own chunk
+              sibujs: {
+                test: /[\\/]node_modules[\\/]sibujs[\\/]/,
+                name: "sibujs",
                 chunks: "all",
                 priority: 20,
               },

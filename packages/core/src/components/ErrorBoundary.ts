@@ -205,43 +205,6 @@ function injectStyles() {
   }
 }
 
-// Memoization cache for fallback renderers keyed by error message.
-// We cache a *factory* (bound to the error) rather than a live Element to
-// avoid re-inserting the same DOM node into multiple parents and to bound
-// memory growth. Each fallback function gets its own LRU Map capped at
-// FALLBACK_CACHE_MAX entries — oldest key evicted when full.
-const FALLBACK_CACHE_MAX = 50;
-const fallbackCache = new WeakMap<(...args: never[]) => unknown, Map<string, () => Element>>();
-
-function getMemoizedFallback(
-  fallbackFn: (error: Error, retry: () => void) => Element,
-  error: Error,
-  retry: () => void,
-): Element {
-  let cache = fallbackCache.get(fallbackFn);
-  if (!cache) {
-    cache = new Map();
-    fallbackCache.set(fallbackFn, cache);
-  }
-  const key = error.message;
-  let factory = cache.get(key);
-  if (factory) {
-    // LRU touch: move to most-recently-used end
-    cache.delete(key);
-    cache.set(key, factory);
-  } else {
-    factory = () => fallbackFn(error, retry);
-    cache.set(key, factory);
-    // Evict oldest if over limit
-    if (cache.size > FALLBACK_CACHE_MAX) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey !== undefined) cache.delete(oldestKey);
-    }
-  }
-  // Always return a *fresh* Element so the same node is never inserted twice
-  return factory();
-}
-
 // Stack parsing is now handled by ErrorDisplay. The helper used to
 // live here but was removed along with the inline legacy renderer.
 
@@ -256,7 +219,7 @@ function getMemoizedFallback(
  *   `unhandledrejection` events instead.
  * - Supports nested ErrorBoundaries (inner catches first, outer catches propagation)
  * - Retry functionality to clear error and re-render children
- * - Memoized fallback to avoid re-creating fallback UI on every render
+ * - Fallback rendered fresh per error, bound to this boundary's error/retry
  * - onError callback for logging/telemetry
  * - Improved CSS styling
  */
@@ -276,14 +239,6 @@ export function ErrorBoundary(
   const [error, setError] = signal<Error | null>(null);
 
   const retry = () => {
-    // Drop only the cached factory bound to the current error message, so
-    // memoized fallbacks for OTHER errors (e.g. unrelated boundary instances
-    // sharing the same fallback fn) survive.
-    if (fallback) {
-      const cur = error();
-      const inner = fallbackCache.get(fallback);
-      if (cur && inner) inner.delete(cur.message);
-    }
     setError(null);
   };
 
@@ -340,7 +295,11 @@ export function ErrorBoundary(
   const tryRenderFallback = (err: Error): Element => {
     const fn = fallback || defaultFallback;
     try {
-      return getMemoizedFallback(fn, err, retry);
+      // Render fresh each time, bound to THIS boundary's current error/retry.
+      // The fallback render is not hot, so there is nothing to memoize — a
+      // module-global cache keyed by (fn, message) previously cross-wired the
+      // error/retry closures between distinct boundary instances.
+      return fn(err, retry);
     } catch (fallbackError) {
       // Fallback itself failed — propagate to parent ErrorBoundary via DOM event
       // Defer dispatch so the container is connected to the DOM tree first

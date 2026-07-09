@@ -11,8 +11,7 @@
  * `import.meta.hot` API (Webpack, Vite, Parcel, etc.).
  */
 
-import { dispose as disposeNode } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { dispose as disposeNode, signal } from "@sibujs/core";
 
 // ---------------------------------------------------------------------------
 // Internal HMR state store

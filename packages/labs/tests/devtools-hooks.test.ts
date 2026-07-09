@@ -1,7 +1,5 @@
+import { derived, effect, signal } from "@sibujs/core";
 import { afterEach, describe, expect, it } from "vitest";
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
 import { getSignalName, getSubscriberCount, inspectSignal, walkDependencyGraph } from "../src/devtools/introspect";
 
 // ── Signal debug names ───────────────────────────────────────────────────────

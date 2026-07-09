@@ -1,9 +1,7 @@
 // Regression tests for the round-4 bug review fixes.
+
+import { batch, deepSignal, effect, signal } from "@sibujs/core";
 import { describe, expect, it, vi } from "vitest";
-import { deepSignal } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
 import { transition } from "../src/motion/transition";
 
 describe("effect: disposed-while-enqueued must not run its body", () => {

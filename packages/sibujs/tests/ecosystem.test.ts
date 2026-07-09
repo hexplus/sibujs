@@ -81,56 +81,42 @@ describe("createTestHarness", () => {
 
 describe("bundlerMetadata", () => {
   it("has the correct name", () => {
-    expect(bundlerMetadata.name).toBe("sibu");
+    expect(bundlerMetadata.name).toBe("sibujs");
   });
 
   it("has sideEffects set to false", () => {
     expect(bundlerMetadata.sideEffects).toBe(false);
   });
 
-  it("lists expected module categories", () => {
-    const categories = Object.keys(bundlerMetadata.modules);
-    expect(categories).toContain("core");
-    expect(categories).toContain("hooks");
-    expect(categories).toContain("plugins");
-    expect(categories).toContain("components");
-    expect(categories).toContain("ssr");
-    expect(categories).toContain("advanced");
-  });
-
-  it("lists known modules within categories", () => {
-    expect(bundlerMetadata.modules.core).toContain("html");
-    expect(bundlerMetadata.modules.core).toContain("mount");
-    expect(bundlerMetadata.modules.hooks).toContain("signal");
-    expect(bundlerMetadata.modules.hooks).toContain("effect");
-    expect(bundlerMetadata.modules.plugins).toContain("router");
-    expect(bundlerMetadata.modules.plugins).toContain("i18n");
+  it("lists the real published subpath entries", () => {
+    const entries = bundlerMetadata.entries;
+    expect(entries).toContain("index");
+    expect(entries).toContain("data");
+    expect(entries).toContain("ui");
+    expect(entries).toContain("ssr");
+    expect(entries).toContain("plugins");
+    expect(entries).toContain("build");
+    expect(entries).toContain("testing");
   });
 
   it("generateImportMap returns a proper map with default base", () => {
     const map = bundlerMetadata.generateImportMap();
-    // Hooks should map to core directory
-    expect(map["sibu/signal"]).toBe("/node_modules/sibu/src/core/signal.js");
-    expect(map["sibu/effect"]).toBe("/node_modules/sibu/src/core/effect.js");
-    // Core modules map to core directory
-    expect(map["sibu/html"]).toBe("/node_modules/sibu/src/core/html.js");
-    // Plugins map to plugins directory
-    expect(map["sibu/router"]).toBe("/node_modules/sibu/src/plugins/router.js");
+    // The bare package specifier resolves to the index bundle.
+    expect(map.sibujs).toBe("/node_modules/sibujs/dist/index.js");
+    // Subpaths resolve to their own dist bundle.
+    expect(map["sibujs/data"]).toBe("/node_modules/sibujs/dist/data.js");
+    expect(map["sibujs/plugins"]).toBe("/node_modules/sibujs/dist/plugins.js");
   });
 
   it("generateImportMap uses a custom base path", () => {
-    const map = bundlerMetadata.generateImportMap("/lib/sibu/");
-    expect(map["sibu/html"]).toBe("/lib/sibu/src/core/html.js");
-    expect(map["sibu/router"]).toBe("/lib/sibu/src/plugins/router.js");
+    const map = bundlerMetadata.generateImportMap("/lib/sibujs/");
+    expect(map.sibujs).toBe("/lib/sibujs/dist/index.js");
+    expect(map["sibujs/ssr"]).toBe("/lib/sibujs/dist/ssr.js");
   });
 
-  it("generateImportMap includes an entry for every module", () => {
+  it("generateImportMap includes an entry for every published subpath", () => {
     const map = bundlerMetadata.generateImportMap();
-    let totalModules = 0;
-    for (const modules of Object.values(bundlerMetadata.modules)) {
-      totalModules += modules.length;
-    }
-    expect(Object.keys(map)).toHaveLength(totalModules);
+    expect(Object.keys(map)).toHaveLength(bundlerMetadata.entries.length);
   });
 });
 

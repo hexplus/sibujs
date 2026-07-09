@@ -83,13 +83,26 @@ export function store<T extends object>(
     },
   });
 
-  // Get non-reactive snapshot of current state
-  const getSnapshot = (): T => {
+  // Internal snapshot: reads each signal through its reactive getter, so calling
+  // it inside an effect (as subscribe() does) registers a dependency on every
+  // key — that tracked read is exactly how subscribe() observes all changes.
+  const readSnapshot = (): T => {
     const snapshot: Partial<T> = {};
     (Object.keys(signals) as Array<keyof T>).forEach((key) => {
       snapshot[key] = signals[key][0]();
     });
     return snapshot as T;
+  };
+
+  // Public snapshot: documented non-reactive, so suspend tracking — reading it
+  // inside an effect must NOT silently subscribe the effect to every store key.
+  const getSnapshot = (): T => {
+    suspendTracking();
+    try {
+      return readSnapshot();
+    } finally {
+      resumeTracking();
+    }
   };
 
   // Actions
@@ -121,8 +134,8 @@ export function store<T extends object>(
   const subscribe = (callback: StoreSubscriber<T>): (() => void) => {
     let first = true;
     return effect(() => {
-      // Read all signals to register dependencies
-      const snapshot = getSnapshot();
+      // Read all signals (tracked) to register dependencies on every key.
+      const snapshot = readSnapshot();
       if (first) {
         first = false;
         return;

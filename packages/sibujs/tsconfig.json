@@ -15,6 +15,16 @@
       "noFallthroughCasesInSwitch": true,
       "skipLibCheck": true
     },
-    "include": ["src", "index.ts"]
+    "include": [
+      "src",
+      "index.ts",
+      "data.ts",
+      "ui.ts",
+      "ssr.ts",
+      "plugins.ts",
+      "build.ts",
+      "testing.ts",
+      "cdn.ts"
+    ]
   }
   

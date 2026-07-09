@@ -26,8 +26,19 @@ export function derived<T>(
   getter: () => T,
   options?: {
     name?: string;
-    /** Custom equality — when the recomputed value equals the previous,
-     *  downstream subscribers are not notified. Defaults to `Object.is`. */
+    /**
+     * Custom equality for the derived's CACHED VALUE. When a recompute produces
+     * a value that `equals` the previous, the derived keeps returning the prior
+     * reference (its identity is preserved) — useful for object/array results
+     * consumed by identity-sensitive readers. Defaults to `Object.is`.
+     *
+     * NOTE: this does NOT suppress downstream notification. Propagation is
+     * push-eager — a write marks all transitive subscribers dirty before this
+     * derived is pulled — so an effect that reads this derived still re-runs
+     * when an upstream dependency changes, even if `equals` reports the
+     * recomputed value as unchanged. `equals` controls value caching, not
+     * effect short-circuiting.
+     */
     equals?: (a: T, b: T) => boolean;
   },
 ): Accessor<T> {

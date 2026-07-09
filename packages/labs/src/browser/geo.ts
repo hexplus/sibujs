@@ -1,5 +1,4 @@
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, signal } from "@sibujs/core";
 
 /**
  * geo provides reactive access to the device's geographic position.

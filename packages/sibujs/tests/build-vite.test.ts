@@ -14,8 +14,8 @@ describe("sibuVitePlugin", () => {
   describe("config", () => {
     it("returns a config object with optimizeDeps, ssr, define, and build", () => {
       const config = sibuVitePlugin({ devMode: true, hmr: true }).config?.() as Record<string, any>;
-      expect(config.optimizeDeps.include).toContain("sibu");
-      expect(config.ssr.noExternal).toContain("sibu");
+      expect(config.optimizeDeps.include).toContain("sibujs");
+      expect(config.ssr.noExternal).toContain("sibujs");
       expect(config.define.__SIBU_DEV__).toBe(JSON.stringify(true));
       expect(config.define.__SIBU_HMR__).toBe(JSON.stringify(true));
       expect(config.build.sourcemap).toBe(true);
@@ -57,20 +57,20 @@ describe("sibuVitePlugin", () => {
       expect(result?.code).toContain("/*#__PURE__*/ tagFactory(");
     });
 
-    it("injects dev helpers in dev mode for files importing sibu", () => {
+    it("injects dev helpers in dev mode for files importing sibujs", () => {
       const plugin = sibuVitePlugin({
         devMode: true,
         pureAnnotations: false,
         staticOptimize: false,
         compileTemplates: false,
       });
-      const result = plugin.transform?.('import { div } from "sibu";\nconst x = 1;', "src/foo.ts");
+      const result = plugin.transform?.('import { div } from "sibujs";\nconst x = 1;', "src/foo.ts");
       expect(result).not.toBeNull();
       expect(result?.code).toContain("__SIBU_DEV__ = true");
       expect(result?.code).toContain("SibuJS Dev Mode");
     });
 
-    it("does not inject dev helpers when the file does not import sibu", () => {
+    it("does not inject dev helpers when the file does not import sibujs", () => {
       const plugin = sibuVitePlugin({
         devMode: true,
         pureAnnotations: false,
@@ -87,7 +87,7 @@ describe("sibuVitePlugin", () => {
       expect(result).not.toBeNull();
       expect(result?.code).not.toContain("html`");
       expect(result?.code).toContain("div(");
-      expect(result?.code).toContain('import { div } from "sibu";');
+      expect(result?.code).toContain('import { div } from "sibujs";');
     });
 
     it("adds svg tagFactory imports when compiling svg templates", () => {
@@ -124,7 +124,7 @@ describe("sibuVitePlugin", () => {
       const result = plugin.transform?.(code, "src/foo.ts");
       expect(result).not.toBeNull();
       expect(result?.code).toContain("staticTemplate(");
-      expect(result?.code).toContain('import { staticTemplate } from "sibu";');
+      expect(result?.code).toContain('import { staticTemplate } from "sibujs";');
     });
 
     it("applies static optimization to multiple static patterns (reverse-ordered replacement)", () => {
@@ -222,7 +222,7 @@ describe("createViteConfig", () => {
   it("produces an SSR config when ssr is true", () => {
     const config = createViteConfig({ ssr: true, entry: "server.ts" });
     const ssr = config.ssr as Record<string, any>;
-    expect(ssr.noExternal).toContain("sibu");
+    expect(ssr.noExternal).toContain("sibujs");
     expect(ssr.target).toBe("node");
     const build = config.build as Record<string, any>;
     expect(build.ssr).toBe(true);

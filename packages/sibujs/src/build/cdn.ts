@@ -9,7 +9,7 @@ import * as SibuExports from "../../index";
 /**
  * The package name used in CDN URLs and UMD builds.
  */
-const PACKAGE_NAME = "sibu";
+const PACKAGE_NAME = "sibujs";
 
 /**
  * Register SibuJS on the global window object for CDN/script tag usage.
@@ -17,7 +17,7 @@ const PACKAGE_NAME = "sibu";
  *
  * Usage (in a script tag):
  * ```html
- * <script src="https://unpkg.com/sibu@latest/dist/cdn.global.js"></script>
+ * <script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
  * <script>
  *   const { div, span, mount, signal } = window.Sibu;
  *   // Use SibuJS without a bundler
@@ -89,8 +89,8 @@ export const cdnUrls = {
    *
    * @example
    * ```ts
-   * cdnUrls.scriptTag('jsdelivr', '1.0.0')
-   * // => '<script src="https://cdn.jsdelivr.net/npm/sibu@1.0.0/dist/cdn.global.js"></script>'
+   * cdnUrls.scriptTag('jsdelivr', '4.0.0-alpha.0')
+   * // => '<script src="https://cdn.jsdelivr.net/npm/sibujs@4.0.0-alpha.0/dist/cdn.global.js"></script>'
    * ```
    */
   scriptTag: (provider: "unpkg" | "jsdelivr" | "skypack" = "jsdelivr", version?: string): string => {
@@ -110,7 +110,7 @@ export const cdnUrls = {
  * Useful for browser-native ES modules without a bundler.
  *
  * Import maps allow browsers to resolve bare module specifiers like
- * `import { div } from 'sibu'` without a build step.
+ * `import { div } from 'sibujs'` without a build step.
  *
  * @param baseUrl - Base URL for module resolution (defaults to jsDelivr)
  * @returns An import map object with serialization helpers
@@ -122,7 +122,7 @@ export const cdnUrls = {
  *
  * // Now you can use bare specifiers in module scripts:
  * // <script type="module">
- * //   import { div, mount } from 'sibu';
+ * //   import { div, mount } from 'sibujs';
  * // </script>
  * ```
  */
@@ -136,13 +136,13 @@ export function generateImportMap(baseUrl?: string): {
   const imports: Record<string, string> = {
     // Main package entry
     [PACKAGE_NAME]: `${base}/dist/index.js`,
-    // Sub-path imports for tree-shaking in browsers
-    [`${PACKAGE_NAME}/core`]: `${base}/dist/core/index.js`,
-    [`${PACKAGE_NAME}/reactivity`]: `${base}/dist/reactivity/index.js`,
-    [`${PACKAGE_NAME}/plugins`]: `${base}/dist/plugins/index.js`,
-    [`${PACKAGE_NAME}/components`]: `${base}/dist/components/index.js`,
-    [`${PACKAGE_NAME}/testing`]: `${base}/dist/testing/index.js`,
-    [`${PACKAGE_NAME}/build`]: `${base}/dist/build/index.js`,
+    // Sub-path imports matching the package's published exports map.
+    [`${PACKAGE_NAME}/data`]: `${base}/dist/data.js`,
+    [`${PACKAGE_NAME}/ui`]: `${base}/dist/ui.js`,
+    [`${PACKAGE_NAME}/ssr`]: `${base}/dist/ssr.js`,
+    [`${PACKAGE_NAME}/plugins`]: `${base}/dist/plugins.js`,
+    [`${PACKAGE_NAME}/build`]: `${base}/dist/build.js`,
+    [`${PACKAGE_NAME}/testing`]: `${base}/dist/testing.js`,
   };
 
   return {

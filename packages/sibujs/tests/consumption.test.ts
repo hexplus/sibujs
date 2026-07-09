@@ -116,21 +116,29 @@ describe("Package consumption", () => {
       expect(exports["./testing"]).toBeDefined();
     });
 
-    it("each export has types, import, and require fields", () => {
+    it("each export nests import/require conditions with types listed first", () => {
       const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
       for (const [key, value] of Object.entries(pkg.exports)) {
         // ./cdn ships an IIFE bundle for direct <script> tags — no ESM/CJS/dts.
         if (key === "./cdn") continue;
-        const entry = value as Record<string, string>;
-        expect(entry.types).toBeDefined();
+        const entry = value as Record<string, Record<string, string>>;
+        // Conditions are nested so a CJS consumer resolves .d.cts/.cjs and an
+        // ESM consumer resolves .d.ts/.js — avoiding TS "masquerading as ESM".
         expect(entry.import).toBeDefined();
         expect(entry.require).toBeDefined();
+        expect(entry.import.types).toBeDefined();
+        expect(entry.import.default).toBeDefined();
+        expect(entry.require.types).toBeDefined();
+        expect(entry.require.default).toBeDefined();
+        // types must be the first key in each condition block.
+        expect(Object.keys(entry.import)[0]).toBe("types");
+        expect(Object.keys(entry.require)[0]).toBe("types");
       }
     });
 
-    it("sideEffects is false", () => {
+    it("sideEffects marks only the CDN bundle so ESM subpaths stay tree-shakeable", () => {
       const pkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "utf-8"));
-      expect(pkg.sideEffects).toBe(false);
+      expect(pkg.sideEffects).toEqual(["./dist/cdn.global.js"]);
     });
 
     it("browserslist is defined", () => {

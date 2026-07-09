@@ -1,6 +1,4 @@
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { derived, effect, signal } from "@sibujs/core";
 
 const boundTablists = new WeakMap<HTMLElement, () => void>();
 

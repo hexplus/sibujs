@@ -93,8 +93,9 @@ export function springSignal(
   function set(newTarget: number): void {
     target = newTarget;
 
-    // Snap immediately when reduced motion is preferred
-    if (prefersReducedMotion()) {
+    // Snap immediately when reduced motion is preferred, or when there is no
+    // requestAnimationFrame available (SSR / Node) — the physics loop can't run.
+    if (prefersReducedMotion() || typeof requestAnimationFrame === "undefined") {
       current = newTarget;
       velocity = 0;
       if (rafId !== null) {

@@ -107,6 +107,10 @@ export function mountIslands(
 
   const cancels: Array<() => void> = [];
   const disposers: Array<() => void> = [];
+  // Set by the returned cleanup. An in-flight resolveSetup().then must not
+  // enhance() after cleanup and push its disposer into the already-spliced
+  // array (which would then never be torn down).
+  let disposed = false;
 
   for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-sibu-island]"))) {
     if (el.getAttribute("data-sibu-enhanced") === "true") continue; // already mounted
@@ -128,6 +132,8 @@ export function mountIslands(
       if (!reg) return;
       resolveSetup(reg)
         .then((setup) => {
+          // Bail if mountIslands was torn down while the loader was in flight.
+          if (disposed) return;
           if (!setup) {
             if (typeof console !== "undefined") console.warn(`[SibuJS islands] "${name}" loader produced no setup.`);
             return;
@@ -152,6 +158,7 @@ export function mountIslands(
   }
 
   return () => {
+    disposed = true;
     for (const c of cancels.splice(0)) c();
     for (const d of disposers.splice(0)) d();
   };

@@ -24,7 +24,16 @@ export function defineElement(
 
   const observed = options.observedAttributes || [];
 
-  class SibuElement extends HTMLElement {
+  // Customized built-in (`extends`): the element must subclass the concrete
+  // built-in interface (e.g. `HTMLButtonElement`), not `HTMLElement`, or the
+  // browser rejects `define(..., { extends })`. Shadow DOM is also unsupported
+  // on most built-ins, so it defaults off there unless explicitly requested.
+  const BaseClass = options.extends
+    ? (Object.getPrototypeOf(document.createElement(options.extends)).constructor as typeof HTMLElement)
+    : HTMLElement;
+  const useShadow = options.extends ? options.shadow === true : options.shadow !== false;
+
+  class SibuElement extends BaseClass {
     private _root: HTMLElement | ShadowRoot;
     private _rendered: HTMLElement | null = null;
 
@@ -34,7 +43,7 @@ export function defineElement(
 
     constructor() {
       super();
-      if (options.shadow !== false) {
+      if (useShadow) {
         this._root = this.attachShadow({ mode: options.mode || "open" });
       } else {
         this._root = this;
@@ -90,7 +99,11 @@ export function defineElement(
     }
   }
 
-  customElements.define(name, SibuElement);
+  if (options.extends) {
+    customElements.define(name, SibuElement, { extends: options.extends });
+  } else {
+    customElements.define(name, SibuElement);
+  }
 }
 
 /**

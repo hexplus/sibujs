@@ -178,6 +178,17 @@ describe("springSignal", () => {
     expect(rafQueue.length).toBe(0);
   });
 
+  it("snaps to target when requestAnimationFrame is unavailable (SSR/Node)", () => {
+    // Simulate an environment without rAF (server / non-DOM). set() must not
+    // throw a ReferenceError and should snap synchronously to the target.
+    vi.stubGlobal("requestAnimationFrame", undefined);
+    const [x, setX] = springSignal(0);
+    setX(100);
+
+    expect(x()).toBe(100);
+    expect(rafQueue.length).toBe(0);
+  });
+
   it("falls back to a reference timestep when rAF supplies a non-progressing clock", () => {
     const [x, setX] = springSignal(0, { stiffness: 0.2, damping: 0.9 });
     setX(100);

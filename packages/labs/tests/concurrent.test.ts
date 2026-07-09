@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
+import { describe, expect, it, vi } from "vitest";
 import {
   deferredValue,
   resetIdCounter,
@@ -93,6 +93,35 @@ describe("deferredValue", () => {
     const deferred = deferredValue(value);
 
     expect(typeof deferred).toBe("function");
+  });
+
+  it("should expose a dispose function on the getter", () => {
+    const [value] = signal(10);
+    const deferred = deferredValue(value);
+
+    expect(typeof deferred.dispose).toBe("function");
+    // dispose is non-enumerable so the getter's public shape stays clean
+    expect(Object.keys(deferred)).not.toContain("dispose");
+  });
+
+  it("dispose() tears down the source subscription (no leak)", () => {
+    const [value, setValue] = signal("a");
+    const deferred = deferredValue(value);
+
+    flushScheduler();
+    expect(deferred()).toBe("a");
+
+    // Before dispose, source changes propagate after a flush.
+    setValue("b");
+    flushScheduler();
+    expect(deferred()).toBe("b");
+
+    // After dispose, the internal effect is gone: source changes no longer
+    // schedule updates, so the deferred value stays frozen.
+    deferred.dispose();
+    setValue("c");
+    flushScheduler();
+    expect(deferred()).toBe("b");
   });
 });
 

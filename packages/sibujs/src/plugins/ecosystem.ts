@@ -82,26 +82,20 @@ export function createTestHarness() {
  * Provides information about SibuJS module structure for tree-shaking optimization.
  */
 export const bundlerMetadata = {
-  name: "sibu" as const,
+  name: "sibujs" as const,
   sideEffects: false as const,
-  modules: {
-    core: ["html", "mount", "each", "slots", "fragment", "catch", "portal", "directives"],
-    hooks: ["signal", "effect", "derived", "watch", "store", "ref", "array", "deepSignal"],
-    plugins: ["router", "i18n"],
-    components: ["ErrorBoundary", "Loading"],
-    ssr: ["ssr"],
-    advanced: ["globalStore", "machine", "optimistic", "timeTravel", "scheduler", "plugin"],
-  } as Record<string, string[]>,
+  // The package's real published subpath entries. Each resolves to a
+  // `dist/<name>.js` bundle. (The previous per-symbol map pointed at
+  // `src/<category>/<symbol>.js` files that no longer exist after the core
+  // split and were never resolvable specifiers — removed.)
+  entries: ["index", "data", "ui", "ssr", "plugins", "build", "testing"] as const,
 
-  /** Generate import map for module resolution */
-  generateImportMap(base: string = "/node_modules/sibu/"): Record<string, string> {
+  /** Generate an import map from the real published subpaths to their dist bundles. */
+  generateImportMap(base: string = "/node_modules/sibujs/"): Record<string, string> {
     const map: Record<string, string> = {};
-    for (const [category, modules] of Object.entries(this.modules)) {
-      for (const mod of modules) {
-        // Hooks live in src/core/, everything else lives under its own category directory
-        const dir = category === "hooks" ? "core" : category;
-        map[`sibu/${mod}`] = `${base}src/${dir}/${mod}.js`;
-      }
+    for (const entry of this.entries) {
+      const specifier = entry === "index" ? "sibujs" : `sibujs/${entry}`;
+      map[specifier] = `${base}dist/${entry}.js`;
     }
     return map;
   },

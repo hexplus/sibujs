@@ -12,8 +12,8 @@ the std tier or be retired over time.
 npm install @sibujs/labs
 ```
 
-`@sibujs/labs` depends on `@sibujs/core` and `sibujs`; install those alongside it
-(they are peer building blocks re-exported through the labs modules).
+`@sibujs/labs` lists `@sibujs/core` and `sibujs` as regular dependencies, so your
+package manager installs them automatically — you don't need to add them yourself.
 
 ## Subpaths
 

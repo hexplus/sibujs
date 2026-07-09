@@ -1,6 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, effect, signal } from "@sibujs/core";
 
 /**
  * scroll tracks the scroll position of a target element or the window.

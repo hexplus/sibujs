@@ -32,8 +32,29 @@ export interface SyncAdapter<T> {
   push: (changes: SyncChange<T>[]) => Promise<SyncResult>;
   /** Pull remote changes since last sync */
   pull: (since: number | null) => Promise<T[]>;
-  /** Conflict resolution strategy */
+  /**
+   * Conflict resolution strategy applied when a pulled remote row collides
+   * with a queued (un-synced) local edit for the same key:
+   * - `"client-wins"` — keep the local edit, discard the remote row (it will
+   *   be overwritten on the next push).
+   * - `"server-wins"` — apply the remote row and drop the local pending change.
+   * - `"manual"` — keep the local edit and report the collisions to
+   *   `onConflict` so the caller can resolve them explicitly.
+   */
   conflictStrategy: "client-wins" | "server-wins" | "manual";
+  /**
+   * Invoked (only under the `"manual"` strategy) with every local/remote
+   * collision detected during a pull. Local edits are preserved until the
+   * caller resolves them (e.g. by calling `put`).
+   */
+  onConflict?: (conflicts: SyncConflict<T>[]) => void;
+}
+
+export interface SyncConflict<T> {
+  /** The queued local edit's item. */
+  local: T;
+  /** The pulled remote row for the same key. */
+  remote: T;
 }
 
 export interface SyncChange<T> {
@@ -79,6 +100,10 @@ function openDB(name: string, version: number, keyPath: string): Promise<IDBData
     const request = indexedDB.open(name, version);
     request.onerror = () => reject(request.error);
     request.onsuccess = () => resolve(request.result);
+    // A version upgrade blocked by another open connection (e.g. a second tab)
+    // never fires onsuccess; reject instead of leaving the promise pending.
+    request.onblocked = () =>
+      reject(new Error(`[offlineStore] Opening "${name}" is blocked by another open connection (pending version upgrade).`));
     request.onupgradeneeded = () => {
       const db = request.result;
       if (!db.objectStoreNames.contains("items")) {
@@ -313,23 +338,59 @@ export async function offlineStore<T extends Record<string, unknown>>(
 
       const remoteItems = await adapter.pull(lastSynced());
       if (closed) return;
-      // Don't clobber items that have unsynced local edits queued during this
-      // pull window. The next sync round will push those edits and re-pull.
-      const pendingChanges = await idbGetAll<SyncChange<T>>(db, "_changes");
+      // Index queued local edits by their item key (retaining each entry's
+      // store key so `server-wins` can drop the superseded change).
+      const pendingEntries = await idbGetAllWithKeys<SyncChange<T>>(db, "_changes");
       if (closed) return;
-      const pendingKeys = new Set<unknown>();
-      for (const c of pendingChanges) {
-        const k = (c.item as Record<string, unknown>)[keyPath];
-        if (k != null) pendingKeys.add(k);
+      const pendingByKey = new Map<unknown, { storeKey: IDBValidKey; change: SyncChange<T> }>();
+      for (const e of pendingEntries) {
+        const k = (e.value.item as Record<string, unknown>)[keyPath];
+        if (k != null) pendingByKey.set(k, { storeKey: e.key, change: e.value });
       }
-      const safeRemote = remoteItems.filter((item) => {
+
+      // Resolve remote rows against queued local edits per the adapter's
+      // conflict strategy (default: client-wins).
+      const strategy = adapter.conflictStrategy ?? "client-wins";
+      const toWrite: T[] = [];
+      const staleChangeKeys: IDBValidKey[] = [];
+      const conflicts: SyncConflict<T>[] = [];
+      for (const item of remoteItems) {
         const k = (item as Record<string, unknown>)[keyPath];
-        return k == null || !pendingKeys.has(k);
-      });
+        const pending = k == null ? undefined : pendingByKey.get(k);
+        if (!pending) {
+          // No local conflict — accept the remote row unconditionally.
+          toWrite.push(item);
+          continue;
+        }
+        if (strategy === "server-wins") {
+          // Remote wins: apply it and discard the superseded local change so
+          // it isn't pushed back over the server on the next round.
+          toWrite.push(item);
+          staleChangeKeys.push(pending.storeKey);
+        } else if (strategy === "manual") {
+          // Preserve the local edit and report the collision to the caller.
+          conflicts.push({ local: pending.change.item, remote: item });
+        }
+        // "client-wins": keep the local edit, skip the remote row.
+      }
+
       // Batch into a single transaction so a mid-loop crash can't leave
       // partial state with `lastSynced` un-updated.
-      await idbPutMany(db, "items", safeRemote);
+      await idbPutMany(db, "items", toWrite);
       if (closed) return;
+      if (staleChangeKeys.length > 0) {
+        await idbDeleteKeys(db, "_changes", staleChangeKeys);
+        if (closed) return;
+      }
+      if (strategy === "manual" && conflicts.length > 0) {
+        if (adapter.onConflict) {
+          adapter.onConflict(conflicts);
+        } else if (typeof console !== "undefined") {
+          console.warn(
+            `[offlineStore] ${conflicts.length} sync conflict(s) detected but no adapter.onConflict handler is set; keeping local changes.`,
+          );
+        }
+      }
 
       const now = Date.now();
       await idbPut(db, "_meta", now, "lastSynced");

@@ -1,11 +1,15 @@
+import { store, tagFactory } from "@sibujs/core";
+import {
+  bindAttribute,
+  isEventHandlerAttr,
+  sanitizeAttributeString,
+  sanitizeCSSValue,
+  sanitizeUrl,
+} from "@sibujs/core/internal";
+import { createUniversalAdapter } from "sibujs/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { tagFactory } from "@sibujs/core";
-import { store } from "@sibujs/core";
 import { preloadModule } from "../src/performance/chunkLoader";
 import { prefetch, preloadResource } from "../src/performance/domRecycler";
-import { bindAttribute } from "@sibujs/core/internal";
-import { createUniversalAdapter } from "sibujs/testing";
-import { isEventHandlerAttr, sanitizeAttributeString, sanitizeCSSValue, sanitizeUrl } from "@sibujs/core/internal";
 
 afterEach(() => {
   document.head.innerHTML = "";

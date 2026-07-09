@@ -138,7 +138,7 @@ function generateRouteModule(entries: RouteEntry[], routesDir: string): string {
 
   const routes = entries.map((e, i) => `  { path: "${e.path}", component: lazy(route${i}) }`).join(",\n");
 
-  return `import { lazy } from "sibu";\n\n${imports}\n\nexport const routes = [\n${routes}\n];\n`;
+  return `import { lazy } from "sibujs";\n\n${imports}\n\nexport const routes = [\n${routes}\n];\n`;
 }
 
 const VIRTUAL_ID = "virtual:sibu-routes";
@@ -153,8 +153,8 @@ const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`;
  * @example
  * ```ts
  * // vite.config.ts
- * import { sibuVitePlugin } from "sibu/build";
- * import { sibuRouteSplitting } from "sibu/build";
+ * import { sibuVitePlugin } from "sibujs/build";
+ * import { sibuRouteSplitting } from "sibujs/build";
  *
  * export default {
  *   plugins: [sibuVitePlugin(), sibuRouteSplitting()],
@@ -162,7 +162,7 @@ const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`;
  *
  * // In your app:
  * import { routes } from "virtual:sibu-routes";
- * import { setRoutes } from "sibu/plugins";
+ * import { setRoutes } from "sibujs/plugins";
  * setRoutes(routes);
  * ```
  */

@@ -12,17 +12,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: "pnpm"
       - run: pnpm install --frozen-lockfile
+      # Build first: workspace packages resolve each other through their exports
+      # maps into dist/, which is gitignored and absent on a fresh checkout.
+      # The topological `pnpm -r` build (core -> sibujs -> labs) produces the
+      # dist/ that typecheck and tests then consume.
+      - run: pnpm -r --if-present run build
       - run: pnpm -r --if-present run lint
       - run: pnpm -r exec tsc --noEmit
       - run: pnpm -r --if-present run test -- --run
-      - run: pnpm -r --if-present run build
 
   # Reactive-core microbenchmarks vs. the committed baseline. Kept
   # non-blocking (continue-on-error): these benchmarks are sensitive to CI
@@ -35,8 +37,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20

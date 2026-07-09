@@ -1,7 +1,7 @@
+import { inject, plugin, resetPlugins } from "sibujs/plugins";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZustandAdapterAPI, ZustandStore } from "../src/ecosystem/adapters/zustand";
 import { zustandAdapter } from "../src/ecosystem/adapters/zustand";
-import { inject, plugin, resetPlugins } from "sibujs/plugins";
 
 interface BearState {
   bears: number;
@@ -94,6 +94,22 @@ describe("zustandAdapter", () => {
 
     api.setState((s) => ({ bears: s.bears + 1 }));
     expect(bears()).toBe(2);
+  });
+
+  it("select() returns a plain lazy getter, not an eagerly-subscribed derived", () => {
+    const store = createFakeZustandStore({ bears: 1, honey: 0 });
+    plugin(zustandAdapter({ store }));
+    const api = inject<ZustandAdapterAPI<BearState>>("zustand");
+
+    const selector = vi.fn((s: BearState) => s.bears);
+    const getter = api.select(selector);
+
+    // A plain getter does not run the selector (or subscribe to getState)
+    // until it is actually read — no leak from an eager derived() track.
+    expect(selector).not.toHaveBeenCalled();
+
+    expect(getter()).toBe(1);
+    expect(selector).toHaveBeenCalledTimes(1);
   });
 
   it("setState() forwards to the underlying store (functional updater)", () => {

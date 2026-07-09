@@ -7,6 +7,7 @@ import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
+export const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
 
 const _isDev = isDev();
 
@@ -16,7 +17,7 @@ const _isDev = isDev();
 // e.g. <script> exists in both HTML and SVG.
 const BLOCKED_TAGS = new Set(["script", "iframe", "object", "embed", "frame", "frameset"]);
 
-function isBlockedTag(tag: string): boolean {
+export function isBlockedTag(tag: string): boolean {
   return BLOCKED_TAGS.has(tag.toLowerCase());
 }
 
@@ -94,14 +95,17 @@ function toKebab(prop: string): string {
 function applyStyle(el: Element, style: TagProps["style"]) {
   if (typeof style === "function") {
     const teardown = track(() => {
-      el.setAttribute("style", (style as () => string)());
+      // Whole-string styles get the same sanitization as the per-property path
+      // (blocks url()/expression()/javascript: exfiltration) so the policy is
+      // consistent across all three style shapes.
+      el.setAttribute("style", sanitizeCSSValue((style as () => string)()));
     });
     registerDisposer(el, teardown);
     return;
   }
 
   if (typeof style === "string") {
-    el.setAttribute("style", style);
+    el.setAttribute("style", sanitizeCSSValue(style));
     return;
   }
 

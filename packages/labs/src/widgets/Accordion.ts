@@ -1,6 +1,4 @@
-import { derived } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { derived, effect, signal } from "@sibujs/core";
 
 // First trigger of an accordion identifies the binding instance for
 // idempotency — calling bind() twice on the same set returns the prior

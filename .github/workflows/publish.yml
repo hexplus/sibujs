@@ -17,8 +17,6 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -30,19 +28,37 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Refuse to publish if the release tag doesn't match the versions in the
+      # manifests, so a mistagged release can't silently publish wrong versions.
+      - name: Verify tag matches workspace versions
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "Release tag: $TAG"
+          for pkg in packages/core packages/sibujs packages/labs; do
+            VERSION=$(node -p "require('./$pkg/package.json').version")
+            echo "  $pkg -> $VERSION"
+            if [ "$VERSION" != "$TAG" ]; then
+              echo "::error::$pkg version ($VERSION) does not match release tag ($TAG)"
+              exit 1
+            fi
+          done
+
+      # Build first: workspace packages resolve each other through dist/ (which
+      # is gitignored), so typecheck and tests need the emitted output present.
+      - name: Build
+        run: pnpm -r --if-present run build
+
       - name: Typecheck
         run: pnpm -r exec tsc --noEmit
 
       - name: Test
         run: pnpm -r --if-present run test -- --run
 
-      - name: Build
-        run: pnpm -r --if-present run build
-
       # Publishes every public workspace package in topological order
       # (@sibujs/core -> sibujs -> @sibujs/labs). pnpm rewrites the
-      # `workspace:*` dependency ranges to the concrete published versions.
+      # `workspace:^` dependency ranges to the concrete published versions.
+      # `--tag next` keeps the 4.0.0-alpha line off the `latest` dist-tag.
       - name: Publish to npm
-        run: pnpm -r publish --access public --no-git-checks
+        run: pnpm -r publish --tag next --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

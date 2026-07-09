@@ -1,5 +1,19 @@
 #!/bin/bash
 
+# SibuJS release helper.
+#
+# This script does NOT publish anything itself. Publishing is a pnpm workspace
+# operation (@sibujs/core -> sibujs -> @sibujs/labs) handled by
+# .github/workflows/publish.yml, which runs `pnpm -r publish` so the
+# `workspace:` dependency ranges are rewritten to concrete versions. npm
+# provenance is produced by that workflow via OIDC (`id-token: write`), NOT by
+# any field in package.json.
+#
+# All this script does is create and push an annotated git tag for the current
+# HEAD. Pushing the tag lets you draft the matching GitHub Release, whose
+# `published` event triggers publish.yml. Run it from the branch you intend to
+# release (the publish workflow asserts tag == workspace version).
+
 set -e
 set -u
 set -o pipefail
@@ -7,7 +21,7 @@ set -o pipefail
 # ─── Validate argument ───────────────────────────────────────────────────────
 if [ -z "${1:-}" ]; then
     echo "Usage: ./release.sh <version>"
-    echo "Example: ./release.sh 1.0.5  or  ./release.sh v1.0.5"
+    echo "Example: ./release.sh 4.0.0-alpha.0  or  ./release.sh v4.0.0-alpha.0"
     exit 1
 fi
 
@@ -22,15 +36,9 @@ TAG="v$VERSION"
 
 echo "🚀 Starting release for $TAG"
 
-# ─── Pull latest main ────────────────────────────────────────────────────────
+# ─── Create and push tag on the current HEAD ─────────────────────────────────
 echo ""
-echo "📦 Pulling latest main..."
-git checkout main
-git pull origin main
-
-# ─── Create and push tag ─────────────────────────────────────────────────────
-echo ""
-echo "🏷️  Creating and pushing tag $TAG..."
+echo "🏷️  Creating and pushing tag $TAG on $(git rev-parse --abbrev-ref HEAD)..."
 
 # Delete local tag if already exists
 if git tag | grep -Fxq "$TAG"; then
@@ -51,3 +59,4 @@ git push origin "refs/tags/$TAG"
 echo ""
 echo "✅ Tag $TAG pushed!"
 echo "👉 Go to GitHub → Releases → Draft a new release → select $TAG → Publish"
+echo "   The 'published' event runs .github/workflows/publish.yml (pnpm -r publish)."

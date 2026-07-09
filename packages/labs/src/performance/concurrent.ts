@@ -2,8 +2,7 @@
 // CONCURRENT RENDERING UTILITIES
 // ============================================================================
 
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { effect, signal } from "@sibujs/core";
 import { globalSingleton } from "@sibujs/core/internal";
 import { Priority, scheduleUpdate } from "./scheduler";
 
@@ -26,17 +25,31 @@ export function startTransition(callback: () => void): void {
  * changes, a LOW-priority update is scheduled. The deferred signal
  * only updates when the scheduler flushes, so fast bursts of source
  * changes collapse into a single deferred update.
+ *
+ * The returned getter carries a non-enumerable `dispose` that tears
+ * down the internal effect, releasing the subscription on the source
+ * signal. Call it on unmount to avoid a permanent leak (matching the
+ * `dispose` hook `persisted()` attaches in patterns/persist.ts).
  */
-export function deferredValue<T>(getter: () => T): () => T {
+export type DeferredValue<T> = (() => T) & { dispose: () => void };
+
+export function deferredValue<T>(getter: () => T): DeferredValue<T> {
   const [deferred, setDeferred] = signal<T>(getter());
   let latest: T = deferred();
 
-  effect(() => {
+  const stop = effect(() => {
     latest = getter();
     scheduleUpdate(Priority.LOW, () => setDeferred(latest));
   });
 
-  return deferred;
+  Object.defineProperty(deferred, "dispose", {
+    value: stop,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
+
+  return deferred as DeferredValue<T>;
 }
 
 /**

@@ -3,6 +3,26 @@ import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
 
 /**
+ * Normalize a branch result into a single tracked Node.
+ *
+ * A DocumentFragment is emptied when inserted (its children spill out as
+ * siblings), leaving an empty, parentless fragment that can never be detached
+ * or disposed as a unit — so the next swap would orphan the spilled children.
+ * Wrap fragment content in a layout-transparent container so the single tracked
+ * branch node moves, and is removed/disposed, as one unit (mirrors KeepAlive).
+ */
+function toBranchNode(result: NodeChild): Node {
+  const node = result instanceof Node ? result : document.createTextNode(String(result));
+  if (node instanceof DocumentFragment) {
+    const wrapper = document.createElement("div");
+    wrapper.style.display = "contents";
+    wrapper.appendChild(node);
+    return wrapper;
+  }
+  return node;
+}
+
+/**
  * Conditional rendering directive. Shows or hides an element reactively.
  * Unlike `when()`, the element is always created — it just toggles display.
  *
@@ -81,7 +101,7 @@ export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBra
 
     const result = show ? thenBranch() : elseBranch ? elseBranch() : null;
     if (result != null) {
-      const node = result instanceof Node ? result : document.createTextNode(String(result));
+      const node = toBranchNode(result);
       parent.insertBefore(node, anchor.nextSibling);
       currentNode = node;
     }
@@ -90,8 +110,19 @@ export function when<T>(condition: () => T, thenBranch: () => NodeChild, elseBra
 
   // Tie the reactive subscription to the anchor's lifetime. When the anchor is
   // disposed the condition subscription, current branch node, and branch
-  // closures are released instead of leaking.
-  registerDisposer(anchor, track(update));
+  // closures are released instead of leaking. The branch node lives as a
+  // SIBLING of the anchor, so an enclosing primitive (nested when/match/each or
+  // a reactive child) that swaps this anchor out only removes the comment — we
+  // must dispose AND remove the live branch here too, mirroring KeepAlive/Portal.
+  const untrack = track(update);
+  registerDisposer(anchor, () => {
+    untrack();
+    if (currentNode) {
+      dispose(currentNode);
+      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
+      currentNode = null;
+    }
+  });
 
   if (!initialized) {
     queueMicrotask(() => {
@@ -160,7 +191,7 @@ export function match<T extends string | number>(
     if (renderFn) {
       const result = renderFn();
       if (result != null) {
-        const node = result instanceof Node ? result : document.createTextNode(String(result));
+        const node = toBranchNode(result);
         parent.insertBefore(node, anchor.nextSibling);
         currentNode = node;
       }
@@ -169,8 +200,19 @@ export function match<T extends string | number>(
   };
 
   // Tie the reactive subscription to the anchor's lifetime so disposing the
-  // anchor releases the value subscription and the matched branch.
-  registerDisposer(anchor, track(update));
+  // anchor releases the value subscription and the matched branch. The matched
+  // node is a SIBLING of the anchor; an enclosing primitive that swaps this
+  // anchor out only removes the comment, so dispose AND remove the live branch
+  // here too (mirrors KeepAlive/Portal).
+  const untrack = track(update);
+  registerDisposer(anchor, () => {
+    untrack();
+    if (currentNode) {
+      dispose(currentNode);
+      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
+      currentNode = null;
+    }
+  });
 
   if (!initialized) {
     queueMicrotask(() => {

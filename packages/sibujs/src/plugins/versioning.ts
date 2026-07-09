@@ -26,7 +26,7 @@ export interface Migration {
 /**
  * Framework version constant.
  */
-export const VERSION = "1.0.0";
+export const VERSION = "4.0.0-alpha.0";
 
 // ─── SemVer Parsing ─────────────────────────────────────────────────────────
 

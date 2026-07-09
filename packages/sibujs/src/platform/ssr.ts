@@ -140,17 +140,26 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     return `<!--${safeCommentText(element.textContent || "")}-->`;
   }
 
-  if (!(element instanceof HTMLElement)) {
+  if (element.nodeType !== 1) {
     return escapeHtml(element.textContent || "");
   }
 
-  const tag = element.tagName.toLowerCase();
+  const el = element as Element;
+  // HTML tag names are case-insensitive and normalized to lower case; SVG (and
+  // other non-HTML) elements are case-sensitive (e.g. `linearGradient`), so
+  // preserve their original tag name. `SVGElement` is not an `HTMLElement`, so
+  // the previous `instanceof HTMLElement` fallback serialized an entire SVG
+  // subtree as its concatenated text — dropping the markup and guaranteeing a
+  // hydration mismatch.
+  const isHtmlElement = el instanceof HTMLElement;
+  const tag = isHtmlElement ? el.tagName.toLowerCase() : el.tagName;
+  const tagLower = tag.toLowerCase();
 
   // Never serialize raw-text elements — their contents bypass HTML
   // escaping and would execute if injected data is present. Scripts and
   // styles must be added via `renderToDocument`'s dedicated options.
-  if (tag === "script" || tag === "style") {
-    return _isDev ? `<!--ssr:${tag}-stripped-->` : "";
+  if (tagLower === "script" || tagLower === "style") {
+    return _isDev ? `<!--ssr:${tagLower}-stripped-->` : "";
   }
 
   // Defense-in-depth: reject tags with unexpected characters.
@@ -160,7 +169,7 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
 
   let html = `<${tag}`;
 
-  for (const attr of Array.from(element.attributes)) {
+  for (const attr of Array.from(el.attributes)) {
     const rawName = attr.name;
     if (!isSafeAttrName(rawName)) continue;
     if (isEventHandlerAttr(rawName)) continue;
@@ -176,17 +185,18 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     html += ` ${rawName}="${escapeAttr(value)}"`;
   }
 
-  if (element.dataset && !element.dataset.sibuHydrate) {
+  const dataset = (el as HTMLElement).dataset;
+  if (dataset && !dataset.sibuHydrate) {
     html += ` data-sibu-ssr="true"`;
   }
 
-  if (VOID_ELEMENTS.has(tag)) {
+  if (VOID_ELEMENTS.has(tagLower)) {
     return `${html} />`;
   }
 
   html += ">";
 
-  for (const child of Array.from(element.childNodes)) {
+  for (const child of Array.from(el.childNodes)) {
     try {
       html += renderToString(child);
     } catch (err) {
@@ -562,15 +572,20 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     return;
   }
 
-  if (!(element instanceof HTMLElement)) {
+  if (element.nodeType !== 1) {
     yield escapeHtml(element.textContent || "");
     return;
   }
 
-  const tag = element.tagName.toLowerCase();
+  const el = element as Element;
+  // Preserve original tag-name casing for SVG/non-HTML elements (see the
+  // matching note in `renderToString`).
+  const isHtmlElement = el instanceof HTMLElement;
+  const tag = isHtmlElement ? el.tagName.toLowerCase() : el.tagName;
+  const tagLower = tag.toLowerCase();
 
-  if (tag === "script" || tag === "style") {
-    if (_isDev) yield `<!--ssr:${tag}-stripped-->`;
+  if (tagLower === "script" || tagLower === "style") {
+    if (_isDev) yield `<!--ssr:${tagLower}-stripped-->`;
     return;
   }
 
@@ -581,7 +596,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
 
   let openTag = `<${tag}`;
 
-  for (const attr of Array.from(element.attributes)) {
+  for (const attr of Array.from(el.attributes)) {
     const rawName = attr.name;
     if (!isSafeAttrName(rawName)) continue;
     if (isEventHandlerAttr(rawName)) continue;
@@ -595,14 +610,14 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     openTag += ` ${rawName}="${escapeAttr(value)}"`;
   }
 
-  if (VOID_ELEMENTS.has(tag)) {
+  if (VOID_ELEMENTS.has(tagLower)) {
     yield `${openTag} />`;
     return;
   }
 
   yield `${openTag}>`;
 
-  for (const child of Array.from(element.childNodes)) {
+  for (const child of Array.from(el.childNodes)) {
     try {
       yield* renderToStream(child);
     } catch (err) {
@@ -861,8 +876,20 @@ export async function* renderToSuspenseStream(
   yield* renderToStream(element);
 
   if (pendingBoundaries.length > 0) {
-    const resolved = await Promise.all(pendingBoundaries);
-    for (const { id, html } of resolved) {
+    // Flush each boundary as soon as it resolves (in completion order) instead
+    // of awaiting them all, so one slow boundary can't degrade progressive
+    // streaming into an all-or-nothing flush.
+    const remaining = new Map<number, Promise<{ index: number; result: { id: string; html: string } }>>();
+    pendingBoundaries.forEach((p, index) => {
+      remaining.set(
+        index,
+        p.then((result) => ({ index, result })),
+      );
+    });
+    while (remaining.size > 0) {
+      const { index, result } = await Promise.race(remaining.values());
+      remaining.delete(index);
+      const { id, html } = result;
       // Drop any boundary whose id fails the allowlist — never emit
       // attacker-controlled attribute content into the stream.
       if (!SAFE_SUSPENSE_ID.test(id)) continue;

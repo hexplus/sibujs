@@ -90,8 +90,10 @@ export function scopedStyle(css: string): { scope: string; attr: string } {
   // since attribute selectors after pseudo-elements are invalid CSS.
   const scopedCSS = safeCss.replace(/([^\r\n,{}]+)(,(?=[^}]*{)|\s*{)/g, (match, selector, delimiter) => {
     const trimmed = selector.trim();
-    // Skip @-rules and keyframe selectors
-    if (trimmed.startsWith("@") || trimmed.startsWith("from") || trimmed.startsWith("to") || /^\d+%$/.test(trimmed)) {
+    // Skip @-rules and keyframe selectors. Match the `from`/`to` keywords
+    // exactly (they are whole selectors) rather than by prefix, so real
+    // selectors like `toolbar` or `from-panel` still get scoped.
+    if (trimmed.startsWith("@") || trimmed === "from" || trimmed === "to" || /^\d+%$/.test(trimmed)) {
       return match;
     }
     // Split at pseudo-element boundary (::) and insert scope before it

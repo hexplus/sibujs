@@ -1,10 +1,9 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { Loading } from "@sibujs/core";
-import { dispose } from "@sibujs/core";
-import { persisted } from "../src/patterns/persist";
+import { dispose, Loading } from "@sibujs/core";
+import { stream } from "sibujs/data";
 import { Head } from "sibujs/ssr";
 import { hover } from "sibujs/ui";
-import { stream } from "sibujs/data";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { persisted } from "../src/patterns/persist";
 import { combobox } from "../src/widgets/Combobox";
 import { datePicker } from "../src/widgets/datePicker";
 import { select as selectWidget } from "../src/widgets/Select";

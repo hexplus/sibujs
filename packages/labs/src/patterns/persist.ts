@@ -1,5 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { effect, signal } from "@sibujs/core";
 import { isUnsafeKey } from "@sibujs/core/internal";
 
 /**

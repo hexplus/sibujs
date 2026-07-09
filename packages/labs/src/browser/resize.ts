@@ -1,6 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
-import { batch } from "@sibujs/core";
+import { batch, effect, signal } from "@sibujs/core";
 
 type ElementTarget = (() => HTMLElement | null) | { current: HTMLElement | null };
 function resolveTarget(target: ElementTarget): () => HTMLElement | null {

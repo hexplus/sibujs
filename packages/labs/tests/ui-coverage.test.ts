@@ -1,11 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { signal } from "@sibujs/core";
-import { __resetDialogStack, dialog } from "sibujs/ui";
-import { hover } from "sibujs/ui";
-import { bindBoolAttr } from "sibujs/ui";
+import { __resetDialogStack, bindBoolAttr, dialog, hover, scopedStyle, toast, withScopedStyle } from "sibujs/ui";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { reducedMotion } from "../src/motion/reducedMotion";
-import { scopedStyle, withScopedStyle } from "sibujs/ui";
-import { toast } from "sibujs/ui";
 
 afterEach(() => {
   vi.restoreAllMocks();

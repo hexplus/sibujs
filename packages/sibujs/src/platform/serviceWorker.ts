@@ -41,7 +41,7 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
     trackedReg = null;
   }
 
-  if ("serviceWorker" in navigator) {
+  if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
     navigator.serviceWorker
       .register(scriptUrl, options)
       .then((reg) => {

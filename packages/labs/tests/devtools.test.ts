@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DevToolsEvent } from "../src/devtools/devtools";
 import { devState, getActiveDevTools, initDevTools } from "../src/devtools/devtools";
 
@@ -336,5 +336,70 @@ describe("devState", () => {
     const event = events[0] as StateChangeEvent;
     expect(event.oldValue).toEqual([]);
     expect(event.newValue).toEqual(["a", "b"]);
+  });
+});
+
+// =============================================================================
+// Node registry lifecycle (prune on effect:destroy, maxSignals cap, listener
+// cleanup on destroy)
+// =============================================================================
+
+describe("devtools node registry lifecycle", () => {
+  function getHook(): {
+    emit: (event: string, payload: unknown) => void;
+    nodes: Map<number, unknown>;
+  } {
+    return (globalThis as unknown as Record<string, any>).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+  }
+
+  beforeEach(() => {
+    const prev = getActiveDevTools();
+    if (prev) prev.destroy();
+    delete (globalThis as unknown as Record<string, unknown>).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+  });
+
+  afterEach(() => {
+    const prev = getActiveDevTools();
+    if (prev) prev.destroy();
+    delete (globalThis as unknown as Record<string, unknown>).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+  });
+
+  it("prunes the node when its effect is destroyed", () => {
+    const dt = initDevTools();
+    const hook = getHook();
+    const fn = () => {};
+
+    hook.emit("effect:create", { effectFn: fn });
+    expect(dt.getSignals().some((s) => s.type === "effect")).toBe(true);
+    const before = hook.nodes.size;
+
+    hook.emit("effect:destroy", { effectFn: fn });
+    expect(hook.nodes.size).toBe(before - 1);
+    expect(dt.getSignals().some((s) => s.type === "effect")).toBe(false);
+  });
+
+  it("caps the node registry at maxSignals, evicting the oldest", () => {
+    initDevTools({ maxSignals: 3 });
+    const hook = getHook();
+
+    for (let i = 0; i < 10; i++) {
+      hook.emit("signal:create", { signal: {}, getter: () => i, initial: i });
+    }
+
+    expect(hook.nodes.size).toBe(3);
+  });
+
+  it("destroy() removes framework-event listeners so a re-init does not stack them", () => {
+    const dt = initDevTools();
+    const hook = getHook();
+
+    hook.emit("signal:create", { signal: {}, getter: () => 1, initial: 1 });
+    expect(dt.getSignals().length).toBe(1);
+
+    dt.destroy();
+
+    // The retained hook's listeners must be gone: emitting is now inert.
+    hook.emit("signal:create", { signal: {}, getter: () => 2, initial: 2 });
+    expect(hook.nodes.size).toBe(0);
   });
 });

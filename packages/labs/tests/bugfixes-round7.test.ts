@@ -1,6 +1,7 @@
 // Regression tests for round-7 fixes (htm parser, scheduler, devtools).
-import { describe, expect, it } from "vitest";
+
 import { html } from "@sibujs/core";
+import { describe, expect, it } from "vitest";
 import { formatError } from "../src/devtools/sourceMaps";
 import { Priority, processInChunks, scheduleUpdate } from "../src/performance/scheduler";
 

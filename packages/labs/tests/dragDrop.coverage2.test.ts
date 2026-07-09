@@ -1,6 +1,6 @@
+import { signal } from "@sibujs/core";
 import { describe, expect, it, vi } from "vitest";
 import { draggable, dropZone } from "../src/browser/dragDrop";
-import { signal } from "@sibujs/core";
 
 describe("draggable (coverage2)", () => {
   it("degrades when window is undefined", () => {

@@ -1,6 +1,5 @@
 import type { TagProps } from "@sibujs/core";
-import { tagFactory } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { signal, tagFactory } from "@sibujs/core";
 
 // ---------------------------------------------------------------------------
 // Theme System

@@ -1,6 +1,4 @@
-import { createId } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { createId, effect, signal } from "@sibujs/core";
 
 const boundPopovers = new WeakMap<HTMLElement, () => void>();
 

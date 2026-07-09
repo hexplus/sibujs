@@ -1,6 +1,6 @@
+import { signal } from "@sibujs/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { imageLoader } from "../src/browser/imageLoader";
-import { signal } from "@sibujs/core";
 
 class FakeImage {
   onload: (() => void) | null = null;

@@ -51,6 +51,10 @@ export function wakeLock(): {
 
   async function request(): Promise<void> {
     if (disposed) return;
+    // A live sentinel already holds the lock. Acquiring another would orphan
+    // this one (only the latest is releasable), keeping the screen awake until
+    // tab hide. Re-requesting is a no-op while a lock is active.
+    if (sentinel && !sentinel.released) return;
     try {
       const s = await api.request("screen");
       // If dispose() ran while the request was in flight, release the sentinel

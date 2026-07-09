@@ -1,6 +1,6 @@
+import { isEventHandlerAttr, stripControlChars } from "@sibujs/core/internal";
 import { describe, expect, it } from "vitest";
 import { isUnsafeKey, stripUnsafeKeys } from "../src/utils/guards";
-import { isEventHandlerAttr, stripControlChars } from "@sibujs/core/internal";
 
 describe("isUnsafeKey", () => {
   it("flags the three prototype-pollution keys", () => {

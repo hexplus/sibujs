@@ -58,37 +58,37 @@ describe("umdWrapper", () => {
 describe("cdnUrls", () => {
   it("should return correct unpkg URL with default version", () => {
     const url = cdnUrls.unpkg();
-    expect(url).toBe("https://unpkg.com/sibu@latest/dist/cdn.global.js");
+    expect(url).toBe("https://unpkg.com/sibujs@latest/dist/cdn.global.js");
   });
 
   it("should return correct unpkg URL with specific version", () => {
     const url = cdnUrls.unpkg("1.2.3");
-    expect(url).toBe("https://unpkg.com/sibu@1.2.3/dist/cdn.global.js");
+    expect(url).toBe("https://unpkg.com/sibujs@1.2.3/dist/cdn.global.js");
   });
 
   it("should return correct jsdelivr URL with default version", () => {
     const url = cdnUrls.jsdelivr();
-    expect(url).toBe("https://cdn.jsdelivr.net/npm/sibu@latest/dist/cdn.global.js");
+    expect(url).toBe("https://cdn.jsdelivr.net/npm/sibujs@latest/dist/cdn.global.js");
   });
 
   it("should return correct jsdelivr URL with specific version", () => {
     const url = cdnUrls.jsdelivr("2.0.0");
-    expect(url).toBe("https://cdn.jsdelivr.net/npm/sibu@2.0.0/dist/cdn.global.js");
+    expect(url).toBe("https://cdn.jsdelivr.net/npm/sibujs@2.0.0/dist/cdn.global.js");
   });
 
   it("should return correct skypack URL with default version", () => {
     const url = cdnUrls.skypack();
-    expect(url).toBe("https://cdn.skypack.dev/sibu@latest");
+    expect(url).toBe("https://cdn.skypack.dev/sibujs@latest");
   });
 
   it("should return correct skypack URL with specific version", () => {
     const url = cdnUrls.skypack("3.0.0");
-    expect(url).toBe("https://cdn.skypack.dev/sibu@3.0.0");
+    expect(url).toBe("https://cdn.skypack.dev/sibujs@3.0.0");
   });
 
   it("should generate a valid script tag for jsdelivr", () => {
     const tag = cdnUrls.scriptTag("jsdelivr", "1.0.0");
-    expect(tag).toBe('<script src="https://cdn.jsdelivr.net/npm/sibu@1.0.0/dist/cdn.global.js"></script>');
+    expect(tag).toBe('<script src="https://cdn.jsdelivr.net/npm/sibujs@1.0.0/dist/cdn.global.js"></script>');
   });
 
   it("should generate a valid script tag for unpkg", () => {
@@ -116,23 +116,23 @@ describe("generateImportMap", () => {
     const map = generateImportMap();
 
     expect(map.imports).toBeDefined();
-    expect(map.imports["sibu"]).toContain("/dist/index.js");
-    expect(map.imports["sibu/core"]).toContain("/dist/core/index.js");
-    expect(map.imports["sibu/reactivity"]).toContain("/dist/reactivity/index.js");
-    expect(map.imports["sibu/plugins"]).toContain("/dist/plugins/index.js");
-    expect(map.imports["sibu/components"]).toContain("/dist/components/index.js");
-    expect(map.imports["sibu/testing"]).toContain("/dist/testing/index.js");
-    expect(map.imports["sibu/build"]).toContain("/dist/build/index.js");
+    expect(map.imports["sibujs"]).toContain("/dist/index.js");
+    expect(map.imports["sibujs/data"]).toContain("/dist/data.js");
+    expect(map.imports["sibujs/ui"]).toContain("/dist/ui.js");
+    expect(map.imports["sibujs/ssr"]).toContain("/dist/ssr.js");
+    expect(map.imports["sibujs/plugins"]).toContain("/dist/plugins.js");
+    expect(map.imports["sibujs/build"]).toContain("/dist/build.js");
+    expect(map.imports["sibujs/testing"]).toContain("/dist/testing.js");
   });
 
   it("should use jsDelivr base URL by default", () => {
     const map = generateImportMap();
-    expect(map.imports["sibu"]).toContain("cdn.jsdelivr.net");
+    expect(map.imports["sibujs"]).toContain("cdn.jsdelivr.net");
   });
 
   it("should accept a custom base URL", () => {
-    const map = generateImportMap("https://my-cdn.example.com/sibu@1.0.0");
-    expect(map.imports["sibu"]).toBe("https://my-cdn.example.com/sibu@1.0.0/dist/index.js");
+    const map = generateImportMap("https://my-cdn.example.com/sibujs@1.0.0");
+    expect(map.imports["sibujs"]).toBe("https://my-cdn.example.com/sibujs@1.0.0/dist/index.js");
   });
 
   it("should return valid JSON from toJSON", () => {
@@ -143,7 +143,7 @@ describe("generateImportMap", () => {
 
     const parsed = JSON.parse(json);
     expect(parsed.imports).toBeDefined();
-    expect(parsed.imports["sibu"]).toBe(map.imports["sibu"]);
+    expect(parsed.imports["sibujs"]).toBe(map.imports["sibujs"]);
   });
 
   it("should return a script element from toScriptTag", () => {
@@ -152,7 +152,7 @@ describe("generateImportMap", () => {
 
     expect(tag).toContain('<script type="importmap">');
     expect(tag).toContain("</script>");
-    expect(tag).toContain('"sibu"');
+    expect(tag).toContain('"sibujs"');
 
     // The content between the tags should be valid JSON
     const jsonContent = tag.replace('<script type="importmap">\n', "").replace("\n</script>", "");

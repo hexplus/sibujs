@@ -9,24 +9,59 @@
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" },
-    "./browser": { "types": "./dist/browser.d.ts", "import": "./dist/browser.js", "require": "./dist/browser.cjs" },
-    "./widgets": { "types": "./dist/widgets.d.ts", "import": "./dist/widgets.js", "require": "./dist/widgets.cjs" },
-    "./patterns": { "types": "./dist/patterns.d.ts", "import": "./dist/patterns.js", "require": "./dist/patterns.cjs" },
-    "./ecosystem": { "types": "./dist/ecosystem.d.ts", "import": "./dist/ecosystem.js", "require": "./dist/ecosystem.cjs" },
-    "./performance": { "types": "./dist/performance.d.ts", "import": "./dist/performance.js", "require": "./dist/performance.cjs" },
-    "./devtools": { "types": "./dist/devtools.d.ts", "import": "./dist/devtools.js", "require": "./dist/devtools.cjs" },
-    "./motion": { "types": "./dist/motion.d.ts", "import": "./dist/motion.js", "require": "./dist/motion.cjs" }
+    ".": {
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
+    },
+    "./browser": {
+      "import": { "types": "./dist/browser.d.ts", "default": "./dist/browser.js" },
+      "require": { "types": "./dist/browser.d.cts", "default": "./dist/browser.cjs" }
+    },
+    "./widgets": {
+      "import": { "types": "./dist/widgets.d.ts", "default": "./dist/widgets.js" },
+      "require": { "types": "./dist/widgets.d.cts", "default": "./dist/widgets.cjs" }
+    },
+    "./patterns": {
+      "import": { "types": "./dist/patterns.d.ts", "default": "./dist/patterns.js" },
+      "require": { "types": "./dist/patterns.d.cts", "default": "./dist/patterns.cjs" }
+    },
+    "./ecosystem": {
+      "import": { "types": "./dist/ecosystem.d.ts", "default": "./dist/ecosystem.js" },
+      "require": { "types": "./dist/ecosystem.d.cts", "default": "./dist/ecosystem.cjs" }
+    },
+    "./performance": {
+      "import": { "types": "./dist/performance.d.ts", "default": "./dist/performance.js" },
+      "require": { "types": "./dist/performance.d.cts", "default": "./dist/performance.cjs" }
+    },
+    "./devtools": {
+      "import": { "types": "./dist/devtools.d.ts", "default": "./dist/devtools.js" },
+      "require": { "types": "./dist/devtools.d.cts", "default": "./dist/devtools.cjs" }
+    },
+    "./motion": {
+      "import": { "types": "./dist/motion.d.ts", "default": "./dist/motion.js" },
+      "require": { "types": "./dist/motion.d.cts", "default": "./dist/motion.cjs" }
+    }
   },
-  "files": ["dist", "README.md", "LICENSE"],
+  "typesVersions": {
+    "*": {
+      "browser": ["./dist/browser.d.ts"],
+      "widgets": ["./dist/widgets.d.ts"],
+      "patterns": ["./dist/patterns.d.ts"],
+      "ecosystem": ["./dist/ecosystem.d.ts"],
+      "performance": ["./dist/performance.d.ts"],
+      "devtools": ["./dist/devtools.d.ts"],
+      "motion": ["./dist/motion.d.ts"]
+    }
+  },
+  "files": ["dist", "README.md", "CHANGELOG.md", "LICENSE"],
   "scripts": {
     "build": "tsup browser.ts widgets.ts patterns.ts ecosystem.ts performance.ts devtools.ts motion.ts index.ts --dts --format esm,cjs --out-dir dist --clean",
     "test": "vitest",
     "lint": "biome check --max-diagnostics=500 src/ tests/"
   },
   "dependencies": {
-    "@sibujs/core": "workspace:*",
-    "sibujs": "workspace:*"
+    "@sibujs/core": "workspace:^",
+    "sibujs": "workspace:^"
   },
   "publishConfig": { "access": "public" },
   "engines": { "node": ">=18.0.0" }

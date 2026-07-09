@@ -78,11 +78,17 @@ function resolveReactiveApi(): ReactiveApi {
     //
     // Since v4 the engine ships as its own package (@sibujs/core), so proper
     // dedup is a PACKAGING guarantee — a single resolved @sibujs/core means this
-    // branch never runs. This registry is therefore a dev-only TRIPWIRE: it
-    // surfaces a duplicate install (usually a bundler misconfig or a version
-    // mismatch pulling two @sibujs/core copies) and, best-effort, delegates to
-    // the first copy so reactivity keeps working. Correctness in supported
-    // single-install setups does NOT depend on it.
+    // branch never runs.
+    //
+    // IMPORTANT: the registry itself is PROD-ACTIVE, not dev-only — only the
+    // warning below is gated by `_isDev`. In every build, a second copy that
+    // reaches here delegates to the FIRST copy's API (first-copy-wins), so all
+    // copies share one runtime and reactivity keeps working across a mixed
+    // install. The consequence: the subscriber-node layout is a cross-copy ABI —
+    // any change to it (or to `batch`'s equivalent key) MUST bump `.v1` in
+    // REGISTRY_KEY, or two versions with incompatible layouts would silently
+    // share state and corrupt. Correctness in supported single-install setups
+    // does not depend on this path, but mixed-version pages actively rely on it.
     if (_isDev && !existing.__dupWarned) {
       existing.__dupWarned = true;
       devWarn(

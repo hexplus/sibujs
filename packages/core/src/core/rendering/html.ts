@@ -1,4 +1,4 @@
-import { SVG_NS, tagFactory } from "./tagFactory";
+import { MATHML_NS, SVG_NS, tagFactory } from "./tagFactory";
 import type {
   AnchorProps,
   AudioProps,
@@ -101,7 +101,7 @@ export const source = tagFactory("source");
 
 // SVG and MathML
 export const svg = tagFactory("svg", SVG_NS);
-export const math = tagFactory("math");
+export const math = tagFactory("math", MATHML_NS);
 
 // Scripting
 export const canvas = tagFactory("canvas");

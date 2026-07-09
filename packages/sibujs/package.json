@@ -1,7 +1,7 @@
 {
   "name": "sibujs",
   "version": "4.0.0-alpha.0",
-  "description": "A lightweight, function-based frontend framework that combines the best of React, Svelte, and Vue — with zero VDOM and maximum simplicity. Designed for developers who want fine-grained reactivity and full control without compilation or magic.",
+  "description": "A lightweight, function-based frontend framework with fine-grained reactivity and direct DOM rendering — no Virtual DOM, no compiler, no magic. Components are plain functions and signals bind straight to the DOM, giving you full control with zero build step required.",
   "keywords": [
     "frontend",
     "framework",
@@ -19,12 +19,14 @@
   "license": "MIT",
   "author": "hexplus (https://github.com/hexplus)",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": ["./dist/cdn.global.js"],
   "main": "dist/index.cjs",
   "module": "dist/index.js",
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
+    "MIGRATION.md",
     "LICENSE"
   ],
   "scripts": {
@@ -33,51 +35,53 @@
     "format": "biome format --write src/ tests/",
     "test": "vitest",
     "test:ui": "vitest --ui",
-    "test:browser": "npm run build && playwright test",
+    "test:browser": "pnpm run build && playwright test",
     "test:browser:install": "playwright install chromium firefox webkit",
     "build": "tsup index.ts data.ts ui.ts ssr.ts plugins.ts build.ts testing.ts --dts --format esm,cjs --out-dir dist --clean && tsup cdn.ts --config tsup.cdn.config.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
-    "publish:npm": "node publish.mjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "pnpm run build"
   },
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "require": { "types": "./dist/index.d.cts", "default": "./dist/index.cjs" }
     },
     "./data": {
-      "types": "./dist/data.d.ts",
-      "import": "./dist/data.js",
-      "require": "./dist/data.cjs"
+      "import": { "types": "./dist/data.d.ts", "default": "./dist/data.js" },
+      "require": { "types": "./dist/data.d.cts", "default": "./dist/data.cjs" }
     },
     "./ui": {
-      "types": "./dist/ui.d.ts",
-      "import": "./dist/ui.js",
-      "require": "./dist/ui.cjs"
+      "import": { "types": "./dist/ui.d.ts", "default": "./dist/ui.js" },
+      "require": { "types": "./dist/ui.d.cts", "default": "./dist/ui.cjs" }
     },
     "./ssr": {
-      "types": "./dist/ssr.d.ts",
-      "import": "./dist/ssr.js",
-      "require": "./dist/ssr.cjs"
+      "import": { "types": "./dist/ssr.d.ts", "default": "./dist/ssr.js" },
+      "require": { "types": "./dist/ssr.d.cts", "default": "./dist/ssr.cjs" }
     },
     "./plugins": {
-      "types": "./dist/plugins.d.ts",
-      "import": "./dist/plugins.js",
-      "require": "./dist/plugins.cjs"
+      "import": { "types": "./dist/plugins.d.ts", "default": "./dist/plugins.js" },
+      "require": { "types": "./dist/plugins.d.cts", "default": "./dist/plugins.cjs" }
     },
     "./build": {
-      "types": "./dist/build.d.ts",
-      "import": "./dist/build.js",
-      "require": "./dist/build.cjs"
+      "import": { "types": "./dist/build.d.ts", "default": "./dist/build.js" },
+      "require": { "types": "./dist/build.d.cts", "default": "./dist/build.cjs" }
     },
     "./testing": {
-      "types": "./dist/testing.d.ts",
-      "import": "./dist/testing.js",
-      "require": "./dist/testing.cjs"
+      "import": { "types": "./dist/testing.d.ts", "default": "./dist/testing.js" },
+      "require": { "types": "./dist/testing.d.cts", "default": "./dist/testing.cjs" }
     },
     "./cdn": {
       "default": "./dist/cdn.global.js"
+    }
+  },
+  "typesVersions": {
+    "*": {
+      "data": ["./dist/data.d.ts"],
+      "ui": ["./dist/ui.d.ts"],
+      "ssr": ["./dist/ssr.d.ts"],
+      "plugins": ["./dist/plugins.d.ts"],
+      "build": ["./dist/build.d.ts"],
+      "testing": ["./dist/testing.d.ts"]
     }
   },
   "publishConfig": {
@@ -93,7 +97,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@sibujs/core": "workspace:*"
+    "@sibujs/core": "workspace:^"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.7",

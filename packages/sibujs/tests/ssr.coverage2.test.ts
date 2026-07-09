@@ -61,11 +61,13 @@ describe("ssr.ts coverage2 — renderToString node types", () => {
     expect(out.slice(4, -3)).not.toContain("-->");
   });
 
-  it("renders a non-HTMLElement node (e.g. SVG) by escaping its textContent", () => {
+  it("serializes an SVG element as markup (with its text content escaped)", () => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.textContent = "<svg-text>";
     const out = renderToString(svg as unknown as Node);
-    expect(out).toBe("&lt;svg-text&gt;");
+    expect(out).toContain("<svg");
+    expect(out).toContain("&lt;svg-text&gt;");
+    expect(out).toContain("</svg>");
   });
 
   it("emits an SSR error comment when a fragment child throws", () => {
@@ -476,11 +478,13 @@ describe("ssr.ts coverage2 — streaming", () => {
     expect(out).toContain("SSR error");
   });
 
-  it("renderToStream escapes a non-HTMLElement node's textContent", async () => {
+  it("renderToStream serializes an SVG element as markup (escaping its text)", async () => {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.textContent = "<svg&node>";
     const out = await collectStream(renderToStream(svg as unknown as Node));
-    expect(out).toBe("&lt;svg&amp;node&gt;");
+    expect(out).toContain("<svg");
+    expect(out).toContain("&lt;svg&amp;node&gt;");
+    expect(out).toContain("</svg>");
   });
 
   it("renderToReadableStream produces a Web ReadableStream and can be cancelled", async () => {

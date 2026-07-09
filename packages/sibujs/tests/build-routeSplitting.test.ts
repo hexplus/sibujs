@@ -113,7 +113,7 @@ describe("sibuRouteSplitting plugin", () => {
     try {
       const plugin = sibuRouteSplitting({ routesDir: "routes" });
       const result = (await plugin.load("\0virtual:sibu-routes")) as string;
-      expect(result).toContain('import { lazy } from "sibu";');
+      expect(result).toContain('import { lazy } from "sibujs";');
       expect(result).toContain("export const routes = [");
       expect(result).toContain('path: "/"');
       expect(result).toContain('path: "/about"');

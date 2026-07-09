@@ -6,9 +6,9 @@
 // machine, and scopedStyle modules. Each test maps to a concrete attack
 // class from the OWASP Top 10 2021 (A01-A10) or closely related CWEs.
 
+import { bindAttribute } from "@sibujs/core/internal";
 import { describe, expect, it, vi } from "vitest";
 import { machine } from "../src/patterns/machine";
-import { bindAttribute } from "@sibujs/core/internal";
 
 // ─── A01 Broken Access Control: router protocol guard ──────────────────────
 
@@ -202,8 +202,7 @@ describe("scopedStyle — CSS escape bypass (A03)", () => {
 
 // ─── A10 SSRF: socket / stream URL validation ──────────────────────────────
 
-import { socket } from "sibujs/data";
-import { stream } from "sibujs/data";
+import { socket, stream } from "sibujs/data";
 
 describe("socket — URL protocol guard (A10)", () => {
   it("refuses javascript: URL", () => {

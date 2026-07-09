@@ -1,3 +1,4 @@
+import { signal } from "@sibujs/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { animationFrame } from "../src/browser/animationFrame";
 import { bounds } from "../src/browser/bounds";
@@ -7,7 +8,6 @@ import { resize } from "../src/browser/resize";
 import { scroll } from "../src/browser/scroll";
 import { title } from "../src/browser/title";
 import { wakeLock } from "../src/browser/wakeLock";
-import { signal } from "@sibujs/core";
 
 afterEach(() => {
   vi.restoreAllMocks();

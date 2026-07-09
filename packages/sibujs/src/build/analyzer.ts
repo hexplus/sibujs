@@ -117,7 +117,7 @@ function formatBytes(bytes: number): string {
  *
  * @example
  * ```ts
- * import { analyzeBundle } from 'sibu/src/build/analyzer';
+ * import { analyzeBundle } from 'sibujs/build';
  *
  * const result = analyzeBundle({
  *   'app.ts': appSourceCode,
@@ -218,7 +218,7 @@ function generateBar(percentage: number, width: number): string {
  *
  * @example
  * ```ts
- * import { estimateImportSize } from 'sibu/src/build/analyzer';
+ * import { estimateImportSize } from 'sibujs/build';
  *
  * // Estimate cost of a minimal SibuJS app
  * const estimate = estimateImportSize([

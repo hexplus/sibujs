@@ -1,7 +1,5 @@
-import { derived } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { batch, signal } from "@sibujs/core";
 import { createPlugin, type SibuPlugin } from "sibujs/plugins";
-import { batch } from "@sibujs/core";
 
 /** Minimal Redux store interface (peer dependency — no import from redux). */
 export interface ReduxStore<S = unknown> {
@@ -58,7 +56,13 @@ export function reduxAdapter<S>(options: ReduxAdapterOptions<S>): SibuPlugin {
     });
 
     function select<R>(selector: (state: S) => R): () => R {
-      return derived(() => selector(getState()));
+      // Return a plain reactive getter, not a standalone derived(): a derived
+      // performs an eager initial track(), permanently subscribing to the
+      // adapter's app-lifetime getState signal, which leaks when select() is
+      // called per-component. Reading getState() inside the CALLER's own
+      // effect/derived ties the subscription to the caller's lifecycle instead,
+      // and stays fully reactive.
+      return () => selector(getState());
     }
 
     const api: ReduxAdapterAPI<S> = {

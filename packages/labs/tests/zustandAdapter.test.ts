@@ -1,7 +1,7 @@
+import { inject, plugin, resetPlugins } from "sibujs/plugins";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ZustandAdapterAPI } from "../src/ecosystem/adapters/zustand";
 import { type ZustandStore, zustandAdapter } from "../src/ecosystem/adapters/zustand";
-import { inject, plugin, resetPlugins } from "sibujs/plugins";
 
 interface TestState {
   bears: number;

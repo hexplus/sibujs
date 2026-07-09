@@ -1,15 +1,11 @@
+import { option, select, signal } from "@sibujs/core";
+import { createRouter, destroyRouter, lazyModule, navigate, route } from "sibujs/plugins";
+import { createAction } from "sibujs/ssr";
+import { bindField, form, inputMask, pagination } from "sibujs/ui";
 import { afterEach, describe, expect, it } from "vitest";
-import { option, select } from "@sibujs/core";
-import { signal } from "@sibujs/core";
 import { initDevTools } from "../src/devtools/devtools";
 import { captureSignalGraph } from "../src/devtools/signalGraph";
 import { type NormalizedSchema, normalize } from "../src/performance/normalize";
-import { createAction } from "sibujs/ssr";
-import { lazyModule } from "sibujs/plugins";
-import { createRouter, destroyRouter, navigate, route } from "sibujs/plugins";
-import { bindField, form } from "sibujs/ui";
-import { inputMask } from "sibujs/ui";
-import { pagination } from "sibujs/ui";
 
 // Regression tests for the non-core audit follow-ups (TODO.md theme D).
 

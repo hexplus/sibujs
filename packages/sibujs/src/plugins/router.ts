@@ -242,6 +242,10 @@ class RouteMatcher {
   private routeTrie = new Map<string, RouteDef>();
   private parentChain = new Map<string, RouteDef[]>();
   private namedRoutes = new Map<string, RouteDef>();
+  // A named route's `path` is only its own segment; navigating by name needs
+  // the full indexed path (parent segments included) or the target won't exist
+  // in the trie.
+  private namedRoutePaths = new Map<string, string>();
   private compiledPatterns = new LRUCache<string, { regex: RegExp; keys: string[] }>(50);
   // Pattern routes (those with params/wildcards) ordered most-specific-first,
   // rebuilt lazily after any mutation. Static full paths are served by the
@@ -293,6 +297,7 @@ class RouteMatcher {
       // Index by name
       if (route.name) {
         this.namedRoutes.set(route.name, route);
+        this.namedRoutePaths.set(route.name, fullPath);
       }
 
       // Handle aliases
@@ -332,6 +337,10 @@ class RouteMatcher {
 
   findByName(name: string): RouteDef | null {
     return this.namedRoutes.get(name) || null;
+  }
+
+  findPathByName(name: string): string | null {
+    return this.namedRoutePaths.get(name) ?? null;
   }
 
   private matchPattern(path: string, routePath: string): { params: Params } | null {
@@ -832,7 +841,12 @@ export class SibuRouter {
     // navigation before this fires, that navigation owns the initial route —
     // don't clobber it by re-navigating to the current location.
     queueMicrotask(() => {
-      if (!this.navigator.isNavigating) {
+      // Only resolve an initial location when there is one to read. Under
+      // Node/SSR `window` is undefined, so `getCurrentPath()` would throw a
+      // ReferenceError inside this microtask (an uncaughtException). A memory
+      // router seeds its own initial navigation synchronously before this
+      // fires, so `isNavigating` is already true there.
+      if (!this.navigator.isNavigating && typeof window !== "undefined") {
         this.handleLocationChange(true);
       }
       this.isReadySetter(true);
@@ -859,6 +873,12 @@ export class SibuRouter {
 
   private getCurrentPath(): string {
     const { mode, base } = this.options;
+
+    // Defensive guard for non-browser environments (SSR/tests): there is no
+    // `window.location` to read, so report the root path instead of throwing.
+    if (typeof window === "undefined") {
+      return "/";
+    }
 
     if (mode === "hash") {
       return window.location.hash.slice(1) || "/";
@@ -1031,6 +1051,13 @@ export class SibuRouter {
       throw new NavigationFailureError("aborted", from, to);
     }
 
+    // A newer navigation may have started (aborting this signal) while the
+    // guards above were awaited. Bail before committing so a stale navigation
+    // can't clobber the newer one's route or push a stale history entry.
+    if (signal.aborted) {
+      throw new NavigationFailureError("cancelled", from, to);
+    }
+
     // Update browser history
     if (!options.skipHistory) {
       this.updateHistory(to, options);
@@ -1051,11 +1078,13 @@ export class SibuRouter {
 
     let path = to.path || "";
 
-    // Handle named routes
+    // Handle named routes. Use the full indexed path (including ancestor
+    // segments), not the route's own `path` segment, so nested named routes
+    // resolve to a URL that actually exists in the trie.
     if (to.name && !path) {
-      const namedRoute = this.matcher.findByName(to.name);
-      if (namedRoute) {
-        path = namedRoute.path;
+      const namedPath = this.matcher.findPathByName(to.name);
+      if (namedPath) {
+        path = namedPath;
       }
     }
 
@@ -1099,11 +1128,30 @@ export class SibuRouter {
   }
 
   private updateHistory(to: RouteContext, options: { replace?: boolean; state?: unknown }): void {
-    const fullPath =
-      this.options.base +
+    if (typeof window === "undefined") return;
+
+    const routePath =
       to.path +
       (Object.keys(to.query).length ? `?${new URLSearchParams(to.query).toString()}` : "") +
       (to.hash ? `#${to.hash}` : "");
+
+    if (this.options.mode === "hash") {
+      // In hash mode the route lives entirely in `location.hash` (e.g.
+      // `#/users/1`), so a reload hits the same document and Back/Forward
+      // fire `hashchange`, which the router listens to. Writing the pathname
+      // here (the previous behavior) both hit the server on reload and left
+      // Back/Forward silently un-synced.
+      const hashPath = `#${routePath}`;
+      const fullPath = window.location.pathname + window.location.search + hashPath;
+      if (options.replace) {
+        history.replaceState(options.state || {}, "", fullPath);
+      } else {
+        history.pushState(options.state || {}, "", fullPath);
+      }
+      return;
+    }
+
+    const fullPath = this.options.base + routePath;
 
     if (options.replace) {
       history.replaceState(options.state || {}, "", fullPath);
@@ -1411,6 +1459,21 @@ export function afterEach(hook: (to: RouteContext, from: RouteContext) => void):
 // Registry of Route cleanup functions for destroyRouter
 const routeCleanups: (() => void)[] = [];
 
+// Register an outlet cleanup that removes itself from `routeCleanups` once it
+// runs. Without this, disposers executed via `registerDisposer` (on an outlet
+// anchor's own teardown) stayed in the module-level array forever, retaining
+// one closure per outlet ever mounted. The returned wrapper is what should be
+// handed to `registerDisposer`.
+function trackRouteCleanup(cleanup: () => void): () => void {
+  const wrapped = () => {
+    const index = routeCleanups.indexOf(wrapped);
+    if (index !== -1) routeCleanups.splice(index, 1);
+    cleanup();
+  };
+  routeCleanups.push(wrapped);
+  return wrapped;
+}
+
 export function Route(): Node {
   const anchor = document.createComment("route-outlet");
   let currentNode: Node | null = null;
@@ -1634,8 +1697,7 @@ export function Route(): Node {
   // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
   // layout change) releases its tracking + nodes immediately — not only on
   // destroyRouter(). Idempotent, so the destroyRouter() drain stays safe.
-  registerDisposer(anchor, routeCleanup);
-  routeCleanups.push(routeCleanup);
+  registerDisposer(anchor, trackRouteCleanup(routeCleanup));
 
   return anchor;
 }
@@ -1823,8 +1885,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   };
   // The cached detached subtrees are the heaviest leak here — release them when
   // the outlet's anchor subtree is disposed, not only on destroyRouter().
-  registerDisposer(anchor, kaCleanup);
-  routeCleanups.push(kaCleanup);
+  registerDisposer(anchor, trackRouteCleanup(kaCleanup));
 
   return anchor;
 }
@@ -1885,8 +1946,10 @@ export function RouterLink(
   const options = _routerRef.current["options"];
   const effectCleanup = effect(() => {
     const route = routeGetter();
-    const isActive = route.path.startsWith(hrefPath);
+    // Match on a segment boundary so a link to `/foo` is not "active" on
+    // `/foobar` — only on `/foo` itself or a descendant like `/foo/bar`.
     const isExactActive = route.path === hrefPath;
+    const isActive = isExactActive || route.path.startsWith(`${hrefPath}/`);
 
     const classes: string[] = [];
     if (isActive) {
@@ -1964,7 +2027,10 @@ export function RouterLink(
 // ============================================================================
 
 export function Suspense(props: {
-  fallback?: () => HTMLElement | HTMLElement;
+  // Parenthesized so this is "a factory OR a plain element", not
+  // `() => (HTMLElement | HTMLElement)` — the runtime (`showFallback`) accepts
+  // both a function and a bare element.
+  fallback?: (() => HTMLElement) | HTMLElement;
   nodes: () => HTMLElement | Promise<HTMLElement>;
 }): Node {
   const anchor = document.createComment("suspense-boundary");
@@ -2114,8 +2180,9 @@ export function buildURL(to: NavigationTarget): string {
 // ============================================================================
 
 export function destroyRouter(): void {
-  // Clean up Route-rendered DOM nodes
-  for (const fn of routeCleanups) fn();
+  // Clean up Route-rendered DOM nodes. Iterate a copy: each wrapper splices
+  // itself out of `routeCleanups` when it runs.
+  for (const fn of [...routeCleanups]) fn();
   routeCleanups.length = 0;
 
   if (_routerRef.current) {
@@ -2247,8 +2314,7 @@ export function Outlet(): Node {
       currentNode = null;
     }
   };
-  registerDisposer(anchor, outletCleanup);
-  routeCleanups.push(outletCleanup);
+  registerDisposer(anchor, trackRouteCleanup(outletCleanup));
   return anchor;
 }
 
@@ -2382,13 +2448,22 @@ export function createMemoryRouter(
   router: SibuRouter;
   currentPath: () => string;
   push: (path: string) => Promise<NavigationResult>;
+  /** Resolves once the initial `_initialPath` navigation settles. */
+  ready: Promise<NavigationResult>;
 } {
   // Override mode to avoid browser history
   const router = createRouter(routes, { mode: "hash" });
+
+  // Seed the initial in-memory location. Kicking off this navigation
+  // synchronously marks the router as navigating before the constructor's
+  // queued microtask runs, so it honors `_initialPath` instead of reading
+  // `window.location` (which also keeps this safe under SSR).
+  const initialNavigation = router.push(_initialPath);
 
   return {
     router,
     currentPath: () => router.currentRoute.path,
     push: (path: string) => router.push(path),
+    ready: initialNavigation,
   };
 }

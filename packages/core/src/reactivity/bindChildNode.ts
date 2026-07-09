@@ -48,25 +48,35 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
     // Build the new node list. Dedupe by reference so a getter returning
     // `[sharedEl, sharedEl]` doesn't desync DOM (insertBefore moves the
     // node, leaving only one in place but our list recording two).
-    let newNodes: Node[];
+    const newNodes: Node[] = [];
+    const seen = new Set<Node>();
+    const pushNode = (node: Node): void => {
+      // A DocumentFragment is emptied by insertBefore (its children move out),
+      // leaving an empty, parentless fragment. Tracking it as a single "node"
+      // means the next commit's dispose + remove hits an empty fragment and the
+      // spilled children stay in the DOM forever. Expand it into its child
+      // nodes up front so each child is tracked (and later removed) individually.
+      if (node instanceof DocumentFragment) {
+        const kids = Array.prototype.slice.call(node.childNodes) as Node[];
+        for (let k = 0; k < kids.length; k++) pushNode(kids[k]);
+        return;
+      }
+      if (seen.has(node)) {
+        if (_isDev)
+          devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
+        return;
+      }
+      seen.add(node);
+      newNodes.push(node);
+    };
     if (Array.isArray(result)) {
-      newNodes = [];
-      const seen = new Set<Node>();
       for (let i = 0; i < result.length; i++) {
         const item = result[i];
         if (item == null || typeof item === "boolean") continue;
-        const node = item instanceof Node ? item : document.createTextNode(String(item));
-        if (seen.has(node)) {
-          if (_isDev)
-            devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
-          continue;
-        }
-        seen.add(node);
-        newNodes.push(node);
+        pushNode(item instanceof Node ? item : document.createTextNode(String(item)));
       }
     } else {
-      const node = result instanceof Node ? result : document.createTextNode(String(result));
-      newNodes = [node];
+      pushNode(result instanceof Node ? result : document.createTextNode(String(result)));
     }
 
     // Build a set of nodes that will be reused (present in both old and new lists).

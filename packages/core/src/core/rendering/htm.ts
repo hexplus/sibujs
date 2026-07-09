@@ -3,7 +3,7 @@ import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { isEventHandlerAttr, isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
-import { SVG_NS } from "./tagFactory";
+import { isBlockedTag, SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
 
 const _isDev = isDev();
@@ -377,6 +377,12 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
 // ── Execute phase: replays cached tree with fresh values ────────────────────
 
 function executeElement(tmpl: TmplElement, values: unknown[]): Element {
+  // Enforce the same security blocklist as tagFactory so the two public
+  // builders share one invariant — <script>/<iframe>/… never become live,
+  // executable elements even though template strings are author-controlled.
+  if (isBlockedTag(tmpl.tag)) {
+    throw new Error(`html: refusing to create <${tmpl.tag}> — tag is blocked for security reasons.`);
+  }
   // Create element directly — avoids allocating a props object + passing through tagFactory
   const el = tmpl.svg ? document.createElementNS(SVG_NS, tmpl.tag) : document.createElement(tmpl.tag);
 
@@ -396,6 +402,18 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         const val = values[attr.idx];
         if (typeof val === "function") {
           registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));
+        } else if (typeof val === "boolean") {
+          // HTML boolean attribute semantics: presence = true. `disabled=${false}`
+          // must NOT set `disabled="false"` (which still disables the element).
+          // Mirror tagFactory's boolean branch — for IDL properties set the DOM
+          // property directly; otherwise toggle attribute presence.
+          if (name in el && (name === "checked" || name === "disabled" || name === "selected")) {
+            (el as unknown as Record<string, unknown>)[name] = val;
+          } else if (val) {
+            el.setAttribute(name, "");
+          } else {
+            el.removeAttribute(name);
+          }
         } else if (val != null) {
           const str = String(val);
           if (lname === "srcset") {
@@ -415,6 +433,16 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         let val = attr.statics[0];
         for (let j = 0; j < attr.exprs.length; j++) {
           const ev = values[attr.exprs[j]];
+          // A function interpolated into a mixed attribute (e.g.
+          // `class="a ${sig}"`) is stringified to its source code and is NEVER
+          // reactive — the single-expression form (`class=${sig}`) is required
+          // for a reactive binding. Warn loudly instead of silently embedding.
+          if (_isDev && typeof ev === "function") {
+            devWarn(
+              `html: function interpolated into mixed attribute "${attr.name}" is stringified and not reactive. ` +
+                `Use a single full-value expression (${attr.name}=\${fn}) for a reactive binding.`,
+            );
+          }
           val += (ev == null ? "" : String(ev)) + attr.statics[j + 1];
         }
         const lname2 = attr.name.toLowerCase();

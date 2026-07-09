@@ -16,6 +16,7 @@
 import { isDev } from "../core/dev";
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { isEventHandlerAttr, sanitizeAttributeString } from "../utils/sanitize";
 
 /**
  * Helpers handed to an `enhance` setup. Every binding is fine-grained (its own
@@ -190,6 +191,17 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     attr: (t, name, value) => {
+      // Event-handler attributes evaluate their value as JS on dispatch, so —
+      // exactly like bindAttribute — refuse to bind them. Islands feed server
+      // data into these bindings, so this path must not be a sanitization gap.
+      if (isEventHandlerAttr(name)) {
+        if (isDev() && typeof console !== "undefined") {
+          console.warn(
+            `[SibuJS enhance] refusing to bind event-handler attribute "${name}". Use ctx.on("${name.slice(2)}", fn) instead.`,
+          );
+        }
+        return;
+      }
       bind(t, (el) => {
         teardowns.push(
           effect(() => {
@@ -202,8 +214,12 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
             const next = v == null ? null : String(v);
             if (next === null) {
               if (el.hasAttribute(name)) el.removeAttribute(name);
-            } else if (el.getAttribute(name) !== next) {
-              el.setAttribute(name, next);
+            } else {
+              // Route through the shared sink policy (URL allowlist / srcset
+              // split) so a javascript: href is blocked here just like on the
+              // tagFactory/bindAttribute paths.
+              const safe = sanitizeAttributeString(name, next);
+              if (el.getAttribute(name) !== safe) el.setAttribute(name, safe);
             }
           }),
         );

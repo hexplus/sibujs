@@ -1,6 +1,6 @@
+import { signal } from "@sibujs/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { title } from "../src/browser/title";
-import { signal } from "@sibujs/core";
 
 describe("title", () => {
   let originalTitle: string;

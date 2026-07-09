@@ -1,7 +1,7 @@
+import { inject, plugin, resetPlugins } from "sibujs/plugins";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReduxAdapterAPI } from "../src/ecosystem/adapters/redux";
 import { reduxAdapter } from "../src/ecosystem/adapters/redux";
-import { inject, plugin, resetPlugins } from "sibujs/plugins";
 
 interface TestState {
   count: number;

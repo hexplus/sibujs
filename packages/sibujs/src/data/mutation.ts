@@ -97,8 +97,11 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       const errorObj = err instanceof Error ? err : new Error(String(err));
 
       // A mutation aborted by reset()/supersession must not surface as an
-      // error state — it was intentionally cancelled.
-      if (errorObj instanceof DOMException && errorObj.name === "AbortError") throw errorObj;
+      // error state — it was intentionally cancelled. Detect that via our own
+      // signal, not the error name: an AbortError raised for some other reason
+      // (e.g. a request timeout inside the mutationFn) is a real failure and
+      // must still clear `loading` instead of wedging it on forever.
+      if (signal.aborted) throw errorObj;
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;

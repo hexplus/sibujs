@@ -1,7 +1,7 @@
+import { inject, plugin, resetPlugins } from "sibujs/plugins";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReduxAdapterAPI, ReduxStore } from "../src/ecosystem/adapters/redux";
 import { reduxAdapter } from "../src/ecosystem/adapters/redux";
-import { inject, plugin, resetPlugins } from "sibujs/plugins";
 
 interface CounterState {
   counter: number;
@@ -133,6 +133,22 @@ describe("reduxAdapter", () => {
     expect(store.listeners.length).toBe(1);
     api.destroy();
     expect(store.listeners.length).toBe(0);
+  });
+
+  it("select() returns a plain lazy getter, not an eagerly-subscribed derived", () => {
+    const store = createFakeReduxStore({ counter: 5, label: "x" });
+    plugin(reduxAdapter({ store }));
+    const api = inject<ReduxAdapterAPI<CounterState>>("redux");
+
+    const selector = vi.fn((s: CounterState) => s.counter);
+    const getter = api.select(selector);
+
+    // A plain getter does not run the selector (or subscribe to getState)
+    // until it is actually read — no leak from an eager derived() track.
+    expect(selector).not.toHaveBeenCalled();
+
+    expect(getter()).toBe(5);
+    expect(selector).toHaveBeenCalledTimes(1);
   });
 
   it("stops reacting to store changes after destroy()", () => {

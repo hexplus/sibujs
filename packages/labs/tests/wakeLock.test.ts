@@ -63,6 +63,21 @@ describe("wakeLock", () => {
     expect(w.active()).toBe(false);
   });
 
+  it("a second request() while active does not acquire another sentinel", async () => {
+    const w = wakeLock();
+    const api = (navigator as unknown as { wakeLock: { request: ReturnType<typeof vi.fn> } }).wakeLock;
+
+    await w.request();
+    expect(api.request).toHaveBeenCalledTimes(1);
+    expect(w.active()).toBe(true);
+
+    // A concurrent request must be a no-op while a live sentinel is held —
+    // otherwise the previous sentinel is orphaned (only the latest is releasable).
+    await w.request();
+    expect(api.request).toHaveBeenCalledTimes(1);
+    expect(w.active()).toBe(true);
+  });
+
   it("gracefully handles missing wakeLock API", async () => {
     vi.stubGlobal("navigator", {});
     const w = wakeLock();

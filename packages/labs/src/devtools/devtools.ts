@@ -23,10 +23,8 @@
  * or creates one. Events are buffered until the panel connects.
  */
 
-import { isDev } from "@sibujs/core/internal";
 import { signal as _sbSignal } from "@sibujs/core";
-import { globalSingleton } from "@sibujs/core/internal";
-import { stripHtml } from "@sibujs/core/internal";
+import { globalSingleton, isDev, stripHtml } from "@sibujs/core/internal";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -245,6 +243,10 @@ export function getActiveDevTools(): ReturnType<typeof initDevTools> | null {
  */
 export function initDevTools(config?: DevToolsConfig) {
   const maxEvents = config?.maxEvents ?? 1000;
+  // Cap on the number of tracked reactive nodes. Without this the registry
+  // grows unbounded for the life of the session; on overflow the oldest nodes
+  // are evicted (they're the least likely to still be mounted).
+  const maxSignals = config?.maxSignals ?? 10000;
   // Default to enabled only in dev mode — production builds get a no-op API
   // unless explicitly opted in via { enabled: true }.
   const enabled = config?.enabled ?? isDev();
@@ -264,109 +266,156 @@ export function initDevTools(config?: DevToolsConfig) {
   // Internal event log (serializable, no DOM refs)
   const eventLog: DevToolsEvent[] = [];
 
+  // Unsubscribe fns for every hook.on() registration below. destroy() invokes
+  // them so a second initDevTools() (HMR / tests) doesn't stack listener sets
+  // on the shared global hook.
+  const hookUnsubs: Array<() => void> = [];
+
+  // Evict the oldest nodes when the registry exceeds the configured cap.
+  // hook.nodes is a Map, so iteration order is insertion order (oldest first).
+  function capNodes(): void {
+    if (hook.nodes.size <= maxSignals) return;
+    const overflow = hook.nodes.size - maxSignals;
+    let removed = 0;
+    for (const key of hook.nodes.keys()) {
+      hook.nodes.delete(key);
+      if (++removed >= overflow) break;
+    }
+  }
+
   // ─── Listen to framework events ──────────────────────────────────────────
 
-  hook.on("signal:create", (payload: unknown) => {
-    const p = payload as { signal: object; getter: () => unknown; initial: unknown };
-    _dt.nextNodeId++;
-    const name = inferName();
-    const node: DevNode = {
-      id: _dt.nextNodeId,
-      type: "signal",
-      name,
-      ref: p.signal,
-      getter: p.getter,
-      createdAt: Date.now(),
-    };
-    hook.nodes.set(_dt.nextNodeId, node);
-    emit();
-  });
+  hookUnsubs.push(
+    hook.on("signal:create", (payload: unknown) => {
+      const p = payload as { signal: object; getter: () => unknown; initial: unknown };
+      _dt.nextNodeId++;
+      const name = inferName();
+      const node: DevNode = {
+        id: _dt.nextNodeId,
+        type: "signal",
+        name,
+        ref: p.signal,
+        getter: p.getter,
+        createdAt: Date.now(),
+      };
+      hook.nodes.set(_dt.nextNodeId, node);
+      capNodes();
+      emit();
+    }),
+  );
 
-  hook.on("signal:update", (payload: unknown) => {
-    if (!isActive) return;
-    const p = payload as { signal: object; oldValue: unknown; newValue: unknown };
-    // Skip if this signal is managed by devState (it records its own events)
-    if (devStateManagedRefs.has(p.signal)) return;
-    const node = findNodeByRef(hook, p.signal);
-    pushEvent(eventLog, maxEvents, {
-      type: "state-change",
-      component: node?.name || "unknown",
-      key: "value",
-      oldValue: p.oldValue,
-      newValue: p.newValue,
-      timestamp: Date.now(),
-    });
-    emit();
-  });
-
-  hook.on("computed:create", (payload: unknown) => {
-    const p = payload as { signal: object; getter: () => unknown };
-    _dt.nextNodeId++;
-    const name = inferName();
-    const node: DevNode = {
-      id: _dt.nextNodeId,
-      type: "computed",
-      name,
-      ref: p.signal,
-      getter: p.getter,
-      createdAt: Date.now(),
-    };
-    hook.nodes.set(_dt.nextNodeId, node);
-    emit();
-  });
-
-  hook.on("computed:update", (payload: unknown) => {
-    const p = payload as { signal: object; oldValue: unknown; newValue: unknown };
-    const node = findNodeByRef(hook, p.signal);
-    pushEvent(eventLog, maxEvents, {
-      type: "state-change",
-      component: node?.name || "computed",
-      key: "value",
-      oldValue: p.oldValue,
-      newValue: p.newValue,
-      timestamp: Date.now(),
-    });
-    emit();
-  });
-
-  hook.on("effect:create", (payload: unknown) => {
-    _dt.nextNodeId++;
-    const name = inferName();
-    const p = payload as { effectFn: () => void };
-    const node: DevNode = { id: _dt.nextNodeId, type: "effect", name, ref: p.effectFn, createdAt: Date.now() };
-    hook.nodes.set(_dt.nextNodeId, node);
-    emit();
-  });
-
-  hook.on("effect:run", (payload: unknown) => {
-    const p = payload as { effectFn: () => void; runCount: number };
-    const node = findNodeByRef(hook, p.effectFn);
-    pushEvent(eventLog, maxEvents, {
-      type: "render",
-      component: node?.name || "effect",
-      duration: 0,
-      timestamp: Date.now(),
-    });
-    emit();
-  });
-
-  hook.on("app:init", (payload: unknown) => {
-    const p = payload as { rootElement: Node; container: Element; duration: number };
-    pushEvent(eventLog, maxEvents, {
-      type: "render",
-      component: "App",
-      duration: p.duration,
-      timestamp: Date.now(),
-    });
-    emit();
-    // Auto-discover components
-    if (typeof document !== "undefined") {
-      queueMicrotask(() => {
-        discoverComponents(hook, eventLog, maxEvents);
-        emit();
+  hookUnsubs.push(
+    hook.on("signal:update", (payload: unknown) => {
+      if (!isActive) return;
+      const p = payload as { signal: object; oldValue: unknown; newValue: unknown };
+      // Skip if this signal is managed by devState (it records its own events)
+      if (devStateManagedRefs.has(p.signal)) return;
+      const node = findNodeByRef(hook, p.signal);
+      pushEvent(eventLog, maxEvents, {
+        type: "state-change",
+        component: node?.name || "unknown",
+        key: "value",
+        oldValue: p.oldValue,
+        newValue: p.newValue,
+        timestamp: Date.now(),
       });
-    }
-  });
+      emit();
+    }),
+  );
+
+  hookUnsubs.push(
+    hook.on("computed:create", (payload: unknown) => {
+      const p = payload as { signal: object; getter: () => unknown };
+      _dt.nextNodeId++;
+      const name = inferName();
+      const node: DevNode = {
+        id: _dt.nextNodeId,
+        type: "computed",
+        name,
+        ref: p.signal,
+        getter: p.getter,
+        createdAt: Date.now(),
+      };
+      hook.nodes.set(_dt.nextNodeId, node);
+      capNodes();
+      emit();
+    }),
+  );
+
+  hookUnsubs.push(
+    hook.on("computed:update", (payload: unknown) => {
+      const p = payload as { signal: object; oldValue: unknown; newValue: unknown };
+      const node = findNodeByRef(hook, p.signal);
+      pushEvent(eventLog, maxEvents, {
+        type: "state-change",
+        component: node?.name || "computed",
+        key: "value",
+        oldValue: p.oldValue,
+        newValue: p.newValue,
+        timestamp: Date.now(),
+      });
+      emit();
+    }),
+  );
+
+  hookUnsubs.push(
+    hook.on("effect:create", (payload: unknown) => {
+      _dt.nextNodeId++;
+      const name = inferName();
+      const p = payload as { effectFn: () => void };
+      const node: DevNode = { id: _dt.nextNodeId, type: "effect", name, ref: p.effectFn, createdAt: Date.now() };
+      hook.nodes.set(_dt.nextNodeId, node);
+      capNodes();
+      emit();
+    }),
+  );
+
+  hookUnsubs.push(
+    hook.on("effect:run", (payload: unknown) => {
+      const p = payload as { effectFn: () => void; runCount: number };
+      const node = findNodeByRef(hook, p.effectFn);
+      pushEvent(eventLog, maxEvents, {
+        type: "render",
+        component: node?.name || "effect",
+        duration: 0,
+        timestamp: Date.now(),
+      });
+      emit();
+    }),
+  );
+
+  // Prune the node when its effect is torn down (core emits effect:destroy on
+  // dispose) so the registry tracks live effects instead of growing forever.
+  hookUnsubs.push(
+    hook.on("effect:destroy", (payload: unknown) => {
+      const p = payload as { effectFn: () => void };
+      const node = findNodeByRef(hook, p.effectFn);
+      if (node) {
+        hook.nodes.delete(node.id);
+        emit();
+      }
+    }),
+  );
+
+  hookUnsubs.push(
+    hook.on("app:init", (payload: unknown) => {
+      const p = payload as { rootElement: Node; container: Element; duration: number };
+      pushEvent(eventLog, maxEvents, {
+        type: "render",
+        component: "App",
+        duration: p.duration,
+        timestamp: Date.now(),
+      });
+      emit();
+      // Auto-discover components
+      if (typeof document !== "undefined") {
+        queueMicrotask(() => {
+          discoverComponents(hook, eventLog, maxEvents);
+          emit();
+        });
+      }
+    }),
+  );
 
   // ─── API for backward compatibility + extension ──────────────────────────
 
@@ -511,6 +560,10 @@ export function initDevTools(config?: DevToolsConfig) {
     }
     for (const t of activeHighlightTimers) clearTimeout(t);
     activeHighlightTimers.clear();
+    // Unsubscribe every framework-event listener so a later initDevTools()
+    // doesn't stack a second set on the shared global hook.
+    for (const off of hookUnsubs) off();
+    hookUnsubs.length = 0;
     // Remove any still-highlighted element
     if (typeof document !== "undefined") {
       const prev = document.querySelector("[data-sibu-highlight]");

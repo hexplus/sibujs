@@ -590,7 +590,13 @@ function drainQueue(): void {
     const sub = pendingQueue[i++];
     if (tickRepeat(sub)) {
       cycleError(sub);
-      break;
+      // Skip ONLY the runaway subscriber — do not `break` the whole drain, or
+      // unrelated effects enqueued in the same pass would be starved. Removing
+      // it from the pending set and continuing lets the rest converge; the
+      // per-subscriber repeat cap and the absolute drain cap remain the
+      // backstops against an infinite loop.
+      pendingSet.delete(sub);
+      continue;
     }
     // Remove from pendingSet BEFORE invoking so a cascading write during
     // this sub's execution can re-enqueue it. Enables sibling-effect

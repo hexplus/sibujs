@@ -1,6 +1,4 @@
-import { createId } from "@sibujs/core";
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { createId, effect, signal } from "@sibujs/core";
 
 // Track which trigger elements already have a bind() active so a second
 // call short-circuits rather than corrupting aria-describedby restore.

@@ -231,19 +231,19 @@ describe("lazyModule", () => {
 
 describe("packageInfo", () => {
   it("should have the correct name and version", () => {
-    expect(packageInfo.name).toBe("sibu");
-    expect(packageInfo.version).toBe("1.0.0");
+    expect(packageInfo.name).toBe("sibujs");
+    expect(packageInfo.version).toBe("4.0.0-alpha.0");
   });
 
   it("should have all expected entry points", () => {
     const keys = Object.keys(packageInfo.entryPoints);
     expect(keys).toContain("main");
-    expect(keys).toContain("core");
-    expect(keys).toContain("hooks");
-    expect(keys).toContain("router");
-    expect(keys).toContain("i18n");
-    expect(keys).toContain("testing");
+    expect(keys).toContain("data");
+    expect(keys).toContain("ui");
     expect(keys).toContain("ssr");
+    expect(keys).toContain("plugins");
+    expect(keys).toContain("build");
+    expect(keys).toContain("testing");
   });
 
   it("should have entry point values that end with .ts", () => {
@@ -257,7 +257,7 @@ describe("packageInfo", () => {
 
     // 'main' entry maps to '.'
     expect(exportsMap["."]).toBeDefined();
-    expect(exportsMap["."].import).toMatch(/\.mjs$/);
+    expect(exportsMap["."].import).toMatch(/\.js$/);
     expect(exportsMap["."].require).toMatch(/\.cjs$/);
     expect(exportsMap["."].types).toMatch(/\.d\.ts$/);
   });
@@ -265,19 +265,19 @@ describe("packageInfo", () => {
   it("generateExportsMap maps non-main entries to subpaths", () => {
     const exportsMap = packageInfo.generateExportsMap();
 
-    expect(exportsMap["./core"]).toBeDefined();
-    expect(exportsMap["./hooks"]).toBeDefined();
-    expect(exportsMap["./router"]).toBeDefined();
+    expect(exportsMap["./data"]).toBeDefined();
+    expect(exportsMap["./ui"]).toBeDefined();
+    expect(exportsMap["./plugins"]).toBeDefined();
 
     // The dist path should contain 'dist/'
-    expect(exportsMap["./core"].import).toContain("dist/");
+    expect(exportsMap["./data"].import).toContain("dist/");
   });
 
   it("generateExportsMap converts source .ts paths to dist paths", () => {
     const exportsMap = packageInfo.generateExportsMap();
 
-    // 'main' entry: ./index.ts -> ./dist/index.mjs
-    expect(exportsMap["."].import).toBe("./dist/index.mjs");
+    // 'main' entry: ./index.ts -> ./dist/index.js
+    expect(exportsMap["."].import).toBe("./dist/index.js");
     expect(exportsMap["."].require).toBe("./dist/index.cjs");
     expect(exportsMap["."].types).toBe("./dist/index.d.ts");
   });

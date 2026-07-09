@@ -1,5 +1,4 @@
-import { effect } from "@sibujs/core";
-import { signal } from "@sibujs/core";
+import { effect, signal } from "@sibujs/core";
 
 export interface ImageLoaderState {
   /** Reactive loading state: "pending" | "loaded" | "error". */

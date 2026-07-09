@@ -173,16 +173,18 @@ export function lazyModule<T>(loader: () => Promise<T>): { get: () => Promise<T>
  * Provides entry point information and can generate Node.js subpath exports maps.
  */
 export const packageInfo = {
-  name: "sibu",
-  version: "1.0.0",
+  name: "sibujs",
+  version: "4.0.0-alpha.0",
+  // Published entry points, matching the package's real build inputs and
+  // `exports` map (each maps to a `dist/<name>.*` bundle).
   entryPoints: {
     main: "./index.ts",
-    core: "./src/core/html.ts",
-    hooks: "./src/core/signals/signal.ts",
-    router: "./src/plugins/router.ts",
-    i18n: "./src/plugins/i18n.ts",
-    testing: "./src/testing/index.ts",
-    ssr: "./src/core/ssr.ts",
+    data: "./data.ts",
+    ui: "./ui.ts",
+    ssr: "./ssr.ts",
+    plugins: "./plugins.ts",
+    build: "./build.ts",
+    testing: "./testing.ts",
   } as Record<string, string>,
 
   /**
@@ -193,13 +195,13 @@ export const packageInfo = {
     const exportsMap: Record<string, { import: string; require: string; types: string }> = {};
 
     for (const [name, sourcePath] of Object.entries(this.entryPoints)) {
-      // Convert .ts source path to dist output paths
+      // Convert the .ts source path to its dist output base path.
       const distPath = sourcePath.replace(/^\.\//, "./dist/").replace(/\.ts$/, "");
 
       const subpath = name === "main" ? "." : `./${name}`;
 
       exportsMap[subpath] = {
-        import: `${distPath}.mjs`,
+        import: `${distPath}.js`,
         require: `${distPath}.cjs`,
         types: `${distPath}.d.ts`,
       };

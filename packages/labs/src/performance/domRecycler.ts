@@ -2,8 +2,7 @@
 // DOM RECYCLING & RESOURCE PRELOADING
 // ============================================================================
 
-import { devWarn, isDev } from "@sibujs/core/internal";
-import { sanitizeUrl } from "@sibujs/core/internal";
+import { devWarn, isDev, sanitizeUrl } from "@sibujs/core/internal";
 
 const _isDev = isDev();
 
@@ -111,6 +110,7 @@ const preloadedResources = new Set<string>();
  * Preloads a resource (script, style, or generic fetch).
  */
 export function preloadResource(url: string, type: "script" | "style" | "fetch" | "image" = "fetch"): void {
+  if (typeof document === "undefined") return;
   // Defense-in-depth: refuse dangerous schemes (javascript:/data:/blob:) before
   // they reach a resource-hint href, consistent with platform/head.ts.
   const safe = sanitizeUrl(url);
@@ -144,6 +144,7 @@ export function preloadResource(url: string, type: "script" | "style" | "fetch" 
  * Prefetches a URL for future navigation.
  */
 export function prefetch(url: string): void {
+  if (typeof document === "undefined") return;
   const safe = sanitizeUrl(url);
   if (!safe) return;
   if (preloadedResources.has(safe)) return;
@@ -159,6 +160,9 @@ export function prefetch(url: string): void {
  * Preloads an image and returns a promise that resolves when loaded.
  */
 export function preloadImage(src: string): Promise<HTMLImageElement> {
+  if (typeof document === "undefined" || typeof Image === "undefined") {
+    return Promise.reject(new Error("preloadImage is not available in this environment"));
+  }
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);

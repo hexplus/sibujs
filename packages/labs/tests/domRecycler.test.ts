@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { DOMPool, getDOMPool, preloadResource } from "../src/performance/domRecycler";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DOMPool, getDOMPool, prefetch, preloadImage, preloadResource } from "../src/performance/domRecycler";
 
 describe("DOMPool", () => {
   it("should acquire a new element", () => {
@@ -52,5 +52,23 @@ describe("preloadResource", () => {
     preloadResource("/test-script.js", "script");
     const after = document.head.querySelectorAll('link[rel="preload"]').length;
     expect(after).toBeGreaterThan(before);
+  });
+});
+
+describe("SSR guards (no document)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("preloadResource / prefetch are no-ops without document", () => {
+    vi.stubGlobal("document", undefined);
+    // Must not throw a ReferenceError when document is unavailable.
+    expect(() => preloadResource("/x.js", "script")).not.toThrow();
+    expect(() => prefetch("/x")).not.toThrow();
+  });
+
+  it("preloadImage rejects instead of touching Image without document", async () => {
+    vi.stubGlobal("document", undefined);
+    await expect(preloadImage("/x.png")).rejects.toThrow();
   });
 });
