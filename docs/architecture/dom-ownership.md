@@ -140,9 +140,33 @@ import { replaceChildrenSafely } from "./dispose";
 replaceChildrenSafely(container, nextNode);
 ```
 
-`replaceChildrenSafely()` disposes the outgoing children, skips any node that
-also appears in the new set (so content can be carried over safely), and then
-performs the native replacement.
+`replaceChildrenSafely()` disposes the outgoing children and then performs the
+native replacement, under this rule:
+
+> **`replaceChildrenSafely()` must dispose all removed SibuJS-owned content, but
+> it must never dispose any node that is part of the incoming replacement set —
+> even when that node is currently nested inside an outgoing subtree.**
+
+The second half matters more than it looks. Native `replaceChildren()` *moves* a
+node out of the content being replaced rather than destroying it:
+
+```text
+parent                    replaceChildrenSafely(parent, incoming)     parent
+└── outer          ────────────────────────────────────────────▶     └── incoming
+    └── inner
+        └── incoming
+```
+
+A naive implementation that disposed `outer` before moving `incoming` would tear
+down `incoming` along with it, leaving a node in the final DOM whose reactive
+resources are already destroyed. So incoming nodes are **detached first**, before
+any outgoing root is disposed — the dispose-walk then cannot reach them. Every
+other part of those outgoing subtrees (`outer` and `inner` above) is still
+disposed exactly once, so preserving one descendant never leaks its former
+ancestors or siblings.
+
+Skipping disposal of an outgoing child merely *because* it contains an incoming
+node would be the wrong fix: it would leak the rest of that subtree.
 
 **Application code that detaches a SibuJS-managed node itself is responsible for
 calling `dispose()` on it first.** SibuJS does not install a global

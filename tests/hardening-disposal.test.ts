@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { dispose } from "../src/core/rendering/dispose";
+import { dispose, registerDisposer, replaceChildrenSafely } from "../src/core/rendering/dispose";
 import { each } from "../src/core/rendering/each";
 import { div, span } from "../src/core/rendering/html";
 import { Suspense } from "../src/core/rendering/lazy";
@@ -152,6 +152,144 @@ describe("hardening: each() logical range disposal", () => {
     host.replaceChildren();
 
     expect(() => dispose(anchor)).not.toThrow();
+  });
+});
+
+describe("hardening: replaceChildrenSafely preserves incoming nodes", () => {
+  it("does not dispose an incoming node moved out of an outgoing subtree", () => {
+    const parent = document.createElement("div");
+    const wrapper = document.createElement("div");
+    const next = document.createElement("button");
+
+    const wrapperCleanup = vi.fn();
+    const nextCleanup = vi.fn();
+
+    registerDisposer(wrapper, wrapperCleanup);
+    registerDisposer(next, nextCleanup);
+
+    wrapper.appendChild(next);
+    parent.appendChild(wrapper);
+
+    replaceChildrenSafely(parent, next);
+
+    expect(parent.childNodes).toHaveLength(1);
+    expect(parent.firstChild).toBe(next);
+
+    // The genuinely-removed wrapper is still torn down...
+    expect(wrapperCleanup).toHaveBeenCalledTimes(1);
+    // ...but the incoming node must survive intact.
+    expect(nextCleanup).not.toHaveBeenCalled();
+  });
+
+  it("preserves an incoming node nested several levels inside outgoing content", () => {
+    const parent = document.createElement("div");
+    const outer = document.createElement("div");
+    const inner = document.createElement("div");
+    const incoming = document.createElement("span");
+
+    const outerCleanup = vi.fn();
+    const innerCleanup = vi.fn();
+    const incomingCleanup = vi.fn();
+
+    registerDisposer(outer, outerCleanup);
+    registerDisposer(inner, innerCleanup);
+    registerDisposer(incoming, incomingCleanup);
+
+    inner.appendChild(incoming);
+    outer.appendChild(inner);
+    parent.appendChild(outer);
+
+    replaceChildrenSafely(parent, incoming);
+
+    expect(parent.childNodes).toHaveLength(1);
+    expect(parent.firstChild).toBe(incoming);
+
+    // Every genuinely removed level is disposed exactly once.
+    expect(outerCleanup).toHaveBeenCalledTimes(1);
+    expect(innerCleanup).toHaveBeenCalledTimes(1);
+    expect(incomingCleanup).not.toHaveBeenCalled();
+  });
+
+  it("still disposes removed siblings of a preserved nested node", () => {
+    const parent = document.createElement("div");
+    const wrapper = document.createElement("div");
+    const doomedSibling = document.createElement("p");
+    const keptChild = document.createElement("b");
+    const otherTopLevel = document.createElement("i");
+
+    const siblingCleanup = vi.fn();
+    const keptCleanup = vi.fn();
+    const otherCleanup = vi.fn();
+
+    registerDisposer(doomedSibling, siblingCleanup);
+    registerDisposer(keptChild, keptCleanup);
+    registerDisposer(otherTopLevel, otherCleanup);
+
+    wrapper.append(doomedSibling, keptChild);
+    parent.append(wrapper, otherTopLevel);
+
+    replaceChildrenSafely(parent, keptChild);
+
+    expect(parent.firstChild).toBe(keptChild);
+    expect(siblingCleanup).toHaveBeenCalledTimes(1);
+    expect(otherCleanup).toHaveBeenCalledTimes(1);
+    expect(keptCleanup).not.toHaveBeenCalled();
+  });
+
+  it("preserves a node that is already a direct child", () => {
+    const parent = document.createElement("div");
+    const stays = document.createElement("span");
+    const goes = document.createElement("p");
+
+    const staysCleanup = vi.fn();
+    const goesCleanup = vi.fn();
+    registerDisposer(stays, staysCleanup);
+    registerDisposer(goes, goesCleanup);
+
+    parent.append(goes, stays);
+
+    replaceChildrenSafely(parent, stays);
+
+    expect(parent.childNodes).toHaveLength(1);
+    expect(parent.firstChild).toBe(stays);
+    expect(goesCleanup).toHaveBeenCalledTimes(1);
+    expect(staysCleanup).not.toHaveBeenCalled();
+  });
+
+  it("matches native replaceChildren semantics for a node adopted from another tree", () => {
+    const parent = document.createElement("div");
+    const donor = document.createElement("div");
+    const adopted = document.createElement("span");
+    const adoptedCleanup = vi.fn();
+
+    registerDisposer(adopted, adoptedCleanup);
+    donor.appendChild(adopted);
+    parent.appendChild(document.createElement("p"));
+
+    replaceChildrenSafely(parent, adopted);
+
+    // Native semantics: the node moves out of the donor into the parent.
+    expect(parent.firstChild).toBe(adopted);
+    expect(donor.childNodes).toHaveLength(0);
+    expect(adoptedCleanup).not.toHaveBeenCalled();
+  });
+
+  it("clears and disposes everything when no incoming nodes are given", () => {
+    const parent = document.createElement("div");
+    const a = document.createElement("p");
+    const b = document.createElement("p");
+    const aCleanup = vi.fn();
+    const bCleanup = vi.fn();
+
+    registerDisposer(a, aCleanup);
+    registerDisposer(b, bCleanup);
+    parent.append(a, b);
+
+    replaceChildrenSafely(parent);
+
+    expect(parent.childNodes).toHaveLength(0);
+    expect(aCleanup).toHaveBeenCalledTimes(1);
+    expect(bCleanup).toHaveBeenCalledTimes(1);
   });
 });
 

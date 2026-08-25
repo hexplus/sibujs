@@ -268,6 +268,77 @@ only their own DOM range."*
 
 ---
 
+## H-008 — `replaceChildrenSafely()` disposed incoming nodes nested in outgoing subtrees
+
+| | |
+|---|---|
+| **Severity** | P1 |
+| **Subsystem** | `src/core/rendering/dispose.ts` |
+| **Status** | Fixed |
+| **Class** | CONFIRMED BUG |
+
+### Description
+
+The helper introduced by H-002 protected incoming nodes with a `Set` membership
+test against `parent`'s **direct children** only. An incoming node that was
+currently a *descendant* of an outgoing child was therefore not protected: its
+ancestor was disposed, and the dispose-walk destroyed the incoming node on its
+way down.
+
+The node still ended up in the final DOM — but with its SibuJS lifecycle and
+reactive resources already torn down. A silently dead node is worse than a
+leaked one: it renders, and then simply stops responding.
+
+### Reproduction
+
+```ts
+wrapper.appendChild(next);
+parent.appendChild(wrapper);
+
+replaceChildrenSafely(parent, next);
+
+// Expected: next survives, wrapper is disposed
+// Actual:   parent.firstChild === next, but next's disposers already ran
+```
+
+Three of six new cases failed before the fix, including the deeper
+`parent > outer > inner > incoming` nesting.
+
+### Root cause
+
+Ownership was inferred from *position at the time of the call* rather than from
+membership of the incoming set. Native `replaceChildren()` moves such a node out
+and keeps it alive; the helper did not preserve that semantic.
+
+### Fix
+
+Detach every incoming node from its current parent **before** snapshotting
+`parent.childNodes` and disposing the outgoing roots. Once detached, the
+dispose-walk cannot reach them. Detaching before the snapshot also removes any
+incoming node that was already a direct child from the outgoing set, so the
+`keep` Set became unnecessary and was dropped — the fix is a net simplification.
+
+Rejected alternative: skipping disposal of an outgoing child that contains an
+incoming node. That would preserve the incoming node but leak the entire rest of
+that subtree. Also rejected: adding an exclusion set to `dispose()`, which would
+have meant redesigning the disposal core for one call site.
+
+### Regression test
+
+`tests/hardening-disposal.test.ts` — 6 cases: single-level nesting, three-level
+nesting, removed siblings of a preserved nested node still disposed, a node
+already a direct child, a node adopted from another tree (native move
+semantics), and the empty-`next` clear-everything path.
+
+### Remaining risk
+
+Low. No in-tree caller currently passes a nested incoming node — `lazy()`,
+`Suspense`, and `ErrorBoundary` all pass freshly created nodes — so this was
+latent rather than live. It is now correct for the public API, where callers
+can and will hit it.
+
+---
+
 ## H-007 — `bench-baseline.json` is stale and unusable as a gate
 
 | | |

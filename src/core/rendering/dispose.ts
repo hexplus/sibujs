@@ -100,18 +100,32 @@ export function dispose(node: Node): void {
  * is never collected. This helper enforces the disposal invariant — a
  * SibuJS-owned node removed permanently from the DOM is disposed exactly once.
  *
- * Nodes present in `next` are never disposed, so a child may be safely carried
- * over from the old content to the new.
+ * **A node in `next` is never disposed, even when it currently sits somewhere
+ * inside an outgoing subtree.** Native `replaceChildren()` would move such a
+ * node out of the content being replaced and keep it alive, and this helper
+ * preserves those semantics: incoming nodes are detached *before* the outgoing
+ * roots are disposed, so the dispose-walk cannot reach them. Everything else in
+ * those outgoing subtrees is still torn down, so preserving one descendant does
+ * not leak its former siblings or ancestors.
  */
 export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void {
-  const keep = next.length > 0 ? new Set<Node>(next) : null;
-  // Snapshot: childNodes is live and replaceChildren mutates it.
+  // Detach incoming nodes first. This is what keeps a node that is currently a
+  // *descendant of an outgoing child* alive: once it is out of the tree, the
+  // dispose() walk below cannot reach it. Doing this before the childNodes
+  // snapshot also removes any incoming node that was already a direct child
+  // from the outgoing set, so no separate keep-list is needed.
+  for (let i = 0; i < next.length; i++) {
+    const node = next[i];
+    node.parentNode?.removeChild(node);
+  }
+
+  // Snapshot: childNodes is live and replaceChildren mutates it. Everything
+  // still here is genuinely outgoing.
   const current = Array.from(parent.childNodes);
   for (let i = 0; i < current.length; i++) {
-    const child = current[i];
-    if (keep?.has(child)) continue;
-    dispose(child);
+    dispose(current[i]);
   }
+
   parent.replaceChildren(...next);
 }
 
