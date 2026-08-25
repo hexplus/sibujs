@@ -640,6 +640,14 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     openTag += ` ${rawName}="${escapeAttr(value)}"`;
   }
 
+  // Emit the SSR provenance marker, matching `renderToString`. Without it the
+  // two documented render paths produced different HTML for identical input —
+  // a trap for anyone who streams in production but snapshots with
+  // renderToString in tests.
+  if (element.dataset && !element.dataset.sibuHydrate) {
+    openTag += ` data-sibu-ssr="true"`;
+  }
+
   if (VOID_ELEMENTS.has(tag)) {
     yield `${openTag} />`;
     return;

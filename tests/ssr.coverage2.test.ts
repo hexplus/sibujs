@@ -442,7 +442,9 @@ describe("ssr.ts coverage2 — streaming", () => {
 
     const out = await collectStream(renderToStream(frag));
     expect(out).toContain("&lt;txt&gt;");
-    expect(out).toContain("<br />");
+    // Void elements carry the same `data-sibu-ssr` provenance marker that
+    // renderToString emits — the two paths are byte-identical (see ST-001).
+    expect(out).toContain('<br data-sibu-ssr="true" />');
     expect(out).toContain("ssr:script-stripped");
   });
 

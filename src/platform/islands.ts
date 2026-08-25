@@ -107,6 +107,12 @@ export function mountIslands(
 
   const cancels: Array<() => void> = [];
   const disposers: Array<() => void> = [];
+  // Set by the returned cleanup. A lazy island's chunk can land *after*
+  // teardown; enhancing then would push its disposer onto an already-drained
+  // list, leaving the enhancement permanently unreachable (a leak) and
+  // violating the single-activation lifetime (DISPOSED must never become
+  // ACTIVE). Every async continuation re-checks this before touching the DOM.
+  let torndown = false;
 
   for (const el of Array.from(root.querySelectorAll<HTMLElement>("[data-sibu-island]"))) {
     if (el.getAttribute("data-sibu-enhanced") === "true") continue; // already mounted
@@ -122,12 +128,15 @@ export function mountIslands(
 
     let activated = false;
     const activate = (): void => {
-      if (activated) return;
+      if (activated || torndown) return;
       activated = true;
       const reg = registry.get(name);
       if (!reg) return;
       resolveSetup(reg)
         .then((setup) => {
+          // The chunk may have landed after teardown — bail rather than
+          // enhancing into a disposer list nobody will ever drain.
+          if (torndown) return;
           if (!setup) {
             if (typeof console !== "undefined") console.warn(`[SibuJS islands] "${name}" loader produced no setup.`);
             return;
@@ -152,6 +161,7 @@ export function mountIslands(
   }
 
   return () => {
+    torndown = true;
     for (const c of cancels.splice(0)) c();
     for (const d of disposers.splice(0)) d();
   };

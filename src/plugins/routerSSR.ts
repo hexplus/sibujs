@@ -511,26 +511,49 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
   //    location-driven resolution reconciles to the live URL.
   createRouter(routes as RouteDef[]);
 
-  // 3. Hydrate the existing DOM.
+  // 3. Hydrate the existing DOM — for the route the BROWSER is actually on.
+  //
+  // The server's path and the live URL can disagree: stale cached HTML, a CDN
+  // serving another route's document, a proxy rewrite, or a redirect landing
+  // elsewhere. Resolving from `serverState.path` here produced the one state
+  // the bootstrap invariant forbids — location and router agreeing on /b while
+  // the DOM showed /a (RM-001).
+  //
+  // Because SibuJS uses replacement hydration, rendering the live route costs
+  // nothing extra: the server subtree is discarded either way. So the live URL
+  // always wins, and DOM / router / location end up describing one location.
   const container = options?.container || document.getElementById("app");
-  if (container && serverState.path) {
-    // Find the component that the server rendered for this route
-    const resolved = resolveServerRoute(serverState.path, routes);
-    if (resolved.component) {
-      // Import hydrate from ssr and attach bindings to existing DOM
-      import("../platform/ssr")
-        .then(({ hydrate }) => {
-          if (resolved.component) {
-            hydrate(resolved.component, container);
-          }
-        })
-        .catch((err) => {
-          if (typeof console !== "undefined") {
-            console.error("[SibuJS routerSSR] failed to load hydrate:", err);
-          }
-        });
-    }
-  }
+  if (!container) return;
+
+  const liveUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const resolved = resolveServerRoute(liveUrl, routes);
+
+  import("../platform/ssr")
+    .then(async ({ hydrate }) => {
+      const { replaceChildrenSafely } = await import("../core/rendering/dispose");
+      // A user navigation may have committed while this chunk loaded. That
+      // navigation owns the DOM now — a stale bootstrap must never overwrite
+      // it (same rule the client router enforces at its commit boundary).
+      //
+      // Compared against `location`, not router state: at bootstrap the router
+      // is still resolving its initial route asynchronously, so its path is not
+      // yet authoritative. The address bar is.
+      const nowUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+      if (nowUrl !== liveUrl) return;
+
+      if (resolved.component) {
+        hydrate(resolved.component, container);
+        return;
+      }
+      // No route matched the live URL. Leaving the server's markup would show
+      // content for a route the user is not on, so clear it instead.
+      replaceChildrenSafely(container);
+    })
+    .catch((err) => {
+      if (typeof console !== "undefined") {
+        console.error("[SibuJS routerSSR] failed to load hydrate:", err);
+      }
+    });
 }
 
 /**
