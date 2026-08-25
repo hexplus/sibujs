@@ -1,3 +1,4 @@
+import { devWarn, isDev } from "../core/dev";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
@@ -123,8 +124,42 @@ export interface ScrollPosition {
   readonly y: number;
 }
 
+/**
+ * Why a navigation failed, at a finer grain than `type`.
+ *
+ * `type: "aborted"` alone cannot tell a caller whether the user was denied
+ * access, whether they simply clicked a newer link, or whether the app tore the
+ * router down — three situations that call for very different handling (show a
+ * message / stay silent / stay silent). `reason` disambiguates them without
+ * changing the existing `type` values, so code branching on `type` keeps
+ * working unchanged.
+ *
+ * - `guard` — a navigation guard returned `false`.
+ * - `superseded` — a newer navigation started before this one could commit.
+ *   Expected during rapid navigation; normally not surfaced to users.
+ * - `router-destroyed` — the router was destroyed while this navigation was in
+ *   flight.
+ * - `redirect-loop` — redirect resolution exceeded the maximum hop count.
+ * - `unsafe-target` — the target or a redirect used a blocked URI scheme, or was
+ *   an absolute/protocol-relative URL (open-redirect protection).
+ * - `duplicate` — the target is identical to the current route.
+ * - `error` — an unexpected error escaped the navigation pipeline.
+ */
+export type NavigationFailureReason =
+  | "guard"
+  | "superseded"
+  | "router-destroyed"
+  | "redirect-loop"
+  | "unsafe-target"
+  | "duplicate"
+  | "error";
+
 export interface NavigationFailure {
   readonly type: "aborted" | "cancelled" | "duplicated" | "timeout";
+  /**
+   * Finer-grained cause. Additive — existing checks on `type` are unaffected.
+   */
+  readonly reason?: NavigationFailureReason;
   readonly from: RouteContext;
   readonly to: RouteContext;
   readonly error?: Error;
@@ -132,7 +167,19 @@ export interface NavigationFailure {
 
 export type NavigationResult =
   | { success: true; route: RouteContext }
-  | { success: false; type: NavigationFailure["type"]; failure: NavigationFailure };
+  | {
+      success: false;
+      type: NavigationFailure["type"];
+      /** Mirrors `failure.reason`; see {@link NavigationFailureReason}. */
+      reason?: NavigationFailureReason;
+      failure: NavigationFailure;
+    };
+
+/**
+ * Abort reason stamped onto a navigation's `AbortSignal` so the pipeline can
+ * report *why* it was cancelled. Anything else is treated as supersession.
+ */
+const ABORT_ROUTER_DESTROYED = "sibu:router-destroyed";
 
 export type NavigationTarget =
   | string
@@ -200,7 +247,8 @@ class NavigationController {
   private currentController: AbortController | null = null;
 
   async navigate(navigationFn: (signal: AbortSignal) => Promise<void>): Promise<void> {
-    // Cancel current navigation
+    // Cancel current navigation. The abort reason is left undefined here so the
+    // pipeline reads it as supersession — teardown stamps its own reason.
     if (this.currentController) {
       this.currentController.abort();
     }
@@ -223,9 +271,9 @@ class NavigationController {
     }
   }
 
-  abort(): void {
+  abort(reason?: unknown): void {
     if (this.currentController) {
-      this.currentController.abort();
+      this.currentController.abort(reason);
       this.currentController = null;
     }
   }
@@ -476,6 +524,9 @@ class GuardManager {
   }
 
   async runBeforeEach(to: RouteContext, from: RouteContext, signal: AbortSignal): Promise<boolean | string> {
+    // Checked before the loop too: with no guards registered the body never
+    // runs, so an already-superseded navigation would otherwise sail through.
+    if (signal.aborted) throw new Error("Navigation aborted");
     for (const guard of this.beforeEachGuards) {
       if (signal.aborted) throw new Error("Navigation aborted");
 
@@ -486,6 +537,8 @@ class GuardManager {
   }
 
   async runBeforeResolve(to: RouteContext, from: RouteContext, signal: AbortSignal): Promise<boolean | string> {
+    // See runBeforeEach — an empty guard list must not skip the abort check.
+    if (signal.aborted) throw new Error("Navigation aborted");
     for (const guard of this.beforeResolveGuards) {
       if (signal.aborted) throw new Error("Navigation aborted");
 
@@ -781,6 +834,10 @@ export class SibuRouter {
   // Event listeners cleanup
   private cleanup: Array<() => void> = [];
 
+  // Set by destroy(). Lets a navigation still in flight report
+  // "router-destroyed" rather than the generic "superseded".
+  private destroyed = false;
+
   constructor(routes: RouteDef[], options: RouterOptions = {}) {
     this.options = {
       mode: "history",
@@ -910,7 +967,7 @@ export class SibuRouter {
         if (!isSafeNavigationTarget(targetPath)) {
           const from = this.currentRouteGetter();
           const toContext = this.createRouteContext(targetPath);
-          throw new NavigationFailureError("aborted", from, toContext);
+          throw new NavigationFailureError("aborted", from, toContext, undefined, "unsafe-target");
         }
 
         const from = this.currentRouteGetter();
@@ -918,7 +975,7 @@ export class SibuRouter {
 
         // Check for duplicate navigation
         if (this.isSameRoute(from, toContext)) {
-          throw new NavigationFailureError("duplicated", from, toContext);
+          throw new NavigationFailureError("duplicated", from, toContext, undefined, "duplicate");
         }
 
         await this.performNavigation(toContext, from, options, signal);
@@ -928,17 +985,25 @@ export class SibuRouter {
     } catch (error) {
       if (error instanceof NavigationFailureError) {
         const failure = error.toFailure();
-        return { success: false, type: failure.type, failure };
+        return { success: false, type: failure.type, reason: failure.reason, failure };
       }
+
+      // Guard runners reject with a plain Error("Navigation aborted") when the
+      // signal fires, so classify that as supersession rather than a genuine
+      // fault. `destroyed` is checked directly: the controller has already been
+      // cleared by teardown, so no signal survives to carry the reason.
+      const isAbort = error instanceof Error && error.message === "Navigation aborted";
+      const reason: NavigationFailureReason = isAbort ? (this.destroyed ? "router-destroyed" : "superseded") : "error";
 
       const failure: NavigationFailure = {
         type: "aborted",
+        reason,
         from: this.currentRouteGetter(),
         to: this.createRouteContext(this.resolvePath(to)),
         error: error instanceof Error ? error : new Error(String(error)),
       };
 
-      return { success: false, type: failure.type, failure };
+      return { success: false, type: failure.type, reason, failure };
     }
   }
 
@@ -950,9 +1015,20 @@ export class SibuRouter {
     options: { replace?: boolean; state?: unknown; skipHistory?: boolean },
     signal: AbortSignal,
     depth = 0,
+    redirectChain: string[] = [],
   ): Promise<void> {
+    const chain = depth === 0 ? [to.path] : redirectChain;
+
     if (depth >= SibuRouter.MAX_REDIRECT_DEPTH) {
-      throw new NavigationFailureError("aborted", from, to);
+      // Bounded either way, but a bare "aborted" tells the developer nothing
+      // about *why*. Print the actual hop sequence — a cycle is obvious the
+      // moment you can see a path repeat.
+      if (isDev()) {
+        devWarn(
+          `Router: redirect loop detected — navigation aborted after ${SibuRouter.MAX_REDIRECT_DEPTH} hops.\n  ${chain.map((p) => `"${p}"`).join(" -> ")}`,
+        );
+      }
+      throw new NavigationFailureError("aborted", from, to, undefined, "redirect-loop");
     }
 
     // Run beforeEach guards
@@ -961,11 +1037,14 @@ export class SibuRouter {
       if (typeof beforeEachResult === "string") {
         // Security: refuse guard-redirect targets with dangerous protocols.
         if (!isSafeNavigationTarget(beforeEachResult)) {
-          throw new NavigationFailureError("aborted", from, to);
+          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
-        return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1);
+        return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
+          ...chain,
+          beforeEachResult,
+        ]);
       }
-      throw new NavigationFailureError("aborted", from, to);
+      throw new NavigationFailureError("aborted", from, to, undefined, "guard");
     }
 
     // Handle route-specific logic
@@ -983,15 +1062,25 @@ export class SibuRouter {
             if (signal.aborted) throw new Error("Navigation aborted");
 
             const result = await guard(to, from);
+            // A user `beforeEnter` is awaited directly, so unlike the runner in
+            // GuardManager nothing rejects it on abort. Re-check here: a stale
+            // navigation must stop progressing rather than fall through to
+            // redirect resolution or the commit boundary.
+            if (signal.aborted) {
+              throw new NavigationFailureError("aborted", from, to, undefined, abortReasonOf(signal));
+            }
             if (result !== true) {
               if (typeof result === "string") {
                 // Security: refuse guard-redirect targets with dangerous protocols.
                 if (!isSafeNavigationTarget(result)) {
-                  throw new NavigationFailureError("aborted", from, to);
+                  throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
-                return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1);
+                return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
+                  ...chain,
+                  result,
+                ]);
               }
-              throw new NavigationFailureError("aborted", from, to);
+              throw new NavigationFailureError("aborted", from, to, undefined, "guard");
             }
           }
         }
@@ -1009,12 +1098,15 @@ export class SibuRouter {
               `[SibuJS Router] Refusing absolute/protocol-relative redirect "${redirectPath}" — open-redirect risk.`,
             );
           }
-          throw new NavigationFailureError("aborted", from, to);
+          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         if (typeof redirectPath === "string" && !isSafeNavigationTarget(redirectPath)) {
-          throw new NavigationFailureError("aborted", from, to);
+          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
-        return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1);
+        return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
+          ...chain,
+          redirectPath,
+        ]);
       }
     }
 
@@ -1024,11 +1116,31 @@ export class SibuRouter {
       if (typeof beforeResolveResult === "string") {
         // Security: refuse guard-redirect targets with dangerous protocols.
         if (!isSafeNavigationTarget(beforeResolveResult)) {
-          throw new NavigationFailureError("aborted", from, to);
+          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
-        return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1);
+        return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
+          ...chain,
+          beforeResolveResult,
+        ]);
       }
-      throw new NavigationFailureError("aborted", from, to);
+      throw new NavigationFailureError("aborted", from, to, undefined, "guard");
+    }
+
+    // ---- Commit boundary -------------------------------------------------
+    // INVARIANT: only the currently active navigation may commit router state.
+    //
+    // Every `await` above is a point where a newer navigation (or router
+    // teardown) can supersede this one by aborting our signal. Guard runners
+    // only test `signal.aborted` *inside* their loops, so a route with no
+    // guards — or a `beforeEnter` that resolves after being superseded — can
+    // reach here stale. Committing then would rewrite history, clobber the
+    // newer route, and fire commit-only hooks for a navigation the user has
+    // already moved on from.
+    //
+    // Everything below this line mutates shared state, so the check belongs
+    // here rather than after any single await.
+    if (signal.aborted) {
+      throw new NavigationFailureError("aborted", from, to, undefined, abortReasonOf(signal));
     }
 
     // Update browser history
@@ -1177,7 +1289,8 @@ export class SibuRouter {
 
   // Cleanup
   destroy(): void {
-    this.navigator.abort();
+    this.destroyed = true;
+    this.navigator.abort(ABORT_ROUTER_DESTROYED);
     for (const fn of this.cleanup) fn();
     this.cleanup = [];
     this.guards.clear();
@@ -1230,14 +1343,22 @@ export class SibuRouter {
 
 class NavigationFailureError extends Error {
   type: NavigationFailure["type"];
+  reason?: NavigationFailureReason;
   from: RouteContext;
   to: RouteContext;
   declare cause?: Error;
 
-  constructor(type: NavigationFailure["type"], from: RouteContext, to: RouteContext, error?: Error) {
-    super(`Navigation ${type}: from ${from.path} to ${to.path}`);
+  constructor(
+    type: NavigationFailure["type"],
+    from: RouteContext,
+    to: RouteContext,
+    error?: Error,
+    reason?: NavigationFailureReason,
+  ) {
+    super(`Navigation ${type}${reason ? ` (${reason})` : ""}: from ${from.path} to ${to.path}`);
     this.name = "NavigationFailureError";
     this.type = type;
+    this.reason = reason;
     this.from = from;
     this.to = to;
     if (error) {
@@ -1248,11 +1369,17 @@ class NavigationFailureError extends Error {
   toFailure(): NavigationFailure {
     return {
       type: this.type,
+      reason: this.reason,
       from: this.from,
       to: this.to,
       error: this.cause instanceof Error ? this.cause : undefined,
     };
   }
+}
+
+/** Map an aborted signal to the reason it was aborted for. */
+function abortReasonOf(signal: AbortSignal): NavigationFailureReason {
+  return signal.reason === ABORT_ROUTER_DESTROYED ? "router-destroyed" : "superseded";
 }
 
 // ============================================================================
@@ -1943,7 +2070,10 @@ export function RouterLink(
 
   // Handle click for internal navigation
   const onLinkClick = (e: MouseEvent) => {
-    if (target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
+    // `defaultPrevented` first: if app code (or an outer handler) already
+    // cancelled this click, the router must not perform its own navigation.
+    // Ignoring it meant a link the app had explicitly neutralised still routed.
+    if (e.defaultPrevented || target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
       return;
     }
     e.preventDefault();

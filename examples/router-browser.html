@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS Router — browser test fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      #log { white-space: pre-wrap; font-family: monospace; font-size: 12px; }
+      nav a { margin-right: 8px; }
+    </style>
+  </head>
+  <body>
+    <nav id="nav"></nav>
+
+    <nav id="plain-nav">
+      <a id="plain-link" href="/users">Plain anchor (NOT intercepted by design)</a>
+    </nav>
+
+    <main>
+      <div id="outlet"></div>
+      <input id="focus-input" type="text" />
+    </main>
+
+    <div id="log"></div>
+
+    <script type="module">
+      import {
+        createRouter,
+        setRoutes,
+        Route,
+        RouterLink,
+        route,
+        navigate,
+        replace,
+      } from "../dist/plugins.js";
+
+      const HOME = "/examples/router-browser.html";
+      const events = [];
+      const log = (msg) => {
+        events.push(msg);
+        document.getElementById("log").textContent = events.join("\n");
+      };
+
+      const page = (name) => () => {
+        const d = document.createElement("div");
+        d.className = "page";
+        d.dataset.page = name;
+        d.textContent = `page:${name}`;
+        return d;
+      };
+
+      createRouter({ mode: "history", base: "" });
+      setRoutes([
+        { path: HOME, component: page("home") },
+        { path: "/users", component: page("users") },
+        { path: "/users/:id", component: page("user-detail") },
+        { path: "/about", component: page("about") },
+        { path: "*", component: page("not-found") },
+      ]);
+
+      document.getElementById("outlet").appendChild(Route());
+
+      // ---- Links under test -------------------------------------------------
+      const nav = document.getElementById("nav");
+
+      const add = (el, id) => {
+        el.id = id;
+        nav.appendChild(el);
+        return el;
+      };
+
+      add(RouterLink({ to: HOME, nodes: "Home" }), "link-home");
+      add(RouterLink({ to: "/about", nodes: "About" }), "link-about");
+      add(RouterLink({ to: "/about#section", nodes: "About hash" }), "link-hash");
+      add(RouterLink({ to: "/about", target: "_blank", nodes: "About (new tab)" }), "link-blank");
+
+      // Nested element inside the anchor — clicking the span must still resolve
+      // the anchor and navigate.
+      const nested = document.createElement("span");
+      nested.className = "label";
+      nested.textContent = "Users";
+      add(RouterLink({ to: "/users", nodes: nested }), "link-users");
+
+      // App code prevents the default before the router's own listener runs.
+      const prevented = add(RouterLink({ to: "/users", nodes: "Prevented" }), "link-prevented");
+      prevented.addEventListener(
+        "click",
+        (e) => {
+          e.preventDefault();
+          log("prevented-handler-ran");
+        },
+        // Capture phase so this runs BEFORE the router's bubble-phase listener.
+        true,
+      );
+
+      // ---- Test hooks -------------------------------------------------------
+      window.__router = {
+        path: () => route().path,
+        params: () => route().params,
+        hash: () => route().hash,
+        query: () => route().query,
+        navigate: (to) => navigate(to),
+        replace: (to) => replace(to),
+        events,
+        reset: () => {
+          events.length = 0;
+          document.getElementById("log").textContent = "";
+        },
+      };
+
+      window.__ready = true;
+      log("ready");
+    </script>
+  </body>
+</html>
