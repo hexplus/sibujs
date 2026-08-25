@@ -8,7 +8,7 @@
  * docs/architecture/hydration.md), and these tests exist so its consequences
  * are explicit rather than discovered in production.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkLeaks, registerDisposer } from "../src/core/rendering/dispose";
 import { div, input, span } from "../src/core/rendering/html";
 import { onCleanup } from "../src/core/rendering/lifecycle";
@@ -209,7 +209,7 @@ describe("hydration: mismatch recovery", () => {
   });
 
   it("never leaves structurally corrupted DOM for any mismatch shape", () => {
-    const cases: Array<[string, () => HTMLElement]> = [
+    const cases: [string, () => HTMLElement][] = [
       ["<span>x</span>", () => div("y") as HTMLElement],
       ["<div><p>a</p></div>", () => div({}, span("b") as Node) as HTMLElement],
       ["", () => div("fresh") as HTMLElement],

@@ -11,8 +11,8 @@
  * deliberately rather than running them back to back.
  */
 import { describe, expect, it } from "vitest";
-import { getSSRStore, isSSR, runInSSRContext, withSSR } from "../src/core/ssr-context";
 import { div, span } from "../src/core/rendering/html";
+import { getSSRStore, isSSR, runInSSRContext, withSSR } from "../src/core/ssr-context";
 import { escapeScriptJson, renderToString, serializeState } from "../src/platform/ssr";
 
 function deferred<T>() {
