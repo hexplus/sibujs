@@ -1,4 +1,4 @@
-import { registerDisposer } from "../core/rendering/dispose";
+import { dispose, registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span, style } from "../core/rendering/html";
 import { takePendingError } from "../core/rendering/lazy";
 import { onMount } from "../core/rendering/lifecycle";
@@ -379,13 +379,31 @@ export function ErrorBoundary(
           const asyncContainer = div({ class: "sibu-error-async" }) as Element;
           asyncContainer.appendChild(span({ class: "sibu-lazy-loading", nodes: "Loading..." }));
 
+          // An async completion may not mutate a boundary that has already been
+          // disposed: the container is detached by then, so anything committed
+          // into it is unreachable by any future dispose-walk and leaks.
+          let asyncDisposed = false;
+          registerDisposer(asyncContainer, () => {
+            asyncDisposed = true;
+          });
+
           (result as unknown as Promise<Element>)
             .then((el: Element) => {
-              asyncContainer.replaceChildren(el);
+              if (asyncDisposed) {
+                // The subtree was built before we could bail — dispose it here,
+                // since nothing else owns it.
+                dispose(el);
+                return;
+              }
+              replaceChildrenSafely(asyncContainer, el);
             })
             .catch((e: unknown) => {
+              // Swallowed rather than reported: the boundary that would have
+              // shown this error no longer exists. Returning keeps the
+              // rejection handled, so it never surfaces as an unhandled one.
+              if (asyncDisposed) return;
               const err = handleError(e);
-              asyncContainer.replaceChildren(tryRenderFallback(err));
+              replaceChildrenSafely(asyncContainer, tryRenderFallback(err));
             });
 
           return asyncContainer;

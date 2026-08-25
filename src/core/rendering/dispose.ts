@@ -91,6 +91,31 @@ export function dispose(node: Node): void {
 }
 
 /**
+ * Replace every child of `parent` with `next`, disposing the outgoing children
+ * first.
+ *
+ * Native `replaceChildren()` detaches nodes without running SibuJS teardown, so
+ * any reactive binding, lifecycle hook, or listener inside the removed subtree
+ * survives as an unreachable zombie: it keeps firing against detached DOM and
+ * is never collected. This helper enforces the disposal invariant — a
+ * SibuJS-owned node removed permanently from the DOM is disposed exactly once.
+ *
+ * Nodes present in `next` are never disposed, so a child may be safely carried
+ * over from the old content to the new.
+ */
+export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void {
+  const keep = next.length > 0 ? new Set<Node>(next) : null;
+  // Snapshot: childNodes is live and replaceChildren mutates it.
+  const current = Array.from(parent.childNodes);
+  for (let i = 0; i < current.length; i++) {
+    const child = current[i];
+    if (keep?.has(child)) continue;
+    dispose(child);
+  }
+  parent.replaceChildren(...next);
+}
+
+/**
  * Check for potential binding leaks. Returns the number of active DOM bindings.
  * In dev mode, logs a warning if the count exceeds the threshold.
  * In production, _isDev is false so the counter is always 0.

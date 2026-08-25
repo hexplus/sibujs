@@ -7,7 +7,7 @@ A lightweight, function-based frontend framework with fine-grained reactivity, d
 
 ## Why SibuJS?
 
-- **Zero VDOM:** Signals bind straight to the DOM, so only the exact node that changed updates — no diffing, no reconciliation.
+- **Zero VDOM:** No Virtual DOM and no component-tree reconciliation. Reactive bindings update their exact DOM targets directly; keyed collections reconcile only their own DOM range.
 - **Function-Based:** Components are plain functions returning nodes. No classes, no hooks rules, no compiler-only syntax.
 - **Fine-Grained Reactivity:** `signal`, `derived`, and `effect` track dependencies automatically and update at the value level.
 - **No Build Step Required:** Runs natively in the browser (or via a `<script>` tag), with an optional Vite plugin for template compilation and other build-time optimizations.
