@@ -225,12 +225,29 @@ export interface HydrationMismatch {
 }
 
 /**
- * Hydrates a server-rendered DOM tree by attaching event listeners
- * and activating reactive bindings.
+ * Activates a server-rendered SibuJS application by building the live client
+ * tree and **replacing** the inert server-rendered subtree with it.
+ *
+ * SibuJS uses replacement hydration rather than DOM adoption: the server markup
+ * is discarded, not attached to. It is not the case that listeners and bindings
+ * are wired onto the existing server nodes — reactive bindings belong to the
+ * nodes `component()` produced, and adopting server nodes would leave the
+ * visible DOM permanently frozen.
+ *
+ * Consequences worth knowing before deploying SSR:
+ *
+ *  - DOM node identity is not preserved.
+ *  - Pre-hydration user input, checkbox state, and focus are discarded.
+ *  - Conversely, partial-adoption mismatch bugs are avoided by this design —
+ *    the client tree is always authoritative.
+ *
+ * Re-hydrating the same container disposes the previous client tree first.
  *
  * When `options.diagnostics` is true, the walker reports the first
  * server/client mismatch it finds. This is a dev-mode tool — pass
  * `diagnostics: false` (or omit it) in production.
+ *
+ * @see docs/architecture/hydration.md
  */
 export function hydrate(component: () => HTMLElement, container: HTMLElement, options: HydrateOptions = {}): void {
   const clientTree = component();
@@ -892,8 +909,13 @@ export function suspenseSwapScript(id: string, nonce?: string): string {
     `<script${nonceAttr}>(function(){` +
     `var t=document.getElementById("sibu-resolved-${id}");` +
     `var f=document.querySelector('[data-sibu-suspense-id="${id}"]');` +
-    // Use appendChild loop instead of innerHTML to avoid DOM-based XSS
-    `if(t&&f){while(t.firstChild)f.appendChild(t.firstChild);t.remove();f.removeAttribute("data-sibu-suspense-id");}` +
+    // Clear the fallback FIRST, then move the resolved nodes in. Appending
+    // without clearing left the loading UI sitting above the real content
+    // (ST-004). Node moves rather than innerHTML, to avoid DOM-based XSS.
+    // Idempotent: a second execution finds no payload (`t`) and does nothing.
+    "if(t&&f){while(f.firstChild)f.removeChild(f.firstChild);" +
+    "while(t.firstChild)f.appendChild(t.firstChild);" +
+    `t.remove();f.removeAttribute("data-sibu-suspense-id");}` +
     "})()</script>"
   );
 }

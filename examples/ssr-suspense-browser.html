@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS SSR Suspense — browser swap fixture</title>
+  </head>
+  <body>
+    <div id="out"></div>
+
+    <script type="module">
+      import { collectStream, renderToSuspenseStream, ssrSuspense } from "../dist/ssr.js";
+
+      /**
+       * Inject streamed SSR HTML the way a browser receiving a stream would:
+       * markup is parsed, and inline <script> elements are re-created so they
+       * actually execute. `innerHTML` alone never runs scripts, which would
+       * make the swap protocol untestable.
+       */
+      function injectStreamed(html, container) {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html;
+        for (const node of Array.from(tpl.content.childNodes)) {
+          if (node.tagName === "SCRIPT") {
+            const s = document.createElement("script");
+            s.textContent = node.textContent;
+            container.appendChild(s);
+          } else {
+            container.appendChild(node);
+          }
+        }
+      }
+
+      const el = (tag, testid, text) => {
+        const n = document.createElement(tag);
+        if (testid) n.setAttribute("data-testid", testid);
+        if (text != null) n.textContent = text;
+        return n;
+      };
+
+      window.__t = {
+        reset() {
+          document.getElementById("out").replaceChildren();
+        },
+
+        /** One boundary: fallback "Loading", resolved "Done". */
+        async simple() {
+          const b = ssrSuspense({
+            fallback: () => el("span", "fallback", "Loading"),
+            content: async () => el("span", "resolved", "Done"),
+          });
+          const shell = document.createElement("div");
+          shell.appendChild(b.element);
+          const html = await collectStream(renderToSuspenseStream(shell, [b.promise]));
+          injectStreamed(html, document.getElementById("out"));
+        },
+
+        /** Resolved content with several sibling nodes. */
+        async multiNode() {
+          const b = ssrSuspense({
+            fallback: () => el("span", "fallback", "Loading"),
+            content: async () => {
+              const wrap = document.createElement("div");
+              wrap.appendChild(el("span", "resolved", "One"));
+              wrap.appendChild(el("span", "resolved", "Two"));
+              wrap.appendChild(el("span", "resolved", "Three"));
+              return wrap;
+            },
+          });
+          const shell = document.createElement("div");
+          shell.appendChild(b.element);
+          const html = await collectStream(renderToSuspenseStream(shell, [b.promise]));
+          injectStreamed(html, document.getElementById("out"));
+        },
+
+        /** Two sibling boundaries resolving to distinct content. */
+        async siblings() {
+          const a = ssrSuspense({
+            fallback: () => el("span", "fallback", "LoadA"),
+            content: async () => el("span", "resolved", "DoneA"),
+          });
+          const b = ssrSuspense({
+            fallback: () => el("span", "fallback", "LoadB"),
+            content: async () => el("span", "resolved", "DoneB"),
+          });
+          const shell = document.createElement("div");
+          shell.appendChild(a.element);
+          shell.appendChild(b.element);
+          const html = await collectStream(renderToSuspenseStream(shell, [a.promise, b.promise]));
+          injectStreamed(html, document.getElementById("out"));
+        },
+
+        /** Empty resolved content — the fallback must still disappear. */
+        async emptyResolved() {
+          const b = ssrSuspense({
+            fallback: () => el("span", "fallback", "Loading"),
+            content: async () => document.createElement("div"),
+          });
+          const shell = document.createElement("div");
+          shell.appendChild(b.element);
+          const html = await collectStream(renderToSuspenseStream(shell, [b.promise]));
+          injectStreamed(html, document.getElementById("out"));
+        },
+
+        /** Hostile text in resolved content must stay escaped after the swap. */
+        async hostileResolved() {
+          const b = ssrSuspense({
+            fallback: () => el("span", "fallback", "Loading"),
+            content: async () => el("span", "resolved", "<script>window.__pwned=1<\/script>"),
+          });
+          const shell = document.createElement("div");
+          shell.appendChild(b.element);
+          const html = await collectStream(renderToSuspenseStream(shell, [b.promise]));
+          injectStreamed(html, document.getElementById("out"));
+        },
+
+        counts() {
+          const out = document.getElementById("out");
+          return {
+            fallback: out.querySelectorAll('[data-testid="fallback"]').length,
+            resolved: out.querySelectorAll('[data-testid="resolved"]').length,
+            markers: out.querySelectorAll("[data-sibu-suspense-id]").length,
+            payloads: out.querySelectorAll('[id^="sibu-resolved-"]').length,
+            text: out.textContent,
+            pwned: window.__pwned === 1,
+          };
+        },
+      };
+
+      window.__ready = true;
+    </script>
+  </body>
+</html>

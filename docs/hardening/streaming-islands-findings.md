@@ -56,7 +56,7 @@ that the marker was always the correct expectation.
 
 ### Regression test
 
-`tests/__probe_tmp.test.ts` — six cases comparing the two paths **byte-for-byte**
+`tests/render-path-equivalence.test.ts` — six cases comparing the two paths **byte-for-byte**
 across void elements, attributes, nesting, hostile text, fragments, and
 `data-sibu-hydrate` suppression. The paths can no longer drift apart silently.
 
@@ -321,7 +321,7 @@ incapable of expressing this invariant regardless of timing.
 Two earlier drafts of these tests passed *vacuously* — one captured the "owner"
 after letting the bootstrap resolve, and one used `class="page"` on the inert
 server markup so `querySelector(".page")` matched the wrong node. Both are noted
-in `tests/__order_probe.test.ts`, which pins the harness timing that makes such
+in `tests/async-timing-characteristics.test.ts`, which pins the harness timing that makes such
 tests meaningful.
 
 ### Remaining risk

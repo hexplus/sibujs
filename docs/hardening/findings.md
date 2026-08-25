@@ -243,7 +243,7 @@ explicit stack and tears down a 2 000-deep DOM tree without overflowing.
 
 ### Test
 
-`tests/__depth_probe.test.ts`, and the depth cases in
+`tests/documented-limits.test.ts`, and the depth cases in
 `tests/hardening-reactivity.test.ts`.
 
 ---
