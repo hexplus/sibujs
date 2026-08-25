@@ -107,7 +107,7 @@ host engine and the call context, at which point the JS stack — not SibuJS
 bookkeeping — is the constraint. Real applications nest derivations tens deep,
 not thousands, so this has not been traded against the performance of the common
 case. The supported depth is pinned by a test; see
-`tests/__depth_probe.test.ts`.
+`tests/documented-limits.test.ts`.
 
 Note that **DOM disposal has no comparable limit**: `dispose()` walks the tree
 iteratively with an explicit stack, so a deeply nested component tree tears down

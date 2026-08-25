@@ -60,6 +60,21 @@ interface CacheEntry {
   promise: Promise<unknown> | null;
   listeners: Set<() => void>;
   refetchers: Set<() => Promise<void>>;
+  /**
+   * Cancellation for the in-flight request, owned by the ENTRY rather than by
+   * whichever query instance happened to start it. Query instances are
+   * observers: one losing interest must never cancel work another still needs
+   * (QRY-001). Aborted only when the entry itself is abandoned — garbage
+   * collected or cleared.
+   */
+  controller: AbortController | null;
+  /**
+   * Monotonic request generation for this entry. A result may commit only to
+   * the generation that still owns the entry: the same key re-fetched after an
+   * A→B→A round trip is a *different* generation, so key equality alone must
+   * never grant commit permission (QRY-003).
+   */
+  generation: number;
 }
 
 // Process-global cache used on the client. Under SSR the cache must be
@@ -76,6 +91,33 @@ function getActiveQueryCache(): Map<string, CacheEntry> {
   return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;
 }
 
+/**
+ * Recognise an abort across environments. `DOMException` is not guaranteed
+ * everywhere a fetcher might run, and userland fetchers commonly reject with a
+ * plain `{ name: "AbortError" }`.
+ */
+function isAbortError(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
+}
+
+/**
+ * Abandon an entry's in-flight work — the entry is being discarded.
+ *
+ * Advancing the generation is what makes abandonment stick: a request already
+ * in flight captured the old generation, so every ownership check downstream
+ * (cache commit, local commit, onSettled) now sees it as superseded. Without
+ * this, a request whose entry was cleared still looked like the owner, because
+ * it holds a reference to the discarded entry object itself.
+ */
+function abandonEntry(entry: CacheEntry): void {
+  if (entry.gcTimer) clearTimeout(entry.gcTimer);
+  entry.gcTimer = null;
+  entry.controller?.abort();
+  entry.controller = null;
+  entry.promise = null;
+  entry.generation++;
+}
+
 function getOrCreateEntry(cache: Map<string, CacheEntry>, key: string, initialData?: unknown): CacheEntry {
   let entry = cache.get(key);
   if (!entry) {
@@ -88,6 +130,8 @@ function getOrCreateEntry(cache: Map<string, CacheEntry>, key: string, initialDa
       promise: null,
       listeners: new Set(),
       refetchers: new Set(),
+      controller: null,
+      generation: 0,
     };
     cache.set(key, entry);
   }
@@ -125,7 +169,6 @@ export function query<T>(
   const [isFetching, setIsFetching] = signal(false);
   const [error, setError] = signal<Error | undefined>(undefined);
 
-  let abortController: AbortController | null = null;
   let disposed = false;
   let currentKey: string | null = null;
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
@@ -157,27 +200,31 @@ export function query<T>(
       const captured = entry.promise;
       try {
         await captured;
-        if (disposed || currentKey !== key) return;
-        if (entry.promise === captured) {
+      } catch {
+        // The owner records the outcome on the entry; a waiter only mirrors it.
+      } finally {
+        // Settle on EVERY terminal path. The previous version refreshed only
+        // when `entry.promise === captured`, but the owner nulls `entry.promise`
+        // before waiters resume — so that check was false on every normal
+        // completion and waiters stayed `fetching` forever (QRY-002).
+        // `onCacheUpdate()` is what clears the flag, so it must always run, and
+        // it must run BEFORE the callbacks so they observe fresh state.
+        if (!disposed && currentKey === key) {
           onCacheUpdate();
           if (entry.error) onError?.(entry.error);
           else if (entry.data !== undefined) onSuccess?.(entry.data as T);
+          onSettled?.();
         }
-      } catch {
-        if (disposed || currentKey !== key) return;
-        if (entry.promise === captured) {
-          onCacheUpdate();
-          if (entry.error) onError?.(entry.error);
-        }
-      } finally {
-        if (!disposed && currentKey === key) onSettled?.();
       }
       return;
     }
 
-    abortController?.abort();
-    abortController = new AbortController();
-    const signal = abortController.signal;
+    // The ENTRY owns cancellation. Starting a new request here must not abort
+    // a request other observers are still awaiting; the previous request for
+    // this entry has already settled (entry.promise was null above).
+    entry.controller = new AbortController();
+    const signal = entry.controller.signal;
+    const generation = ++entry.generation;
 
     setIsFetching(true);
 
@@ -197,12 +244,29 @@ export function query<T>(
 
     try {
       const result = await promise;
-      entry.promise = null;
-      if (disposed || currentKey !== key) return;
 
+      // Only the owning generation may clear the entry's in-flight state —
+      // clearing first would let a stale settle wipe a newer request's promise
+      // and abort handle.
+      if (entry.generation !== generation) return;
+      entry.promise = null;
+      entry.controller = null;
+
+      // ── Cache commit ───────────────────────────────────────────────────
+      // Owned by the entry GENERATION, not by this observer. The instance that
+      // started the request may since have changed key or been disposed, but
+      // other observers are still waiting on the result — gating the cache
+      // write on the initiator's local state stranded them with no data.
       entry.data = result;
       entry.dataUpdatedAt = Date.now();
       entry.error = undefined;
+
+      // Notify every observer of the entry, including this one.
+      for (const listener of entry.listeners) listener();
+
+      // ── Local commit ───────────────────────────────────────────────────
+      // Only if this observer still cares about this key.
+      if (disposed || currentKey !== key) return;
 
       const selected = select ? select(result as T) : (result as T);
       batch(() => {
@@ -210,26 +274,38 @@ export function query<T>(
         setIsFetching(false);
         setError(undefined);
       });
-
-      for (const listener of entry.listeners) listener();
       onSuccess?.(result as T);
     } catch (err) {
+      if (entry.generation !== generation) return;
       entry.promise = null;
-      if (disposed || currentKey !== key) return;
-      if (err instanceof DOMException && err.name === "AbortError") return;
+      entry.controller = null;
+
+      if (isAbortError(err)) {
+        // An abort is not an application error, but every observer still has
+        // to leave the fetching state or it spins forever.
+        for (const listener of entry.listeners) listener();
+        if (!disposed && currentKey === key) setIsFetching(false);
+        return;
+      }
 
       const errorObj = err instanceof Error ? err : new Error(String(err));
       entry.error = errorObj;
+
+      // Cache-level notification first — waiters depend on it.
+      for (const listener of entry.listeners) listener();
+
+      if (disposed || currentKey !== key) return;
 
       batch(() => {
         setError(errorObj);
         setIsFetching(false);
       });
-
-      for (const listener of entry.listeners) listener();
       onError?.(errorObj);
     } finally {
-      if (!disposed && currentKey === key) onSettled?.();
+      // Settlement is reported by the generation that owns the entry. A
+      // superseded run must not tell this observer the work is done while a
+      // newer request for the same key is still in flight.
+      if (!disposed && currentKey === key && entry.generation === generation) onSettled?.();
     }
   }
 
@@ -268,7 +344,14 @@ export function query<T>(
           // rapid key swap doesn't leave two timers racing toward the
           // same cache.delete(oldKey).
           if (oldEntry.gcTimer !== null) clearTimeout(oldEntry.gcTimer);
-          oldEntry.gcTimer = setTimeout(() => cache.delete(oldKey), cacheTime);
+          oldEntry.gcTimer = setTimeout(() => {
+            // Entry discarded with no observers left — its in-flight request is
+            // genuinely abandoned, so cancel it here rather than on disposal of
+            // any single observer.
+            const stale = cache.get(oldKey);
+            if (stale && stale.subscribers <= 0) abandonEntry(stale);
+            cache.delete(oldKey);
+          }, cacheTime);
         }
       }
     }
@@ -337,7 +420,9 @@ export function query<T>(
     // corrupting refcount and GC'ing entries still held by other subscribers.
     if (disposed) return;
     disposed = true;
-    abortController?.abort();
+    // Deliberately does NOT abort: the in-flight request belongs to the cache
+    // entry, and other observers may still need it (QRY-001). Abandoned
+    // requests are cancelled when the entry itself is garbage collected.
     effectCleanup();
     if (intervalTimer) clearInterval(intervalTimer);
     if (currentKey) {
@@ -349,7 +434,11 @@ export function query<T>(
         if (entry.subscribers <= 0 && cacheTime >= 0) {
           const key = currentKey;
           if (entry.gcTimer !== null) clearTimeout(entry.gcTimer);
-          entry.gcTimer = setTimeout(() => cache.delete(key), cacheTime);
+          entry.gcTimer = setTimeout(() => {
+            const stale = cache.get(key);
+            if (stale && stale.subscribers <= 0) abandonEntry(stale);
+            cache.delete(key);
+          }, cacheTime);
         }
       }
     }
@@ -407,11 +496,14 @@ export function clearQueryCache(): void {
   const activeRefetchers: Array<() => Promise<void>> = [];
   const activeCache = getActiveQueryCache();
   for (const entry of activeCache.values()) {
-    if (entry.gcTimer) clearTimeout(entry.gcTimer);
     if (entry.subscribers > 0) {
       for (const listener of entry.listeners) activeListeners.push(listener);
       for (const refetcher of entry.refetchers) activeRefetchers.push(refetcher);
     }
+    // Every entry is being discarded, so every request it owns is abandoned:
+    // cancel it and advance its generation so a late settle cannot commit,
+    // report settlement, or clobber the refetch started below.
+    abandonEntry(entry);
   }
   activeCache.clear();
   for (const listener of activeListeners) listener();
@@ -434,7 +526,9 @@ export function clearQueryCache(): void {
 export function __resetQueryCache(): void {
   const activeCache = getActiveQueryCache();
   for (const entry of activeCache.values()) {
-    if (entry.gcTimer) clearTimeout(entry.gcTimer);
+    // Clearing discards every entry, so every request it owns is abandoned.
+    // Cancel them rather than letting a stale result race the cleared cache.
+    abandonEntry(entry);
   }
   activeCache.clear();
 }

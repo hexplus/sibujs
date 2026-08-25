@@ -199,7 +199,7 @@ expect(checkLeaks()).toBe(before);
 
 `tests/hardening-memory.test.ts` applies this to `each()`, `Suspense`,
 `Portal`, `KeepAlive`, `ErrorBoundary`, and nested component trees across
-repeated cycles. `tests/__vacuity_check.test.ts` keeps the detector honest by
+repeated cycles. `tests/leak-detector-meta.test.ts` keeps the detector honest by
 proving it still reports a deliberately leaked range.
 
 This catches leaks without depending on garbage collection, which is why it is

@@ -57,6 +57,15 @@ export interface InfiniteQueryResult<TData> {
   dispose: () => void;
 }
 
+/**
+ * Recognise an abort across environments. `DOMException` is not available in
+ * every runtime a fetcher might execute in, and userland fetchers commonly
+ * reject with a plain `{ name: "AbortError" }`.
+ */
+function isAbortError(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
+}
+
 export function infiniteQuery<TData, TPageParam = number>(
   key: string | (() => string),
   fetcher: (ctx: { signal: AbortSignal; pageParam: TPageParam }) => Promise<TData>,
@@ -145,8 +154,20 @@ export function infiniteQuery<TData, TPageParam = number>(
 
         onSuccess?.(newPages);
       } catch (err) {
+        // A stale run owns nothing — a newer run's flags are not its to touch.
         if (disposed || myRun !== runId) return;
-        if (err instanceof DOMException && err.name === "AbortError") return;
+
+        if (isAbortError(err)) {
+          // The CURRENT run was aborted. An abort is not an application error,
+          // so no error state is set — but the fetching flags this run raised
+          // must still come down, or the query reports fetching forever.
+          batch(() => {
+            setIsFetching(false);
+            setIsFetchingNext(false);
+            setIsFetchingPrev(false);
+          });
+          return;
+        }
 
         const errorObj = err instanceof Error ? err : new Error(String(err));
         batch(() => {

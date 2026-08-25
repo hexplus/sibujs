@@ -38,8 +38,8 @@ hardening, and no real-browser test was run. Those are stated below.
 | Keyed reconciliation correctness | `tests/hardening-keyed-reconciliation.test.ts` (31) |
 | Reactive runtime under stress | `tests/hardening-reactivity.test.ts` (20) |
 | Leak-free mount/destroy cycles | `tests/hardening-memory.test.ts` (8, 1 GC-gated) |
-| Leak detector is not vacuous | `tests/__vacuity_check.test.ts` (2) |
-| Documented runtime limits | `tests/__depth_probe.test.ts` (2) |
+| Leak detector is not vacuous | `tests/leak-detector-meta.test.ts` (2) |
+| Documented runtime limits | `tests/documented-limits.test.ts` (2) |
 
 ## Metrics: before → after
 
