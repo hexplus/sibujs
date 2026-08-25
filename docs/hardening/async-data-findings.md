@@ -283,6 +283,124 @@ Low.
 
 ---
 
+## QRY-005 — `clearQueryCache()` silently detached live observers
+
+| | |
+|---|---|
+| **Severity** | P1 |
+| **Subsystem** | query cache observer lifecycle |
+| **Status** | Fixed |
+| **Class** | CONFIRMED BUG |
+
+### Description
+
+`clearQueryCache()` replaces every `CacheEntry` and restarts live queries by
+calling their stored refetchers. But `doFetch()` is fetch logic, not observer
+registration — it registered a listener and refetcher **only on the path where
+it had to create the entry**:
+
+```ts
+let entry = cache.get(key);
+if (!entry) {                       // ← only here
+  entry = getOrCreateEntry(cache, key);
+  entry.listeners.add(onCacheUpdate);
+  entry.refetchers.add(doFetch);
+}
+```
+
+So with two observers on one key, the first refetcher recreated the entry and
+registered itself; every other observer found the entry already present,
+deduplicated onto the shared promise, and registered **nothing**.
+
+The reconstructed entry ended up as:
+
+```text
+CacheEntry("profile") #2
+  subscribers = 0      ← nobody incremented it
+  listeners   = { A }
+  refetchers  = { A }
+```
+
+with B still live but detached. Worse, `subscribers = 0` made the entry look
+abandoned, so garbage collection could delete an entry that still had observers.
+
+The compounding cause: normal registration lives in a reactive `effect` keyed on
+`resolveKey()`, and subscriber counting was gated on `if (keyChanged)`. A cache
+clear changes the **entry object** but not the **key string**, so the effect
+never re-ran.
+
+### Reproducer
+
+The post-clear refetch is a poor probe — a detached observer still awaits the
+shared promise directly and updates its own state, so it looks healthy. An
+external cache write is the probe that exposes a missing listener:
+
+```ts
+const a = query(() => "K", fetcher);
+const b = query(() => "K", fetcher);
+await settle();
+
+clearQueryCache();
+await settle();
+expect(a.data()).toBe(b.data());   // passes even when broken
+
+setQueryData("K", "manual-update");
+await settle();
+expect(b.data()).toBe("manual-update");   // FAILED: b stayed at "v2"
+```
+
+Seven of ten new cases failed before the fix. The **single-observer** case
+passed — the bug needs at least two.
+
+### Root cause
+
+Observer attachment was keyed on the **key string** rather than on the concrete
+`CacheEntry` object.
+
+```text
+same key  ≠  same CacheEntry
+```
+
+### Fix
+
+The query instance now tracks the concrete entry it is attached to
+(`attachedEntry`), with two helpers:
+
+- `attachToEntry(entry, key)` — idempotent. Returns immediately if already
+  attached to that exact entry, so one observer can never inflate the
+  subscriber count. Otherwise detaches from the previous entry, then increments
+  `subscribers` and adds the listener and refetcher.
+- `detachFromEntry()` — removes listener and refetcher, decrements
+  `subscribers` with a `Math.max(0, …)` floor so a double-detach cannot make a
+  live entry look abandoned, and schedules GC **only if the entry is still the
+  live one for its key**. The timer re-checks entry identity before deleting, so
+  a timer scheduled for a predecessor can never collect its replacement.
+
+Both the registration effect and `doFetch()` now call `attachToEntry()` on every
+entry acquisition, so a post-clear restart reattaches every observer regardless
+of which one recreated the entry. `dispose()` reuses `detachFromEntry()`.
+
+Registration responsibility stays with the observer; `clearQueryCache()` needs
+no knowledge of observer internals. Entry-owned request ownership from QRY-001
+is untouched — the entry still owns the promise, `AbortController`, and
+generation.
+
+### Regression test
+
+`tests/query-observer-reattachment.test.ts` — 10 cases: 1, 2, and 10 observers
+after a clear; `setQueryData` after clear; `invalidateQueries` after clear
+(proving refetchers were restored, not just listeners); dedup preserved at one
+restarted fetch; disposing one observer leaves the other attached; no GC of an
+entry with a live observer under a short `cacheTime`; repeated clear cycles; no
+double-attachment; and a clear-during-pending-restart race.
+
+### Remaining risk
+
+Low. Attachment is now expressed once, in two helpers, rather than duplicated
+across the effect, `doFetch`, and `dispose`.
+
+---
+
 ## INF-001 — Aborting the current run left `fetching` flags true forever
 
 | | |

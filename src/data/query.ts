@@ -171,6 +171,14 @@ export function query<T>(
 
   let disposed = false;
   let currentKey: string | null = null;
+  // The concrete CacheEntry this observer is currently attached to.
+  //
+  // Attachment must be keyed on ENTRY IDENTITY, not on the key string:
+  // `clearQueryCache()` replaces the entry while the key stays the same, so
+  // key-driven registration never re-runs and the observer silently detaches
+  // (QRY-005). `same key !== same CacheEntry`.
+  let attachedEntry: CacheEntry | null = null;
+  let attachedKey: string | null = null;
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
   const loading = derived(() => isFetching() && data() === undefined);
@@ -182,15 +190,78 @@ export function query<T>(
     return Date.now() - entry.dataUpdatedAt >= staleTime;
   });
 
+  /**
+   * Release this observer's registration on the entry it currently holds.
+   *
+   * GC is scheduled only when the entry is still the live one for its key —
+   * scheduling it for an entry that has already been replaced would delete the
+   * *replacement* out from under live observers.
+   */
+  function detachFromEntry(): void {
+    const entry = attachedEntry;
+    const key = attachedKey;
+    if (!entry) return;
+
+    attachedEntry = null;
+    attachedKey = null;
+
+    entry.listeners.delete(onCacheUpdate);
+    entry.refetchers.delete(doFetch);
+    // Never let the refcount go negative — a double-detach would otherwise
+    // make the entry look abandoned while observers remain.
+    entry.subscribers = Math.max(0, entry.subscribers - 1);
+
+    if (entry.subscribers > 0 || cacheTime < 0 || key === null) return;
+    if (cache.get(key) !== entry) return; // already replaced; nothing to collect
+
+    if (entry.gcTimer !== null) clearTimeout(entry.gcTimer);
+    entry.gcTimer = setTimeout(() => {
+      const current = cache.get(key);
+      // Re-check identity: a replacement entry must never be collected by a
+      // timer scheduled for its predecessor.
+      if (current === entry && current.subscribers <= 0) {
+        abandonEntry(current);
+        cache.delete(key);
+      }
+    }, cacheTime);
+  }
+
+  /**
+   * Attach this observer to `entry`, moving off any previous entry first.
+   *
+   * Idempotent: re-attaching to the entry already held is a no-op, so the
+   * subscriber count can never be inflated by one observer.
+   */
+  function attachToEntry(entry: CacheEntry, key: string): void {
+    if (attachedEntry === entry) {
+      if (entry.gcTimer !== null) {
+        clearTimeout(entry.gcTimer);
+        entry.gcTimer = null;
+      }
+      return;
+    }
+
+    detachFromEntry();
+
+    attachedEntry = entry;
+    attachedKey = key;
+    entry.subscribers++;
+    entry.listeners.add(onCacheUpdate);
+    entry.refetchers.add(doFetch);
+    if (entry.gcTimer !== null) {
+      clearTimeout(entry.gcTimer);
+      entry.gcTimer = null;
+    }
+  }
+
   async function doFetch(): Promise<void> {
     if (disposed || !currentKey || !enabled) return;
     const key = currentKey;
-    let entry = cache.get(key);
-    if (!entry) {
-      entry = getOrCreateEntry(cache, key);
-      entry.listeners.add(onCacheUpdate);
-      entry.refetchers.add(doFetch);
-    }
+    // getOrCreateEntry + attach on every fetch. After clearQueryCache() the
+    // first refetcher recreates the entry and the rest deduplicate onto it, so
+    // registering only on the create path left every other observer detached.
+    const entry = getOrCreateEntry(cache, key);
+    attachToEntry(entry, key);
 
     // Dedup: another subscriber is already fetching this key — await its result.
     // Capture the in-flight promise so a cache invalidation that swaps it
@@ -331,41 +402,14 @@ export function query<T>(
 
   const effectCleanup = effect(() => {
     const key = resolveKey();
-
-    if (currentKey !== null && currentKey !== key) {
-      const oldEntry = cache.get(currentKey);
-      if (oldEntry) {
-        oldEntry.listeners.delete(onCacheUpdate);
-        oldEntry.refetchers.delete(doFetch);
-        oldEntry.subscribers--;
-        if (oldEntry.subscribers <= 0 && cacheTime >= 0) {
-          const oldKey = currentKey;
-          // Clear any existing gcTimer before scheduling a new one so a
-          // rapid key swap doesn't leave two timers racing toward the
-          // same cache.delete(oldKey).
-          if (oldEntry.gcTimer !== null) clearTimeout(oldEntry.gcTimer);
-          oldEntry.gcTimer = setTimeout(() => {
-            // Entry discarded with no observers left — its in-flight request is
-            // genuinely abandoned, so cancel it here rather than on disposal of
-            // any single observer.
-            const stale = cache.get(oldKey);
-            if (stale && stale.subscribers <= 0) abandonEntry(stale);
-            cache.delete(oldKey);
-          }, cacheTime);
-        }
-      }
-    }
-
     const keyChanged = currentKey !== key;
     currentKey = key;
+
+    // One call handles both transitions: a changed key, and an unchanged key
+    // whose entry object was replaced. Detaching from the previous entry,
+    // refcounting, and GC scheduling all live in the helpers.
     const entry = getOrCreateEntry(cache, key, initialData);
-    if (keyChanged) entry.subscribers++;
-    if (entry.gcTimer !== null) {
-      clearTimeout(entry.gcTimer);
-      entry.gcTimer = null;
-    }
-    entry.listeners.add(onCacheUpdate);
-    entry.refetchers.add(doFetch);
+    attachToEntry(entry, key);
 
     if (entry.data !== undefined) {
       const raw = entry.data as T;
@@ -425,23 +469,7 @@ export function query<T>(
     // requests are cancelled when the entry itself is garbage collected.
     effectCleanup();
     if (intervalTimer) clearInterval(intervalTimer);
-    if (currentKey) {
-      const entry = cache.get(currentKey);
-      if (entry) {
-        entry.listeners.delete(onCacheUpdate);
-        entry.refetchers.delete(doFetch);
-        entry.subscribers--;
-        if (entry.subscribers <= 0 && cacheTime >= 0) {
-          const key = currentKey;
-          if (entry.gcTimer !== null) clearTimeout(entry.gcTimer);
-          entry.gcTimer = setTimeout(() => {
-            const stale = cache.get(key);
-            if (stale && stale.subscribers <= 0) abandonEntry(stale);
-            cache.delete(key);
-          }, cacheTime);
-        }
-      }
-    }
+    detachFromEntry();
     // Guard removeEventListener in case the runtime added addEventListener
     // to globalThis but doesn't expose removeEventListener symmetrically
     // (e.g. polyfilled-focus environments).

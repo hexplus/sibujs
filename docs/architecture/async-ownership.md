@@ -53,6 +53,21 @@ Enforced by monotonic counters:
 | `infiniteQuery()` | `runId` | every new run |
 | `Route()` outlet | `navSeq` | every render pass |
 
+### Observer-attachment invariant
+
+> A live observer must be attached to the **current concrete cache entry** for
+> its key — reattaching when the entry object is replaced, even though the key
+> is unchanged.
+
+```text
+same key  ≠  same CacheEntry
+```
+
+`clearQueryCache()` replaces entries without changing keys, so any registration
+driven by key comparison never re-runs and silently detaches observers.
+Attachment is therefore keyed on entry identity, and is idempotent: attaching
+twice to the same entry must not inflate the subscriber count.
+
 ### Cache-commit vs local-commit
 
 > A result may update the shared cache even when the instance that requested it
