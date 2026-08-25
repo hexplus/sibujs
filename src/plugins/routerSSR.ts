@@ -16,7 +16,7 @@
 import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "../utils/guards";
 import type { RouteDef } from "./router";
-import { createRouter } from "./router";
+import { __getNavigationEpoch, createRouter } from "./router";
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -525,21 +525,22 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
   const container = options?.container || document.getElementById("app");
   if (!container) return;
 
+  // The live URL selects WHICH route to render. The navigation generation
+  // decides WHETHER this bootstrap is still allowed to commit. Those are two
+  // different questions and must not be conflated — see RM-002.
   const liveUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   const resolved = resolveServerRoute(liveUrl, routes);
+  const bootstrapEpoch = __getNavigationEpoch();
 
   import("../platform/ssr")
     .then(async ({ hydrate }) => {
       const { replaceChildrenSafely } = await import("../core/rendering/dispose");
-      // A user navigation may have committed while this chunk loaded. That
-      // navigation owns the DOM now — a stale bootstrap must never overwrite
-      // it (same rule the client router enforces at its commit boundary).
-      //
-      // Compared against `location`, not router state: at bootstrap the router
-      // is still resolving its initial route asynchronously, so its path is not
-      // yet authoritative. The address bar is.
-      const nowUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-      if (nowUrl !== liveUrl) return;
+      // Final ownership check, immediately before the commit that replaces the
+      // container's DOM. Any navigation committed since bootstrap began has
+      // advanced the generation, so this bootstrap is permanently superseded —
+      // including the A→B→A case, where the URL is identical again but the
+      // generation is not. Router teardown advances it too.
+      if (__getNavigationEpoch() !== bootstrapEpoch) return;
 
       if (resolved.component) {
         hydrate(resolved.component, container);

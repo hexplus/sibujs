@@ -189,11 +189,10 @@ invariant.
 
 1. Resolve from `location.pathname + search + hash` instead of
    `serverState.path`.
-2. Guard the async continuation: re-read the live URL when the chunk lands and
-   bail if it changed, so a superseded bootstrap cannot overwrite a newer
-   navigation. Compared against `location` rather than router state, because at
-   bootstrap the router is still resolving its initial route asynchronously and
-   its path is not yet authoritative.
+2. Guard the async continuation so a superseded bootstrap cannot overwrite a
+   newer navigation. **This guard was initially a URL comparison, which RM-002
+   later replaced with a navigation-generation check** — see RM-002 for why URL
+   equality could not express the invariant.
 3. When no route matches the live URL, clear the container through
    `replaceChildrenSafely()` rather than leaving markup for a route the user is
    not on.
@@ -215,6 +214,120 @@ helper now awaits macrotasks.
 ### Remaining risk
 
 Not verified in real browsers — see the readiness document.
+
+---
+
+## RM-002 — Stale bootstrap could regain commit permission via an ABA navigation
+
+| | |
+|---|---|
+| **Severity** | P1 |
+| **Subsystem** | SSR/client bootstrap ownership (`hydrateRouter`) |
+| **Status** | Fixed |
+| **Class** | CONFIRMED BUG |
+
+Filed separately from RM-001 rather than folded into it. RM-001 was a
+*route-selection* defect — the bootstrap rendered the wrong route. RM-002 is an
+*ownership* defect: the bootstrap renders the right route but has no right to
+commit it. They have different root causes and different fixes, and RM-001's fix
+introduced the guard that RM-002 corrects.
+
+### Description
+
+The RM-001 fix guarded the async bootstrap by capturing the URL at start and
+comparing it after the dynamic import resolved. That defends the simple case
+(`/b` → navigate `/c` → bootstrap resolves) but not an **ABA** sequence:
+
+```text
+bootstrap   generation 10 → /b   (import pending)
+navigation  generation 11 → /c
+navigation  generation 12 → /b   ← same URL, newer generation
+bootstrap   generation 10 resolves
+```
+
+At that point `nowUrl === liveUrl`, so the guard passes and the stale bootstrap
+calls `hydrate()`. Because SibuJS uses **replacement hydration**, that replaces
+the entire container — destroying the signals, effects, event listeners, loaded
+data, and lifecycle owned by the generation-12 instance.
+
+The damage is invisible to the obvious assertions: `location`, `route()`, and
+`textContent` all still read `/b`. Only component-instance identity reveals that
+the wrong generation owns the DOM.
+
+### Reproducer
+
+`destroyRouter()` during a pending bootstrap is the same defect with a wider
+window, and **failed against the RM-001 implementation**:
+
+```ts
+hydrateRouter(routes, { container });
+destroyRouter();
+await settle();
+// Expected: container untouched
+// Actual:   the bootstrap committed into a torn-down router's container
+```
+
+The ownership primitive is proved directly:
+
+```ts
+await navigate("/b");
+const url = location.pathname, epoch = __getNavigationEpoch();
+await navigate("/c");
+await navigate("/b");
+
+expect(location.pathname).toBe(url);                    // URL cannot distinguish
+expect(__getNavigationEpoch()).toBeGreaterThan(epoch);  // generation can
+```
+
+### Root cause
+
+Conflating two responsibilities. The live URL answers *which route to render*;
+it cannot answer *whether this async work may still commit*. That second
+question is temporal, and `/b` at generation 10 and `/b` at generation 12 are
+different moments wearing the same string.
+
+### Fix
+
+Reused the client router's existing supersession discipline rather than adding
+an SSR-only mechanism. `SibuRouter` gains an internal monotonic `navEpoch`,
+advanced at the **commit boundary** — the same place the router already enforces
+"only the active navigation may commit" — and on `destroy()`. The router's own
+initial location resolution is excluded via an internal `initialResolution`
+flag, because it establishes the bootstrap's route rather than superseding it.
+
+`hydrateRouter()` captures the epoch before the async gap and re-checks it
+immediately before `hydrate()`, with no further `await` in between. Exposed as
+`__getNavigationEpoch()`, documented `@internal`; no public API added.
+
+The epoch lives on the router instance, not in a module global, so multiple
+routers and SSR request isolation are unaffected.
+
+### Regression test
+
+`tests/ssr-hardening-bootstrap-aba.test.ts` — 12 cases: normal bootstrap, simple
+supersession, ABA, multiple ABA, query ABA, router destroy, an RM-001
+non-regression check, and five direct proofs that the generation advances across
+round trips where the URL does not.
+
+**Honest limitation:** the end-to-end ABA cases (C, D, E) pass both before and
+after the fix. `hydrateRouter`'s dynamic import is warm — `routerSSR` already
+imports `platform/ssr` statically — so its continuation fires on the first
+macrotask, before two navigations can complete, and the URL guard rejected it
+during the `/c` phase instead. The window is real but too narrow to stage
+reliably in this harness. Case F (destroy) is the case that genuinely failed
+before, and the generation proofs establish that URL equality is structurally
+incapable of expressing this invariant regardless of timing.
+
+Two earlier drafts of these tests passed *vacuously* — one captured the "owner"
+after letting the bootstrap resolve, and one used `class="page"` on the inert
+server markup so `querySelector(".page")` matched the wrong node. Both are noted
+in `tests/__order_probe.test.ts`, which pins the harness timing that makes such
+tests meaningful.
+
+### Remaining risk
+
+Low. Not verified in real browsers, where import timing differs and the window
+may be wider.
 
 ---
 
