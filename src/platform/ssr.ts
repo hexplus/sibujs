@@ -28,6 +28,7 @@
 //    to block prototype-pollution lookups on the islands map.
 
 import { isDev } from "../core/dev";
+import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
 import { isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
@@ -254,7 +255,12 @@ export function hydrate(component: () => HTMLElement, container: HTMLElement, op
   // DOM. In-place attribute reconciliation cannot adopt those bindings —
   // they remain wired to the client subtree, so leaving the server DOM in
   // place would silently freeze updates.
-  container.replaceChildren(clientTree);
+  // Route through replaceChildrenSafely rather than a bare replaceChildren:
+  // on a re-hydration the outgoing children are a SibuJS-owned client tree
+  // whose bindings, listeners and lifecycle hooks must be torn down. A native
+  // replace would detach them unreachable and leak. First-time hydration is
+  // unaffected — inert server markup has nothing to dispose.
+  replaceChildrenSafely(container, clientTree);
   container.setAttribute("data-sibu-hydrated", "true");
 }
 
@@ -269,6 +275,27 @@ export function hydrate(component: () => HTMLElement, container: HTMLElement, op
  * Stops early after the first `max` mismatches to avoid log spam.
  * This is opt-in — running it on a large tree has non-zero cost.
  */
+/**
+ * Concatenated direct text-node children of `node`, whitespace-normalised.
+ *
+ * Only *direct* children, so text owned by a descendant element is attributed
+ * to that descendant rather than reported twice. Normalising whitespace avoids
+ * false positives from HTML source formatting.
+ */
+function directTextOf(node: HTMLElement): string {
+  let out = "";
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === 3 /* TEXT_NODE */) out += child.nodeValue ?? "";
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+/** Dispose a SibuJS-owned node, then swap `next` into its place. */
+function disposeAndReplace(outgoing: HTMLElement, next: Node): void {
+  dispose(outgoing);
+  outgoing.replaceWith(next);
+}
+
 function collectMismatches(
   serverNode: HTMLElement | null,
   clientNode: HTMLElement | null,
@@ -357,8 +384,26 @@ function collectMismatches(
     }
   }
 
+  // Direct text content. Compared before descending so a leaf whose text
+  // differs is reported once, at the node that owns the text, rather than
+  // being silently skipped — text divergence is the most common real-world
+  // mismatch (server and client disagreeing on data).
+  const serverText = directTextOf(serverNode);
+  const clientText = directTextOf(clientNode);
+  if (serverText !== clientText) {
+    out.push({
+      kind: "text",
+      path: nodePath,
+      serverValue: serverText,
+      clientValue: clientText,
+      message: "Text content differs between server and client.",
+    });
+    if (out.length >= max) return;
+  }
+
   // Descend into children. We only descend through element children —
-  // text-node diffs would be noisy to report in the default walk.
+  // per-text-node diffs would be noisy, so the aggregate check above covers
+  // text divergence instead.
   const serverChildren = Array.from(serverNode.children) as HTMLElement[];
   const clientChildren = Array.from(clientNode.children) as HTMLElement[];
   const max2 = Math.max(serverChildren.length, clientChildren.length);
@@ -687,7 +732,7 @@ export function hydrateIslands(container: HTMLElement, islands: Record<string, (
     // hydration loops don't re-process already-hydrated islands.
     (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
     (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
-    (marker as HTMLElement).replaceWith(clientTree);
+    disposeAndReplace(marker as HTMLElement, clientTree);
   }
   container.setAttribute("data-sibu-hydrated", "partial");
 }
@@ -728,7 +773,7 @@ export function hydrateProgressively(
             // + data-sibu-hydrated for downstream re-queries.
             (clientTree as HTMLElement).setAttribute("data-sibu-island", id);
             (clientTree as HTMLElement).setAttribute("data-sibu-hydrated", "true");
-            (marker as HTMLElement).replaceWith(clientTree);
+            disposeAndReplace(marker as HTMLElement, clientTree);
             break;
           }
         }

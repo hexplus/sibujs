@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS Hydration — browser test fixture</title>
+  </head>
+  <body>
+    <!-- Each block below stands in for server-rendered markup. The client
+         hydrates them on demand so a spec can drive one case at a time. -->
+
+    <section id="match">
+      <div id="m-root" class="box" data-n="1">Hello</div>
+    </section>
+
+    <section id="text-mismatch">
+      <span id="t-root">Hello</span>
+    </section>
+
+    <section id="struct-mismatch">
+      <div id="s-root"><span>Hello</span><span>Unexpected</span></div>
+    </section>
+
+    <section id="counter">
+      <div id="c-root"><button id="c-btn">inc</button><span id="c-val">0</span></div>
+    </section>
+
+    <section id="form">
+      <input id="f-input" value="Alice" />
+      <input id="f-check" type="checkbox" />
+    </section>
+
+    <section id="islands">
+      <div data-sibu-island="alpha"><span class="marker">alpha-server</span></div>
+      <div data-sibu-island="beta"><span class="marker">beta-server</span></div>
+    </section>
+
+    <section id="router">
+      <nav id="r-nav"></nav>
+      <div id="r-outlet"></div>
+    </section>
+
+    <div id="log"></div>
+
+    <script type="module">
+      import { div, span, button, input } from "../dist/index.js";
+      import { signal } from "../dist/index.js";
+      import { hydrate, hydrateIslands } from "../dist/ssr.js";
+      import { createRouter, setRoutes, Route, RouterLink, route, navigate } from "../dist/plugins.js";
+
+      const log = [];
+      const record = (m) => {
+        log.push(m);
+        document.getElementById("log").textContent = log.join("\n");
+      };
+
+      // Counters that prove callbacks fire exactly once.
+      const counts = { click: 0, render: 0 };
+
+      const api = {
+        log,
+        counts,
+
+        capture(sel) {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          el.__probe = Symbol.for("probe");
+          return true;
+        },
+        // True when the node at `sel` is the SAME node captured earlier.
+        sameNode(sel) {
+          const el = document.querySelector(sel);
+          return !!el && el.__probe === Symbol.for("probe");
+        },
+
+        hydrateMatch() {
+          hydrate(
+            () => div({ id: "m-root", class: "box", "data-n": "1" }, "Hello"),
+            document.getElementById("match"),
+          );
+        },
+
+        hydrateTextMismatch() {
+          hydrate(() => span({ id: "t-root" }, "Goodbye"), document.getElementById("text-mismatch"));
+        },
+
+        hydrateStructMismatch() {
+          hydrate(
+            () => div({ id: "s-root" }, span("Hello")),
+            document.getElementById("struct-mismatch"),
+          );
+        },
+
+        hydrateCounter() {
+          const [n, setN] = signal(0);
+          hydrate(() => {
+            counts.render++;
+            const b = button({ id: "c-btn", on: { click: () => { counts.click++; setN(n() + 1); } } }, "inc");
+            const v = span({ id: "c-val" }, () => String(n()));
+            return div({ id: "c-root" }, [b, v]);
+          }, document.getElementById("counter"));
+        },
+
+        hydrateForm() {
+          hydrate(
+            () => div({}, [input({ id: "f-input", value: "Alice" }), input({ id: "f-check", type: "checkbox" })]),
+            document.getElementById("form"),
+          );
+        },
+
+        hydrateIsland(name) {
+          hydrateIslands(document.getElementById("islands"), {
+            [name]: () => div({ class: "hydrated" }, `${name}-client`),
+          });
+        },
+
+        setupRouter() {
+          createRouter({ mode: "history", base: "" });
+          setRoutes([
+            { path: "/examples/hydration-browser.html", component: () => div({ class: "page", "data-page": "home" }, "home") },
+            { path: "/users/:id", component: () => div({ class: "page", "data-page": "user" }, () => `user:${route().params.id}`) },
+            { path: "/about", component: () => div({ class: "page", "data-page": "about" }, "about") },
+          ]);
+          const nav = document.getElementById("r-nav");
+          const l1 = RouterLink({ to: "/users/42", nodes: "User 42" });
+          l1.id = "r-link-user";
+          const l2 = RouterLink({ to: "/about", nodes: span({ class: "inner" }, "About") });
+          l2.id = "r-link-about";
+          nav.append(l1, l2);
+          document.getElementById("r-outlet").appendChild(Route());
+        },
+
+        routePath: () => route().path,
+        routeParams: () => route().params,
+        navigate: (to) => navigate(to),
+        historyLength: () => history.length,
+      };
+
+      window.__t = api;
+      window.__ready = true;
+      record("ready");
+    </script>
+  </body>
+</html>
