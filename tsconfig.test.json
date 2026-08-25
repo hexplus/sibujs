@@ -1,0 +1,41 @@
+{
+  // The main tsconfig only includes `src` and `index.ts`, so nothing ever
+  // type-checked the test suite or the 15 subpath entry files. A test could call
+  // a public API with the wrong types and still pass, because vitest strips
+  // types rather than checking them — that is how a `retry: 0` (the option is a
+  // `RetryOptions` object, not a number) survived into a new test during RC
+  // certification and silently exercised the default 3-retry backoff instead of
+  // the intended zero. See rc-findings TEST-003 / TEST-004.
+  //
+  // Run with `npm run typecheck:tests`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "declaration": false,
+    "types": ["vitest/globals", "node"],
+    // Tests legitimately declare fixtures they only partly consume.
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "src",
+    "tests",
+    "index.ts",
+    "data.ts",
+    "browser.ts",
+    "patterns.ts",
+    "motion.ts",
+    "ui.ts",
+    "widgets.ts",
+    "ssr.ts",
+    "devtools.ts",
+    "performance.ts",
+    "ecosystem.ts",
+    "plugins.ts",
+    "build.ts",
+    "testing.ts",
+    "extras.ts",
+    "cdn.ts"
+  ]
+}
