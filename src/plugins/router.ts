@@ -838,6 +838,15 @@ export class SibuRouter {
   // "router-destroyed" rather than the generic "superseded".
   private destroyed = false;
 
+  // Monotonic navigation generation. Bumped by every committed navigation that
+  // can acquire DOM ownership, and by destroy(). Async work that wants to
+  // commit into the DOM captures this first and re-checks before committing:
+  // unlike a URL comparison it distinguishes "/b" generation 10 from "/b"
+  // generation 12, so an A→B→A round trip can never restore commit permission
+  // to superseded work. The router's own initial location resolution is
+  // excluded — it establishes the bootstrap route rather than superseding it.
+  private navEpoch = 0;
+
   constructor(routes: RouteDef[], options: RouterOptions = {}) {
     this.options = {
       mode: "history",
@@ -890,7 +899,9 @@ export class SibuRouter {
     // don't clobber it by re-navigating to the current location.
     queueMicrotask(() => {
       if (!this.navigator.isNavigating) {
-        this.handleLocationChange(true);
+        // Initial resolution: establishes the bootstrap route, so it must not
+        // advance the generation and invalidate the bootstrap it is serving.
+        this.handleLocationChange(true, true);
       }
       this.isReadySetter(true);
     });
@@ -907,9 +918,9 @@ export class SibuRouter {
     };
   }
 
-  private handleLocationChange(skipHistory = true): void {
+  private handleLocationChange(skipHistory = true, initialResolution = false): void {
     const path = this.getCurrentPath();
-    this.navigate(path, { replace: true, skipHistory }).catch((err) => {
+    this.navigate(path, { replace: true, skipHistory, initialResolution }).catch((err) => {
       console.error("[Router] Error during location change navigation:", err);
     });
   }
@@ -954,7 +965,7 @@ export class SibuRouter {
   // Public API
   async navigate(
     to: NavigationTarget,
-    options: { replace?: boolean; state?: unknown; skipHistory?: boolean } = {},
+    options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean } = {},
   ): Promise<NavigationResult> {
     try {
       await this.navigator.navigate(async (signal) => {
@@ -1012,7 +1023,7 @@ export class SibuRouter {
   private async performNavigation(
     to: RouteContext,
     from: RouteContext,
-    options: { replace?: boolean; state?: unknown; skipHistory?: boolean },
+    options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean },
     signal: AbortSignal,
     depth = 0,
     redirectChain: string[] = [],
@@ -1147,6 +1158,11 @@ export class SibuRouter {
     if (!options.skipHistory) {
       this.updateHistory(to, options);
     }
+
+    // Advance the navigation generation. Anything asynchronous that captured
+    // the previous value has now been superseded and permanently loses the
+    // right to commit into the DOM.
+    if (!options.initialResolution) this.navEpoch++;
 
     // Update current route
     this.currentRouteSetter(to);
@@ -1283,6 +1299,11 @@ export class SibuRouter {
     return this.isReadyGetter();
   }
 
+  /** @internal Navigation generation — see `navEpoch`. Not a public API. */
+  get navigationEpoch(): number {
+    return this.navEpoch;
+  }
+
   get isNavigating(): boolean {
     return this.navigator.isNavigating;
   }
@@ -1290,6 +1311,8 @@ export class SibuRouter {
   // Cleanup
   destroy(): void {
     this.destroyed = true;
+    // Any async work holding an older epoch can never commit after teardown.
+    this.navEpoch++;
     this.navigator.abort(ABORT_ROUTER_DESTROYED);
     for (const fn of this.cleanup) fn();
     this.cleanup = [];
@@ -2218,6 +2241,21 @@ export async function preloadRoute(to: NavigationTarget): Promise<void> {
 /**
  * Validates if a route exists
  */
+/**
+ * Current navigation generation for the active router, or `-1` when no router
+ * exists (including after `destroyRouter()`).
+ *
+ * @internal Not part of the public API. Exists so asynchronous work that can
+ * acquire DOM ownership — notably `hydrateRouter()`'s bootstrap — can prove it
+ * has not been superseded. Capture before the async gap, re-check immediately
+ * before committing. A URL comparison cannot serve this purpose: an A→B→A
+ * navigation returns to the same URL under a *newer* generation, and stale work
+ * must stay superseded.
+ */
+export function __getNavigationEpoch(): number {
+  return _routerRef.current?.navigationEpoch ?? -1;
+}
+
 export function hasRoute(name: string): boolean {
   if (!_routerRef.current) return false;
   return _routerRef.current["matcher"].findByName(name) !== null;

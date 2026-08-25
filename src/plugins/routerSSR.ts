@@ -16,7 +16,7 @@
 import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "../utils/guards";
 import type { RouteDef } from "./router";
-import { createRouter } from "./router";
+import { __getNavigationEpoch, createRouter } from "./router";
 
 // ============================================================================
 // TYPES & INTERFACES
@@ -511,26 +511,50 @@ export function hydrateRouter(routes: SSRRouteDef[], options?: { container?: HTM
   //    location-driven resolution reconciles to the live URL.
   createRouter(routes as RouteDef[]);
 
-  // 3. Hydrate the existing DOM.
+  // 3. Hydrate the existing DOM — for the route the BROWSER is actually on.
+  //
+  // The server's path and the live URL can disagree: stale cached HTML, a CDN
+  // serving another route's document, a proxy rewrite, or a redirect landing
+  // elsewhere. Resolving from `serverState.path` here produced the one state
+  // the bootstrap invariant forbids — location and router agreeing on /b while
+  // the DOM showed /a (RM-001).
+  //
+  // Because SibuJS uses replacement hydration, rendering the live route costs
+  // nothing extra: the server subtree is discarded either way. So the live URL
+  // always wins, and DOM / router / location end up describing one location.
   const container = options?.container || document.getElementById("app");
-  if (container && serverState.path) {
-    // Find the component that the server rendered for this route
-    const resolved = resolveServerRoute(serverState.path, routes);
-    if (resolved.component) {
-      // Import hydrate from ssr and attach bindings to existing DOM
-      import("../platform/ssr")
-        .then(({ hydrate }) => {
-          if (resolved.component) {
-            hydrate(resolved.component, container);
-          }
-        })
-        .catch((err) => {
-          if (typeof console !== "undefined") {
-            console.error("[SibuJS routerSSR] failed to load hydrate:", err);
-          }
-        });
-    }
-  }
+  if (!container) return;
+
+  // The live URL selects WHICH route to render. The navigation generation
+  // decides WHETHER this bootstrap is still allowed to commit. Those are two
+  // different questions and must not be conflated — see RM-002.
+  const liveUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  const resolved = resolveServerRoute(liveUrl, routes);
+  const bootstrapEpoch = __getNavigationEpoch();
+
+  import("../platform/ssr")
+    .then(async ({ hydrate }) => {
+      const { replaceChildrenSafely } = await import("../core/rendering/dispose");
+      // Final ownership check, immediately before the commit that replaces the
+      // container's DOM. Any navigation committed since bootstrap began has
+      // advanced the generation, so this bootstrap is permanently superseded —
+      // including the A→B→A case, where the URL is identical again but the
+      // generation is not. Router teardown advances it too.
+      if (__getNavigationEpoch() !== bootstrapEpoch) return;
+
+      if (resolved.component) {
+        hydrate(resolved.component, container);
+        return;
+      }
+      // No route matched the live URL. Leaving the server's markup would show
+      // content for a route the user is not on, so clear it instead.
+      replaceChildrenSafely(container);
+    })
+    .catch((err) => {
+      if (typeof console !== "undefined") {
+        console.error("[SibuJS routerSSR] failed to load hydrate:", err);
+      }
+    });
 }
 
 /**

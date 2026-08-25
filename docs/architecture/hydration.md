@@ -120,6 +120,27 @@ because it cannot know which pre-hydration edits are meaningful.
   component instance. Verified by counting real clicks and real re-renders in
   all three browser engines.
 
+## Bootstrap with the router
+
+`hydrateRouter()` resolves and renders **the route the browser is actually on**,
+taken from `location`, not from the server's serialized `path`. The two can
+disagree — stale cached HTML, a CDN serving another route's document, a proxy
+rewrite, or a user navigating before the bundle boots.
+
+After bootstrap completes, this must hold:
+
+```text
+rendered DOM  ==  router.currentRoute  ==  location
+```
+
+Because hydration replaces rather than adopts, rendering the live route costs
+nothing extra — the server subtree is discarded either way. A bootstrap that is
+overtaken by a real user navigation bails rather than overwriting it.
+
+`hydrateRouter()` is a **one-shot bootstrap**: it renders the initial route and
+does not install a reactive outlet. Ongoing route rendering is the application's
+job, via `Route()`.
+
 ## Islands
 
 Islands hydrate independently. `hydrateIslands(container, registry)` activates
