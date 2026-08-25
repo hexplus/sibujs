@@ -1,5 +1,5 @@
 import { devWarn } from "../dev";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
@@ -81,13 +81,16 @@ export function lazy(importFn: LazyImport): Component {
         if (disposed) return;
         cached = mod.default;
         const rendered = cached();
-        container.replaceChildren(rendered);
+        replaceChildrenSafely(container, rendered);
       })
       .catch((err) => {
         if (disposed) return;
         const errorObj = err instanceof Error ? err : new Error(String(err));
         devWarn(`[SibuJS] lazy() failed to load component: ${errorObj.message}`);
-        container.replaceChildren(div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`));
+        replaceChildrenSafely(
+          container,
+          div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`),
+        );
         dispatchPropagate(container, errorObj);
       });
 
@@ -154,10 +157,15 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
       const el = nodes();
       childEl = el;
 
+      // Committing swaps the fallback out for `el`. The fallback is
+      // user-authored and may hold reactive bindings, lifecycle hooks, and
+      // listeners, so it must be disposed as it is detached — a bare
+      // replaceChildren() would leave it re-rendering off-screen forever.
+      // `replaceChildrenSafely` never disposes the incoming `el`.
       if (el.classList.contains("sibu-lazy")) {
         // Already loaded synchronously — swap and skip the observer entirely.
         if (!el.querySelector(".sibu-lazy-loading")) {
-          container.replaceChildren(el);
+          replaceChildrenSafely(container, el);
           return;
         }
         observer = new MutationObserver(() => {
@@ -166,12 +174,12 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
           if (!loading) {
             observer?.disconnect();
             observer = null;
-            container.replaceChildren(el);
+            replaceChildrenSafely(container, el);
           }
         });
         observer.observe(el, { childList: true, subtree: true });
       } else {
-        container.replaceChildren(el);
+        replaceChildrenSafely(container, el);
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));

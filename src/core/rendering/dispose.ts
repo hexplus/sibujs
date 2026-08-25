@@ -91,6 +91,45 @@ export function dispose(node: Node): void {
 }
 
 /**
+ * Replace every child of `parent` with `next`, disposing the outgoing children
+ * first.
+ *
+ * Native `replaceChildren()` detaches nodes without running SibuJS teardown, so
+ * any reactive binding, lifecycle hook, or listener inside the removed subtree
+ * survives as an unreachable zombie: it keeps firing against detached DOM and
+ * is never collected. This helper enforces the disposal invariant — a
+ * SibuJS-owned node removed permanently from the DOM is disposed exactly once.
+ *
+ * **A node in `next` is never disposed, even when it currently sits somewhere
+ * inside an outgoing subtree.** Native `replaceChildren()` would move such a
+ * node out of the content being replaced and keep it alive, and this helper
+ * preserves those semantics: incoming nodes are detached *before* the outgoing
+ * roots are disposed, so the dispose-walk cannot reach them. Everything else in
+ * those outgoing subtrees is still torn down, so preserving one descendant does
+ * not leak its former siblings or ancestors.
+ */
+export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void {
+  // Detach incoming nodes first. This is what keeps a node that is currently a
+  // *descendant of an outgoing child* alive: once it is out of the tree, the
+  // dispose() walk below cannot reach it. Doing this before the childNodes
+  // snapshot also removes any incoming node that was already a direct child
+  // from the outgoing set, so no separate keep-list is needed.
+  for (let i = 0; i < next.length; i++) {
+    const node = next[i];
+    node.parentNode?.removeChild(node);
+  }
+
+  // Snapshot: childNodes is live and replaceChildren mutates it. Everything
+  // still here is genuinely outgoing.
+  const current = Array.from(parent.childNodes);
+  for (let i = 0; i < current.length; i++) {
+    dispose(current[i]);
+  }
+
+  parent.replaceChildren(...next);
+}
+
+/**
  * Check for potential binding leaks. Returns the number of active DOM bindings.
  * In dev mode, logs a warning if the count exceeds the threshold.
  * In production, _isDev is false so the counter is always 0.

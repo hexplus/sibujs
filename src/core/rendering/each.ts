@@ -133,10 +133,13 @@ export function each<T>(
 
   let initialized = false;
   let sentinelInserted = false;
+  let rangeDisposed = false;
 
   const keyFn = options.key;
 
   const update = () => {
+    // A queued notification must never revive a disposed range.
+    if (rangeDisposed) return;
     // Always call getArray() first to register reactive dependencies,
     // even if anchor is not yet connected to the DOM.
     const arr = getArray();
@@ -328,14 +331,45 @@ export function each<T>(
   // has no parent yet (getArray() runs before the parent check).
   // Capture teardown so disposing the anchor unsubscribes the effect.
   const untrack = track(update);
-  registerDisposer(anchor, untrack);
+
+  /**
+   * Tear down the whole logical range, not just the anchor.
+   *
+   * Rows and the `each:end` sentinel are *siblings* of the anchor, not its
+   * children, so an ancestor `dispose()` walk never reaches them: unsubscribing
+   * the effect alone would leave every row visible in the DOM and every row
+   * binding alive. The anchor owns the range `(anchor, end]`, so its disposer
+   * must dispose and remove each owned row plus the sentinel.
+   *
+   * Idempotent, and tolerant of rows a hostile parent already detached.
+   */
+  const disposeRange = () => {
+    if (rangeDisposed) return;
+    rangeDisposed = true;
+    untrack();
+
+    for (const node of nodeMap.values()) {
+      dispose(node);
+      node.parentNode?.removeChild(node);
+    }
+
+    if (end.parentNode) end.parentNode.removeChild(end);
+    sentinelInserted = false;
+
+    nodeMap.clear();
+    workMap.clear();
+    keyIndexMap.clear();
+    oldKeyIndex.clear();
+    oldLen = 0;
+  };
+  registerDisposer(anchor, disposeRange);
 
   // Fallback: if the anchor wasn't in the DOM during the initial track
   // (common when each() is called inside tagFactory nodes), schedule
   // a one-time retry so the initial items render before first paint.
   if (!initialized) {
     queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) {
+      if (!initialized && !rangeDisposed && anchor.parentNode) {
         update();
       }
     });
