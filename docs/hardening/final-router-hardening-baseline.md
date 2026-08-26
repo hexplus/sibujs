@@ -85,3 +85,64 @@ removal performed with raw `node.parentNode.removeChild(node)` (line 2338, 2362)
 `1162-1172`, `1185`)** — `isSafeNavigationTarget()` rejects protocol-relative and
 dangerous-scheme targets but accepts `https://example.com`; route `redirect` adds a
 second, stricter `^(https?:)?\/\//i` check that the other four entrypoints do not have.
+
+---
+
+# Follow-up baseline — PR #52 ownership gaps
+
+Recorded **before** any production-code change in the follow-up pass. This is the
+post-first-pass state, i.e. the state PR #52 currently proposes.
+
+| Item | Value |
+| --- | --- |
+| Commit | _not a git repository_ — `git rev-parse` fails; the working tree is the only reference point |
+| Version | `4.0.0-rc.1` (still unpublished — `npm view sibujs@4.0.0-rc.1` → 404) |
+
+| Gate | Command | Baseline |
+| --- | --- | --- |
+| Full unit/integration suite | `npx vitest run` | **4547 passed, 1 skipped (4548), 369 files** — green |
+| Router suite | router/route/fuzz/split/ssr-route files | **469 passed, 30 files** — green |
+| Outlet suite | `tests/router.nested*.test.ts` | **6 passed, 2 files** — green |
+| Suspense suite | `router-hardening-suspense` + async-race/disposal/memory/lazy | **53 passed, 1 skipped (54), 6 files** — green |
+| Browser matrix | `npx playwright test --list` | **186 tests, 6 files** (Chromium/Firefox/WebKit) |
+| Soak | `npm run test:soak` | **19 passed, 1 skipped (20), 2 files** — green |
+| Source typecheck | `npx tsc --noEmit` | **0 errors** |
+| Test typecheck | `npx tsc -p tsconfig.test.json` | **0 errors** |
+| Lint | `npx biome check src/ tests/` | **clean** — 572 files |
+| `certify:rc` | `node scripts/certify/run.mjs` | **ALL REQUIRED GATES PASSED** — 12 PASS / 0 FAIL / 1 NOT TESTED (Node 22.3.0 floor: no interpreter available on this machine) |
+
+## Scope of the follow-up
+
+Two correctness gaps, two optional P3 cleanups. Nothing else.
+
+| ID | Area | Suspected severity |
+| --- | --- | --- |
+| OUT-001 | `Outlet()` commits after `component()` user code without re-checking ownership | P1 |
+| OUT-002 | `Outlet()` pending load ignores `outletTorn`; teardown does not invalidate the generation | P1 |
+| SUS-003 | `Suspense.showFallback()` captures the parent before running the fallback factory | P1/P2 |
+| LINK-003 | non-internal `RouterLink`s can receive router-active classes | P3 |
+| DOC-004 | classifier comment misdescribes protocol-relative targets | P3 |
+
+### Explicitly preserved (approved in PR #52 review, not touched)
+
+`classifyNavigationTarget()` · `navigate()` target policy · route-redirect policy ·
+`beforeEach`/`beforeEnter`/`beforeResolve` consistency · RouterLink external native
+navigation · RouterLink unsafe neutralization · segment-boundary active matching ·
+exactActive Model B · all previously certified areas · the data layer.
+
+## Suspect code at follow-up baseline
+
+**`Outlet()` (`src/plugins/router.ts:2706-2748`)** — `seq !== navSeq` is checked at
+2734, then `component()` runs arbitrary user code at 2736, and the commit at
+2738 re-checks only `anchor.parentNode`. `outletTorn` is declared at 2756, after
+`update` closes over nothing of the sort, and `update` never consults it.
+`outletCleanup` (2757) does not advance `navSeq`. A node that fails the
+`anchor.parentNode` test is dropped, never disposed.
+
+**`Suspense.showFallback()` (`src/plugins/router.ts:2477-2492`)** — `parent` is
+read at 2479, *before* `props.fallback()` executes at 2483; the insert at 2487
+uses that stale parent, and `fallbackNode` is assigned after any teardown-driven
+`cleanupNodes()` would already have run.
+
+**`RouterLink` (`src/plugins/router.ts`, active-class effect)** — `kind` is
+computed but not consulted when deriving `isActive`/`isExactActive`.

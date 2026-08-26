@@ -51,7 +51,8 @@ Enforced by monotonic counters:
 | `hydrateRouter` bootstrap | captures `navEpoch` | — re-checked at the commit |
 | `query()` | `entry.generation` | every new request on that entry, **and abandonment** |
 | `infiniteQuery()` | `runId` | every new run |
-| `Route()` outlet | `navSeq` | every render pass |
+| `Route()` outlet | `navSeq` | every render pass, **and outlet disposal** |
+| `Outlet()` (nested) | `navSeq` | every update pass, **and outlet disposal** |
 | `KeepAliveRoute()` outlet | `updateSeq` | every update pass, **and outlet disposal** |
 | router `Suspense()` boundary | `generation` | every render pass, **and boundary disposal** |
 
@@ -100,6 +101,39 @@ request settles
       │
       └─► local commit    — gated on generation AND this observer's liveness
 ```
+
+### User-code reentrancy invariant
+
+> Ownership must be revalidated after executing arbitrary user code, even when
+> no `await` occurs.
+
+An `await` is not the only way ownership moves. Synchronous user code can
+navigate, dispose its own owner, unmount a subtree, or otherwise invalidate the
+current generation — and it runs *between* the check and the commit:
+
+```text
+OWNERSHIP CHECK
+      ↓
+ARBITRARY USER CODE      ← component(), fallback(), a hook, a callback
+      ↓
+OWNERSHIP CHECK AGAIN
+      ↓
+COMMIT
+```
+
+Every arbitrary user-code boundary between validation and commit requires a
+second validation. Two corollaries:
+
+- **Re-read the parent.** A `parentNode` captured before user code ran is not
+  evidence the outlet is still mounted after it returns.
+- **`parentNode` is not a liveness test.** A subtree detached from the document
+  still has internal parent links, so a node orphaned without disposal looks
+  "attached" from the inside. Liveness is a `torn`/generation flag set by
+  disposal, never a DOM query.
+
+Where the check runs before user code as well as after, stale work never invokes
+user code at all — the strongest form, because a component factory may have side
+effects of its own.
 
 ### Stale-result disposal
 
@@ -246,7 +280,8 @@ detection therefore tests the `name` property rather than the constructor.
 | Subsystem | Owner | Cancels when | Generation guard |
 |---|---|---|---|
 | router navigation | the navigation transaction | superseded, or router destroyed | `navEpoch` |
-| `Route()` outlet | the update pass | superseded, or anchor disposed | `navSeq` |
+| `Route()` outlet | the update pass | superseded, or anchor disposed | `navSeq` + `routeTorn` |
+| `Outlet()` (nested) | the update pass | superseded, or outlet disposed | `navSeq` + `outletTorn` |
 | `KeepAliveRoute()` outlet | the update pass | superseded, or outlet disposed | `updateSeq` + `kaTorn` |
 | `hydrateRouter` bootstrap | the bootstrap | — | captured `navEpoch` |
 | `query()` fetch | the **cache entry** | entry cleared or GC'd | `entry.generation` |

@@ -29,6 +29,7 @@
         setRoutes,
         Route,
         RouterLink,
+        Outlet,
         route,
         navigate,
         replace,
@@ -53,6 +54,33 @@
       setRoutes([
         { path: HOME, component: page("home") },
         { path: "/user", component: page("user") },
+        {
+          path: "/nested",
+          component: () => {
+            const el = document.createElement("div");
+            el.className = "page";
+            el.dataset.page = "nested-layout";
+            el.appendChild(Outlet());
+            return el;
+          },
+          children: [
+            { path: "/plain", component: page("nested-plain") },
+            {
+              // Reentrancy case: the child factory synchronously navigates to a
+              // sibling before returning its node. The node it returns belongs
+              // to a generation that no longer owns the outlet, so it must
+              // never be committed. (OUT-001)
+              path: "/reentrant",
+              component: () => {
+                navigate("/nested/plain");
+                const el = document.createElement("div");
+                el.className = "page";
+                el.dataset.page = "nested-reentrant";
+                return el;
+              },
+            },
+          ],
+        },
         { path: "/user/:id", component: page("user-detail-singular") },
         { path: "/users", component: page("users") },
         { path: "/users/:id", component: page("user-detail") },

@@ -298,6 +298,109 @@ describe("router Suspense: lifecycle ownership", () => {
     }
   });
 
+  // SUS-003 — the fallback factory is arbitrary user code. A parent captured
+  // before it runs is not evidence that the boundary still exists after it
+  // returns.
+  it("disposes a fallback whose factory tore the boundary down", async () => {
+    const fallback = makeProbe("fallback");
+    let anchor: Node;
+    let factoryRuns = 0;
+
+    const pending = new Promise<HTMLElement>(() => {
+      /* never resolves — the fallback path is what is under test */
+    });
+
+    const boundary = Suspense({
+      fallback: () => {
+        factoryRuns++;
+        // Synchronously destroy the boundary from inside the factory, then
+        // hand back a live reactive node for the (now stale) continuation.
+        dispose(anchor);
+        anchor.parentNode?.removeChild(anchor);
+        return fallback.el;
+      },
+      nodes: () => pending,
+    });
+    anchor = boundary;
+    host.appendChild(boundary);
+    await settle();
+
+    expect(factoryRuns).toBe(1);
+    // The fallback must not be inserted into a boundary that no longer exists…
+    expect(host.contains(fallback.el)).toBe(false);
+    expect(host.childNodes.length).toBe(0);
+    // …and it must be lifecycle-disposed, not merely dropped.
+    expect(fallback.disposed).toBe(1);
+    const runsBefore = fallback.effectRuns;
+    fallback.bump();
+    expect(fallback.effectRuns).toBe(runsBefore);
+    fallback.click();
+    expect(fallback.listenerCalls).toBe(0);
+  });
+
+  // SUS-003 — the same reentrancy through the supported parent-disposal path.
+  it("disposes a fallback whose factory disposed the boundary's parent", async () => {
+    const fallback = makeProbe("fallback");
+    const wrapper = document.createElement("div");
+    host.appendChild(wrapper);
+
+    const pending = new Promise<HTMLElement>(() => {
+      /* never resolves */
+    });
+
+    wrapper.appendChild(
+      Suspense({
+        fallback: () => {
+          dispose(wrapper);
+          wrapper.remove();
+          return fallback.el;
+        },
+        nodes: () => pending,
+      }),
+    );
+    await settle();
+
+    expect(host.contains(fallback.el)).toBe(false);
+    expect(fallback.disposed).toBe(1);
+    fallback.click();
+    expect(fallback.listenerCalls).toBe(0);
+  });
+
+  it("still mounts a fallback whose factory leaves the boundary alone", async () => {
+    const fallback = makeProbe("fallback");
+    const pending = new Promise<HTMLElement>(() => {
+      /* never resolves */
+    });
+
+    host.appendChild(Suspense({ fallback: () => fallback.el, nodes: () => pending }));
+    await settle();
+
+    expect(host.contains(fallback.el)).toBe(true);
+    expect(fallback.disposed).toBe(0);
+  });
+
+  it("accepts a non-function fallback and disposes it on teardown", async () => {
+    const fallback = makeProbe("fallback");
+    const pending = new Promise<HTMLElement>(() => {
+      /* never resolves */
+    });
+
+    // `props.fallback` typed as a value rather than a factory — existing
+    // semantics, preserved.
+    const anchor = Suspense({ fallback: fallback.el as unknown as () => HTMLElement, nodes: () => pending });
+    host.appendChild(anchor);
+    await settle();
+
+    expect(host.contains(fallback.el)).toBe(true);
+
+    dispose(anchor);
+    anchor.parentNode?.removeChild(anchor);
+
+    expect(fallback.disposed).toBe(1);
+    fallback.click();
+    expect(fallback.listenerCalls).toBe(0);
+  });
+
   it("does not leak across repeated create → resolve → dispose cycles", async () => {
     const probes: Probe[] = [];
 

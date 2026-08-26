@@ -241,6 +241,50 @@ first, and the outlet resolves the component afterwards.
 On replacement the outgoing subtree is `dispose()`d before detaching, so route
 components are disposed exactly once per replacement.
 
+### Outlet ownership
+
+`Route()` and the nested `Outlet()` follow the same rule as every other async
+owner in the framework:
+
+> Async completion does not imply commit ownership. Only the current live owner
+> may commit.
+
+Both wrap their commit like this:
+
+```text
+await component load
+      ↓
+ownership check      ← torn? superseded? (before user code, so stale work
+      ↓                 never invokes a component factory at all)
+component()          ← arbitrary user code
+      ↓
+ownership check      ← re-checked, and the parent re-read
+      ↓
+synchronous commit
+```
+
+The second check exists because **user component creation is itself an ownership
+boundary**: a factory may synchronously navigate, dispose its own owner, or
+otherwise invalidate the generation before it returns. See
+[async-ownership.md § User-code reentrancy](./async-ownership.md#user-code-reentrancy-invariant).
+
+A node built by a generation that has lost ownership is **disposed**, not
+dropped — it already owns effects, listeners and registered disposers by the
+time ownership is checked.
+
+Teardown marks the outlet torn and advances the generation *before* releasing
+anything, so every pending continuation permanently loses ownership.
+
+#### Components are invoked twice on first load
+
+The component loader validates a freshly-loaded component by invoking it once
+and checking it returns an `Element`. That probe node is discarded — and
+disposed — and the caller then invokes the component again for the node it
+actually mounts. This happens **once per route definition**, at cache-fill time;
+subsequent navigations reuse the cached component and do not re-probe.
+
+Keep component factories free of side effects that must happen exactly once.
+
 ## The KeepAlive outlet
 
 `KeepAliveRoute()` caches rendered views so signals, form state, and scroll
@@ -526,6 +570,14 @@ Note that this is `RouterLink`'s decision alone. The `KeepAlive` cache keys on
 `path + query + hash` too, but the two are independent choices that happen to
 agree; neither implies the other.
 
+### Non-internal links are never active
+
+Active classes are router state, so only a target the router would actually
+navigate can carry them. An external or unsafe target never receives
+`activeClass` or `exactActiveClass`, whatever its sanitized `href` happens to
+parse to — an unsafe target's `href` collapses to `"#"`, whose pathname parses
+as `/`, which would otherwise make it exact-active on every root route.
+
 ### Trailing slashes
 
 Normalized away on both sides, so `/users/` and `/users` are the same target.
@@ -585,6 +637,19 @@ Suspense: not my generation → dispose(element), no insertion
 ```
 
 There is no DOM resurrection, no fallback resurrection, and no double cleanup.
+
+### Fallback creation is generation-owned
+
+The fallback factory is arbitrary user code and may synchronously tear the
+boundary down. A parent read *before* it runs is therefore not evidence that the
+boundary still exists after it returns.
+
+> If the boundary is torn down or superseded while a fallback factory runs, the
+> node it returns is lifecycle-disposed rather than committed.
+
+Ownership is revalidated — and the parent re-read — after the factory returns
+and before the node is adopted. A non-function `fallback` value is accepted
+unchanged and is disposed on teardown or replacement like any other owned node.
 
 ### Single-shot
 

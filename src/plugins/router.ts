@@ -22,10 +22,11 @@ import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from
  * - `internal` — a path, `?query`, `#hash`, or relative reference. SPA routing
  *   can service it.
  * - `external` — an absolute URL with an allowed scheme (`http:`, `https:`,
- *   `mailto:`, `tel:`, `ftp:`), or a protocol-relative `//host`. Not dangerous,
- *   but not something SPA routing can service either.
+ *   `mailto:`, `tel:`, `ftp:`). Not dangerous, but not something SPA routing
+ *   can service either, so it keeps native browser behaviour.
  * - `unsafe` — a dangerous scheme (`javascript:`, `data:`, `vbscript:`,
- *   `blob:`, `file:`, …). Never rendered as a live href, never navigated.
+ *   `blob:`, `file:`, …) **or a protocol-relative `//host`**. Never rendered as
+ *   a live href, never navigated.
  *
  * Protocol-relative `//host` is classified `unsafe` rather than `external`
  * because it carries no scheme to vet and is the classic open-redirect
@@ -845,6 +846,19 @@ class ComponentLoader {
       if (!this.isElement(result)) {
         throw new Error(`Component for route "${routePath}" must return Element, got ${typeof result}`);
       }
+
+      // The call above is a *validation probe*: it exists only to prove the
+      // component returns an Element. The node it produced is discarded — the
+      // caller invokes `comp` again to get the node it will actually mount.
+      //
+      // Discarding it without disposing leaked every effect, listener and
+      // registered disposer the probe created, once per route definition. Worse
+      // for nested routes: a probe node containing an `Outlet()` left that
+      // outlet live and *undisposable* — its anchor is not in any tree the
+      // caller can reach, so no `dispose()` ever finds it, and its update pass
+      // kept invoking child component factories long after the real outlet was
+      // torn down. (OUT-004)
+      dispose(result as unknown as Node);
       return comp as Component;
     }
 
@@ -869,11 +883,14 @@ class ComponentLoader {
       const result = await pending;
       const component = this.extractComponent(result, routePath);
 
-      // Validate component
+      // Validate component. Like the synchronous path, this is a *probe*: the
+      // node exists only to prove the component returns an Element and is then
+      // discarded, so it must be disposed rather than dropped. (OUT-004)
       const testElement = component();
       if (!this.isElement(testElement)) {
         throw new Error(`Component for route "${routePath}" must return Element, got ${typeof testElement}`);
       }
+      dispose(testElement as unknown as Node);
 
       return component;
     } catch (error) {
@@ -1778,6 +1795,26 @@ export function Route(): Node {
   // per-invocation token, superseded loads are simply dropped — "latest wins".
   let navSeq = 0;
   let currentTopRoute: RouteDef | null = null;
+  // Declared before `update` so an in-flight pass can consult it. A component
+  // load that resolves after teardown must lose ownership permanently,
+  // including the right to run user component code. (OUT-003)
+  let routeTorn = false;
+
+  /**
+   * The parent this `seq` may still commit into, or `null` if it has lost
+   * ownership — outlet torn down, superseded, or the anchor detached. Read
+   * fresh at every check: a parent captured before user code ran is not
+   * evidence that the outlet is still mounted now.
+   */
+  const commitTarget = (seq: number): (Node & ParentNode) | null =>
+    routeTorn || seq !== navSeq ? null : anchor.parentNode;
+
+  /** Lifecycle-safe discard of a node this pass built but may not commit. */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
 
   const cleanupNodes = () => {
     [currentNode, loadingNode, errorNode].forEach((node) => {
@@ -1884,7 +1921,7 @@ export function Route(): Node {
   };
 
   const update = async () => {
-    if (!_routerRef.current) return;
+    if (routeTorn || !_routerRef.current) return;
 
     // Claim the latest navigation slot. Any update still in flight for an
     // earlier slot becomes stale and must not mutate the DOM when it resolves.
@@ -1935,21 +1972,35 @@ export function Route(): Node {
 
           const component = await _routerRef.current.loadComponent(routeDef, route.path);
 
-          // A newer navigation superseded us while loading — drop this result.
-          // The newer update() owns the DOM and will (or already did) render.
-          if (seq !== navSeq) return;
+          // A newer navigation superseded us while loading, or the outlet was
+          // disposed — drop this result. The newer update() owns the DOM and
+          // will (or already did) render. Checked *before* `component()` so
+          // stale work never invokes user code at all. (OUT-003)
+          if (!commitTarget(seq)) return;
 
+          // Arbitrary user code. It may synchronously navigate, dispose this
+          // outlet's owner, or otherwise invalidate the generation — an `await`
+          // is not the only way ownership moves.
           const node = component();
 
-          if (node && anchor.parentNode) {
+          // Second ownership check, immediately before the synchronous commit,
+          // re-reading the parent rather than trusting one captured earlier.
+          // The node already owns lifecycle resources by now, so a stale pass
+          // disposes it instead of dropping the reference. (OUT-003)
+          const parent = commitTarget(seq);
+          if (!parent) {
+            release(node);
+            return;
+          }
+          if (node) {
             // Commit only now that we know we are the latest resolution.
             currentTopRoute = routeDef;
             cleanupNodes();
-            anchor.parentNode.insertBefore(node, anchor.nextSibling);
+            parent.insertBefore(node, anchor.nextSibling);
             currentNode = node;
           }
         } catch (error) {
-          if (seq !== navSeq) return;
+          if (routeTorn || seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
           showError(error instanceof Error ? error : new Error(String(error)), routeDef);
@@ -1957,6 +2008,7 @@ export function Route(): Node {
       }
     } catch (error) {
       if (seq !== navSeq) return;
+      if (routeTorn) return;
       console.error("[Route] Update failed:", error);
       showError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -1977,12 +2029,16 @@ export function Route(): Node {
     });
   }
 
-  let routeTorn = false;
   const routeCleanup = () => {
     if (routeTorn) return;
+    // Order matters: mark torn and invalidate the generation *first*, so every
+    // pending continuation permanently loses ownership before anything else is
+    // released.
     routeTorn = true;
+    navSeq++;
     routeTeardown();
     cleanupNodes();
+    currentTopRoute = null;
   };
   // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
   // layout change) releases its tracking + nodes immediately — not only on
@@ -2324,12 +2380,19 @@ export function RouterLink(
     const currentPath = normalizePathname(route.path);
     // Ancestor matching, on segment boundaries. Raw prefix matching made
     // `/user` active on `/users`. (LINK-001)
-    const isActive = isPathnameAncestor(targetPath, currentPath);
+    // Active classes are router state, so only a target the router would
+    // actually navigate can carry them. An unsafe target's href is collapsed to
+    // "#", whose pathname parses as "/" — without this gate it would be
+    // exact-active on every root route. (LINK-003)
+    const isActive = kind === "internal" && isPathnameAncestor(targetPath, currentPath);
     // Exact-active is full normalized target identity: pathname *and* query
     // *and* hash. `/search?q=a` and `/search?q=b` are distinct navigation
     // targets, as are `/docs#one` and `/docs#two`. (LINK-002)
     const isExactActive =
-      currentPath === targetPath && normalizeQuery(route.query) === targetQuery && route.hash === hrefHash;
+      kind === "internal" &&
+      currentPath === targetPath &&
+      normalizeQuery(route.query) === targetQuery &&
+      route.hash === hrefHash;
 
     const classes: string[] = [];
     if (isActive) {
@@ -2474,21 +2537,39 @@ export function Suspense(props: {
     fallbackNode = null;
   };
 
-  const showFallback = () => {
+  /**
+   * Build and mount the fallback for `myGeneration`.
+   *
+   * The fallback factory is arbitrary user code and may synchronously tear the
+   * boundary down or supersede it. A parent read *before* the factory runs is
+   * therefore not evidence that the boundary still exists after it returns, so
+   * ownership is revalidated — and the parent re-read — before the returned
+   * node is adopted. A fallback that loses the race is disposed, not dropped.
+   * (SUS-003)
+   */
+  const showFallback = (myGeneration: number) => {
     if (fallbackNode || !props.fallback || tornDown) return;
-    const parent = anchor.parentNode;
-    if (!parent) return;
+    // Cheap pre-check: nothing to mount into yet, so don't run user code.
+    if (!anchor.parentNode) return;
 
+    let fallback: HTMLElement | (() => HTMLElement) | undefined;
     try {
-      const fallback = typeof props.fallback === "function" ? props.fallback() : props.fallback;
-
-      if (fallback instanceof HTMLElement) {
-        fallbackNode = fallback;
-        parent.insertBefore(fallbackNode, anchor.nextSibling);
-      }
+      fallback = typeof props.fallback === "function" ? props.fallback() : props.fallback;
     } catch (error) {
       console.error("[Suspense] Fallback error:", error);
+      return;
     }
+
+    if (!(fallback instanceof HTMLElement)) return;
+
+    const parent = commitTarget(myGeneration);
+    if (!parent) {
+      release(fallback);
+      return;
+    }
+
+    fallbackNode = fallback;
+    parent.insertBefore(fallbackNode, anchor.nextSibling);
   };
 
   const render = async () => {
@@ -2500,7 +2581,7 @@ export function Suspense(props: {
       const result = props.nodes();
       let element: HTMLElement;
       if (result instanceof Promise) {
-        showFallback();
+        showFallback(myGeneration);
         element = await result;
       } else {
         element = result;
@@ -2691,6 +2772,10 @@ export function Outlet(): Node {
   // Mirror Route()'s "latest wins" guard so a superseded child load cannot
   // resurrect stale content after a newer navigation.
   let navSeq = 0;
+  // Declared before `update` so the update pass can actually consult it. A
+  // pending child load that resolves after teardown must lose ownership
+  // permanently — including the right to run user component code. (OUT-002)
+  let outletTorn = false;
 
   const clearCurrent = () => {
     if (currentNode) {
@@ -2703,8 +2788,24 @@ export function Outlet(): Node {
     currentChild = null;
   };
 
+  /**
+   * The parent `seq` may still commit into, or `null` if this pass has lost
+   * ownership — outlet torn down, superseded by a newer pass, or the anchor
+   * detached. Read fresh at every check: a parent captured before user code ran
+   * is not evidence that the outlet is still mounted now.
+   */
+  const commitTarget = (seq: number): (Node & ParentNode) | null =>
+    outletTorn || seq !== navSeq ? null : anchor.parentNode;
+
+  /** Lifecycle-safe discard of a node this pass built but may not commit. */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
+
   const update = async () => {
-    if (!_routerRef.current) return;
+    if (outletTorn || !_routerRef.current) return;
     const seq = ++navSeq;
     const route = _routerRef.current.currentRoute;
 
@@ -2730,19 +2831,33 @@ export function Outlet(): Node {
       const cacheKey = `${route.path}\0${childRoute.path}`;
       const component = await _routerRef.current.loadComponent(childRoute, cacheKey);
 
-      // A newer navigation superseded us while loading — discard.
-      if (seq !== navSeq) return;
+      // First ownership check: a newer navigation superseded us while loading,
+      // or the outlet was disposed. Deliberately *before* `component()` so
+      // stale work never invokes user code at all. (OUT-002)
+      if (!commitTarget(seq)) return;
 
+      // Arbitrary user code. It may synchronously navigate, dispose this
+      // outlet's owner, or otherwise invalidate the generation — an `await` is
+      // not the only way ownership moves.
       const node = component();
 
-      if (node && anchor.parentNode) {
-        clearCurrent();
-        anchor.parentNode.insertBefore(node, anchor.nextSibling);
-        currentNode = node;
-        currentChild = childRoute;
+      // Second ownership check, immediately before the synchronous commit, and
+      // re-reading the parent rather than trusting one captured earlier. The
+      // node already exists and owns lifecycle resources by now, so a stale
+      // pass disposes it instead of dropping the reference. (OUT-001)
+      const parent = commitTarget(seq);
+      if (!parent) {
+        release(node);
+        return;
       }
+      if (!node) return;
+
+      clearCurrent();
+      parent.insertBefore(node, anchor.nextSibling);
+      currentNode = node;
+      currentChild = childRoute;
     } catch (error) {
-      if (seq !== navSeq) return;
+      if (outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
     }
   };
@@ -2753,16 +2868,20 @@ export function Outlet(): Node {
       if (anchor.parentNode) update();
     });
   }
-  let outletTorn = false;
   const outletCleanup = () => {
     if (outletTorn) return;
+    // Order matters: mark torn and invalidate the generation *first*, so every
+    // pending continuation permanently loses ownership before anything else is
+    // released.
     outletTorn = true;
+    navSeq++;
     outletTeardown();
     if (currentNode) {
       dispose(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       currentNode = null;
     }
+    currentChild = null;
   };
   registerDisposer(anchor, outletCleanup);
   routeCleanups.push(outletCleanup);

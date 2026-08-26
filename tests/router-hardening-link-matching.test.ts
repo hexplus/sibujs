@@ -135,6 +135,45 @@ describe("RouterLink: active-state matching", () => {
     });
   });
 
+  // LINK-003 — active classes are router state. A link the router will never
+  // navigate is not router state, whatever its sanitized href happens to parse
+  // to.
+  describe("non-internal links are never router-active", () => {
+    it("does not mark an unsafe link active on the root route", async () => {
+      // `javascript:` collapses to href="#", whose pathname parses as "/" —
+      // which would otherwise make it exact-active on every root route.
+      expect(await stateOf("javascript:alert(1)", "/")).toEqual({ active: false, exact: false });
+    });
+
+    for (const target of ["data:text/html,x", "vbscript:msgbox(1)", "//example.com"]) {
+      it(`does not mark the unsafe link ${JSON.stringify(target)} active on the root route`, async () => {
+        expect(await stateOf(target, "/")).toEqual({ active: false, exact: false });
+      });
+    }
+
+    it("does not mark an external link active on a matching path", async () => {
+      const link = RouterLink({ to: "https://example.com/users" });
+      host.appendChild(link);
+      await navigate("/users");
+      await settle();
+      expect(link.className).not.toContain(ACTIVE);
+      expect(link.className).not.toContain(EXACT);
+    });
+
+    it("does not apply a custom activeClass to a non-internal link", async () => {
+      const link = RouterLink({ to: "javascript:alert(1)", activeClass: "on", exactActiveClass: "exact" });
+      host.appendChild(link);
+      await navigate("/");
+      await settle();
+      expect(link.className).not.toContain("on");
+      expect(link.className).not.toContain("exact");
+    });
+
+    it("still marks an ordinary internal link active", async () => {
+      expect(await stateOf("/users", "/users")).toEqual({ active: true, exact: true });
+    });
+  });
+
   describe("custom class props still honour the same matching", () => {
     it("applies a custom activeClass on a descendant but not the exactActiveClass", async () => {
       const link = RouterLink({ to: "/users", activeClass: "on", exactActiveClass: "exact" });

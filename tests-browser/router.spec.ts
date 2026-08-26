@@ -384,3 +384,39 @@ test.describe("RouterLink active matching", () => {
     expect(await classOf(page, "link-hash-one")).not.toContain("router-link-exact-active");
   });
 });
+
+/**
+ * Nested `Outlet()` ownership in a real engine (OUT-001).
+ *
+ * A child component factory that synchronously navigates elsewhere belongs to a
+ * generation that no longer owns the outlet by the time it returns, so its node
+ * must never reach the DOM.
+ */
+test.describe("nested Outlet ownership", () => {
+  test("renders a nested child through the Outlet", async ({ page }) => {
+    await page.evaluate(() =>
+      (window as never as { __router: { navigate: (t: string) => Promise<unknown> } }).__router.navigate(
+        "/nested/plain",
+      ),
+    );
+
+    await expect(page.locator('[data-page="nested-layout"]')).toHaveCount(1);
+    await expect(page.locator('[data-page="nested-plain"]')).toHaveCount(1);
+  });
+
+  test("does not commit a child whose factory navigated away", async ({ page }) => {
+    await page.evaluate(() =>
+      (window as never as { __router: { navigate: (t: string) => Promise<unknown> } }).__router.navigate(
+        "/nested/reentrant",
+      ),
+    );
+    // Let the reentrant navigation settle.
+    await expect(page.locator('[data-page="nested-plain"]')).toHaveCount(1);
+
+    // The stale generation's node never reaches the document…
+    await expect(page.locator('[data-page="nested-reentrant"]')).toHaveCount(0);
+    // …and the outlet holds exactly one child, not two.
+    expect(await routerPath(page)).toBe("/nested/plain");
+    await expect(page.locator('[data-page="nested-layout"]')).toHaveCount(1);
+  });
+});

@@ -26,7 +26,16 @@ import { signal } from "../../src/core/signals/signal";
 import { __resetQueryCache, clearQueryCache, query } from "../../src/data/query";
 import { getSubscriberCount } from "../../src/devtools/introspect";
 import type { RouteDef } from "../../src/plugins/router";
-import { createRouter, destroyRouter, KeepAliveRoute, navigate, Route, Suspense } from "../../src/plugins/router";
+import {
+  createRouter,
+  destroyRouter,
+  KeepAliveRoute,
+  navigate,
+  Outlet,
+  Route,
+  Suspense,
+  setRoutes,
+} from "../../src/plugins/router";
 import { batch } from "../../src/reactivity/batch";
 
 const flush = async (n = 6) => {
@@ -456,6 +465,96 @@ describe("router Suspense soak", () => {
 
     expect(host.childNodes.length, "a late resolution resurrected DOM").toBe(0);
     expect(checkLeaks(), "late Suspense resolutions leaked bindings").toBeLessThanOrEqual(baseline + 2);
+  });
+});
+
+describe("nested Outlet soak", () => {
+  /** A child node carrying real lifecycle resources. */
+  const child = (label: string) => {
+    const el = document.createElement("div");
+    el.textContent = label;
+    const [v, setV] = signal(0);
+    const stop = effect(() => v());
+    const onClick = () => setV(v() + 1);
+    el.addEventListener("click", onClick);
+    registerDisposer(el, () => {
+      stop();
+      el.removeEventListener("click", onClick);
+    });
+    return el;
+  };
+
+  const layout = () => {
+    const el = document.createElement("div");
+    el.appendChild(Outlet());
+    return el;
+  };
+
+  it("500 nested child mount/replace cycles return bindings to baseline", async () => {
+    createRouter({ mode: "history", base: "" });
+    setRoutes([
+      {
+        path: "/parent",
+        component: layout,
+        children: [
+          { path: "/a", component: () => child("a") },
+          { path: "/b", component: () => child("b") },
+        ],
+      },
+    ]);
+    const anchorNode = host.appendChild(Route());
+
+    // Warm up so first-run singletons (component cache, validation probes) are
+    // not counted against the baseline.
+    await navigate("/parent/a");
+    await flush();
+    await navigate("/parent/b");
+    await flush();
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 500; i++) {
+      await navigate(i % 2 === 0 ? "/parent/a" : "/parent/b");
+      await flush();
+    }
+
+    // Exactly one child is mounted, and nothing accumulated.
+    expect(host.querySelectorAll("div").length, "nested Outlet accumulated DOM").toBeLessThanOrEqual(2);
+    expect(checkLeaks(), "bindings leaked across 500 nested Outlet cycles").toBeLessThanOrEqual(baseline + 2);
+
+    dispose(anchorNode);
+    anchorNode.parentNode?.removeChild(anchorNode);
+    destroyRouter();
+  });
+
+  it("300 outlet mount/teardown cycles do not accumulate tracking", async () => {
+    createRouter({ mode: "history", base: "" });
+    setRoutes([
+      {
+        path: "/parent",
+        component: layout,
+        children: [{ path: "/a", component: () => child("a") }],
+      },
+    ]);
+
+    // Warm the component cache before measuring.
+    const warm = host.appendChild(Route());
+    await navigate("/parent/a");
+    await flush();
+    dispose(warm);
+    warm.parentNode?.removeChild(warm);
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 300; i++) {
+      const node = host.appendChild(Route());
+      await navigate("/parent/a");
+      await flush();
+      dispose(node);
+      node.parentNode?.removeChild(node);
+    }
+
+    expect(host.childNodes.length, "Route/Outlet left DOM behind").toBe(0);
+    expect(checkLeaks(), "bindings leaked across 300 Outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
+    destroyRouter();
   });
 });
 
