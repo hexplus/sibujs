@@ -52,6 +52,21 @@ Enforced by monotonic counters:
 | `query()` | `entry.generation` | every new request on that entry, **and abandonment** |
 | `infiniteQuery()` | `runId` | every new run |
 | `Route()` outlet | `navSeq` | every render pass |
+| `KeepAliveRoute()` outlet | `updateSeq` | every update pass, **and outlet disposal** |
+
+For the KeepAlive outlet the distinction the invariant names is unusually easy
+to get wrong, because the outlet holds a second identifier that *looks* like an
+ownership token but is not one:
+
+```text
+cache key         answers:  "Which cached view is this?"
+update generation answers:  "May this async completion still commit?"
+```
+
+Pathname, query, hash, and cache-key equality are all route **values**. None of
+them grants commit permission. `/search?q=a` and `/search?q=b` share a pathname;
+an A → B → A round trip returns to an identical cache key under a newer
+generation. See [router.md](./router.md#the-keepalive-outlet).
 
 ### Observer-attachment invariant
 
@@ -88,6 +103,57 @@ request settles
 ### Disposal invariant
 
 > Disposed consumers may not receive local state commits.
+
+A disposed **owner of DOM** carries an extra obligation. If the losing generation
+has already created a node, returning early is not enough — the node has
+registered effects and listeners that nothing will ever tear down. The rule is:
+
+```text
+generation G starts
+      ↓
+   await
+      ↓
+is G still current?  is the owner still alive?
+      ↓ NO
+dispose everything G created, then stop
+```
+
+Enforced in `KeepAliveRoute()`: the ownership check runs once before the node is
+created (so a superseded generation never builds one) and again immediately
+before the commit (so a node built by user code that then navigated, or tore the
+outlet down, is `dispose()`d rather than leaked).
+
+### Observer-isolation invariant
+
+> Shared observer notification must isolate observers from each other's
+> exceptions, and a user callback throwing is never an operation failure.
+
+Two separate claims, both enforced in the data layer via
+`src/data/callbacks.ts`:
+
+**Isolation.** An unguarded `for (const listener of listeners) listener()`
+aborts at the first throw. One observer with a broken `select` then starves
+every observer registered after it, on a request that succeeded. Listener
+iteration is therefore individually guarded, over a snapshot of the set.
+
+**Classification.** The success or failure of an operation is decided by the
+operation, never by a notification callback:
+
+```text
+network success ──► cache commit ──► user callback ──► callback throws
+                                                            │
+                          operation is STILL a success ◄─────┘
+                          callback error surfaced separately
+```
+
+Running callbacks inside the request's own `try`/`catch` collapsed those two
+channels: a throwing `onSuccess` was caught by the catch meant for the fetch,
+stamped onto the shared cache entry as the request's error, and passed to
+`onError`. Every observer of that key was told a successful request had failed.
+
+The one deliberate exception is `mutation()`'s `onMutate`, which is a *step of*
+the operation rather than a notification — it produces the rollback context the
+mutation depends on, so its failure is a mutation failure.
 
 ### Terminal-state invariant
 
@@ -158,6 +224,8 @@ detection therefore tests the `name` property rather than the constructor.
 | Subsystem | Owner | Cancels when | Generation guard |
 |---|---|---|---|
 | router navigation | the navigation transaction | superseded, or router destroyed | `navEpoch` |
+| `Route()` outlet | the update pass | superseded, or anchor disposed | `navSeq` |
+| `KeepAliveRoute()` outlet | the update pass | superseded, or outlet disposed | `updateSeq` + `kaTorn` |
 | `hydrateRouter` bootstrap | the bootstrap | — | captured `navEpoch` |
 | `query()` fetch | the **cache entry** | entry cleared or GC'd | `entry.generation` |
 | `infiniteQuery()` page | the run | superseded run | `runId` |

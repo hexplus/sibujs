@@ -140,4 +140,125 @@ describe("router navigation without a DOM", () => {
     expect(router.currentRoute.path).toBe("/target");
     destroyRouter();
   });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MEM-001 — scrollBehavior must not reach browser primitives here
+  //
+  // `handleScrollBehavior()` ran `requestAnimationFrame(() => window.scrollTo())`
+  // with no environment probe, while the history write directly above it *was*
+  // guarded (NODE-001). A memory router advertised for testing/SSR could
+  // therefore be configured with a perfectly legal option and then die on
+  // `ReferenceError: requestAnimationFrame is not defined` on first navigation.
+  //
+  // Policy A, matching NODE-001: the route still commits; only the browser-only
+  // scroll side effect is skipped.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it("has neither requestAnimationFrame nor scrollTo here (guards the premise)", () => {
+    expect(typeof (globalThis as { requestAnimationFrame?: unknown }).requestAnimationFrame).toBe("undefined");
+    expect(typeof window).toBe("undefined");
+  });
+
+  // Note on reachability: `createMemoryRouter(routes, initialPath)` takes no
+  // options object, so `scrollBehavior` cannot be passed to it directly — it
+  // builds a hash-mode router internally. The configuration that reaches
+  // `handleScrollBehavior()` in a DOM-less runtime is therefore an explicit
+  // `createRouter(routes, { scrollBehavior })` running server-side, which is the
+  // same code path a memory router executes on every navigation.
+
+  it("a DOM-less router with scrollBehavior navigates without reaching scroll APIs", async () => {
+    const calls: Array<{ to: string; from: string }> = [];
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      {
+        mode: "hash",
+        scrollBehavior: (to, from) => {
+          calls.push({ to: to.path, from: from.path });
+          return { x: 0, y: 0 };
+        },
+      },
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+
+    // Navigation succeeds; no ReferenceError escapes.
+    expect(result.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/a");
+
+    // The hook itself still runs — only applying its result is skipped.
+    expect(calls.some((c) => c.to === "/a")).toBe(true);
+
+    destroyRouter();
+  });
+
+  it("a DOM-less router with scrollBehavior survives a redirect", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/target", component: () => null as never },
+        { path: "/old", redirect: "/target" },
+      ],
+      { mode: "history", scrollBehavior: () => ({ x: 0, y: 120 }) },
+    );
+    await flushBootstrap();
+
+    await router.push("/old").catch(() => {});
+    await flushBootstrap();
+
+    expect(router.currentRoute.path).toBe("/target");
+    destroyRouter();
+  });
+
+  it("a scrollBehavior hook that returns nothing is equally safe", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      { mode: "history", scrollBehavior: () => null },
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+    expect(result.success).toBe(true);
+    destroyRouter();
+  });
+
+  it("a memory router (no scrollBehavior available) is unaffected", async () => {
+    const { router, currentPath } = createMemoryRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      "/",
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+    expect(result.success).toBe(true);
+    expect(currentPath()).toBe("/a");
+    destroyRouter();
+  });
+
+  it("destroying a scroll-configured DOM-less router is clean", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      { mode: "history", scrollBehavior: () => ({ x: 0, y: 40 }) },
+    );
+    await flushBootstrap();
+    await router.push("/a");
+    await flushBootstrap();
+
+    expect(() => destroyRouter()).not.toThrow();
+  });
 });

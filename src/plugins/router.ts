@@ -1299,15 +1299,40 @@ export class SibuRouter {
     }
   }
 
+  /**
+   * Apply the configured `scrollBehavior`, if the runtime can actually scroll.
+   *
+   * This runs *after* the route has been committed, so an exception here does
+   * not merely skip scrolling — it propagates out of `navigateInternal` and the
+   * navigation is reported as `success: false` while the route state says it
+   * succeeded. In a DOM-less runtime the bare `requestAnimationFrame` did
+   * exactly that: a legal `scrollBehavior` option made every navigation report
+   * failure under SSR and in memory-router-style tests. (MEM-001)
+   *
+   * Policy A, consistent with the history write in `updateHistory()` (NODE-001):
+   * the route still commits, and only the browser-only side effect is skipped.
+   *
+   * Both primitives are probed, not just `window` — `requestAnimationFrame` and
+   * `scrollTo` can be missing independently (jsdom without a rAF polyfill, a
+   * partial DOM shim). `requestAnimationFrame` is invoked as a method on the
+   * global object rather than through a detached reference, since browsers
+   * reject a bare call with "Illegal invocation".
+   */
   private handleScrollBehavior(to: RouteContext, from: RouteContext): void {
-    if (this.options.scrollBehavior) {
-      const scrollTo = this.options.scrollBehavior(to, from, null);
-      if (scrollTo) {
-        requestAnimationFrame(() => {
-          window.scrollTo(scrollTo.x, scrollTo.y);
-        });
-      }
-    }
+    if (!this.options.scrollBehavior) return;
+
+    const scrollTo = this.options.scrollBehavior(to, from, null);
+    if (!scrollTo) return;
+
+    const g = globalThis as typeof globalThis & {
+      requestAnimationFrame?: (cb: () => void) => unknown;
+    };
+    if (typeof g.requestAnimationFrame !== "function") return;
+    if (typeof window === "undefined" || typeof window.scrollTo !== "function") return;
+
+    g.requestAnimationFrame(() => {
+      window.scrollTo(scrollTo.x, scrollTo.y);
+    });
   }
 
   // Component loading
@@ -1861,6 +1886,30 @@ export function Route(): Node {
  * Uses the `keepAlive` option from RouterOptions if set, or accepts
  * explicit options.
  *
+ * ## Cache identity
+ *
+ * A cached view is keyed by the **full location** — path + query + hash — so
+ * `/search?q=a`, `/search?q=b`, and `/docs#one` are three distinct cached views.
+ * Keying on `route.path` alone would serve one query's cached DOM and state for
+ * another.
+ *
+ * ## Reuse and disposal
+ *
+ * | Event | Effect on a cached view |
+ * |---|---|
+ * | navigated away from | detached, kept in cache, **not** disposed |
+ * | navigated back to | the same node is re-attached — no remount |
+ * | evicted past `max` (LRU) | disposed and dropped |
+ * | excluded by `include` | never cached; disposed on navigation away |
+ * | outlet disposed | whole cache disposed and cleared |
+ *
+ * ## Cache identity is not async ownership
+ *
+ * The cache key answers *"which cached view is this?"*. It never answers *"may
+ * this async completion still commit?"* — that is what the update generation is
+ * for, because `same route value !== same navigation generation`. See
+ * `docs/architecture/router.md`.
+ *
  * @param options Optional: override the router-level keepAlive setting
  *
  * @example
@@ -1893,18 +1942,35 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   let currentNode: Node | null = null;
   let currentKey = "";
   let currentCached = false;
-  let isUpdating = false;
-  let pendingUpdate = false;
+  /**
+   * Monotonic update generation — the same temporal-ownership model `Route()`
+   * uses for `navSeq`.
+   *
+   * An update claims a generation on entry and may commit only while it still
+   * holds the newest one. Ownership is deliberately NOT inferred from route
+   * values: `same route value !== same navigation generation`. Two navigations
+   * that differ only in query share a pathname, and an A → B → A round trip
+   * returns to identical values under a different generation — so pathname,
+   * query, hash, and cache-key equality are all useless as commit permission.
+   *
+   * Cache identity and async ownership answer different questions:
+   *   - `cacheKey`   — "which cached view is this?"
+   *   - `updateSeq`  — "may this async completion still commit?"
+   */
+  let updateSeq = 0;
+  /** Set once the outlet is disposed; no generation may commit afterwards. */
+  let kaTorn = false;
 
   const update = async () => {
-    if (!_routerRef.current) return;
-    if (isUpdating) {
-      pendingUpdate = true;
-      return;
-    }
+    if (kaTorn || !_routerRef.current) return;
 
-    const route = _routerRef.current.currentRoute;
-    const match = _routerRef.current["matcher"].match(route.path);
+    // Claim the latest update slot. Any update still in flight for an earlier
+    // slot is now superseded and must not cache, mount, or move anything.
+    const seq = ++updateSeq;
+    const router = _routerRef.current;
+
+    const route = router.currentRoute;
+    const match = router["matcher"].match(route.path);
     if (!match) return;
 
     const { route: routeDef } = match;
@@ -1933,75 +1999,97 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // Same route — skip
     if (cacheKey === currentKey && currentNode) return;
 
-    isUpdating = true;
+    // Not mounted yet — `track()` runs this once at creation, before the caller
+    // has appended the anchor. Short-circuit before loading anything; the
+    // queueMicrotask fallback below re-runs once the anchor is attached.
+    // (The post-await check further down is the one that matters for
+    // ownership; this one only avoids pointless work.)
+    if (!anchor.parentNode) return;
+
+    // ── Resolve the view, without touching the live DOM ────────────────────
+    // The currently mounted view stays put until a replacement is in hand.
+    // Tearing it down first would let a generation that never earns the right
+    // to commit leave the outlet permanently empty.
+    let node: Node | null = null;
+    let fromCache = false;
+
+    if (shouldCache && cache.has(cacheKey)) {
+      node = cache.get(cacheKey)!;
+      fromCache = true;
+    } else {
+      try {
+        const component = await router.loadComponent(routeDef, route.path);
+
+        // Ownership check BEFORE building anything. A superseded generation
+        // must not even *create* the node: creation runs user code that
+        // registers effects and listeners, and none of it would ever be owned.
+        if (kaTorn || seq !== updateSeq) return;
+
+        node = component();
+      } catch (error) {
+        if (kaTorn || seq !== updateSeq) return;
+        console.error("[KeepAliveRoute] Component error:", error);
+        return;
+      }
+
+      if (!node) return;
+
+      // Re-check at the commit boundary. `component()` is user code: it can
+      // navigate, or collapse the layout owning this outlet, synchronously.
+      // The node exists and holds resources now, so losing ownership here
+      // means disposing it — returning would leak every disposer it registered.
+      if (kaTorn || seq !== updateSeq) {
+        dispose(node);
+        return;
+      }
+    }
+
     const parent = anchor.parentNode;
     if (!parent) {
-      isUpdating = false;
+      if (!fromCache) dispose(node);
       return;
     }
 
-    try {
-      // Detach current node — dispose if it wasn't cached
-      if (currentNode?.parentNode) {
-        parent.removeChild(currentNode);
-        if (!currentCached) {
-          dispose(currentNode);
+    // ── Synchronous commit ─────────────────────────────────────────────────
+    // From here down there is no await, so ownership cannot lapse mid-commit.
+
+    // Detach the outgoing view — dispose it only if it isn't cached.
+    if (currentNode && currentNode !== node) {
+      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
+      if (!currentCached) dispose(currentNode);
+    }
+
+    if (fromCache) {
+      // Touch LRU order.
+      const idx = lruOrder.indexOf(cacheKey);
+      if (idx !== -1) lruOrder.splice(idx, 1);
+      lruOrder.push(cacheKey);
+    } else if (shouldCache) {
+      cache.set(cacheKey, node);
+      lruOrder.push(cacheKey);
+
+      // Evict oldest if over max.
+      while (lruOrder.length > maxCache) {
+        const evictKey = lruOrder.shift()!;
+        // Never evict the view being committed — disposing it here would mount
+        // a dead node. Only reachable with a pathological `max` (< 1).
+        if (evictKey === cacheKey) {
+          lruOrder.push(evictKey);
+          break;
         }
-      }
-
-      if (shouldCache && cache.has(cacheKey)) {
-        // Retrieve from cache
-        currentNode = cache.get(cacheKey)!;
-        currentCached = true;
-        // Update LRU order
-        const idx = lruOrder.indexOf(cacheKey);
-        if (idx !== -1) {
-          lruOrder.splice(idx, 1);
+        const evictNode = cache.get(evictKey);
+        if (evictNode) {
+          dispose(evictNode);
+          if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
+          cache.delete(evictKey);
         }
-        lruOrder.push(cacheKey);
-      } else {
-        // Create new
-        const component = await _routerRef.current!.loadComponent(routeDef, route.path);
-        const node = component();
-
-        if (!node || route.path !== _routerRef.current!.currentRoute.path) {
-          isUpdating = false;
-          return;
-        }
-
-        currentNode = node;
-        currentCached = shouldCache;
-
-        if (shouldCache) {
-          cache.set(cacheKey, node);
-          lruOrder.push(cacheKey);
-
-          // Evict oldest if over max
-          while (lruOrder.length > maxCache) {
-            const evictKey = lruOrder.shift()!;
-            const evictNode = cache.get(evictKey);
-            if (evictNode) {
-              dispose(evictNode);
-              if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
-              cache.delete(evictKey);
-            }
-          }
-        }
-      }
-
-      currentKey = cacheKey;
-      if (currentNode) {
-        parent.insertBefore(currentNode, anchor.nextSibling);
-      }
-    } catch (error) {
-      console.error("[KeepAliveRoute] Component error:", error);
-    } finally {
-      isUpdating = false;
-      if (pendingUpdate) {
-        pendingUpdate = false;
-        update();
       }
     }
+
+    currentNode = node;
+    currentCached = fromCache || shouldCache;
+    currentKey = cacheKey;
+    parent.insertBefore(node, anchor.nextSibling);
   };
 
   let initialized = false;
@@ -2016,10 +2104,14 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     });
   }
 
-  let kaTorn = false;
   const kaCleanup = () => {
     if (kaTorn) return;
     kaTorn = true;
+    // Advance the generation as well as setting the flag. Both are checked at
+    // every commit boundary, so an update parked on a lazy import is superseded
+    // the moment the outlet dies — it cannot re-insert into the DOM, cannot
+    // repopulate the cache we are about to clear, and cannot resurrect a view.
+    updateSeq++;
     kaTeardown();
     for (const node of cache.values()) {
       dispose(node);
@@ -2028,7 +2120,12 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     cache.clear();
     lruOrder.length = 0;
     if (currentNode?.parentNode) currentNode.parentNode.removeChild(currentNode);
+    // An uncached current view is not in `cache`, so it would otherwise be
+    // detached but never torn down.
+    if (currentNode && !currentCached) dispose(currentNode);
     currentNode = null;
+    currentKey = "";
+    currentCached = false;
   };
   // The cached detached subtrees are the heaviest leak here — release them when
   // the outlet's anchor subtree is disposed, not only on destroyRouter().

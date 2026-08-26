@@ -18,7 +18,7 @@
 // `--expose-gc` heap comparison is layered on top where available, with a loose
 // tolerance, purely as corroboration.
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { checkLeaks, dispose } from "../../src/core/rendering/dispose";
+import { checkLeaks, dispose, registerDisposer } from "../../src/core/rendering/dispose";
 import { each } from "../../src/core/rendering/each";
 import { derived } from "../../src/core/signals/derived";
 import { effect } from "../../src/core/signals/effect";
@@ -26,7 +26,7 @@ import { signal } from "../../src/core/signals/signal";
 import { __resetQueryCache, clearQueryCache, query } from "../../src/data/query";
 import { getSubscriberCount } from "../../src/devtools/introspect";
 import type { RouteDef } from "../../src/plugins/router";
-import { createRouter, destroyRouter, Route } from "../../src/plugins/router";
+import { createRouter, destroyRouter, KeepAliveRoute, navigate, Route } from "../../src/plugins/router";
 import { batch } from "../../src/reactivity/batch";
 
 const flush = async (n = 6) => {
@@ -287,6 +287,102 @@ describe("router soak", () => {
     await flush(10);
 
     expect(checkLeaks(), "bindings leaked across 500 router lifecycles").toBeLessThanOrEqual(baseline + 2);
+  });
+});
+
+/**
+ * A countable route component for the KeepAlive soak.
+ *
+ * `checkLeaks()` counts registered disposers, so the returned nodes must carry
+ * one to be measurable at all. The FIRST invocation deliberately does not
+ * register: `ComponentLoader.doLoadComponent()` calls every route factory once
+ * to assert it returns an Element, then discards the result and memoises the
+ * factory. That throwaway node is never mounted and never disposed, so counting
+ * it would add a constant `+1 per route definition` to the residual — an
+ * artifact of the loader that has nothing to do with KeepAlive ownership, and
+ * one that would mask or fake a real leak depending on which way it drifted.
+ */
+function countableComponent(label = "") {
+  let calls = 0;
+  return () => {
+    const validationCall = calls++ === 0;
+    const d = document.createElement("div");
+    d.textContent = label;
+    if (!validationCall) registerDisposer(d, () => {});
+    return d;
+  };
+}
+
+describe("KeepAlive outlet soak", () => {
+  it("2 000 cache/switch/reuse cycles return bindings to baseline", async () => {
+    // The KeepAlive outlet holds detached subtrees on purpose, so its failure
+    // mode is the opposite of the plain Route outlet's: not "disposed too
+    // eagerly" but "never disposed at all". Cached views are expected to stay
+    // alive for the outlet's lifetime — what must return to baseline is the
+    // state after the outlet itself is disposed.
+    const routes: RouteDef[] = [
+      { path: "/", component: countableComponent("/") },
+      { path: "/a", name: "a", component: countableComponent("/a") },
+      { path: "/b", name: "b", component: countableComponent("/b") },
+      { path: "/c", name: "c", component: countableComponent("/c") },
+    ];
+    window.history.replaceState({}, "", "/");
+    createRouter(routes, { mode: "history", keepAlive: 8 });
+
+    const baseline = checkLeaks();
+    const anchor = KeepAliveRoute({ max: 4 });
+    host.appendChild(anchor);
+    await flush(10);
+
+    // Mix cache hits (repeat keys) with cache misses (fresh query strings), so
+    // both the reuse path and the create+evict path are exercised.
+    const targets = ["/a", "/b", "/a", "/c", "/b?p=1", "/a", "/c?p=2", "/b"];
+    for (let i = 0; i < 2_000; i++) {
+      void navigate(targets[i % targets.length]).catch(() => {});
+      if (i % 50 === 0) await flush(4);
+    }
+    await flush(30);
+
+    await navigate("/a").catch(() => {});
+    await flush(10);
+    expect(host.textContent, "KeepAlive outlet wedged after 2 000 cycles").toContain("/a");
+
+    // Exactly one view is mounted at a time, however many are cached.
+    expect(host.querySelectorAll("div").length, "duplicate views mounted").toBe(1);
+
+    // Disposing the outlet must release the whole cache, not just the mounted
+    // view — that is where a bounded-cache leak would show up.
+    dispose(anchor);
+    anchor.parentNode?.removeChild(anchor);
+    destroyRouter();
+    await flush(10);
+
+    expect(checkLeaks(), "KeepAlive cache leaked across 2 000 cycles").toBeLessThanOrEqual(baseline + 2);
+  });
+
+  it("1 000 outlet create/dispose cycles do not accumulate cached subtrees", async () => {
+    const routes: RouteDef[] = [
+      { path: "/", component: countableComponent() },
+      { path: "/a", name: "a", component: countableComponent() },
+      { path: "/b", name: "b", component: countableComponent() },
+    ];
+    window.history.replaceState({}, "", "/");
+    createRouter(routes, { mode: "history", keepAlive: 4 });
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 1_000; i++) {
+      const anchor = KeepAliveRoute();
+      host.appendChild(anchor);
+      await flush(2);
+      await navigate(i % 2 === 0 ? "/a" : "/b").catch(() => {});
+      await flush(2);
+      dispose(anchor);
+      anchor.parentNode?.removeChild(anchor);
+    }
+    destroyRouter();
+    await flush(10);
+
+    expect(checkLeaks(), "bindings leaked across 1 000 KeepAlive outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
   });
 });
 

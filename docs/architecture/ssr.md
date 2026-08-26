@@ -136,11 +136,70 @@ be trusted.
   pull-based backpressure and a `cancel()` that returns the generator.
 - `ssrSuspense({ fallback, content })` emits fallback markup carrying a
   `data-sibu-suspense-id`, and resolves to the real content later.
-- `renderToSuspenseStream()` emits the shell, then each resolved boundary
-  followed by a small swap script that moves the resolved content into place.
+- `renderToSuspenseStream()` emits the shell, then — once **every** boundary has
+  settled — each resolved boundary followed by a small swap script that moves
+  the resolved content into place.
+
+**Environment.** Every streaming API above requires a server DOM implementation,
+exactly like the non-streaming ones: they take real `Node` objects and walk
+them. Returning a Web `ReadableStream` does not make `renderToReadableStream`
+usable in a DOM-less runtime. The supported floor is SibuJS's declared Node
+version (`>=22.3.0`) plus a DOM (`jsdom`, `linkedom`, `happy-dom`).
+
+### Streaming is shell-then-batch, not per-boundary progressive
+
+This distinction is easy to misread, so it is worth stating precisely.
+
+```
+shell HTML (with fallbacks)  ──► flushed immediately
+                                      │
+                          await Promise.all(all boundaries)   ← one barrier
+                                      │
+boundary A + swap script     ──┐
+boundary B + swap script     ──┤ flushed together, after the SLOWEST settles
+boundary C + swap script     ──┘
+```
+
+`renderToSuspenseStream()` awaits `Promise.all(pendingBoundaries)` before
+emitting any of them. A boundary that resolves in 5 ms is therefore not sent
+until the boundary that takes 3 s is done. What streams early is the **shell**;
+what does not stream is the boundaries relative to *each other*.
+
+This is genuinely useful — first paint does not wait on data — but it is not
+per-boundary progressive streaming, and it should not be described as such.
+Under a slow boundary, total time-to-content is governed by the slowest one.
+
+### Suspense failure semantics
+
+`ssrSuspense` resolves to the **fallback HTML** in all three non-success cases:
+
+| Outcome | Emitted markup |
+|---|---|
+| Still pending when the shell flushes | fallback |
+| Timed out (`timeoutMs`, default 30 000) | fallback |
+| Content promise rejected | fallback |
+
+The consequence to be explicit about: **the emitted markup does not distinguish
+a permanently failed boundary from one that is merely still pending.** Both look
+like a rendered fallback. A rejection is logged in development
+(`[SibuJS SSR] ssrSuspense rejected:`), but the HTML carries no failure marker
+and no client-side signal that the boundary will never arrive. An application
+that must tell the two apart has to carry that state in its own payload.
 
 Suspense ids come from the **per-request** counter, so concurrent streaming
 renders cannot collide on marker ids.
+
+### `query()` under SSR
+
+`query()` **does** fetch during server rendering. Its effect runs on creation and
+starts a request like it would on the client; results land in the
+**request-scoped** cache (see [Request isolation](#request-isolation) above), not
+the process-global one, so concurrent requests cannot read each other's data.
+
+What SSR does *not* do is wait for those requests before serializing: nothing in
+`renderToString`/`renderToStream` blocks on in-flight queries. To get data into
+server markup, resolve it before rendering, or put the dependent subtree behind
+`ssrSuspense`.
 
 ## Invariants
 

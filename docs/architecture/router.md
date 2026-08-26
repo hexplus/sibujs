@@ -185,6 +185,77 @@ first, and the outlet resolves the component afterwards.
 On replacement the outgoing subtree is `dispose()`d before detaching, so route
 components are disposed exactly once per replacement.
 
+## The KeepAlive outlet
+
+`KeepAliveRoute()` caches rendered views so signals, form state, and scroll
+position survive navigation. It runs the same ownership model as `Route()` —
+a monotonic `updateSeq` claimed on entry and re-checked after every `await` —
+plus a teardown flag checked at the same boundaries.
+
+### Cache identity and async ownership are separate concepts
+
+This is the distinction the outlet is built around, and conflating the two is
+what made stale loads commit:
+
+```text
+cache key        answers:  "Which cached view is this?"
+update generation answers: "May this async completion still commit?"
+```
+
+They are not interchangeable, because
+
+```text
+same route value  !=  same navigation generation
+```
+
+A cache key is derived from the **full location** — path + query + hash:
+
+| Location | Cache key | Distinct view? |
+|---|---|---|
+| `/search?q=a` | `/search?q=a` | yes |
+| `/search?q=b` | `/search?q=b` | yes — query is part of identity |
+| `/docs#one` | `/docs#one` | yes — hash is part of identity |
+| `/users/1` vs `/users/2` | different | yes |
+
+Ownership is never inferred from any of those. Two navigations differing only in
+query share a pathname; an A → B → A round trip returns to an identical key
+under a *different* generation. So a superseded load whose key still "matches"
+must still be refused:
+
+```text
+KeepAlive update 4 ──► /search?q=a ──► await lazy chunk
+KeepAlive update 5 ──► /search?q=b ──► becomes current
+chunk resolves with token 4 ≠ 5 ──► dropped, never created, never cached
+```
+
+### Commit rules
+
+- The ownership check runs **before** the node is created, so a superseded
+  generation never registers effects or listeners at all.
+- It runs **again** immediately before the commit, because `component()` is user
+  code that can navigate or tear the outlet down synchronously. If ownership is
+  lost at that point the created node is `dispose()`d — returning would leak
+  every disposer it just registered.
+- The commit itself — detach outgoing, update LRU, cache, insert — is
+  **synchronous**, so ownership cannot lapse midway through it.
+- The currently mounted view stays attached while a replacement loads. A
+  generation that never earns the right to commit therefore cannot leave the
+  outlet empty.
+
+### Lifetime
+
+| Event | Effect on a cached view |
+|---|---|
+| Navigated away from | detached from the DOM, kept in cache, **not** disposed |
+| Navigated back to | the same node is re-attached — no remount |
+| Evicted past `max` (LRU) | disposed and dropped |
+| Excluded by `include` | never cached; disposed on navigation away |
+| Outlet disposed / `destroyRouter()` | whole cache disposed and cleared |
+
+After the outlet is disposed, no in-flight load may repopulate the cache or
+re-insert into the DOM — the teardown flag and the generation counter are both
+advanced, and both are checked at the commit boundary.
+
 ## History integration
 
 | Action | History effect |
@@ -260,6 +331,38 @@ The router **delegates focus entirely to the application**. It never moves,
 resets, or restores focus on navigation or history traversal. Applications
 needing route-change focus management — an accessibility requirement for many —
 should implement it in an `afterEach` hook.
+
+## DOM-less runtimes and the memory router
+
+The router is constructible and navigable with no DOM at all — bare Node, an SSR
+request, a test process. Browser-only side effects are **skipped**, never
+attempted and never fatal; the route itself always commits.
+
+| Capability | Without a DOM |
+|---|---|
+| Route matching, guards, redirects, `push`/`replace` | works |
+| `currentRoute`, navigation results | works |
+| `history.pushState` / `replaceState` | **skipped** — probed via `globalThis.history` |
+| `popstate` / `hashchange` listeners | **not registered** — nothing to register on |
+| `scrollBehavior` | hook still runs; **applying** its result is skipped |
+| `go()` / `back()` / `forward()` | browser-only — no effect |
+| `Route()` / `KeepAliveRoute()` outlets | need a DOM; they build real nodes |
+
+`createMemoryRouter(routes, initialPath)` builds a hash-mode router for
+testing/SSR. Two things about it are worth stating plainly:
+
+- It **does not mutate browser history**, by construction.
+- It takes **no options object**, so `scrollBehavior` cannot be configured on it
+  directly. The configuration that reaches the scroll path in a DOM-less runtime
+  is an explicit `createRouter(routes, { scrollBehavior })` rendered server-side.
+
+`scrollBehavior` guards the primitives it actually uses —
+`requestAnimationFrame` *and* `window.scrollTo` — not merely `typeof window`.
+The two can be missing independently (a partial DOM shim, jsdom without
+`pretendToBeVisual`), and the scroll call runs **after** the route has been
+committed: an exception there does not just skip scrolling, it propagates out of
+the navigation and reports `success: false` on a navigation that in fact
+succeeded. That was MEM-001.
 
 ## Known limitations
 

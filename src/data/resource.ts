@@ -1,9 +1,16 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 
+/**
+ * Lifecycle callbacks follow the shared data-layer contract: an exception
+ * thrown by `onStart`, `onSuccess`, `onError`, or `onSettled` never changes the
+ * success/failure state of the fetch itself, and is reported separately via
+ * `console.error`. See `QueryOptions` for the full statement.
+ */
 export interface ResourceOptions<T> {
   /** Initial data value before first fetch. Default: undefined */
   initialValue?: T;
@@ -107,7 +114,11 @@ export function resource<T, S = void>(
       setLoading(true);
       setError(undefined);
     });
-    options.onStart?.();
+    // Isolated, and deliberately outside the try: an onStart that throws must
+    // not cancel the fetch it was only meant to announce. `doFetch` is invoked
+    // unawaited from an effect, so an escaping exception here became an
+    // unhandled rejection rather than a catchable error.
+    runCallback("resource onStart", () => options.onStart?.());
 
     try {
       const result = await withRetry(() => fetcher(sourceValue, { signal, prev }), options.retry, undefined, signal);
@@ -120,7 +131,10 @@ export function resource<T, S = void>(
         setData(result);
         setLoading(false);
       });
-      options.onSuccess?.(result);
+      // Isolated: the fetch succeeded and the data is committed. A throwing
+      // onSuccess used to fall into the catch below, which then overwrote that
+      // success with the callback's own error and invoked onError with it.
+      runCallback("resource onSuccess", () => options.onSuccess?.(result));
     } catch (err) {
       if (version !== fetchVersion || disposed) return;
       if (err instanceof DOMException && err.name === "AbortError") {
@@ -133,10 +147,10 @@ export function resource<T, S = void>(
         setError(errorObj);
         setLoading(false);
       });
-      options.onError?.(errorObj);
+      runCallback("resource onError", () => options.onError?.(errorObj));
     } finally {
       if (version === fetchVersion) {
-        options.onSettled?.();
+        runCallback("resource onSettled", () => options.onSettled?.());
       }
     }
   }
