@@ -341,6 +341,189 @@ describe("route component loading vs instantiation", () => {
       expect(host.querySelectorAll("[data-page]").length).toBe(0);
     });
 
+    // LOAD-004 — source text is not semantic metadata. An ordinary component
+    // that merely *mentions* a dynamic import must never become executable
+    // during preload.
+    describe("source text grants no preload authority", () => {
+      it("does not invoke a factory containing an import( string literal", async () => {
+        let calls = 0;
+        const Page = () => {
+          calls++;
+          // A documentation sample held as data, not a dynamic import.
+          const example = "import('./Page')";
+          void example;
+          const d = document.createElement("div");
+          d.dataset.page = "literal";
+          return d;
+        };
+
+        setRoutes([
+          { path: "/", component: home },
+          { path: "/page", component: Page },
+        ]);
+        host.appendChild(Route());
+        await settle();
+
+        await preloadRoute("/page");
+        await settle();
+        expect(calls).toBe(0);
+
+        // …and it still mounts normally.
+        await navigate("/page");
+        await settle();
+        expect(calls).toBe(1);
+        expect(host.querySelectorAll('[data-page="literal"]').length).toBe(1);
+      });
+
+      it("does not invoke a factory mentioning import( in a comment", async () => {
+        let calls = 0;
+        const Page = () => {
+          // Example: import("./OtherPage")
+          calls++;
+          const d = document.createElement("div");
+          d.dataset.page = "comment";
+          return d;
+        };
+
+        setRoutes([
+          { path: "/", component: home },
+          { path: "/page", component: Page },
+        ]);
+        host.appendChild(Route());
+        await settle();
+
+        await preloadRoute("/page");
+        await settle();
+        expect(calls).toBe(0);
+
+        await navigate("/page");
+        await settle();
+        expect(calls).toBe(1);
+      });
+
+      it("does not invoke a factory containing import( in a template literal or block comment", async () => {
+        let calls = 0;
+        const Page = () => {
+          calls++;
+          const tpl = `import("./foo")`;
+          /* import("./foo") */
+          void tpl;
+          return document.createElement("div");
+        };
+
+        setRoutes([
+          { path: "/", component: home },
+          { path: "/page", component: Page },
+        ]);
+        host.appendChild(Route());
+        await settle();
+
+        for (let i = 0; i < 10; i++) await preloadRoute("/page");
+        await settle();
+
+        expect(calls).toBe(0);
+      });
+    });
+
+    // An unmarked dynamic-import factory is no longer preloadable — but it must
+    // still navigate correctly.
+    describe("unmarked module-like factories", () => {
+      it("is a preload no-op but navigates correctly", async () => {
+        let loaderCalls = 0;
+        let componentCalls = 0;
+        const Page = () => {
+          componentCalls++;
+          const d = document.createElement("div");
+          d.dataset.page = "unmarked";
+          return d;
+        };
+        // Shaped exactly like `() => import("./Page")`, without `lazy()`.
+        const loader = () => {
+          loaderCalls++;
+          return Promise.resolve({ default: Page });
+        };
+
+        setRoutes([
+          { path: "/", component: home },
+          { path: "/page", component: loader as never },
+        ]);
+        host.appendChild(Route());
+        await settle();
+
+        await preloadRoute("/page");
+        await settle();
+        expect(loaderCalls).toBe(0);
+        expect(componentCalls).toBe(0);
+
+        await navigate("/page");
+        await settle();
+
+        expect(loaderCalls).toBe(1);
+        expect(componentCalls).toBe(1);
+        expect(host.querySelectorAll('[data-page="unmarked"]').length).toBe(1);
+      });
+
+      it("keeps route-generation ownership when a stale unmarked loader resolves", async () => {
+        let componentCalls = 0;
+        let disposals = 0;
+        let release!: () => void;
+        const gate = new Promise<void>((r) => {
+          release = r;
+        });
+        const loader = async () => {
+          await gate;
+          return {
+            default: () => {
+              componentCalls++;
+              const d = document.createElement("div");
+              d.dataset.page = "stale";
+              registerDisposer(d, () => {
+                disposals++;
+              });
+              return d;
+            },
+          };
+        };
+
+        setRoutes([
+          { path: "/", component: home },
+          { path: "/slow", component: loader as never },
+          {
+            path: "/other",
+            component: () => {
+              const d = document.createElement("div");
+              d.dataset.page = "other";
+              return d;
+            },
+          },
+        ]);
+        host.appendChild(Route());
+        await settle();
+
+        const pending = navigate("/slow");
+        await settle();
+        await navigate("/other");
+        await settle();
+
+        release();
+        await pending.catch(() => {});
+        await settle();
+
+        // The superseded generation cannot commit, and anything it did build is
+        // lifecycle-disposed rather than dropped.
+        //
+        // Note the residual: the ownership check runs immediately before and
+        // after `instantiateComponent()`, but this loader awaits *inside* it, so
+        // the second-stage factory can still run for a generation that has since
+        // been superseded. That is wasted work, not a correctness failure — the
+        // guarantees that matter (no commit, no leak, no resurrection) hold, and
+        // are what this asserts.
+        expect(host.querySelectorAll('[data-page="stale"]').length).toBe(0);
+        expect(host.querySelectorAll('[data-page="other"]').length).toBe(1);
+        expect(disposals).toBe(componentCalls);
+      });
+    });
+
     it("stays a no-op when repeated", async () => {
       let imports = 0;
       let calls = 0;

@@ -10,6 +10,7 @@ entry in [final-router-followup-findings.md](./final-router-followup-findings.md
 | LOAD-002 | Direct `AsyncComponent` Element disposed before mount, then cached and reused | **P1** | Fixed |
 | OUT-004 (revised) | Root cause is the validation-probe architecture, not a missing `dispose()` | **P1** | Superseded by the above |
 | LOAD-003 | `preloadRoute()` invoked directly supplied `AsyncComponent` factories | **P2** | Fixed |
+| LOAD-004 | Preload permission inferred from `Function#toString()` source text | **P2** | Fixed |
 
 ---
 
@@ -158,15 +159,27 @@ yields a distinct Element per instantiation.
 
 ---
 
+## How this arrived at its final shape
+
+Three corrections, in order. Only the last row describes current behaviour.
+
+| Step | State after it |
+|---|---|
+| **LOAD-001 / LOAD-002** — separate loading from instantiation | The loader stopped invoking components to validate them. Preload resolved modules, but still invoked a direct `AsyncComponent` and disposed the Element. |
+| **LOAD-003** — preload no-ops for directly supplied factories | Preload stopped invoking direct factories. Which functions counted as "module loaders" was still decided by looking for `import(` in the function's source. |
+| **LOAD-004** — explicit brand is the only authority | **Current.** Only a `lazy()`-branded loader is ever executed during preload. Nothing is inferred from source text, syntax, or a trial invocation. |
+
 ## Behaviour changes worth knowing
 
-- **Component factories now run once per instance**, not twice on first load.
-  Applications that had (knowingly or not) come to rely on the double call will
-  see one fewer invocation.
-- **`preloadRoute()` no longer renders.** It resolves deferred modules and
-  caches their factories, uninvoked. (This pass left one gap — direct
-  `AsyncComponent` preloading still invoked the factory and disposed the
-  result — closed by LOAD-003 below.)
+- **Component factories run once per instance**, not twice on first load.
+  Applications that had (knowingly or not) come to rely on the double call see
+  one fewer invocation.
+- **`preloadRoute()` does not render, and does not invoke component factories.**
+  It executes only an explicitly branded `lazy()` loader, importing the module
+  and caching its factory uninvoked.
+- **Only `lazy()` routes are preloadable.** A route written as
+  `() => import("./Page")` still navigates correctly but is no longer preloaded.
+  Wrap it in `lazy()` to restore that.
 - **Load errors are recorded at instantiation time**, since that is where a
   deferred load now runs. The `errorRetryDelay` rate-limit and the retry button
   behave as before; the bookkeeping moved with the work.
@@ -354,6 +367,85 @@ which a route component can be invoked.
 
 ---
 
+## LOAD-004 — Preload permission inferred from source text
+
+**Severity:** P2. **Status:** Fixed. **Subsystem:** ComponentLoader / preload classification.
+
+**Reproducers.** `tests/router-hardening-loader-instantiation.test.ts`,
+`source text grants no preload authority`.
+
+| Component factory | Preload invocations — expected | Before fix |
+|---|---|---|
+| contains `const example = "import('./Page')"` | 0 | **1** |
+| contains a template literal `` `import("./foo")` `` and a block comment | 0 (×10 preloads) | **10** |
+| contains only a `//` line comment mentioning `import(` | 0 | 0 — *see below* |
+
+The line-comment variant passed **before** the fix, which is itself part of the
+evidence: TypeScript strips `//` comments before the function ever reaches
+runtime, so whether that reproducer fires depends on the build pipeline. A
+contract that changes with the transpiler is not a contract.
+
+**Root cause.** The loader replaced runtime-type guessing with **source-text
+guessing**:
+
+```ts
+comp.toString().includes("import(")
+```
+
+Source representation is not semantic metadata and cannot safely grant
+permission to execute application code. It fails in both directions:
+
+- **false positive** — an ordinary component mentioning `import(` in a string,
+  template literal, or surviving comment becomes executable during preload,
+  breaking preload purity. This is the dangerous direction, and it reproduced.
+- **false negative** — a bundler that rewrites `import("./Page")` into its own
+  chunk-loader call erases the marker, silently losing the preload
+  optimisation. Not dangerous, but it shows the heuristic is not stable across
+  the toolchains the package certifies against.
+
+No better regex fixes this. The defect is source inspection itself.
+
+**Fix.** `isDeferredModule()` now consults exactly one thing — the `LAZY_MARKER`
+brand stamped by `lazy()`:
+
+```ts
+private isDeferredModule(comp): boolean {
+  return (comp as { [LAZY_MARKER]?: boolean })[LAZY_MARKER] === true;
+}
+```
+
+A brand is metadata: it survives TypeScript, every bundler, and minification,
+because it is part of runtime behaviour rather than syntax. Preload purity
+becomes structurally enforceable rather than heuristically defended — an
+unbranded factory has no branch that could execute it.
+
+No public API was added. `lazy()` already existed and is now documented as the
+explicit opt-in for preloadable code splitting.
+
+**Regression tests.** 3 false-positive tests, 2 unmarked-module-like-factory
+tests (preload no-op + navigation still correct, and stale-generation ownership),
+plus the existing purity matrix and the preload/navigation race — all green.
+
+**Behaviour change.** `() => import("./Page")` without `lazy()` is no longer
+preloaded. It navigates correctly; it simply gets no preload benefit. This
+sacrifices an optimisation, not correctness, and `4.0.0-rc.1` is unreleased.
+
+**Residual, disclosed.** Two `Function#toString()` reads remain in `Route()`:
+one extracts an import path for a dev error node's `data-component-source`
+attribute, the other guesses whether to show a loading spinner. Both are
+cosmetic/diagnostic and grant **no** execution permission; the spinner site now
+carries a comment saying so. They were left alone as out of scope.
+
+A second residual worth naming: the ownership check runs immediately before and
+after `instantiateComponent()`, but an unmarked loader that awaits *inside* it
+can still run its second-stage factory for a generation that has since been
+superseded. That is wasted work, not a correctness failure — the result is
+lifecycle-disposed and never committed, which the test asserts. Closing it would
+require threading an ownership callback into the loader, which is beyond this
+pass.
+
+---
+
 ## Final matrix (LOAD-003)
 
 ```text
@@ -462,3 +554,114 @@ already removed then (`tracked()`, `instrumented()`/`SelfDestruct`, and the
 browser fixture's `instanced()`). No new scaffolding was introduced by this pass:
 every route component invocation in the suite now represents a genuine instance,
 and no assertion was weakened to accommodate the change.
+
+---
+
+## Final report (LOAD-004)
+
+```text
+PRELOAD CLASSIFICATION
+
+Uses Function#toString():                  NO
+Uses source regex/heuristics:              NO
+Uses AsyncFunction constructor:            NO
+Uses speculative invocation:               NO
+Explicit lazy/deferred marker required:    YES
+
+FALSE POSITIVE TESTS
+
+"import(" in string invokes component:     NO
+"import(" in comment invokes component:    NO
+"import(" in template literal / block:     NO
+
+DIRECT FACTORIES
+
+sync preload invocation:                   0
+AsyncComponent preload invocation:         0
+Promise-returning preload invocation:      0
+unmarked import-loader preload invocation: 0
+
+EXPLICIT LAZY
+
+module imported during preload:            YES
+component instantiated during preload:     NO
+navigation instantiation count:            1
+```
+
+## Documentation report
+
+```text
+CHANGELOG stale AsyncComponent preload text: REMOVED (in the LOAD-003 pass; re-verified absent)
+router.md stale AsyncComponent exception:    REMOVED (in the LOAD-003 pass; re-verified absent)
+source-text preload contract:                REMOVED
+lazy() explicit preload contract:            DOCUMENTED
+historical findings chronology:              CLEAN
+```
+
+Two items the brief expected to still be present were already gone: the
+CHANGELOG sentence about a direct `AsyncComponent` having "nothing to preload
+without instantiating", and the matching `router.md` paragraph. Both were
+removed when LOAD-003 was fixed. Re-checked by search; nothing to do. What *did*
+remain was the preload table row describing `() => import("./Page")` as
+"recognised by the dynamic `import(` in its source", which is now corrected.
+
+## Test counts - before / after
+
+| Suite | Before | After | Delta |
+|---|---|---|---|
+| Full unit/integration | 4597 passed, 1 skipped (371 files) | **4602 passed, 1 skipped (371 files)** | **+5** |
+| Router suite | 519 passed (32 files) | **524 passed (32 files)** | **+5** |
+| ComponentLoader / preload | 46 passed (4 files) | **51 passed (4 files)** | **+5** |
+| Ownership suites (Route/Outlet/KeepAlive/Suspense) | 43 passed (4 files) | **43 passed (4 files)** | 0 |
+| Browser matrix | 192 runs | **192 runs** | 0 |
+| Soak | 21 passed, 1 skipped | **21 passed, 1 skipped** | 0 |
+
+| Typecheck | Before | After |
+|---|---|---|
+| Source TypeScript errors | 0 | **0** |
+| Test TypeScript errors | 0 | **0** |
+
+## Certification
+
+| Gate | Result |
+|---|---|
+| Build | PASS |
+| TypeScript (src) | PASS |
+| Lint | PASS |
+| Full unit/integration suite | PASS - 4602 tests, 371 files |
+| TypeScript (tests + entry files) | PASS - 0 errors |
+| Query / Router / SSR fuzzing | PASS - 6 / 7 / 8 |
+| Browser matrix (Chromium/Firefox/WebKit) | PASS - 192 runs |
+| Lifecycle + SSR soak | PASS - 21 tests |
+| Packed package + subpath exports | PASS - 112/112, 16 subpaths |
+| Bundler matrix (Vite/Rollup/esbuild/Webpack) | PASS - builds 12/12, runtime 12/12 |
+| Node support matrix | NOT TESTED - 22.3.0 unavailable on this host; 22 PASS, 24 PASS |
+| **Result** | **ALL REQUIRED GATES PASSED** (12 PASS / 0 FAIL) |
+
+The bundler matrix is the gate that matters most for this change: a brand is
+runtime state, so it survives TypeScript, Vite, Rollup, esbuild, Webpack and
+minification, where the source-text heuristic it replaced did not. 12/12 builds
+and 12/12 runtime checks pass, and `lazy()` usage is unchanged.
+
+No public API changed - `preloadRoute()` keeps its signature and `Promise<void>`
+result, `lazy()` is unchanged, and the 112/112 subpath check is identical.
+
+### Node floor
+
+Exact Node **22.3.0** is not installed on this host: **NOT TESTED on this run**,
+neither PASS nor FAIL. Node v22.14.0 and v24.19.0 passed every sub-gate. The
+previously certified exact-floor evidence stands separately and is not
+reinterpreted.
+
+## Ownership guards - unchanged and green
+
+```text
+Route:      navSeq + routeTorn      PASS
+Outlet:     navSeq + outletTorn     PASS
+KeepAlive:  updateSeq + kaTorn      PASS
+Suspense:   generation + tornDown   PASS
+```
+
+Preload/navigation module-load dedupe is preserved: switching the classifier
+from source text to the `lazy()` brand did not touch `resolveModuleFactory()`,
+and the race test still shows one import and one instantiation.

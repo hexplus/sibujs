@@ -1030,25 +1030,30 @@ class ComponentLoader {
   }
 
   /**
-   * Does this route component load a **module**, as opposed to producing an
-   * instance?
+   * Is this route component an **explicitly declared module loader**?
    *
-   * Only two signals are reliable: the LAZY_MARKER stamped by `lazy()`, and a
-   * dynamic `import(` in the source — preserved verbatim by bundlers, since it
-   * drives code-splitting, so it survives minification. `lazy()` is the robust
-   * form.
+   * Preload is the only place SibuJS executes a route function before the
+   * router needs an instance, so permission to do that must be explicit. The
+   * brand stamped by `lazy()` is the sole authority.
    *
-   * `constructor.name === "AsyncFunction"` is deliberately **not** a signal.
-   * It cannot distinguish `async () => import("./Page")` from
-   * `async () => document.createElement("div")`, and treating the latter as a
-   * module loader is what made preload invoke user components. A component that
-   * merely happens to be async has nothing separately loadable. (LOAD-003)
+   * Everything the loader once inferred is deliberately *not* a signal:
+   *
+   * - `constructor.name === "AsyncFunction"` — cannot distinguish
+   *   `async () => import("./Page")` from `async () => div()`. Treating the
+   *   latter as a module loader is what made preload invoke user
+   *   components. (LOAD-003)
+   * - `toString().includes("import(")` — source text is a representation, not
+   *   semantics. An ordinary component with `"import('./x')"` in a string, a
+   *   template literal, or a comment was executed during preload; and the same
+   *   text can vanish under a bundler that rewrites dynamic imports into its
+   *   own chunk-loader calls. Both directions are wrong, and no better regex
+   *   fixes that — the defect is source inspection itself. (LOAD-004)
+   *
+   * A brand is metadata: it survives TypeScript, every bundler, and
+   * minification, because it is part of runtime behaviour rather than syntax.
    */
   private isDeferredModule(comp: Component | AsyncComponent | LazyComponent): boolean {
-    return (
-      (comp as { [LAZY_MARKER]?: boolean })[LAZY_MARKER] === true ||
-      (typeof comp === "function" && comp.toString().includes("import("))
-    );
+    return (comp as { [LAZY_MARKER]?: boolean })[LAZY_MARKER] === true;
   }
 
   private isElement(value: unknown): value is Element {
@@ -2096,7 +2101,12 @@ export function Route(): Node {
       // Handle component routes
       if ("component" in routeDef) {
         try {
-          // Show loading for async components
+          // Show loading for async components.
+          //
+          // A best-effort *cosmetic* guess, and deliberately not the loader's
+          // classification: getting it wrong shows or omits a spinner, nothing
+          // more. Preload permission is granted only by the `lazy()` brand and
+          // never by source text — see `isDeferredModule`. (LOAD-004)
           const isAsync =
             routeDef.component.constructor.name === "AsyncFunction" ||
             routeDef.component.toString().includes("import(");

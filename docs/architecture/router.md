@@ -451,18 +451,22 @@ if (!result.success && result.reason === "guard") {
 
 ## Preloading
 
-> `preloadRoute()` prepares deferred route code without creating a component
-> instance. Directly supplied component factories require no preload work and
-> are not invoked.
+> `preloadRoute()` only executes explicitly deferred route loaders — routes
+> wrapped with `lazy()`. Directly supplied component factories are never invoked
+> during preload, even if they return a Promise or dynamically import a module
+> during actual navigation.
 
-Preloading may execute module-loading machinery. It may **not** execute
-application component code — the boundary is the same one the loader itself
-respects:
+Preload is the one place the router would run a route function before it needs
+an instance, so **permission to do that is explicit**, never inferred:
+
+```text
+PRELOAD EXECUTION REQUIRES EXPLICIT AUTHORITY
+```
 
 ```text
 PRELOAD
    ↓
-module/factory resolution only
+explicitly branded module loader only
    ↓
 no component invocation
    ↓
@@ -472,19 +476,32 @@ no DOM, no lifecycle resources
 | Route definition | What preload does |
 |---|---|
 | `lazy(() => import("./Page"))` | imports the module, caches its default factory — **uninvoked** |
-| `() => import("./Page")` | same; recognised by the dynamic `import(` in its source |
+| `() => import("./Page")` | no-op — not branded, so not preloadable |
 | `() => element` | no-op — the factory is already here |
-| `async () => element` | no-op — there is no separate module to fetch |
+| `async () => element` | no-op — nothing separable to fetch |
 | `() => Promise.resolve(element)` | no-op — same reason |
 
-For directly supplied factories — synchronous, `async`, or plain
-promise-returning — there is nothing separable to load: the only thing calling
-them achieves is building the component, which is instantiation, not preloading.
-Preloading them is therefore intentionally a no-op that reports success.
+To make a dynamically imported route preloadable, wrap the loader with `lazy()`:
 
-`preloadRoute()` never invokes a component factory even to discover what it
-returns. `dispose()` cannot undo an analytics call, a store write, or a log
-line, so "call it and throw the result away" is not a form of preloading.
+```ts
+// Preloadable.
+{ path: "/page", component: lazy(() => import("./Page")) }
+
+// Works, but preloadRoute() is a no-op for it.
+{ path: "/page", component: () => import("./Page") }
+```
+
+Everything unbranded is treated as a component factory: the only thing calling
+it achieves is building the component, which is instantiation, not preloading.
+`preloadRoute()` never invokes such a factory even to discover what it returns —
+`dispose()` cannot undo an analytics call, a store write, or a log line, so
+"call it and throw the result away" is not a form of preloading.
+
+Preloadability is deliberately **not** inferred from what a function looks like.
+A brand survives TypeScript, every bundler, and minification because it is part
+of runtime behaviour; source text does not, in either direction — an ordinary
+component can mention `import(` in a string or comment, and a bundler can
+rewrite a real dynamic import into its own chunk-loader call.
 
 ### Preload cannot surface component errors
 

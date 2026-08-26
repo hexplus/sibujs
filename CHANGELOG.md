@@ -103,12 +103,20 @@ isolation never actually worked there under ESM — see below.
 - **`preloadRoute()` no longer renders the route.** Because validation ran at
   cache-fill time, preloading a route instantiated its component and built DOM —
   the opposite of what preloading is for. Preloading never invokes route
-  component factories now: deferred modules are resolved and their factories
-  cached, while directly supplied factories — synchronous, `async`, or plain
-  promise-returning — require no separate preload work and are left untouched
-  until real navigation. Because the factory is not invoked, preloading cannot
-  surface component errors; those appear at navigation. A lazy module's *load*
-  failure is still reported.
+  component factories now: only an explicitly branded loader — a route wrapped
+  with `lazy()` — is executed, importing the module and caching its factory
+  uninvoked. Every directly supplied factory, synchronous or `async` or plain
+  promise-returning, is left untouched until real navigation. Because the
+  factory is not invoked, preloading cannot surface component errors; those
+  appear at navigation. A lazy module's *load* failure is still reported.
+- **Preloadability is explicit, never inferred.** An earlier iteration decided
+  which route functions were safe to execute during preload by looking for
+  `import(` in `Function#toString()`. Source text is a representation, not
+  metadata: an ordinary component mentioning `import(` in a string or a comment
+  was executed during preload, and a bundler that rewrites dynamic imports into
+  its own chunk loader would hide a real one. The `lazy()` brand is now the sole
+  authority. A route written as `() => import("./Page")` still navigates
+  correctly, but is no longer preloaded — wrap it in `lazy()` to restore that.
 - **A direct `AsyncComponent` is no longer disposed before it is mounted.** For
   `component: async () => element`, the resolved Element was handed to the
   validation step, disposed as a discarded probe, cached as a reusable

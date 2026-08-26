@@ -190,6 +190,24 @@ loadable — a directly supplied factory, however async — preloading is a no-o
 rather than a speculative call. See
 [router.md § Preloading](./router.md#preloading).
 
+And the rule that makes that enforceable rather than aspirational:
+
+> Preloadability is explicit metadata or branding. It is never inferred by
+> executing application code, and never by parsing it.
+
+Both inference routes fail, for the same underlying reason — neither runtime
+behaviour nor source representation is a declaration of intent:
+
+| Inference | Why it fails |
+|---|---|
+| call it and inspect the result | that *is* instantiation; the side effects have already happened |
+| `constructor.name === "AsyncFunction"` | an async component is indistinguishable from an async module loader |
+| `toString()` contains `import(` | ordinary components mention it in strings and comments; bundlers rewrite real ones away |
+
+A brand set at registration is metadata: it survives compilation, bundling and
+minification, because it is part of what the value *is* rather than how it was
+written.
+
 ### Stale-result disposal
 
 > Discarding a stale async result is not the same as dropping it.
