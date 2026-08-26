@@ -20,18 +20,26 @@
  * ```
  */
 
-import { devWarn } from "../dev";
+import { type RuntimeErrorPhase, reportError } from "../errors";
 import { registerDisposer } from "./dispose";
 
 type CleanupFn = () => void;
 
-/** Safely invoke a lifecycle callback, catching and logging errors in dev mode.
- *  Returns the callback's return value (used to capture onMount cleanup functions). */
+/** Safely invoke a lifecycle callback, containing and REPORTING any failure.
+ *  Returns the callback's return value (used to capture onMount cleanup functions).
+ *
+ *  The callback is user code. Containment keeps one broken hook from aborting
+ *  the rest of the lifecycle run, but reporting it only through `devWarn` made
+ *  it vanish entirely in production — the failure pattern the central pipeline
+ *  exists to remove. Unmount-side hooks are reported as `"cleanup"`, mount-side
+ *  as `"effect"`; neither carries a node, because a hook may well be running
+ *  after its element has already been detached. */
 function safeCall(cb: () => unknown, hookName: string): unknown {
   try {
     return cb();
   } catch (err) {
-    devWarn(`${hookName}: callback threw: ${err instanceof Error ? err.message : String(err)}`);
+    const phase: RuntimeErrorPhase = hookName.toLowerCase().includes("unmount") ? "cleanup" : "effect";
+    reportError(err, { phase, name: hookName });
     return undefined;
   }
 }

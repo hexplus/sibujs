@@ -123,20 +123,79 @@ Both ceilings are configurable via `setMaxSubscriberRepeats()` and
 ### Errors
 
 Every exception the runtime catches and contains — from an effect, a binding, a
-cleanup, or the scheduler itself — is routed through one pipeline:
+renderer, a cleanup, a lifecycle hook, or the scheduler itself — is routed
+through one pipeline, and **exactly one** of these three runs for a given
+failure:
 
-1. the nearest DOM error boundary, when the failure is anchored to a node;
+1. the nearest `ErrorBoundary`, but only if it **explicitly claims** the error;
 2. the handler installed with `setRuntimeErrorHandler()`;
 3. `console.error`.
 
-The default reporting is **not** gated on development mode. Containment keeps a
-broken subscriber from freezing unrelated bindings; it must not make an
-application exception indistinguishable from success in production.
+```text
+                    runtime catches error
+                            |
+                            v
+                       reportError
+                            |
+             +--------------+--------------+
+             |                             |
+     node associated?                     no
+             |                             |
+            yes                            |
+             v                             |
+      offer to boundary                    |
+             |                             |
+    explicitly claimed?                    |
+        /          \                       |
+      yes           no --------------------+
+       |                                   |
+       v                                   v
+     STOP                     configured runtime handler?
+                                    /            \
+                                  yes            no
+                                   |              |
+                                   v              v
+                                handler      console.error
+```
+
+**A dispatched event is not a handled error.** The boundary event is
+`cancelable`; a boundary that takes responsibility calls `preventDefault()`, and
+`dispatchEvent()` returning `false` is the acknowledgement the pipeline reads.
+Anything less — a node that simply exists, an event that bubbles past listeners
+that ignore it — leaves the error unclaimed and it continues to the handler or
+the console. A boundary already showing a fallback deliberately *declines*, so
+the error keeps bubbling to an outer boundary that can still render.
+
+The default reporting is **not** gated on development mode, and neither is any
+safety ceiling. Containment keeps a broken subscriber from freezing unrelated
+bindings; it must not make an application exception indistinguishable from
+success in production. `__SIBU_DEV_WARN__` silences optional diagnostics only —
+never a contained failure.
+
+Reporting runs outside any tracking context, so a boundary listener or handler
+that reads signals cannot accidentally subscribe the failing subscriber to them.
 
 An error thrown on an effect's **initial** run additionally propagates to the
 caller of `effect()`, because there is a caller to receive it — failing fast at
 setup. A rerun has no such caller, so it is reported and contained. Supplying
 `effect(fn, { onError })` routes both phases to `onError` instead.
+
+Phases are accurate rather than approximate: `effect` for a user effect,
+`binding` for a reactive DOM binding, `render` for a renderer, `cleanup` for
+teardown, `scheduler` for a safety-ceiling activation. A cleanup often runs after
+its node is already detached, so cleanup errors normally resolve to the handler
+or console rather than to a boundary — no stale DOM parent is invented to reach
+one.
+
+The handler is process-global, not request-scoped: under SSR it is shared by
+every concurrent request, so install it once at startup. It is also shared
+across duplicate SibuJS copies through the same `globalThis` registry the
+reactive engine uses, so a handler installed through either copy sees errors
+contained by the shared engine.
+
+The `sibu:error-propagate` event is an internal implementation detail of
+boundary routing, not a supported extension point — use `ErrorBoundary` or
+`setRuntimeErrorHandler()`.
 
 ## Invariants
 

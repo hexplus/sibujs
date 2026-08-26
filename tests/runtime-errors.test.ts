@@ -112,7 +112,10 @@ describe("runtime error pipeline", () => {
 });
 
 describe("error boundary routing", () => {
-  it("gives an enclosing boundary first refusal when a node is supplied", () => {
+  it("offers the error to a listener but does NOT treat dispatch as handling", () => {
+    // A listener that observes the event without claiming it has not handled
+    // anything. Returning here merely because a dispatch occurred is what made
+    // errors vanish whenever a node existed but no boundary was mounted.
     const handler = vi.fn();
     setRuntimeErrorHandler(handler);
 
@@ -130,9 +133,47 @@ describe("error boundary routing", () => {
 
     expect(caught).toHaveLength(1);
     expect((caught[0] as Error).message).toBe("boundary-bound");
-    // The boundary handled it, so the global handler must NOT also fire.
+    // Nobody claimed it, so the fallback chain must still run — exactly once.
+    expect(handler).toHaveBeenCalledTimes(1);
+    parent.remove();
+  });
+
+  it("stops at a listener that explicitly claims the error", () => {
+    const handler = vi.fn();
+    setRuntimeErrorHandler(handler);
+
+    const parent = document.createElement("div");
+    const child = document.createElement("span");
+    parent.appendChild(child);
+    document.body.appendChild(parent);
+
+    parent.addEventListener("sibu:error-propagate", (event) => {
+      // preventDefault() is the acknowledgement contract.
+      event.preventDefault();
+    });
+
+    reportError(new Error("claimed"), { phase: "render", node: child });
+
     expect(handler).not.toHaveBeenCalled();
     parent.remove();
+  });
+
+  it("carries the context alongside the error in the event detail", () => {
+    const seen: Array<{ phase: string; name?: string }> = [];
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    el.addEventListener("sibu:error-propagate", (event) => {
+      const detail = (event as CustomEvent).detail;
+      seen.push(detail.context);
+      event.preventDefault();
+    });
+
+    reportError(new Error("with-context"), { phase: "render", name: "widget", node: el });
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].phase).toBe("render");
+    expect(seen[0].name).toBe("widget");
+    el.remove();
   });
 
   it("wraps a non-Error value before dispatching to a boundary", () => {

@@ -1,3 +1,4 @@
+import { reportError } from "../errors";
 import { dispose, registerDisposer } from "./dispose";
 
 /**
@@ -36,24 +37,19 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
       portalContent = nodes();
       container.appendChild(portalContent);
     } catch (err) {
-      if (typeof console !== "undefined") {
-        console.error("[Portal] Render error:", err);
-      }
-      // Dispatch on the anchor's Element parent — Comment anchors don't bubble.
-      const errorObj = err instanceof Error ? err : new Error(String(err));
+      // Single path: `reportError` offers the error to an enclosing boundary
+      // and, only if none claims it, to the runtime handler / console. The old
+      // code logged unconditionally AND dispatched, so a boundary-handled
+      // portal failure was still reported a second time to the console.
+      //
+      // Deferred one microtask so the anchor is linked to its parent before
+      // boundary lookup walks the parentNode chain.
       queueMicrotask(() => {
-        try {
-          const target = anchor.parentNode as Element | null;
-          if (target?.dispatchEvent) {
-            target.dispatchEvent(
-              new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
-            );
-          }
-          // Defensive: dispatchEvent does not throw on a connected target.
-          /* v8 ignore next 3 */
-        } catch {
-          /* ignore dispatch failure */
-        }
+        reportError(err, {
+          phase: "render",
+          name: "Portal",
+          node: anchor.parentNode ? anchor : undefined,
+        });
       });
     }
   });

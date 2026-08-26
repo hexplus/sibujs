@@ -1,6 +1,7 @@
 import { batch } from "../../reactivity/batch";
 import { track } from "../../reactivity/track";
 import { devAssert, devWarn, isDev } from "../dev";
+import { reportError } from "../errors";
 import { signal } from "../signals/signal";
 import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
@@ -247,31 +248,25 @@ export function each<T>(
         try {
           node = resolveNodeChild(render(itemGetter, indexGetter));
         } catch (err) {
-          if (_isDev) {
-            devWarn(
-              `each: render threw for item at index ${i} (key="${newKeys[i]}"): ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
+          // The row is replaced by an inert placeholder so reconciliation can
+          // continue; the failure itself goes through the CENTRAL pipeline.
+          //
+          // It previously dispatched the boundary event directly, which meant a
+          // render failure in production with no ErrorBoundary mounted was
+          // silent — exactly the second, parallel error system ../errors.ts
+          // exists to remove.
+          const key = newKeys[i];
           node = document.createComment(`each:error:${i}`);
-          // Comment nodes don't bubble events to ancestor Elements. Defer
-          // and dispatch on the anchor's Element parent so an enclosing
-          // ErrorBoundary can catch it. Skip if anchor is still detached.
-          const errorObj = err instanceof Error ? err : new Error(String(err));
+          // Deferred by one microtask because the placeholder is not linked to
+          // its parent yet, and boundary lookup walks the parentNode chain.
+          // `reportError` retargets a Comment to its nearest Element ancestor,
+          // so the anchor's parent no longer has to be resolved here.
           queueMicrotask(() => {
-            try {
-              const target = anchor.parentNode as Element | null;
-              if (target?.dispatchEvent) {
-                target.dispatchEvent(
-                  new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
-                );
-              } else if (_isDev) {
-                devWarn(`each: error not surfaced — anchor detached: ${errorObj.message}`);
-              }
-              // Defensive: dispatchEvent does not throw on a connected target.
-              /* v8 ignore next 3 */
-            } catch {
-              /* ignore */
-            }
+            reportError(err, {
+              phase: "render",
+              name: `each row (key="${String(key)}")`,
+              node: anchor.parentNode ? anchor : undefined,
+            });
           });
         }
         row = { node, item: itemGetter, setItem, index: indexGetter, setIndex };

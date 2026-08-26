@@ -1,4 +1,4 @@
-import { reportError } from "../core/errors";
+import { type RuntimeErrorPhase, reportError } from "../core/errors";
 import type { ReactiveSignal } from "./signal";
 
 // ---------------------------------------------------------------------------
@@ -249,6 +249,16 @@ type SubWithList = Subscriber & {
   _c?: number;
   _sig?: ReactiveSignal;
   __name?: string;
+  // Error-reporting metadata, stamped once by whoever created the subscriber
+  // and read ONLY on the failure path. The drain cannot otherwise tell an
+  // effect from a DOM binding, nor find the node a binding belongs to.
+  //
+  // `_errorNode` is set only for DOM bindings, which already own that node for
+  // their whole lifetime, so it adds no retention beyond what the binding
+  // itself holds. Generic effects leave it undefined — attaching DOM to them
+  // would retain unrelated subtrees.
+  _errorPhase?: RuntimeErrorPhase;
+  _errorNode?: unknown;
   // True when at least one dependency recorded during the most recent run was
   // a COMPUTED. Rebuilt from scratch by every `retrack`.
   //
@@ -276,7 +286,14 @@ function safeInvoke(sub: Subscriber): void {
     // component freeze every unrelated binding on the page; swallowing it (the
     // previous behaviour outside dev builds) made an application exception
     // indistinguishable from success in production. See ../core/errors.ts.
-    reportError(err, { phase: "effect", name: (sub as SubWithList).__name });
+    //
+    // The phase and node come from metadata the subscriber's creator stamped on
+    // it. The drain invokes effects and DOM bindings through the same call, so
+    // without that metadata every binding failure would be mislabelled
+    // `"effect"` and — worse — would carry no node, leaving the ErrorBoundary
+    // branch of the pipeline permanently unreachable for DOM bindings.
+    const s = sub as SubWithList;
+    reportError(err, { phase: s._errorPhase ?? "effect", name: s.__name, node: s._errorNode });
   }
 }
 
@@ -512,7 +529,7 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
 //
 // The guard wraps BOTH the initial run and every notification-driven run.
 // ---------------------------------------------------------------------------
-export function reactiveBinding(commit: () => void): () => void {
+export function reactiveBinding(commit: () => void, ownerNode?: unknown): () => void {
   const run = (): void => {
     const s = subscriber as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
     // A binding can be queued for notification and then disposed before the
@@ -541,6 +558,12 @@ export function reactiveBinding(commit: () => void): () => void {
   subscriber._runs = 0;
   subscriber._reentrant = false;
   subscriber._disposed = false;
+  // A binding that fails on a LATER scheduled run is reported from the drain,
+  // which has no other way to locate the DOM position it belongs to. Stamping
+  // the owning node here is what makes ErrorBoundary routing real for bindings
+  // rather than only for errors raised during synchronous rendering.
+  subscriber._errorPhase = "binding";
+  subscriber._errorNode = ownerNode;
 
   // Initial run establishes the first dependency set (guarded, see above).
   run();
@@ -549,6 +572,9 @@ export function reactiveBinding(commit: () => void): () => void {
     subscriber._dispose ??
     (subscriber._dispose = () => {
       (subscriber as { _disposed?: boolean })._disposed = true;
+      // Drop the DOM reference so a disposed binding cannot keep a detached
+      // subtree alive through the subscriber object.
+      subscriber._errorNode = undefined;
       cleanup(subscriber);
     })
   );

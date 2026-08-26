@@ -1,4 +1,5 @@
 import { devWarn, isDev } from "../core/dev";
+import { reportError } from "../core/errors";
 import { dispose } from "../core/rendering/dispose";
 import type { NodeChild } from "../core/rendering/types";
 import { reactiveBinding } from "./track";
@@ -7,7 +8,8 @@ const _isDev = isDev();
 
 /**
  * Binds a reactive getter that returns NodeChild or NodeChild[] next to a placeholder comment.
- * Render errors are swallowed to preserve the last successful state.
+ * A throwing getter is contained — the last successful children stay on screen —
+ * and the failure is reported through the central runtime error pipeline.
  *
  * @param placeholder Anchor Comment node for insertion
  * @param getter Function returning NodeChild or NodeChild[] to render
@@ -21,7 +23,12 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
     try {
       result = getter();
     } catch (err) {
-      if (_isDev) devWarn(`bindChildNode: getter threw: ${err instanceof Error ? err.message : String(err)}`);
+      // The getter is USER code. Keeping the previously rendered children is
+      // the right containment, but reporting only under a dev flag made the
+      // failure vanish entirely in production. Route it through the central
+      // pipeline so an enclosing ErrorBoundary — or the runtime handler, or the
+      // console — always sees it.
+      reportError(err, { phase: "binding", name: "bindChildNode", node: placeholder });
       return;
     }
 
@@ -110,5 +117,7 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
   // dependencies on every run, so a signal first read on a later run (e.g. a
   // conditional branch that only becomes live after a state change) is still
   // subscribed.
-  return reactiveBinding(commit);
+  // The placeholder is passed as the binding's error owner so a failure on a
+  // LATER scheduled run can still be offered to the enclosing ErrorBoundary.
+  return reactiveBinding(commit, placeholder);
 }

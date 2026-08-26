@@ -54,6 +54,39 @@ export and one additive field were added.
   candidate split left the dangerous half in the descriptor position.
 - **The README's CDN snippet pointed at a file the build does not emit**
   (`dist/sibu.global.js`); the correct artifact is `dist/cdn.global.js`.
+- **Runtime errors associated with a DOM node were treated as handled merely
+  because an `ErrorBoundary` event had been dispatched.** If no boundary was
+  mounted above the node, the event went nowhere and reporting stopped anyway —
+  so the configured runtime error handler and the `console.error` fallback were
+  both skipped and the failure disappeared. A boundary must now explicitly claim
+  an error (the event is cancelable; claiming means `preventDefault()`), and an
+  unclaimed error falls through to the handler or the console.
+- **Keyed-list render failures bypassed the central runtime error pipeline.**
+  `each()` dispatched its own boundary event and otherwise warned only in
+  development, so a row that failed to render in production with no boundary
+  mounted was silent. The same applied to `Portal`, `lazy()`/`Suspense`,
+  reactive bindings (`bindChildNode`, `bindTextNode`, `bindAttribute`,
+  `bindDynamic`), lifecycle hooks (`onMount`/`onUnmount`) and node disposers —
+  all of which now report through the one pipeline.
+- **Runtime error handlers are now shared between compatible duplicate SibuJS
+  runtime instances.** The handler was module-local, so when a bundler
+  materialized SibuJS twice, a handler installed through one copy was invisible
+  to the shared reactive engine owned by the other, and application telemetry
+  silently never fired.
+- **Reactive-binding failures were reported as phase `"effect"`.** The scheduler
+  invokes effects and DOM bindings through the same call and had no way to tell
+  them apart; bindings now report phase `"binding"` and carry the node they own,
+  which is also what lets an `ErrorBoundary` catch a binding that throws on a
+  later update rather than only during the initial render.
+- **An effect that hit its rerun safety ceiling was not reported when
+  `__SIBU_DEV_WARN__` was `false`.** That flag controls optional developer
+  diagnostics; reaching a safety ceiling means the framework forcibly stopped
+  the user's work, which stays observable regardless.
+- **Reporting an error no longer runs inside the failing subscriber's tracking
+  context.** An `ErrorBoundary` listener (or an application handler) that reads
+  a signal while deciding what to do would otherwise have that read attributed
+  to the throwing subscriber — which subscribed the failing binding to the
+  boundary's own error signal, re-ran it, and reported the same failure twice.
 
 ### Added
 
@@ -68,11 +101,17 @@ export and one additive field were added.
   Superseded runs and disposal both abort. The run-id guard is retained because
   not every async API honours `AbortSignal`. Existing zero-argument factories
   continue to work unchanged.
-- **`setRuntimeErrorHandler(handler)`, `reportError()` and the
-  `RuntimeErrorPhase` / `RuntimeErrorContext` types**, exported from the package
-  root — one place to observe every error the runtime catches and contains
+- **The runtime error handling API**, exported from the package root — one place
+  to observe every error the runtime catches and contains:
+  `setRuntimeErrorHandler()`, `getRuntimeErrorHandler()`, `reportError()`, and
+  the `RuntimeErrorHandler`, `RuntimeErrorContext` and `RuntimeErrorPhase`
+  types. A handler receives the original error plus a context naming the phase
   (`effect`, `binding`, `derived`, `cleanup`, `event`, `async`, `render`,
-  `scheduler`). Without a handler, errors go to `console.error`.
+  `scheduler`), the failing subscriber's debug name, and the associated node
+  where one exists. Without a handler, errors go to `console.error`.
+  `reportError()` is intended for plugin/integration code that catches an
+  application exception on SibuJS's behalf; ordinary application code should use
+  `ErrorBoundary` or `setRuntimeErrorHandler()`.
 - Browser tests (Playwright) now run in CI: Chromium on pull requests,
   Chromium + Firefox + WebKit on `main`. They previously existed but ran only
   when invoked manually, so a real-engine regression could ship with CI green.
@@ -108,10 +147,13 @@ queries, hydration bootstrap, island activation, and SSR Suspense boundaries now
 answer that with monotonic generations rather than by comparing keys, URLs, or
 values — because returning to the same key or URL is *not* the same generation.
 
-Beyond the engine floor there are no breaking changes: one new public export,
-one additive field on an existing result type, several type declarations that
-became *more* permissive, and no change to any existing signature or behaviour
-that was already correct.
+Beyond the engine floor there are no breaking changes. Everything else is
+additive: new public exports, additive fields on existing result types, and
+several type declarations that became *more* permissive. No existing signature
+was removed or narrowed, and no behaviour that was already correct changed.
+(See each release entry's **Added** section for the exact surface — a running
+count is not maintained here, because it goes stale the moment anything is
+added.)
 
 ### Migration to 4.0
 

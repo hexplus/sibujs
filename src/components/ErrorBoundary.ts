@@ -1,3 +1,4 @@
+import { normalizeError, reportError } from "../core/errors";
 import { dispose, registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span, style } from "../core/rendering/html";
 import { takePendingError } from "../core/rendering/lazy";
@@ -316,15 +317,19 @@ export function ErrorBoundary(
   }
 
   const handleError = (e: unknown): Error => {
-    const errorObj = e instanceof Error ? e : new Error(String(e));
+    // Shared normalization: an existing Error passes through by reference
+    // (stack/cause/instanceof preserved) and a non-Error throw keeps its
+    // original value as `cause` rather than being flattened to a string.
+    const errorObj = normalizeError(e);
     setError(errorObj);
     if (onError) {
       try {
         onError(errorObj);
       } catch (cbErr) {
-        if (typeof console !== "undefined") {
-          console.error("[SibuJS ErrorBoundary] onError callback threw:", cbErr);
-        }
+        // The user's own onError callback failed. Route it through the central
+        // pipeline instead of only logging, and WITHOUT a node: this boundary
+        // is mid-handling and must not be offered its own callback's failure.
+        reportError(cbErr, { phase: "render", name: "ErrorBoundary onError callback" });
       }
     }
     return errorObj;
@@ -342,21 +347,23 @@ export function ErrorBoundary(
     try {
       return getMemoizedFallback(fn, err, retry);
     } catch (fallbackError) {
-      // Fallback itself failed — propagate to parent ErrorBoundary via DOM event
-      // Defer dispatch so the container is connected to the DOM tree first
-      const propagateError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError));
+      // The fallback renderer itself failed. This second error must not vanish:
+      // route it through the central pipeline so an OUTER boundary can claim it
+      // and, failing that, the runtime handler or console still sees it.
+      //
+      // Dispatching from `container` is safe against self-capture: by now
+      // `error()` is set, so this boundary's own listener declines and lets the
+      // event bubble past itself rather than re-entering its broken fallback.
+      //
+      // Deferred by one microtask so `container` is attached to its parent
+      // first — bubbling walks parentNode chains, and a boundary mounted above
+      // us cannot be found before we are linked to it.
       queueMicrotask(() => {
-        // CustomEvent bubbling traverses parentNode chains even on detached
-        // subtrees; require parentNode (not isConnected) so nested boundaries
-        // work in tests and pre-mount setup.
-        if (container.parentNode) {
-          container.dispatchEvent(
-            new CustomEvent("sibu:error-propagate", {
-              bubbles: true,
-              detail: { error: propagateError },
-            }),
-          );
-        }
+        reportError(fallbackError, {
+          phase: "render",
+          name: "ErrorBoundary fallback",
+          node: container.parentNode ? container : undefined,
+        });
       });
       return document.createComment("error-boundary-failed") as unknown as Element;
     }
@@ -421,14 +428,24 @@ export function ErrorBoundary(
   // Store the handler so it can be removed via registerDisposer to avoid
   // leaking the listener when the boundary itself is disposed.
   const propagateListener = (e: Event) => {
-    // If this boundary is already in error state, let the event bubble to parent
+    // DECLINE, do not claim: a boundary already showing a fallback cannot show
+    // another one, so the event must stay un-cancelled and keep bubbling to an
+    // outer boundary. Calling preventDefault() before establishing that this
+    // boundary can actually handle the error would strand it here.
     if (error()) return;
-    e.stopPropagation();
+
     const customEvent = e as CustomEvent;
     const propagatedError = customEvent.detail?.error;
-    if (propagatedError) {
-      handleError(propagatedError);
-    }
+    // Nothing to handle — leave the event alone so it is reported normally.
+    if (!propagatedError) return;
+
+    // CLAIM. `preventDefault()` is the acknowledgement `reportError()` reads:
+    // it means this boundary took responsibility, so the global handler and the
+    // console fallback must not also fire. `stopPropagation()` additionally
+    // keeps outer boundaries from double-handling the same error.
+    e.preventDefault();
+    e.stopPropagation();
+    handleError(propagatedError);
   };
   container.addEventListener("sibu:error-propagate", propagateListener);
 

@@ -71,14 +71,14 @@ describe("lifecycle coverage2 — onMount with element", () => {
     expect(cb).toHaveBeenCalledTimes(1);
   });
 
-  it("swallows a throwing onMount callback and warns", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("contains a throwing onMount callback and reports it", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     onMount(() => {
       throw new Error("mount boom");
     });
     await tick();
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });
 

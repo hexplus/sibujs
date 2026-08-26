@@ -1,9 +1,10 @@
-import { devWarn, isDev } from "../core/dev";
+import { reportError } from "../core/errors";
 import { reactiveBinding } from "./track";
 
 /**
  * Binds a reactive getter to a Text node, updating its content reactively.
- * Render errors are swallowed to preserve last displayed text.
+ * A throwing getter is contained — the last displayed text stays — and the
+ * failure is reported through the central runtime error pipeline.
  *
  * textContent is inherently XSS-safe — it sets plain text, never parsing HTML.
  *
@@ -17,9 +18,10 @@ export function bindTextNode(textNode: Text, getter: () => string | number): () 
     try {
       value = getter();
     } catch (err) {
-      if (isDev()) {
-        devWarn(`[SibuJS] bindTextNode getter threw: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      // Keep the previously rendered text (containment) but never silently:
+      // the getter is user code, so the failure goes through the central
+      // pipeline rather than a dev-only warning.
+      reportError(err, { phase: "binding", name: "bindTextNode", node: textNode });
       return;
     }
     textNode.textContent = String(value);
@@ -27,5 +29,5 @@ export function bindTextNode(textNode: Text, getter: () => string | number): () 
 
   // Initial render and reactive subscription. Re-tracks deps every run so a
   // signal first read on a later run is subscribed (per-run dependency tracking).
-  return reactiveBinding(commit);
+  return reactiveBinding(commit, textNode);
 }
