@@ -170,6 +170,26 @@ Classification must never require duplicate user-code execution: detect a
 thenable on the *real* invocation instead of calling once to decide and again to
 use.
 
+The same boundary governs **preloading**:
+
+```text
+PRELOAD
+   ↓
+module/factory resolution only
+   ↓
+NO COMPONENT INVOCATION
+   ↓
+NO DOM
+   ↓
+NO LIFECYCLE RESOURCES
+```
+
+`preload ≠ instantiate`. Preloading may run module-loading machinery; it may not
+run application component code. Where a component form has nothing separately
+loadable — a directly supplied factory, however async — preloading is a no-op
+rather than a speculative call. See
+[router.md § Preloading](./router.md#preloading).
+
 ### Stale-result disposal
 
 > Discarding a stale async result is not the same as dropping it.

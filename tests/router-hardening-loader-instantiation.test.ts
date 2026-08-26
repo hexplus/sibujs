@@ -14,7 +14,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerDisposer } from "../src/core/rendering/dispose";
 import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
-import { createRouter, destroyRouter, navigate, preloadRoute, Route, setRoutes } from "../src/plugins/router";
+import {
+  createRouter,
+  destroyRouter,
+  lazy,
+  navigate,
+  preloadRoute,
+  Route,
+  route,
+  setRoutes,
+} from "../src/plugins/router";
 
 const settle = async (n = 30) => {
   for (let i = 0; i < n; i++) await Promise.resolve();
@@ -165,9 +174,11 @@ describe("route component loading vs instantiation", () => {
     });
   });
 
-  // LOAD-001 — preload must resolve modules without creating DOM.
-  describe("preload", () => {
-    it("loads the module without instantiating the component", async () => {
+  // LOAD-003 — preload may load code, never run components.
+  describe("preload purity", () => {
+    const home = () => document.createElement("div");
+
+    it("imports a lazy module without instantiating the component", async () => {
       let imports = 0;
       let calls = 0;
       const Page = () => {
@@ -178,13 +189,13 @@ describe("route component loading vs instantiation", () => {
       };
 
       setRoutes([
-        { path: "/", component: () => document.createElement("div") },
+        { path: "/", component: home },
         {
           path: "/a",
-          component: async () => {
+          component: lazy(async () => {
             imports++;
             return { default: Page };
-          },
+          }),
         },
       ]);
       host.appendChild(Route());
@@ -193,9 +204,9 @@ describe("route component loading vs instantiation", () => {
       await preloadRoute("/a");
       await settle();
 
-      // The module resolved…
+      // The module resolved — that is the useful part of preloading…
       expect(imports).toBe(1);
-      // …but no component instance, and therefore no DOM, was created.
+      // …but the component factory was not called, so no DOM exists.
       expect(calls).toBe(0);
       expect(host.querySelectorAll('[data-page="preloaded"]').length).toBe(0);
 
@@ -206,16 +217,17 @@ describe("route component loading vs instantiation", () => {
       expect(host.querySelectorAll('[data-page="preloaded"]').length).toBe(1);
     });
 
-    it("does not instantiate a synchronous component", async () => {
+    it("does not invoke a synchronous factory", async () => {
       let calls = 0;
-      const Page = () => {
-        calls++;
-        return document.createElement("div");
-      };
-
       setRoutes([
-        { path: "/", component: () => document.createElement("div") },
-        { path: "/a", component: Page },
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: () => {
+            calls++;
+            return document.createElement("div");
+          },
+        },
       ]);
       host.appendChild(Route());
       await settle();
@@ -224,6 +236,319 @@ describe("route component loading vs instantiation", () => {
       await settle();
 
       expect(calls).toBe(0);
+    });
+
+    // The headline case: a directly supplied AsyncComponent has no separate
+    // module to fetch, so there is nothing to preload without running it.
+    it("does not invoke a direct AsyncComponent", async () => {
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: async () => {
+            calls++;
+            return document.createElement("div");
+          },
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      await preloadRoute("/a");
+      await settle();
+
+      expect(calls).toBe(0);
+    });
+
+    it("does not invoke a plain Promise-returning factory", async () => {
+      let calls = 0;
+      const Page = () => {
+        calls++;
+        return Promise.resolve(document.createElement("div"));
+      };
+      setRoutes([
+        { path: "/", component: home },
+        { path: "/a", component: Page as never },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      await preloadRoute("/a");
+      await settle();
+
+      expect(calls).toBe(0);
+    });
+
+    // Mandatory: a side effect `dispose()` cannot undo.
+    it("runs no user side effect for a direct AsyncComponent", async () => {
+      const effects: string[] = [];
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: async () => {
+            effects.push("created");
+            const d = document.createElement("div");
+            d.dataset.page = "async";
+            return d;
+          },
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      await preloadRoute("/a");
+      await settle();
+      expect(effects).toEqual([]);
+
+      await navigate("/a");
+      await settle();
+      expect(effects).toEqual(["created"]);
+      expect(host.querySelectorAll('[data-page="async"]').length).toBe(1);
+    });
+
+    it("creates no lifecycle resources for any route definition style", async () => {
+      let calls = 0;
+      let disposals = 0;
+      const build = (name: string) => {
+        calls++;
+        const el = document.createElement("div");
+        el.dataset.page = name;
+        registerDisposer(el, () => {
+          disposals++;
+        });
+        return el;
+      };
+
+      setRoutes([
+        { path: "/", component: home },
+        { path: "/sync", component: () => build("sync") },
+        { path: "/async", component: async () => build("async") },
+        { path: "/thenable", component: (() => Promise.resolve(build("thenable"))) as never },
+        { path: "/lazy", component: lazy(async () => ({ default: () => build("lazy") })) },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      for (const p of ["/sync", "/async", "/thenable", "/lazy"]) {
+        await preloadRoute(p);
+      }
+      await settle();
+
+      expect(calls).toBe(0);
+      expect(disposals).toBe(0);
+      expect(host.querySelectorAll("[data-page]").length).toBe(0);
+    });
+
+    it("stays a no-op when repeated", async () => {
+      let imports = 0;
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: lazy(async () => {
+            imports++;
+            return {
+              default: () => {
+                calls++;
+                return document.createElement("div");
+              },
+            };
+          }),
+        },
+        {
+          path: "/direct",
+          component: async () => {
+            calls++;
+            return document.createElement("div");
+          },
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      for (let i = 0; i < 3; i++) {
+        await preloadRoute("/a");
+        await preloadRoute("/direct");
+      }
+      await settle();
+
+      // Module imported once and cached; no component ever instantiated.
+      expect(imports).toBe(1);
+      expect(calls).toBe(0);
+    });
+
+    it("keeps preload and a concurrent navigation to the same route consistent", async () => {
+      let imports = 0;
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: lazy(async () => {
+            imports++;
+            return {
+              default: () => {
+                calls++;
+                const d = document.createElement("div");
+                d.dataset.page = "raced";
+                return d;
+              },
+            };
+          }),
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      // Navigation starts before the preload settles.
+      await Promise.all([preloadRoute("/a"), navigate("/a")]);
+      await settle();
+
+      expect(imports).toBe(1);
+      expect(calls).toBe(1);
+      expect(host.querySelectorAll('[data-page="raced"]').length).toBe(1);
+    });
+
+    it("does not touch the current route when preloading a different one", async () => {
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/other",
+          component: () => {
+            const d = document.createElement("div");
+            d.dataset.page = "other";
+            return d;
+          },
+        },
+        {
+          path: "/slow",
+          component: lazy(async () => ({
+            default: () => {
+              calls++;
+              return document.createElement("div");
+            },
+          })),
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      const preloading = preloadRoute("/slow");
+      await navigate("/other");
+      await preloading;
+      await settle();
+
+      expect(calls).toBe(0);
+      expect(host.querySelectorAll('[data-page="other"]').length).toBe(1);
+    });
+
+    it("does not discover component errors — those surface at navigation", async () => {
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/bad",
+          component: (async () => {
+            calls++;
+            return "not-an-element";
+          }) as never,
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      // The factory is never invoked, so preload cannot and does not fail.
+      await expect(preloadRoute("/bad")).resolves.toBeUndefined();
+      expect(calls).toBe(0);
+
+      await navigate("/bad");
+      await settle();
+
+      expect(calls).toBe(1);
+      expect(host.querySelector(".route-error")).not.toBe(null);
+    });
+
+    it("does not invoke an invalid synchronous factory during preload", async () => {
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/bad",
+          component: (() => {
+            calls++;
+            return "not-an-element";
+          }) as never,
+        },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      await expect(preloadRoute("/bad")).resolves.toBeUndefined();
+      expect(calls).toBe(0);
+
+      await navigate("/bad");
+      await settle();
+
+      expect(calls).toBe(1);
+      expect(host.querySelector(".route-error")).not.toBe(null);
+    });
+
+    it("surfaces a lazy module-load failure", async () => {
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/broken",
+          component: lazy(async () => {
+            throw new Error("module boom");
+          }),
+        },
+      ]);
+      host.appendChild(Route());
+      await navigate("/");
+      await settle();
+
+      await expect(preloadRoute("/broken")).resolves.toBeUndefined();
+
+      // A failed preload leaves the current route untouched.
+      expect(route().path).toBe("/");
+    });
+
+    it("preloading then mounting invokes the factory once per real mount", async () => {
+      let calls = 0;
+      setRoutes([
+        { path: "/", component: home },
+        {
+          path: "/a",
+          component: async () => {
+            calls++;
+            const d = document.createElement("div");
+            d.dataset.page = "async";
+            return d;
+          },
+        },
+        { path: "/b", component: home },
+      ]);
+      host.appendChild(Route());
+      await settle();
+
+      await preloadRoute("/a");
+      await settle();
+      expect(calls).toBe(0);
+
+      await navigate("/a");
+      await settle();
+      expect(calls).toBe(1);
+
+      await navigate("/b");
+      await settle();
+      await navigate("/a");
+      await settle();
+      expect(calls).toBe(2);
+      expect(host.querySelectorAll('[data-page="async"]').length).toBe(1);
     });
   });
 

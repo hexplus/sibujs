@@ -9,6 +9,7 @@ entry in [final-router-followup-findings.md](./final-router-followup-findings.md
 | LOAD-001 | Speculative validation invokes user component factories twice | **P1** | Fixed |
 | LOAD-002 | Direct `AsyncComponent` Element disposed before mount, then cached and reused | **P1** | Fixed |
 | OUT-004 (revised) | Root cause is the validation-probe architecture, not a missing `dispose()` | **P1** | Superseded by the above |
+| LOAD-003 | `preloadRoute()` invoked directly supplied `AsyncComponent` factories | **P2** | Fixed |
 
 ---
 
@@ -162,15 +163,109 @@ yields a distinct Element per instantiation.
 - **Component factories now run once per instance**, not twice on first load.
   Applications that had (knowingly or not) come to rely on the double call will
   see one fewer invocation.
-- **`preloadRoute()` no longer renders.** It resolves the module and caches the
-  factory. For a direct `AsyncComponent` there is nothing to preload without
-  instantiating, so the produced Element is disposed and the route stays
-  unresolved.
+- **`preloadRoute()` no longer renders.** It resolves deferred modules and
+  caches their factories, uninvoked. (This pass left one gap — direct
+  `AsyncComponent` preloading still invoked the factory and disposed the
+  result — closed by LOAD-003 below.)
 - **Load errors are recorded at instantiation time**, since that is where a
   deferred load now runs. The `errorRetryDelay` rate-limit and the retry button
   behave as before; the bookkeeping moved with the work.
 
 All of this ships inside the unreleased `4.0.0-rc.1`.
+
+---
+
+## LOAD-003 — `preloadRoute()` invoked directly supplied `AsyncComponent` factories
+
+**Severity:** P2. **Status:** Fixed. **Subsystem:** ComponentLoader / preload.
+
+Found in review of the previous pass's own output: the load-vs-instantiate
+separation was applied to the loader but not carried through to `preloadRoute()`.
+
+**Reproducers.** `tests/router-hardening-loader-instantiation.test.ts`,
+`preload purity` block.
+
+| Route definition | Factory calls during preload — expected | Before fix |
+|---|---|---|
+| `() => element` | 0 | 0 |
+| `() => Promise.resolve(element)` | 0 | 0 |
+| `lazy(async () => ({ default: Page }))` | 0 (module import: 1) | 0 |
+| `async () => element` | 0 | **1** |
+| the same, preloaded 3× | 0 | **3** |
+| side effect `effects.push("created")` | `[]` | **`["created"]`** |
+
+**Root cause.** Preload semantics were defined as *"do as much loading as
+possible"* rather than the stronger invariant *"never cross the
+component-instantiation boundary."*
+
+Concretely, `doLoadPlan()` classified a route as a `deferred` module loader
+using `isAsyncComponent()`, which treats **any** `AsyncFunction` as deferred.
+That cannot distinguish `async () => import("./Page")` from
+`async () => document.createElement("div")`. `preloadPlan()` then resolved every
+deferred plan — invoking the second kind, getting an Element, and disposing it.
+
+That is the same "call it and throw the result away" shape this pass had just
+removed from validation, and it fails for the same reason: `dispose()` cannot
+undo an analytics call, a network request, a store write, or a log line.
+
+**Fix — architectural, not a special case.**
+
+`isAsyncComponent()` is replaced by `isDeferredModule()`, which recognises only
+what genuinely has separable code to fetch:
+
+- the `LAZY_MARKER` stamped by `lazy()`, or
+- a dynamic `import(` in the function source.
+
+`constructor.name === "AsyncFunction"` is deliberately no longer a signal. Every
+directly supplied factory — synchronous, `async`, or plain promise-returning —
+is now a `factory` plan, and `preloadPlan()` returns immediately for those. They
+become preload no-ops **by construction**, with no branch that could call them.
+
+Two supporting changes fell out of the reclassification:
+
+- `instantiateFactory()` now unwraps a factory whose real invocation resolves to
+  a module namespace or a bare factory function, so an un-marked
+  `async () => ({ default: Page })` still works. The plan is upgraded so later
+  mounts skip the extra hop, and the unwrap is depth-bounded.
+- Module resolution moved into a shared `resolveModuleFactory()` used by both
+  instantiation and preload, so a preload racing a navigation to the same route
+  imports once. Without it the two paths each ran the loader arrow.
+
+**Regression tests.** 14 tests: per-form purity, the mandatory
+side-effect assertion, a lifecycle-counter sweep across all four definition
+styles, repeat-preload idempotency, preload/navigation race, preload of an
+unrelated route, module-load failure, and error-surfacing-at-navigation for both
+sync and async invalid components.
+
+**Remaining risk.** Low. One behaviour change worth stating: a route written as
+`async () => ({ default: Page })` **without** `lazy()` and without a literal
+`import(` is no longer preloadable — it is indistinguishable from a component
+factory without invoking it. It still works correctly on navigation; it simply
+gets no preload benefit. Wrapping it in `lazy()` restores that, which is what
+`lazy()` is for.
+
+---
+
+## Documentation audit (§23–§26)
+
+Two suspected documentation duplications were checked and **NOT CONFIRMED**:
+
+| Suspected | Actual |
+|---|---|
+| duplicate `Route()` rows in `async-ownership.md` | one row per table; both already carry the final `navSeq` + `routeTorn` wording |
+| duplicate `unsafe-target` rows in `router.md` | one row, pointing at the target-policy section |
+
+No obsolete rows were left behind by the earlier passes, so nothing was removed.
+
+Terminology was verified consistent across implementation and docs:
+`internal` / `external` / `unsafe`, with protocol-relative `//host` classified
+**unsafe** everywhere — the comment that once said otherwise was corrected as
+DOC-004 in the previous pass.
+
+Current architecture and public docs describe final behaviour only. The phrase
+"components are invoked twice on first load" no longer appears anywhere; the
+remaining mentions of the old behaviour live in this findings document and are
+written as history.
 
 ---
 
@@ -256,3 +351,114 @@ Outlet paths, now strictly stronger: the pre-instantiation ownership check gates
 `instantiateComponent()`, so a stale generation no longer runs user component
 code at all - and with the loader's probe gone, that is now the *only* path on
 which a route component can be invoked.
+
+---
+
+## Final matrix (LOAD-003)
+
+```text
+PRELOAD
+
+Sync factory invoked during preload:               NO
+AsyncComponent invoked during preload:             NO
+Promise-returning factory invoked during preload:  NO
+Lazy module imported during preload:               YES
+Lazy component instantiated during preload:        NO
+Repeated preload component calls:                  0
+
+NAVIGATION
+
+Sync first mount invocations:                       1
+Lazy first mount invocations:                       1
+AsyncComponent first mount invocations:             1
+Promise-returning first mount invocations:          1
+
+LIFECYCLE
+
+Preload creates disposer-owned nodes:               NO
+Async resolved Element alive after mount:           YES
+Disposed on leave exactly once:                     PASS
+Stale actual resolution disposed:                   PASS
+Disposed instance reused:                           NO
+```
+
+## Documentation report
+
+```text
+Preload docs:                        UPDATED
+AsyncComponent preload wording:      UPDATED
+Changelog:                           UPDATED
+Async ownership duplicate rows:      NOT CONFIRMED (none present)
+unsafe-target duplicate row:         NOT CONFIRMED (none present)
+Historical findings remain accurate: YES
+```
+
+## Test counts - before / after
+
+| Suite | Before | After | Delta |
+|---|---|---|---|
+| Full unit/integration | 4586 passed, 1 skipped (371 files) | **4597 passed, 1 skipped (371 files)** | **+11** |
+| Router suite | 508 passed (32 files) | **519 passed (32 files)** | **+11** |
+| ComponentLoader / preload | 35 passed (4 files) | **46 passed (4 files)** | **+11** |
+| Route/Outlet/KeepAlive/Suspense | 47 passed (5 files) | **47 passed (5 files)** | 0 |
+| Browser matrix | 192 runs | **192 runs** | 0 |
+| Soak | 21 passed, 1 skipped | **21 passed, 1 skipped** | 0 |
+
+| Typecheck | Before | After |
+|---|---|---|
+| Source TypeScript errors | 0 | **0** |
+| Test TypeScript errors | 0 | **0** |
+
+The preload block replaced two earlier preload tests with fourteen, so the net
+is +11 rather than +14.
+
+## Certification
+
+| Gate | Result |
+|---|---|
+| Build | PASS |
+| TypeScript (src) | PASS |
+| Lint | PASS |
+| Full unit/integration suite | PASS - 4597 tests, 371 files |
+| TypeScript (tests + entry files) | PASS - 0 errors |
+| Query / Router / SSR fuzzing | PASS - 6 / 7 / 8 |
+| Browser matrix (Chromium/Firefox/WebKit) | PASS - 192 runs |
+| Lifecycle + SSR soak | PASS - 21 tests |
+| Packed package + subpath exports | PASS - 112/112, 16 subpaths |
+| Bundler matrix | PASS - 12/12 |
+| Node support matrix | NOT TESTED - 22.3.0 unavailable on this host; 22 PASS, 24 PASS |
+| **Result** | **ALL REQUIRED GATES PASSED** (12 PASS / 0 FAIL) |
+
+No public API changed: `preloadRoute()` keeps its signature and its
+`Promise<void>` result, and the 112/112 subpath check is unchanged.
+
+### Node floor
+
+Exact Node **22.3.0** is not installed on this host: **NOT TESTED on this run**,
+neither PASS nor FAIL. Node v22.14.0 and v24.19.0 passed every sub-gate. The
+previously certified exact-floor evidence stands separately and is not
+reinterpreted.
+
+## Ownership guards - unchanged and green
+
+```text
+Route:      navSeq + routeTorn      PASS
+Outlet:     navSeq + outletTorn     PASS
+KeepAlive:  updateSeq + kaTorn      PASS
+Suspense:   generation + tornDown   PASS
+```
+
+The preload correction integrates with these guards rather than replacing them.
+Stale-resolution disposal on the real navigation path is unaffected: a component
+invoked by an actual route generation whose Promise resolves after supersession
+still has its Element disposed exactly once and never mounted.
+
+## Test-scaffolding audit (§39-40)
+
+Searched the router test suites for compensating logic left over from the
+removed architectures - `probe`, `validation`, first-call adjustments,
+ignore-unmounted filters. The three such helpers found in the previous pass were
+already removed then (`tracked()`, `instrumented()`/`SelfDestruct`, and the
+browser fixture's `instanced()`). No new scaffolding was introduced by this pass:
+every route component invocation in the suite now represents a genuine instance,
+and no assertion was weakened to accommodate the change.

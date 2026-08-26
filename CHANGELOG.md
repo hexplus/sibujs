@@ -102,11 +102,13 @@ isolation never actually worked there under ESM — see below.
   mounted.
 - **`preloadRoute()` no longer renders the route.** Because validation ran at
   cache-fill time, preloading a route instantiated its component and built DOM —
-  the opposite of what preloading is for. It now resolves the module and caches
-  the factory, creating no component instance and no DOM. A direct
-  `AsyncComponent` is the one case with nothing to preload without instantiating,
-  so its Element is disposed and the route stays unresolved for the next real
-  navigation.
+  the opposite of what preloading is for. Preloading never invokes route
+  component factories now: deferred modules are resolved and their factories
+  cached, while directly supplied factories — synchronous, `async`, or plain
+  promise-returning — require no separate preload work and are left untouched
+  until real navigation. Because the factory is not invoked, preloading cannot
+  surface component errors; those appear at navigation. A lazy module's *load*
+  failure is still reported.
 - **A direct `AsyncComponent` is no longer disposed before it is mounted.** For
   `component: async () => element`, the resolved Element was handed to the
   validation step, disposed as a discarded probe, cached as a reusable

@@ -861,12 +861,16 @@ class ComponentLoader {
     if (typeof comp !== "function") {
       throw new Error(`Component for route "${routePath}" must be a function, got ${typeof comp}`);
     }
-    // `isAsyncComponent` classifies syntactically, so a plain arrow returning a
-    // promise (`() => fetchThing().then(...)`) lands in the factory branch —
-    // still a valid AsyncComponent per the exported type. Runtime thenable
-    // detection at instantiation handles it, applied to the real invocation
-    // rather than to a probe. (RC-003)
-    if (!this.isAsyncComponent(comp)) {
+    // Only a *module loader* is deferred, because only a module loader has
+    // something to fetch that is separable from running the component.
+    // Everything else — a synchronous factory, a direct `AsyncComponent`, a
+    // plain arrow returning a promise — is a factory whose sole job is to
+    // produce an instance, so there is nothing to preload without invoking user
+    // code. Those become preload no-ops by construction. (LOAD-003)
+    //
+    // Runtime thenable detection at instantiation handles every async shape,
+    // applied to the real invocation rather than to a probe. (RC-003)
+    if (!this.isDeferredModule(comp)) {
       return { kind: "factory", component: comp as Component };
     }
     return { kind: "deferred", load: comp as AsyncComponent | LazyComponent };
@@ -882,14 +886,35 @@ class ComponentLoader {
    */
   async instantiate(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
     if (plan.kind === "factory") {
-      return this.instantiateFactory(plan.component, routePath);
+      return this.instantiateFactory(plan.component, route, routePath);
     }
 
+    const factory = await this.resolveModuleFactory(plan, route, routePath);
+    return this.instantiateFactory(factory, route, routePath);
+  }
+
+  /**
+   * Resolve a deferred plan's module and cache the factory it exports —
+   * **without invoking that factory**.
+   *
+   * Shared by instantiation and preloading, so a preload racing a navigation to
+   * the same route imports the module once. A deferred plan is only ever a
+   * module loader (see `isDeferredModule`), so a resolution that is not
+   * module-shaped is a configuration error and is reported as one.
+   */
+  private async resolveModuleFactory(
+    plan: Extract<RoutePlan, { kind: "deferred" }>,
+    route: RouteDef,
+    routePath: string,
+  ): Promise<Component> {
     const cacheKey = this.keyFor(route);
+
+    // Someone (a preload, or an earlier mount) may already have upgraded it.
+    const cached = this.planCache.get(cacheKey);
+    if (cached && cached.kind === "factory") return cached.component;
+
     this.assertNotHot(cacheKey);
 
-    // Share the in-flight module resolution so concurrent first mounts of a
-    // lazy route run the loader arrow once.
     let pending = this.moduleLoads.get(cacheKey);
     const owner = pending === undefined;
     if (pending === undefined) {
@@ -907,38 +932,54 @@ class ComponentLoader {
       if (owner) this.moduleLoads.delete(cacheKey);
     }
 
-    if (this.isElement(resolved)) {
-      // Direct AsyncComponent. This Element *is* the instance for this
-      // invocation: it belongs to the route generation that requested it, is
-      // never disposed before mount, and is never cached as a reusable
-      // factory. (LOAD-002)
-      //
-      // An Element must never be shared between callers, so a caller that
-      // merely piggy-backed on someone else's in-flight load makes its own.
-      if (owner) return resolved;
-      const own = await plan.load();
-      if (this.isElement(own)) return own;
-      resolved = own;
-    }
-
     const factory = this.extractFactory(resolved, routePath);
-    // Lazy module: cache the real factory so the import happens once.
     this.planCache.set(cacheKey, { kind: "factory", component: factory });
-    return this.instantiateFactory(factory, routePath);
+    return factory;
   }
 
-  /** Invoke a factory exactly once and validate the instance it produced. */
-  private async instantiateFactory(component: Component, routePath: string): Promise<Element> {
+  /**
+   * Invoke a factory exactly once and validate the instance it produced.
+   *
+   * A factory may turn out to resolve to a *module* rather than an Element —
+   * an un-marked `async () => ({ default: Page })` is indistinguishable from a
+   * component factory until it runs. That is settled here, on the real
+   * invocation, and the plan is upgraded so later mounts skip the extra hop.
+   * `depth` bounds that unwrapping; a module whose default is itself a module
+   * is a configuration error, not something to chase.
+   */
+  private async instantiateFactory(
+    component: Component,
+    route: RouteDef,
+    routePath: string,
+    depth = 0,
+  ): Promise<Element> {
     const result = component();
 
     // Runtime thenable detection on the *real* invocation — never a second,
     // speculative call made only to classify. (RC-003)
     const value = this.isThenable(result) ? await (result as unknown as Promise<Element>) : result;
 
-    if (!this.isElement(value)) {
-      throw new Error(`Component for route "${routePath}" must return Element, got ${typeof value}`);
+    if (this.isElement(value)) return value;
+
+    if (depth === 0 && this.isFactoryLike(value)) {
+      const factory = this.extractFactory(value, routePath);
+      this.planCache.set(this.keyFor(route), { kind: "factory", component: factory });
+      return this.instantiateFactory(factory, route, routePath, depth + 1);
     }
-    return value;
+
+    throw new Error(`Component for route "${routePath}" must return Element, got ${typeof value}`);
+  }
+
+  /**
+   * Something `extractFactory` can turn into a component factory: a bare
+   * callable, or a module namespace carrying a callable `default`. Both are
+   * long-supported shapes for an async loader's resolution.
+   */
+  private isFactoryLike(value: unknown): boolean {
+    if (typeof value === "function") return true;
+    return (
+      typeof value === "object" && value !== null && typeof (value as { default?: unknown }).default === "function"
+    );
   }
 
   /**
@@ -969,25 +1010,15 @@ class ComponentLoader {
    */
   async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
     const plan = await this.loadPlan(route, routePath);
+    // A directly supplied factory — synchronous, `async`, or plain
+    // promise-returning — has no separately loadable code. Invoking it to
+    // "warm" anything would run application code and create an instance, which
+    // is precisely what preloading must not do. No-op. (LOAD-003)
     if (plan.kind === "factory") return;
 
-    const cacheKey = this.keyFor(route);
-    this.assertNotHot(cacheKey);
-
-    let resolved: unknown;
-    try {
-      resolved = await plan.load();
-    } catch (error) {
-      this.noteError(cacheKey);
-      throw error;
-    }
-
-    if (this.isElement(resolved)) {
-      dispose(resolved as unknown as Node);
-      return;
-    }
-    const factory = this.extractFactory(resolved, routePath);
-    this.planCache.set(cacheKey, { kind: "factory", component: factory });
+    // Import the module and cache its factory *uninvoked*. Shares the in-flight
+    // load with any concurrent navigation to the same route.
+    await this.resolveModuleFactory(plan, route, routePath);
   }
 
   private isThenable(value: unknown): boolean {
@@ -998,15 +1029,24 @@ class ComponentLoader {
     );
   }
 
-  private isAsyncComponent(comp: Component | AsyncComponent | LazyComponent): boolean {
-    // Prefer the reliable signals: the LAZY_MARKER stamped by `lazy()` and a
-    // genuine async function. The `toString()` source sniff is a best-effort
-    // fallback for an un-wrapped `() => import("./Page")` shorthand — dynamic
-    // `import(` is preserved verbatim by bundlers (it drives code-splitting), so
-    // it survives minification, but wrapping in `lazy()` is the robust form.
+  /**
+   * Does this route component load a **module**, as opposed to producing an
+   * instance?
+   *
+   * Only two signals are reliable: the LAZY_MARKER stamped by `lazy()`, and a
+   * dynamic `import(` in the source — preserved verbatim by bundlers, since it
+   * drives code-splitting, so it survives minification. `lazy()` is the robust
+   * form.
+   *
+   * `constructor.name === "AsyncFunction"` is deliberately **not** a signal.
+   * It cannot distinguish `async () => import("./Page")` from
+   * `async () => document.createElement("div")`, and treating the latter as a
+   * module loader is what made preload invoke user components. A component that
+   * merely happens to be async has nothing separately loadable. (LOAD-003)
+   */
+  private isDeferredModule(comp: Component | AsyncComponent | LazyComponent): boolean {
     return (
-      (comp as any)[LAZY_MARKER] === true ||
-      comp.constructor.name === "AsyncFunction" ||
+      (comp as { [LAZY_MARKER]?: boolean })[LAZY_MARKER] === true ||
       (typeof comp === "function" && comp.toString().includes("import("))
     );
   }

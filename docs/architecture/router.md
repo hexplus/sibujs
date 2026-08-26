@@ -326,6 +326,9 @@ Caching policy:
 | synchronous `Component` factory | yes |
 | Element resolved by a direct `AsyncComponent` | **no** |
 
+Preloading never produces such an Element in the first place — see
+[Preloading](#preloading).
+
 The loader cache and the [KeepAlive](#the-keepalive-outlet) instance cache are
 different things: KeepAlive deliberately caches *mounted instances* and owns
 their lifecycle; the loader caches only how to *produce* an instance.
@@ -448,21 +451,50 @@ if (!result.success && result.reason === "guard") {
 
 ## Preloading
 
-`preloadRoute(target)` resolves a route's module and factory ahead of time.
+> `preloadRoute()` prepares deferred route code without creating a component
+> instance. Directly supplied component factories require no preload work and
+> are not invoked.
 
-> Preloading may resolve route modules/factories but does not instantiate route
-> component DOM.
+Preloading may execute module-loading machinery. It may **not** execute
+application component code — the boundary is the same one the loader itself
+respects:
 
-For a lazy route this performs the dynamic import and caches the resulting
-factory, so the later navigation mounts without a network round trip — and the
-component factory itself is not called, so no DOM and no lifecycle state is
-created. For a synchronous component there is nothing to fetch and preloading is
-a no-op.
+```text
+PRELOAD
+   ↓
+module/factory resolution only
+   ↓
+no component invocation
+   ↓
+no DOM, no lifecycle resources
+```
 
-The one exception is a direct `AsyncComponent`: resolving it *is* creating its
-Element, so there is nothing to preload without instantiating. SibuJS disposes
-that Element and leaves the route unresolved; the next real navigation invokes
-the component normally.
+| Route definition | What preload does |
+|---|---|
+| `lazy(() => import("./Page"))` | imports the module, caches its default factory — **uninvoked** |
+| `() => import("./Page")` | same; recognised by the dynamic `import(` in its source |
+| `() => element` | no-op — the factory is already here |
+| `async () => element` | no-op — there is no separate module to fetch |
+| `() => Promise.resolve(element)` | no-op — same reason |
+
+For directly supplied factories — synchronous, `async`, or plain
+promise-returning — there is nothing separable to load: the only thing calling
+them achieves is building the component, which is instantiation, not preloading.
+Preloading them is therefore intentionally a no-op that reports success.
+
+`preloadRoute()` never invokes a component factory even to discover what it
+returns. `dispose()` cannot undo an analytics call, a store write, or a log
+line, so "call it and throw the result away" is not a form of preloading.
+
+### Preload cannot surface component errors
+
+Because the factory is never invoked, preloading cannot discover that a
+component returns the wrong thing or throws while building. Those surface during
+real instantiation, through the route's normal error handling.
+
+A **module-load** failure is different and is still reported: importing a lazy
+route's module can genuinely fail during preload, and that error follows the
+existing retry/error policy. A failed preload never changes the current route.
 
 ## Navigation target policy
 
