@@ -23,6 +23,7 @@
  * Per-request SSR store. Currently holds the SSR flag plus a
  * suspense-id counter so concurrent streaming renders never collide.
  */
+import { devWarn } from "./dev";
 export interface SSRStore {
   ssr: boolean;
   suspenseIdCounter: number;
@@ -70,9 +71,22 @@ function detectSSRShared(): SSRShared {
       const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
       if (typeof getBuiltin === "function") {
         mod = getBuiltin("node:async_hooks") as AHMod;
-      } else {
-        const req = (Function("return typeof require==='function'?require:null") as () => NodeRequire | null)();
-        if (req) mod = req("node:async_hooks") as AHMod;
+      } else if (typeof require === "function") {
+        // Older Node (< 22.3) has no `getBuiltinModule`. In the CommonJS build
+        // `require` is a MODULE-LOCAL binding, so it has to be referenced
+        // lexically. The previous attempt went through
+        // `Function("return typeof require === 'function' ? require : null")`,
+        // which evaluates its body in GLOBAL scope — where `require` does not
+        // exist in either module system. That fallback therefore returned null
+        // on every Node version and in both formats, so ALS was only ever
+        // detected via `getBuiltinModule`, i.e. on Node >= 22.3.
+        //
+        // In the ESM build `require` is genuinely absent, so `typeof require`
+        // is "undefined" and this branch is skipped — there is no synchronous
+        // way to load a builtin from ESM before `getBuiltinModule` existed.
+        // ESM on Node < 22.3 consequently still falls back to the shared store;
+        // see NODE-002 and docs/support-matrix.md. (NODE-002)
+        mod = require("node:async_hooks") as AHMod;
       }
       if (mod) detected = new mod.AsyncLocalStorage();
     }
@@ -89,6 +103,33 @@ const _shared: SSRShared = ((globalThis as typeof globalThis & { [SSR_KEY]?: SSR
 // `fallbackStore` is a shared object every copy mutates/reads in place.
 const als = _shared.als;
 const fallbackStore = _shared.fallbackStore;
+
+// Warn once, on a Node runtime that reached the shared-store fallback.
+//
+// Without AsyncLocalStorage the fallback save/restore is correct for a fully
+// SYNCHRONOUS render, but two requests that interleave across an `await` share
+// one store — which is cross-request data bleed, the exact failure request
+// scoping exists to prevent. On a browser or a DOM-less edge runtime the
+// fallback is expected and no warning is useful, so this fires only where ALS
+// was supposed to be available: Node.
+//
+// Reachable on Node < 22.3 under ESM, where no synchronous way to load a
+// builtin module exists. See NODE-002 and docs/support-matrix.md.
+let _alsWarned = false;
+function warnMissingAsyncLocalStorage(): void {
+  if (_alsWarned || als) return;
+  const isNode = typeof process !== "undefined" && !!process.versions?.node;
+  if (!isNode) return;
+  _alsWarned = true;
+  const version = process.versions.node;
+  devWarn(
+    `SSR request isolation is UNAVAILABLE on this runtime (Node ${version}). ` +
+      "AsyncLocalStorage could not be loaded, so concurrent requests share one " +
+      "SSR store: request state and the query cache can bleed between them. " +
+      "Node >= 22.3 is required for isolated SSR under ESM; the CommonJS build " +
+      "works on older versions. A fully synchronous render is unaffected.",
+  );
+}
 
 /** Returns the active store (ALS or fallback). */
 export function getSSRStore(): SSRStore {
@@ -142,6 +183,7 @@ export function runInSSRContext<T>(fn: () => T): T {
   if (als) {
     return als.run(store, fn);
   }
+  warnMissingAsyncLocalStorage();
   // Module-global fallback for runtimes without AsyncLocalStorage (browser,
   // some edge runtimes). Unreachable under the Node test runner where `als`
   // is always present.

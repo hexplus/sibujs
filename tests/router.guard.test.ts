@@ -642,8 +642,13 @@ describe("Router System", () => {
 
       const result = await navigate("/same");
 
-      // Should detect duplicate navigation
-      expect(result?.type).toBe("duplicated");
+      // Should detect duplicate navigation. `NavigationResult` is a
+      // discriminated union, so narrow to the failure branch before reading
+      // `type` — the optional chain compiled only because the suite was
+      // never type-checked, and would have silently passed `undefined`.
+      expect(result.success).toBe(false);
+      if (result.success) throw new Error("expected the duplicate navigation to fail");
+      expect(result.type).toBe("duplicated");
     });
 
     it("should handle rapid navigation changes", async () => {

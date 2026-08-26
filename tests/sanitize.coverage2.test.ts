@@ -133,7 +133,10 @@ describe("stripHtml (coverage2)", () => {
         throw new Error("boom");
       }
     }
-    // @ts-expect-error swap in a throwing parser
+    // Assigning a stand-in parser type-checks on its own, so no suppression is
+    // needed here. A stale expect-error directive is itself an error under
+    // `typecheck:tests`, which is why the suite uses that form of suppression
+    // rather than the silent one.
     globalThis.DOMParser = ThrowingParser;
     try {
       expect(stripHtml("<b>hi</b>")).toBe("hi");

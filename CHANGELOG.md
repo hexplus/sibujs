@@ -6,6 +6,297 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Breaking
+
+- **Minimum Node.js is now 22.3.0** (was 18.0.0). SSR request isolation is built
+  on `AsyncLocalStorage`, which the runtime loads through
+  `process.getBuiltinModule` — added in Node 22.3. The fallback for older
+  releases never worked: it looked for `require` in global scope, where it does
+  not exist in either module format. Below 22.3, concurrent SSR requests
+  therefore shared one store, so request state and the query cache could bleed
+  between them.
+
+  The CommonJS half is now fixed and isolates correctly on every version. The
+  ESM half cannot be: there is no synchronous way to load a builtin module from
+  ESM before `getBuiltinModule` existed, and a static `import "node:async_hooks"`
+  would break every browser bundle. Node 18 (EOL April 2025) and Node 20 (EOL
+  April 2026) were the only versions failing any gate, so the floor was raised to
+  the version that actually provides the mechanism.
+
+  Every version in the declared range is now executed by CI on every pull
+  request, against the packed tarball, in both ESM and CommonJS. Where
+  `AsyncLocalStorage` is genuinely unavailable — a browser, a DOM-less edge
+  runtime — `runInSSRContext` now emits a one-time warning instead of degrading
+  silently. A fully synchronous render was never affected.
+
+### Fixed
+
+- **Router navigation in DOM-less runtimes.** `updateHistory()` referenced the
+  bare `history` global, so every `push`, `replace`, and redirect failed with
+  `ReferenceError: history is not defined` outside a browser. `createMemoryRouter`
+  — documented as "a router that doesn't interact with browser history" and
+  advertised for testing/SSR — could be constructed and then never navigated. The
+  route now commits and only the address-bar side effect is skipped.
+- **`eventBus()` and the `normalize` family reject an `interface`.** Their
+  generic constraint was `Record<string, unknown>`, which an `interface` cannot
+  satisfy because it has no implicit index signature — so the identical shape
+  compiled or failed depending on whether it was declared with `type` or
+  `interface`, while the runtime handled both. Constraints widened to
+  `T extends object`.
+- **`globalStore` actions could not have typed payloads.** The action-map
+  constraint required every action to *accept* `payload?: unknown`, making
+  `add: (state, amount: number) => ...` unassignable and collapsing
+  `Parameters<A[K]>[1]` — which `dispatch` already used — to `unknown`. Replaced
+  with an exported `StoreActionMap<S>`.
+- **`RouterLink` now returns `HTMLAnchorElement`.** It always builds an `<a>`,
+  but was declared `HTMLElement`, so reading back the props it sets (`.href`,
+  `.target`, `.rel`) did not type-check.
+
+### Changed
+
+- The test suite and all 16 subpath entry files are now type-checked
+  (`npm run typecheck:tests`), and both typechecks are CI gates. This went from
+  130 errors to 0; the burn-down is what surfaced the four type fixes above.
+
+---
+
+A sustained production-hardening pass across disposal, the client router, SSR,
+hydration, islands, and the data layer. Twenty-four confirmed bugs fixed, every
+one reproduced by a failing test before the fix. Beyond the Node engine bump
+above, no breaking changes: one new public export, one additive field on an
+existing result type, and no change to
+any existing signature or behaviour that was already correct.
+
+The recurring theme is **async ownership**: when asynchronous work finishes, who
+still holds the right to commit it? Navigation, queries, hydration bootstrap,
+island activation, and SSR Suspense boundaries now answer that with monotonic
+generations rather than by comparing keys, URLs, or values — because returning
+to the same key or URL is *not* the same generation.
+
+### Added
+
+- **`replaceChildrenSafely(parent, ...next)`** — replaces a node's children,
+  disposing the outgoing subtree first. Native `replaceChildren()` detaches
+  nodes without running SibuJS teardown, so bindings, listeners, and lifecycle
+  hooks inside the removed content survive as unreachable zombies that keep
+  firing against detached DOM. Application code that swaps SibuJS-managed
+  content hits the same hazard the framework did, so this ships alongside
+  `dispose()` and `checkLeaks()` rather than staying internal. Nodes present in
+  `next` are never disposed, including when they currently sit *inside* the
+  outgoing subtree.
+- **`reason` on failed navigation results** — `NavigationResult` and
+  `NavigationFailure` now carry an optional discriminator: `"guard"`,
+  `"superseded"`, `"router-destroyed"`, `"redirect-loop"`, `"unsafe-target"`,
+  `"duplicate"`, or `"error"`. Previously a guard rejection and a navigation
+  superseded by a newer one were both `{ success: false, type: "aborted" }`, so
+  applications could not tell "you lack access to this page" from "you clicked a
+  newer link" — forcing a choice between spurious error messages during rapid
+  navigation and swallowing genuine authorization failures. Existing `type`
+  values are unchanged, so code branching on `type` is unaffected.
+
+### Fixed
+
+#### Disposal and lifecycle
+
+- **`each()` no longer leaves its rows behind when torn down.** Rows and the
+  `each:end` sentinel are *siblings* of the anchor comment, not children, so an
+  ancestor `dispose()` walk never reached them and only the reactive
+  subscription was released. Swapping an `each()` out of a conditional branch
+  left every row **visible on screen** beneath the replacement content, still
+  reactive and still holding its bindings. The anchor now owns and tears down
+  its whole logical range.
+- **`Suspense` disposes its fallback when content resolves.** The commit used a
+  native `replaceChildren()`, so a user-authored fallback — commonly reactive,
+  e.g. a progress indicator — was detached without teardown and kept
+  re-rendering off-screen forever, with its `onCleanup` never firing.
+- **`ErrorBoundary` no longer commits async results into a disposed boundary.**
+  A promise settling after the boundary was torn down built a fresh subtree
+  inside a detached container that nothing would ever dispose. Late results are
+  now disposed rather than attached, and a late rejection stays handled so it
+  never surfaces as an unhandled rejection.
+- **`replaceChildrenSafely()` preserves an incoming node nested inside outgoing
+  content.** Protection was originally a membership test against the parent's
+  *direct* children, so a node being moved up out of a wrapper was destroyed
+  along with it — leaving a node in the final DOM whose reactive resources had
+  already been torn down. It renders once, then silently stops responding.
+  Incoming nodes are now detached before the outgoing roots are disposed.
+
+#### Client router
+
+- **A superseded navigation can no longer commit.** Each navigation already
+  carried an `AbortController`, and a newer navigation already aborted the
+  previous one — but nothing consulted the signal before committing. A
+  navigation superseded mid-flight would resume after its `await` and rewrite
+  history, clobber the newer route, fire `afterEach`, and apply its scroll
+  position. A single check at the commit boundary closes it, with two further
+  checks so stale navigations stop early rather than merely failing late.
+- **A navigation pending at `destroyRouter()` no longer commits afterwards.**
+- **`RouterLink` respects `event.defaultPrevented`.** It correctly declined
+  modifier clicks, non-primary buttons, and `target`-bearing links, but never
+  checked whether something had already cancelled the click — so a link the
+  application had explicitly neutralised still navigated.
+- **The router no longer throws an uncatchable error without a DOM.** Reading
+  the current path assumed a live `location`. Listener registration was already
+  guarded, but the deferred bootstrap still called through — and a throw from a
+  microtask is a process-level error the caller cannot defend against with
+  `try`/`catch`, so merely constructing a router in an SSG build or a test
+  runner could take the process down. It now resolves to the root path, matching
+  the route already seeded, and server-side callers navigate explicitly.
+- **A route component returning a promise from a plain arrow is no longer
+  dropped.** Async components were classified *syntactically* — the `lazy()`
+  marker, an `async function`, or an `import(` in the source — so
+  `() => fetchThing().then(...)` matched none of them despite being a valid
+  `AsyncComponent`. It produced a misleading "must return Element, got object"
+  and left the promise unhandled, so a later rejection escaped as an unhandled
+  rejection. Any thenable is now adopted and awaited.
+- **Redirect loops report the offending chain.** Recursion was already bounded
+  at ten hops, but failed with a bare `aborted` and no explanation. Development
+  builds now print the hop sequence, so a cycle is obvious the moment a path
+  repeats.
+
+#### SSR, hydration, and islands
+
+- **SSR Suspense replaces its fallback instead of appending beside it.** The
+  streamed swap script moved resolved nodes into the boundary wrapper without
+  clearing it first, so the loading UI stayed on screen above the real content.
+  Verified in Chromium, Firefox, and WebKit by executing the real swap script
+  against live DOM.
+- **`hydrate()` disposes the previous client tree when a container is
+  re-hydrated.** First-time hydration is unaffected — inert server markup has
+  nothing to tear down — but a second hydration orphaned the entire previous
+  tree's bindings, listeners, and lifecycle hooks.
+- **Hydration diagnostics now report text mismatches.** `HydrationMismatch`
+  declared a `"text"` variant that could never occur: the walker descended only
+  through element children. The single most common real-world mismatch — server
+  and client disagreeing on *data* — went unreported while a trivial attribute
+  difference was flagged.
+- **`renderToStream()` and `renderToString()` produce identical output.**
+  Streaming omitted the `data-sibu-ssr` provenance marker, so the two documented
+  render paths emitted different HTML for the same input — a trap for anyone who
+  streams in production but snapshots with `renderToString()` in tests.
+- **A lazy island whose module arrives after `cleanup()` no longer activates.**
+  It enhanced the DOM for a torn-down island and pushed its disposer onto a list
+  already drained, leaving the enhancement permanently unreachable. Reachable in
+  practice via the `load` strategy, whose cancel is a no-op.
+- **SSR bootstrap renders the route the browser is actually on.** `hydrateRouter()`
+  created the router from `location` but hydrated the component resolved from
+  the *server's* path. When the two disagreed — stale cached HTML, a CDN serving
+  another route's document, a proxy rewrite, or a user navigating before the
+  bundle boots — bootstrap ended with the URL and router agreeing on one route
+  while the DOM showed another. The live URL now wins; when no route matches it,
+  the container is cleared rather than left showing unrelated content.
+- **A superseded bootstrap can never regain the right to commit.** Its staleness
+  check compared URLs, which cannot distinguish `/b` from `/b` reached again
+  after visiting `/c` — an A→B→A round trip restored permission to work that had
+  already lost it, and replacement hydration would then destroy the newer
+  instance's state, effects, and listeners while the URL still looked correct.
+  Commit permission is now a monotonic navigation generation.
+
+#### Data layer
+
+- **A shared query request is no longer cancelled by an unrelated subscriber.**
+  The cache entry owned the in-flight promise while each query instance owned
+  the `AbortController`, so one instance changing key or unmounting aborted a
+  request other instances had deduplicated onto. The entry now owns the request
+  and its cancellation; query instances are observers. A request is aborted only
+  when the entry itself is abandoned — never when one observer leaves.
+- **Deduplicated waiters no longer stay `fetching` forever.** A waiter refreshed
+  its state only when the shared promise still matched the one it captured, but
+  the owner clears that reference *before* waiters resume — so the check was
+  false on every normal completion and the flag never came down.
+- **A completed request is recorded even when the instance that started it moved
+  on.** The cache write was gated on the initiator's local state, so when it
+  changed key or was disposed the shared result was never committed and every
+  other observer was stranded with no data. Cache commit and local commit are
+  now separate permissions.
+- **A request abandoned by `clearQueryCache()` can no longer report settlement**
+  while a newer request for the same key is still in flight.
+- **`clearQueryCache()` keeps every live observer attached.** It replaces each
+  cache entry and restarts live queries, but registration was driven by the key
+  string — unchanged across a clear — so only the observer that happened to
+  recreate the entry re-registered. Every other observer stayed live but
+  detached: it missed later cache updates and invalidations, and the entry's
+  subscriber count could reach zero while observers remained, making it eligible
+  for garbage collection. Attachment is now keyed on cache-entry identity.
+- **The query cache's retention timer no longer holds a Node process open.** The
+  garbage-collection timer is pure bookkeeping, but a ref'd handle kept the event
+  loop alive for the whole retention window — 300 s by default — so an SSG build,
+  a CLI, or a serverless invocation that merely touched `query()` would hang long
+  after finishing its work. The handle is now `unref()`'d where the runtime
+  supports it, which changes only whether the timer keeps the process alive,
+  never when it fires.
+- **`infiniteQuery()` clears its fetching flags when the current request is
+  aborted.** The stale-run guard was correct, but an abort on the *current* run
+  returned before clearing the flags it had raised, so the query reported
+  `fetching: true` permanently with no request in flight. Abort detection also no
+  longer depends on `DOMException`, which is unavailable in some runtimes.
+
+### Documented
+
+Behaviours that are deliberate but were easy to misread. Full detail lives in
+`docs/architecture/` and `docs/hardening/`.
+
+- **Hydration replaces server DOM rather than adopting it.** Node identity is
+  not preserved, and pre-hydration user input, checkbox state, and focus are
+  discarded. The trade is real in both directions: partial-adoption mismatch
+  bugs are structurally impossible, but SSR here buys first-paint HTML, not
+  work-sharing between server and client. The `hydrate()` docstring described
+  adoption and has been corrected.
+- **`context()` is application-global** — not subtree-scoped and not SSR
+  request-scoped, so concurrent server requests can observe each other's values.
+  Development builds now warn when it is used during SSR and point to the
+  alternatives.
+- **`withContext()` scopes synchronous execution only.** The previous value is
+  restored when the callback returns, which for an async callback is when it
+  returns its promise. Development builds warn on an async callback. A
+  promise-aware restore was deliberately not adopted: because the value is
+  global it would fix the single-callback case while leaving overlapping async
+  scopes equally broken, making the hazard harder to notice.
+- **SSR requires a DOM implementation on the server** (jsdom, happy-dom,
+  linkedom). Server-side *routing* is DOM-free; server-side *rendering* is not.
+- **`renderToSuspenseStream()` waits for all boundaries before flushing any**, so
+  streaming delivers an early shell plus one batched flush rather than
+  incremental per-boundary delivery.
+- **SSR Suspense renders its fallback on rejection or timeout**, so a failed
+  boundary is indistinguishable from a loading one in the markup.
+- **`withSSR()` is not request-scoped** — use `runInSSRContext()` for anything
+  serving concurrent requests.
+- **Derived chains are stack-bounded** at roughly 2 000–3 000 links, inherent to
+  lazy pull-based evaluation. `dispose()` has no comparable limit; it walks
+  iteratively.
+- **Plain `<a href>` is never intercepted.** SibuJS installs no global click
+  handler; only `RouterLink` intercepts.
+- The README no longer claims "no diffing, no reconciliation" — keyed `each()`
+  legitimately reconciles its own DOM range. It now says there is no Virtual DOM
+  and no component-tree reconciliation, and that keyed collections reconcile only
+  the range they own.
+
+### Testing
+
+The suite grew from 3 998 to 4 373 tests, plus 150 real-browser tests across
+**Chromium, Firefox, and WebKit** (there were none for routing, hydration, or
+SSR Suspense before). Beyond per-bug regressions, the new coverage includes
+seeded differential testing of keyed reconciliation against an external
+reference model, a reactive-runtime torture suite, leak detection that asserts
+live-binding counts return to baseline without relying on garbage collection,
+seeded model testing for the router, query, and SSR escaping, cross-request SSR
+isolation under hostile interleaving, and hostile-input escaping for both
+streamed and non-streamed output.
+
+New tooling, all opt-in and excluded from the default test loop:
+
+- `npm run test:soak` (and `test:soak:gc`) — long-running lifecycle and SSR soak
+  suites for memory behaviour under sustained load.
+- `npm run typecheck` / `typecheck:tests` — type checking split so test-only
+  types are verified separately from the shipped surface.
+- `npm run certify:rc` — a release-candidate check that runs an export audit and
+  a bundler matrix against minimal probe fixtures, verifying that subpath
+  imports pull in only what they should.
+
+---
+
 ## [3.4.1] — 2026-07-07
 
 A router correctness fix. No breaking changes.

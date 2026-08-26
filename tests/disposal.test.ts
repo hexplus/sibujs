@@ -6,6 +6,7 @@ import { signal } from "../src/core/signals/signal";
 import { store } from "../src/core/signals/store";
 import { watch } from "../src/core/signals/watch";
 import { batch } from "../src/reactivity/batch";
+import { callbackSlot } from "./helpers/mocks";
 
 // ── Ownership model: signals outlive effects ─────────────────────────────────
 
@@ -27,7 +28,11 @@ describe("Ownership model", () => {
     const [s, { setState }] = store({ count: 0 });
     const spy = vi.fn();
 
-    const teardown = effect(() => spy(store.count));
+    // `store.count` read a property off the imported FACTORY, not off this
+    // store instance: always `undefined`, and — worse — the effect then
+    // subscribed to nothing at all, so the "subscriber dead" assertion below
+    // held trivially. The subscriber was never alive. (TYPE-008)
+    const teardown = effect(() => spy(s.count));
     expect(spy).toHaveBeenCalledTimes(1);
 
     teardown();
@@ -292,16 +297,20 @@ describe("Conditional branches with shared state", () => {
     const branchASpy = vi.fn();
     const branchBSpy = vi.fn();
 
-    let currentTeardown: (() => void) | null = null;
+    // A nullable function holder. A plain `let` is narrowed to `null` at every
+    // use site here, because every assignment happens inside `renderBranch`
+    // and TypeScript cannot see that it ran — copying into a local does not
+    // help either, since a `const` is narrowed from its initializer.
+    const currentTeardown = callbackSlot<() => void>("currentTeardown");
 
     // Simulate conditional rendering
     function renderBranch() {
-      if (currentTeardown) currentTeardown();
+      if (currentTeardown.captured()) currentTeardown.invoke();
 
       if (flag()) {
-        currentTeardown = effect(() => branchASpy(data()));
+        currentTeardown.set(effect(() => branchASpy(data())));
       } else {
-        currentTeardown = effect(() => branchBSpy(data()));
+        currentTeardown.set(effect(() => branchBSpy(data())));
       }
     }
 
@@ -324,7 +333,7 @@ describe("Conditional branches with shared state", () => {
     expect(branchASpy).toHaveBeenCalledTimes(4); // 2 old + 1 new mount + 1 update
     expect(branchBSpy).toHaveBeenCalledTimes(2); // disposed
 
-    if (currentTeardown) currentTeardown();
+    if (currentTeardown.captured()) currentTeardown.invoke();
   });
 });
 

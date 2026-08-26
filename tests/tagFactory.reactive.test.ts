@@ -45,9 +45,12 @@ describe("tagFactory reactive features", () => {
   describe("reactive style binding", () => {
     it("should accept reactive style properties", () => {
       const [color, setColor] = signal("red");
+      // The tag factories are declared to return `Element`; `style` is an
+      // `HTMLElement` member. `div()` always builds an HTMLElement, so narrowing
+      // here is safe and keeps the assertion typed.
       const el = div({
         style: { color: () => color(), fontWeight: "bold" },
-      });
+      }) as HTMLElement;
       document.body.appendChild(el);
 
       expect(el.style.color).toBe("red");

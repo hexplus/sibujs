@@ -1,15 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { block, cloneTemplate, hoistable, precompile, staticTemplate } from "../src/performance/compiled";
+import { block, cloneTemplate, hoistable, precompile, staticTemplate, trustHTML } from "../src/performance/compiled";
+
+// `staticTemplate` and `precompile` write their argument to `innerHTML`, so
+// they accept only branded `TrustedHTML` — minted through `trustHTML()` — to
+// keep that write from becoming a silent XSS sink (CWE-79). These tests used
+// to pass bare strings, which the public type has always forbidden; they only
+// compiled because `tests/` was never type-checked. Calling the API the way a
+// typed consumer must is the point of the test. (TYPE-004)
 
 describe("staticTemplate", () => {
   it("should create an element from an HTML string", () => {
-    const el = staticTemplate("<div>Hello</div>");
+    const el = staticTemplate(trustHTML("<div>Hello</div>"));
     expect(el.tagName).toBe("DIV");
     expect(el.textContent).toBe("Hello");
   });
 
   it("should create an element with attributes", () => {
-    const el = staticTemplate('<span class="badge" data-type="info">Info</span>');
+    const el = staticTemplate(trustHTML('<span class="badge" data-type="info">Info</span>'));
     expect(el.tagName).toBe("SPAN");
     expect(el.className).toBe("badge");
     expect(el.getAttribute("data-type")).toBe("info");
@@ -17,7 +24,7 @@ describe("staticTemplate", () => {
   });
 
   it("should create an element with nested nodes", () => {
-    const el = staticTemplate("<ul><li>A</li><li>B</li></ul>");
+    const el = staticTemplate(trustHTML("<ul><li>A</li><li>B</li></ul>"));
     expect(el.tagName).toBe("UL");
     expect(el.querySelectorAll("li").length).toBe(2);
     expect(el.querySelectorAll("li")[0].textContent).toBe("A");
@@ -25,7 +32,7 @@ describe("staticTemplate", () => {
   });
 
   it("should trim surrounding whitespace from the HTML string", () => {
-    const el = staticTemplate("  <p>Trimmed</p>  ");
+    const el = staticTemplate(trustHTML("  <p>Trimmed</p>  "));
     expect(el.tagName).toBe("P");
     expect(el.textContent).toBe("Trimmed");
   });
@@ -72,7 +79,7 @@ describe("cloneTemplate", () => {
 
 describe("precompile", () => {
   it("should return a factory that creates elements from a cached template", () => {
-    const factory = precompile<{ text: string }>("<div></div>", (el, props) => {
+    const factory = precompile<{ text: string }>(trustHTML("<div></div>"), (el, props) => {
       el.textContent = props.text;
     });
 
@@ -82,7 +89,7 @@ describe("precompile", () => {
   });
 
   it("should apply hydration on each call", () => {
-    const factory = precompile<{ count: number }>('<span class="counter"></span>', (el, props) => {
+    const factory = precompile<{ count: number }>(trustHTML('<span class="counter"></span>'), (el, props) => {
       el.textContent = String(props.count);
     });
 
@@ -94,7 +101,7 @@ describe("precompile", () => {
   });
 
   it("should produce independent elements per call", () => {
-    const factory = precompile<{ label: string }>("<button></button>", (el, props) => {
+    const factory = precompile<{ label: string }>(trustHTML("<button></button>"), (el, props) => {
       el.textContent = props.label;
     });
 
@@ -106,11 +113,14 @@ describe("precompile", () => {
   });
 
   it("should preserve template attributes through hydration", () => {
-    const factory = precompile<{ active: boolean }>('<div class="card" data-role="panel"></div>', (el, props) => {
-      if (props.active) {
-        el.classList.add("active");
-      }
-    });
+    const factory = precompile<{ active: boolean }>(
+      trustHTML('<div class="card" data-role="panel"></div>'),
+      (el, props) => {
+        if (props.active) {
+          el.classList.add("active");
+        }
+      },
+    );
 
     const el = factory({ active: true });
     expect(el.classList.contains("card")).toBe(true);

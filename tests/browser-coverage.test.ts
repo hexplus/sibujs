@@ -19,6 +19,7 @@ import { swipe } from "../src/browser/swipe";
 import { title } from "../src/browser/title";
 import { visibility } from "../src/browser/visibility";
 import { windowSize } from "../src/browser/windowSize";
+import { callbackSlot } from "./helpers/mocks";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -294,11 +295,11 @@ describe("browser handlers + dispose (real paths)", () => {
   });
 
   it("permissions() tracks a resolved status and its change event", async () => {
-    let changeHandler: (() => void) | null = null;
+    const changeHandler = callbackSlot<() => void>("changeHandler");
     const status = {
       state: "granted",
       addEventListener: (_e: string, h: () => void) => {
-        changeHandler = h;
+        changeHandler.set(h);
       },
       removeEventListener: vi.fn(),
     };
@@ -308,7 +309,7 @@ describe("browser handlers + dispose (real paths)", () => {
     await Promise.resolve();
     expect(p.state()).toBe("granted");
     status.state = "denied";
-    changeHandler?.();
+    changeHandler.invoke();
     expect(p.state()).toBe("denied");
     p.dispose();
     expect(status.removeEventListener).toHaveBeenCalled();

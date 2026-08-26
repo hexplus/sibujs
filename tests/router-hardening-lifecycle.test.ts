@@ -52,6 +52,9 @@ describe("router hardening: redirects are bounded", () => {
 
     // Bounded: it fails rather than hanging or blowing the stack.
     expect(result.success).toBe(false);
+    // `NavigationResult` is a discriminated union: `type` lives only on the
+    // failure branch, so it has to be narrowed before being read.
+    if (result.success) throw new Error("expected this navigation to fail");
     expect(result.type).toBe("aborted");
   });
 
@@ -299,6 +302,8 @@ describe("router hardening: same-route and partial navigation (characterization)
     // Current documented behaviour: an identical target is rejected as a
     // duplicate rather than re-running the pipeline.
     expect(second.success).toBe(false);
+    // Narrow the discriminated union before reading `type`.
+    if (second.success) throw new Error("expected the duplicate navigation to fail");
     expect(second.type).toBe("duplicated");
     expect(route().path).toBe("/users/1");
   });

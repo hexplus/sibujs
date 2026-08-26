@@ -50,10 +50,23 @@ export type Middleware<S> = (state: S, action: string, payload: unknown, next: (
 
 export type Selector<S, R> = (state: S) => R;
 
-export interface GlobalStore<
-  S extends Record<string, unknown>,
-  A extends Record<string, (state: S, payload?: unknown) => Partial<S>>,
-> {
+/**
+ * Action-map constraint.
+ *
+ * `(state: S, payload?: unknown)` looks permissive but is the opposite: it
+ * requires every action to ACCEPT any `unknown` payload, so a typed action such
+ * as `add: (state, amount: number) => ...` is not assignable, and
+ * `Parameters<A[K]>[1]` — which `dispatch` already uses to type its payload —
+ * collapses to `unknown` for every action. The constraint therefore defeated the
+ * per-action payload typing the rest of this file is built around.
+ *
+ * A `never[]` rest parameter accepts any concrete parameter list while keeping
+ * `Parameters<A[K]>` intact, so `dispatch("add", 5)` is checked against the
+ * action's real signature. (TYPE-007)
+ */
+export type StoreActionMap<S> = Record<string, (state: S, ...args: never[]) => Partial<S>>;
+
+export interface GlobalStore<S extends Record<string, unknown>, A extends StoreActionMap<S>> {
   getState: () => S;
   select: <R>(selector: Selector<S, R>) => () => R;
   dispatch: <K extends keyof A>(action: K, payload?: Parameters<A[K]>[1]) => void;
@@ -65,10 +78,11 @@ export interface GlobalStore<
  * globalStore creates a centralized state management store
  * with actions, selectors, and middleware support.
  */
-export function globalStore<
-  S extends Record<string, unknown>,
-  A extends Record<string, (state: S, payload?: unknown) => Partial<S>>,
->(config: { state: S; actions: A; middleware?: Middleware<S>[] }): GlobalStore<S, A> {
+export function globalStore<S extends Record<string, unknown>, A extends StoreActionMap<S>>(config: {
+  state: S;
+  actions: A;
+  middleware?: Middleware<S>[];
+}): GlobalStore<S, A> {
   const initialState = deepClone(config.state);
   const [getState, setState] = signal<S>({ ...initialState });
   const listeners: Set<(state: S) => void> = new Set();
@@ -80,7 +94,13 @@ export function globalStore<
 
     const execute = () => {
       const current = getState();
-      const rawPatch = actionFn(current, payload);
+      // `A[K]` is constrained with a `never[]` rest parameter so that concrete
+      // action signatures stay assignable and `Parameters<A[K]>` keeps their
+      // real types. That makes the call site itself unprovable to the compiler,
+      // which is unavoidable for a heterogeneous action map — the payload was
+      // already checked against `Parameters<A[K]>[1]` at the `dispatch`
+      // boundary, which is where it matters to callers.
+      const rawPatch = (actionFn as unknown as (state: S, payload?: unknown) => Partial<S>)(current, payload);
       // Strip prototype-pollution keys before merging (shared guard).
       const patch = stripUnsafeKeys(rawPatch as Record<string, unknown>) as Partial<S>;
       setState({ ...current, ...patch } as S);

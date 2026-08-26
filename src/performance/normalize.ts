@@ -68,9 +68,7 @@ export interface NormalizedStoreActions<T> {
  * const bobs = users.select(u => u.name.startsWith("B"));
  * ```
  */
-export function normalizedStore<T extends Record<string, unknown>>(
-  schema: NormalizedSchema,
-): NormalizedStoreActions<T> {
+export function normalizedStore<T extends object>(schema: NormalizedSchema): NormalizedStoreActions<T> {
   const idKey = schema.idKey || "id";
 
   const [getState, setState] = signal<NormalizedState<T>>({
@@ -78,8 +76,14 @@ export function normalizedStore<T extends Record<string, unknown>>(
     entities: {},
   });
 
+  // `idKey` is a runtime string, so reading it off `T` is unchecked either way —
+  // the previous `T extends Record<string, unknown>` constraint did not make it
+  // sound, it only excluded entities declared as interfaces. The cast is local
+  // and honest about that; the constraint now matches what callers may pass.
+  const idOf = (entity: T): string => String((entity as Record<string, unknown>)[idKey]);
+
   function add(entity: T): void {
-    const id = String(entity[idKey]);
+    const id = idOf(entity);
     setState((prev) => {
       const ids = prev.ids.includes(id) ? prev.ids : [...prev.ids, id];
       return {
@@ -95,7 +99,7 @@ export function normalizedStore<T extends Record<string, unknown>>(
       const nextEntities = { ...prev.entities };
 
       for (const entity of entities) {
-        const id = String(entity[idKey]);
+        const id = idOf(entity);
         if (!nextIds.includes(id)) {
           nextIds.push(id);
         }
@@ -201,7 +205,7 @@ export interface NormalizeResult {
  * // entities.comment["c1"] === { id: "c1", text: "Great!" }
  * ```
  */
-export function normalize<T extends Record<string, unknown>>(data: T | T[], schema: NormalizedSchema): NormalizeResult {
+export function normalize<T extends object>(data: T | T[], schema: NormalizedSchema): NormalizeResult {
   const entities: NormalizedEntities = {};
 
   function ensureTable(name: string): Record<string, unknown> {
@@ -241,12 +245,14 @@ export function normalize<T extends Record<string, unknown>>(data: T | T[], sche
     return id;
   }
 
+  // `normalizeEntity` walks entities as records; the cast is the same one it
+  // already applies to nested relation values.
   if (Array.isArray(data)) {
-    const result = data.map((item) => normalizeEntity(item, schema));
+    const result = data.map((item) => normalizeEntity(item as Record<string, unknown>, schema));
     return { result, entities };
   }
 
-  const result = normalizeEntity(data, schema);
+  const result = normalizeEntity(data as Record<string, unknown>, schema);
   return { result, entities };
 }
 
@@ -266,7 +272,7 @@ export function normalize<T extends Record<string, unknown>>(data: T | T[], sche
  * // post.comments is an array of full comment objects
  * ```
  */
-export function denormalize<T extends Record<string, unknown>>(
+export function denormalize<T extends object>(
   id: string,
   entities: NormalizedEntities,
   schema: NormalizedSchema,

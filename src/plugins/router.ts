@@ -1275,10 +1275,27 @@ export class SibuRouter {
       (Object.keys(to.query).length ? `?${new URLSearchParams(to.query).toString()}` : "") +
       (to.hash ? `#${to.hash}` : "");
 
+    // No browser history to write to. Reached whenever the router runs outside
+    // a browser: bare Node, an SSR request, a hand-wired jsdom test harness, or
+    // `createMemoryRouter` — which documents itself as a router that "doesn't
+    // interact with browser history" yet reaches this same code path on every
+    // push/replace.
+    //
+    // A bare `history` reference threw `ReferenceError: history is not defined`
+    // and failed the navigation, so the memory router could be constructed and
+    // then never navigated. The route itself still commits; only the address-bar
+    // side effect is skipped, which is exactly the intended memory-router
+    // semantics. (NODE-001)
+    //
+    // Checked via `globalThis` rather than a bare `typeof history` so this is
+    // unambiguous about which binding is being probed.
+    const h = (globalThis as { history?: History }).history;
+    if (!h) return;
+
     if (options.replace) {
-      history.replaceState(options.state || {}, "", fullPath);
+      h.replaceState(options.state || {}, "", fullPath);
     } else {
-      history.pushState(options.state || {}, "", fullPath);
+      h.pushState(options.state || {}, "", fullPath);
     }
   }
 
@@ -2038,7 +2055,12 @@ export function RouterLink(
     [key: string]: unknown;
   },
   children?: string | Node | (string | Node)[],
-): HTMLElement {
+  // Returns the concrete anchor type. `RouterLink` always builds an `<a>`, so
+  // declaring `HTMLElement` was needlessly lossy: reading back the very props
+  // this function sets (`.href`, `.target`, `.rel`) did not type-check for
+  // consumers or for the router's own tests. Widening a return type is
+  // backwards-compatible. (TYPE-003)
+): HTMLAnchorElement {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, class: classAttr, ...attrs } = props;

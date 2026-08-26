@@ -87,21 +87,16 @@ gate("TypeScript (src)", "npx", ["tsc", "--noEmit"]);
 gate("Lint", "npx", ["biome", "check", "--max-diagnostics=500", "src/", "tests/"]);
 gate("Full unit/integration suite", "npx", ["vitest", "run", "--reporter=dot"], { extract: countTests });
 
-// `tests/` has never been type-clean (see rc-findings TEST-004); tracked as a
-// non-blocking gate so the count is visible and can be burned down, rather than
-// hidden or made to look green.
-{
-  process.stdout.write("→ TypeScript (tests + entry files) ... ");
-  const r = run("npx", ["tsc", "-p", "tsconfig.test.json"]);
-  const errors = `${r.stdout ?? ""}${r.stderr ?? ""}`.split("\n").filter((l) => /error TS/.test(l)).length;
-  record(
-    "TypeScript (tests + entry files)",
-    errors === 0 ? "PASS" : "FAIL",
-    `${errors} pre-existing errors — non-blocking, see rc-findings TEST-004`,
-    false,
-  );
-  console.log(errors === 0 ? "PASS" : `FAIL (${errors} errors, non-blocking)`);
-}
+// `tests/` and the 15 non-index entry files. This was a NON-BLOCKING gate
+// while 130 pre-existing errors were burned down (rc-findings TEST-004); it is
+// now REQUIRED, because a test can only say something about the public API if
+// it uses that API the way the published types permit.
+gate("TypeScript (tests + entry files)", "npx", ["tsc", "-p", "tsconfig.test.json"], {
+  extract: (out) => {
+    const n = stripAnsi(out).split(String.fromCharCode(10)).filter((l) => /error TS/.test(l)).length;
+    return n ? `${n} errors` : "0 errors";
+  },
+});
 
 // --- fuzz gates -------------------------------------------------------------
 gate("Query model fuzzing", "npx", ["vitest", "run", "tests/fuzz-query-model.test.ts", "--reporter=dot"], {
@@ -203,6 +198,26 @@ if (SKIP_PACKAGE) {
         },
       );
     }
+  }
+}
+
+// --- Node support matrix ----------------------------------------------------
+// Every Node line `engines.node` claims, exercised against the packed tarball.
+// `engines` is a promise; before this gate existed it claimed ">=18" while CI
+// ran Node 20 only, and two P1s were hiding on the versions nobody executed.
+{
+  process.stdout.write("→ Node support matrix ... ");
+  const r = run("node", [join(HERE, "node-matrix.mjs")]);
+  const out = stripAnsi(`${r.stdout ?? ""}${r.stderr ?? ""}`);
+  const versions = [...out.matchAll(/^Node (\d+) .*— (PASS|FAIL|INCOMPLETE)$/gm)].map(
+    (m) => `${m[1]}:${m[2]}`,
+  );
+  const incomplete = out.includes("INCOMPLETE");
+  const status = r.status === 0 ? (incomplete ? "NOT TESTED" : "PASS") : "FAIL";
+  record("Node support matrix", status, versions.join(" "), true);
+  console.log(`${status} ${versions.join(" ")}`);
+  if (status !== "PASS") {
+    console.log(out.trim().split(String.fromCharCode(10)).slice(-15).join(String.fromCharCode(10)).replace(/^/gm, "    | "));
   }
 }
 

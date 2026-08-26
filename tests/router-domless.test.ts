@@ -61,3 +61,83 @@ describe("router construction without a DOM", () => {
     expect(router).toBeTruthy();
   });
 });
+
+describe("router navigation without a DOM", () => {
+  // NODE-001. RC-001 made *construction* safe in a DOM-less runtime, but every
+  // navigation still threw: `updateHistory()` referenced the bare `history`
+  // global rather than a guarded one, so `push()`/`replace()` failed with
+  // `ReferenceError: history is not defined`.
+  //
+  // This made `createMemoryRouter` — whose own doc comment says it "creates a
+  // router that doesn't interact with browser history", and which the codebase
+  // advertises for testing/SSR — unusable for its stated purpose: it could be
+  // constructed and then never navigated.
+  //
+  // Found by the Node support-matrix pass, not by the jsdom suite: vitest's
+  // jsdom environment installs `history` as a real global, so the bare
+  // reference resolves there. A consumer wiring up jsdom by hand (the
+  // documented way to run SibuJS outside a browser) copies `window` and
+  // friends but has no reason to copy `history`, and hits this immediately.
+
+  it("createMemoryRouter can actually navigate", async () => {
+    const { router, currentPath, push } = createMemoryRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/about", component: () => null as never },
+      ],
+      "/",
+    );
+    await flushBootstrap();
+    expect(currentPath()).toBe("/");
+
+    const result = await push("/about");
+    await flushBootstrap();
+
+    expect(result.success, `navigation failed: ${JSON.stringify(result)}`).toBe(true);
+    expect(currentPath()).toBe("/about");
+    expect(router.currentRoute.path).toBe("/about");
+    destroyRouter();
+  });
+
+  it("push and replace both commit without a history global", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+        { path: "/b", component: () => null as never },
+      ],
+      { mode: "history" },
+    );
+    await flushBootstrap();
+
+    const pushed = await router.push("/a");
+    await flushBootstrap();
+    expect(pushed.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/a");
+
+    const replaced = await router.replace("/b");
+    await flushBootstrap();
+    expect(replaced.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/b");
+
+    destroyRouter();
+  });
+
+  it("a redirect route resolves without a history global", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/target", component: () => null as never },
+        { path: "/old", redirect: "/target" },
+      ],
+      { mode: "history" },
+    );
+    await flushBootstrap();
+
+    await router.push("/old").catch(() => {});
+    await flushBootstrap();
+
+    expect(router.currentRoute.path).toBe("/target");
+    destroyRouter();
+  });
+});

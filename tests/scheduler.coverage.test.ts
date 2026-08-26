@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushScheduler, Priority, pendingTasks, scheduleUpdate, yieldToMain } from "../src/performance/scheduler";
+import { callbackSlot } from "./helpers/mocks";
 
 afterEach(() => {
   // Drain anything left so tests do not bleed into each other.
@@ -9,9 +10,9 @@ afterEach(() => {
 
 describe("scheduler frame scheduling (requestAnimationFrame)", () => {
   it("runs NORMAL tasks via the queued animation frame", () => {
-    let rafCb: FrameRequestCallback | null = null;
+    const rafCb = callbackSlot<FrameRequestCallback>("rafCb");
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      rafCb = cb;
+      rafCb.set(cb);
       return 7;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -19,9 +20,9 @@ describe("scheduler frame scheduling (requestAnimationFrame)", () => {
     const fn = vi.fn();
     scheduleUpdate(Priority.NORMAL, fn);
     expect(fn).not.toHaveBeenCalled();
-    expect(rafCb).toBeTypeOf("function");
+    expect(rafCb.captured()).toBe(true);
 
-    rafCb?.(0);
+    rafCb.invoke(0);
     expect(fn).toHaveBeenCalledOnce();
     expect(pendingTasks()).toBe(0);
   });
@@ -40,17 +41,17 @@ describe("scheduler microtask scheduling (USER_BLOCKING)", () => {
 
 describe("scheduler idle scheduling", () => {
   it("uses requestIdleCallback for IDLE tasks when available", () => {
-    let idleCb: (() => void) | null = null;
+    const idleCb = callbackSlot<() => void>("idleCb");
     vi.stubGlobal("requestIdleCallback", (cb: () => void) => {
-      idleCb = cb;
+      idleCb.set(cb);
       return 11;
     });
     vi.stubGlobal("cancelIdleCallback", vi.fn());
 
     const fn = vi.fn();
     scheduleUpdate(Priority.IDLE, fn);
-    expect(idleCb).toBeTypeOf("function");
-    idleCb?.();
+    expect(idleCb.captured()).toBe(true);
+    idleCb.invoke();
     expect(fn).toHaveBeenCalledOnce();
   });
 
@@ -106,9 +107,9 @@ describe("flushScheduler cancellation branches", () => {
 describe("scheduler error handling", () => {
   it("logs and continues when a queued task throws during processQueue", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    let rafCb: FrameRequestCallback | null = null;
+    const rafCb = callbackSlot<FrameRequestCallback>("rafCb");
     vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
-      rafCb = cb;
+      rafCb.set(cb);
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -119,7 +120,7 @@ describe("scheduler error handling", () => {
     });
     scheduleUpdate(Priority.NORMAL, good);
     // processQueue (driven by the frame callback) catches and logs task errors.
-    rafCb?.(0);
+    rafCb.invoke(0);
     expect(good).toHaveBeenCalledOnce();
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();

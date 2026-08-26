@@ -150,6 +150,8 @@ describe("compileHtmlTemplates - multi-root templates (regression)", () => {
 
   it("keeps multiple roots that contain expressions", () => {
     const out = compileHtmlTemplates("const el = html`<span>${a}</span><span>${b}</span>`;").code;
+    expect(out).not.toBeNull();
+    if (out === null) throw new Error("compileHtmlTemplates returned no code");
     expect(out).toContain("div(");
     // Two child expressions, not one.
     expect(out.match(/span\(/g)?.length).toBe(2);

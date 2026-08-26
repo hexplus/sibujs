@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { signal } from "../src/core/signals/signal";
 import { resource } from "../src/data/resource";
+import { createDeferred } from "./helpers/mocks";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -111,15 +112,15 @@ describe("resource", () => {
 
   describe("dispose", () => {
     it("prevents further updates after disposal", async () => {
-      let resolvePromise: (v: string) => void;
-      const res = resource(async () => {
-        return new Promise<string>((resolve) => {
-          resolvePromise = resolve;
-        });
-      });
+      // `let resolvePromise` assigned inside the executor trips
+      // "used before being assigned"; the usual `resolvePromise?.(...)` patch
+      // compiles but silently does nothing if the executor never ran, so the
+      // assertion below would pass without the resource ever settling.
+      const deferred = createDeferred<string>();
+      const res = resource(async () => deferred.promise);
 
       res.dispose();
-      resolvePromise?.("data");
+      deferred.resolve("data");
       await tick();
 
       expect(res.data()).toBe(undefined); // did not set

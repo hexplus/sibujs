@@ -2,7 +2,15 @@
  * eventBus creates a typed publish/subscribe event system.
  * No reactive state needed -- pure event dispatching.
  */
-export function eventBus<T extends Record<string, unknown>>(): {
+// `T extends object`, deliberately NOT `Record<string, unknown>`.
+//
+// An `interface` has no implicit index signature, so an event map written the
+// idiomatic way — `interface AppEvents { message: string }` — fails a
+// `Record<string, unknown>` constraint even though the runtime handles it
+// perfectly. (A `type` alias passes, which makes the failure look arbitrary.)
+// The implementation only ever uses `keyof T` and `T[K]`, so nothing here needs
+// an index signature. See tests/types/public-api-contract.test.ts. (TYPE-001)
+export function eventBus<T extends object>(): {
   on: <K extends keyof T>(event: K, handler: (data: T[K]) => void) => () => void;
   emit: <K extends keyof T>(event: K, data: T[K]) => void;
   off: <K extends keyof T>(event: K, handler: (data: T[K]) => void) => void;

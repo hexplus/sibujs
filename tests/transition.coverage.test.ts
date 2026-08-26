@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spring, transition } from "../src/ui/transition";
+import { callbackSlot } from "./helpers/mocks";
 
 describe("transition enter", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -93,10 +94,10 @@ describe("transition leave", () => {
 describe("spring (Web Animations API)", () => {
   it("resolves when the animation finishes", async () => {
     const el = document.createElement("div");
-    let finishHandler: (() => void) | null = null;
+    const finishHandler = callbackSlot<() => void>("finishHandler");
     const fakeAnimation = {
       set onfinish(fn: () => void) {
-        finishHandler = fn;
+        finishHandler.set(fn);
       },
       set oncancel(_fn: () => void) {},
     };
@@ -104,30 +105,34 @@ describe("spring (Web Animations API)", () => {
 
     const p = spring(el, [{ opacity: 0 }, { opacity: 1 }], { duration: 100 });
     expect(el.animate).toHaveBeenCalled();
-    finishHandler?.();
+    finishHandler.invoke();
     await expect(p).resolves.toBeUndefined();
   });
 
   it("resolves when the animation is cancelled", async () => {
     const el = document.createElement("div");
-    let cancelHandler: (() => void) | null = null;
+    const cancelHandler = callbackSlot<() => void>("cancelHandler");
     const fakeAnimation = {
       set onfinish(_fn: () => void) {},
       set oncancel(fn: () => void) {
-        cancelHandler = fn;
+        cancelHandler.set(fn);
       },
     };
     el.animate = vi.fn(() => fakeAnimation as unknown as Animation);
 
     const p = spring(el, [{ transform: "scale(1)" }]);
-    cancelHandler?.();
+    cancelHandler.invoke();
     await expect(p).resolves.toBeUndefined();
   });
 
   it("merges default options with provided overrides", () => {
     const el = document.createElement("div");
+    // Typed with `animate`'s real parameter list, so `mock.calls[0][1]` is the
+    // options argument. A zero-arg `vi.fn(() => ...)` types its calls as an
+    // empty tuple, and reading index 1 off it does not compile.
     const animateSpy = vi.fn(
-      () => ({ set onfinish(_f: () => void) {}, set oncancel(_f: () => void) {} }) as unknown as Animation,
+      (_keyframes: Keyframe[] | PropertyIndexedKeyframes | null, _options?: number | KeyframeAnimationOptions) =>
+        ({ set onfinish(_f: () => void) {}, set oncancel(_f: () => void) {} }) as unknown as Animation,
     );
     el.animate = animateSpy;
     spring(el, [{ opacity: 1 }], { duration: 500 });

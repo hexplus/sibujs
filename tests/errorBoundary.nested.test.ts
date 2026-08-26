@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import { ErrorBoundary } from "../src/components/ErrorBoundary";
 
 // Helper to mount and extract container
-function mountComponent(component: () => HTMLElement) {
+// `ErrorBoundary` returns `Element`; `appendChild` accepts any `Node`, so the
+// narrower `HTMLElement` only rejected valid boundaries. (TYPE-005)
+function mountComponent(component: () => Element) {
   const container = document.createElement("div");
   const el = component();
   container.appendChild(el);

@@ -4,8 +4,9 @@ Evidence-based. **Verified** means a suite was actually executed in that
 environment during release-candidate certification. **Not tested** means exactly
 that — it is never a synonym for "works".
 
-Certification host: Windows 11 (win32 10.0.26200 x64), Node v24.19.0,
-npm 11.17.0, 12th-gen Intel Core i7-12650H, 32 GB RAM.
+Certification host: Windows 11 (win32 10.0.26200 x64), 12th-gen Intel Core
+i7-12650H, 32 GB RAM. Node interpreters invoked directly from their install
+roots, each with its own bundled npm.
 Package under test: `sibujs@3.4.1`, installed from a real `npm pack` tarball in
 throwaway consumer projects — never a workspace link.
 
@@ -30,17 +31,52 @@ the floor as a build-target declaration, not a verified claim.
 
 | Environment | Status | Evidence |
 |---|---|---|
-| Node 24 (v24.19.0) | **Verified** | full suite, soak, SSR, packaged consumers |
-| Node 18 / 20 / 22 | **Not tested** | no other runtime installed on the certification host |
+| Node 22 (v22.14.0, npm 11.12.0) | **Verified** | 13/13 gates |
+| Node 24 (v24.19.0, npm 11.17.0) | **Verified** | 13/13 gates |
+| Node 18 / 20 | **Not supported** | below the declared floor — see below |
 
-`package.json` declares `engines.node: ">=18.0.0"`. Only Node 24 was exercised.
-The 18/20/22 claim is **inherited, not verified** — running the suite on each is
-the single highest-value gap to close before a stable release, and is cheap in
-CI (a matrix job).
+`package.json` declares `engines.node: ">=22.3.0"`, and **every version in that
+range is executed by CI** (`.github/workflows/ci.yml`, `node-matrix` job) via
+`node scripts/certify/node-matrix.mjs`. Per-version gates:
 
-One Node-specific behaviour was found and fixed during this pass (RC-002: an
-un-`unref`'d cache timer holding the event loop open), which is a reminder that
-Node-side behaviour is not free just because jsdom passes.
+| Gate | Node 22 | Node 24 |
+|---|---|---|
+| `npm install` | PASS | PASS |
+| `npm run build` | PASS | PASS |
+| Source typecheck | PASS | PASS |
+| Test typecheck | PASS (0 errors) | PASS (0 errors) |
+| Unit suite | PASS (4 383 tests) | PASS (4 383 tests) |
+| `npm pack` | PASS | PASS |
+| ESM import — all 15 subpaths | PASS | PASS |
+| CJS require — all 15 subpaths | PASS | PASS |
+| DOM-less router (RC-001, NODE-001) | PASS | PASS |
+| Query clean exit (RC-002) | PASS (141 ms) | PASS (132 ms) |
+| SSR isolation, CJS (NODE-002) | PASS | PASS |
+| SSR isolation, ESM (NODE-002) | PASS | PASS |
+| Promise-returning route component (RC-003) | PASS | PASS |
+
+### Why the floor is 22.3.0
+
+It was `>=18.0.0` and CI ran Node 20 only. Executing the full range for the
+first time found **NODE-002**: SSR request isolation depends on
+`AsyncLocalStorage`, which the runtime loads through
+`process.getBuiltinModule` — **added in Node 22.3**. The pre-22.3 fallback was
+broken (it looked for `require` in global scope, where it does not exist in
+either module format), so below 22.3 concurrent requests silently shared one
+store: cross-request data bleed.
+
+The CommonJS half is fixed and now isolates correctly on Node 18 through 24.
+The ESM half cannot be fixed in place — there is no synchronous way to load a
+builtin from ESM before `getBuiltinModule` existed, and a static
+`import "node:async_hooks"` would break every browser bundle.
+
+Node 18 (EOL April 2025) and Node 20 (EOL April 2026) are both end-of-life and
+were the only versions failing any gate, so the floor was raised to the version
+that actually provides the mechanism. **This is a breaking change** for anyone
+on EOL Node.
+
+On any runtime that reaches the fallback, `runInSSRContext` now emits a one-time
+warning rather than degrading silently.
 
 ## Server runtimes
 
@@ -76,10 +112,21 @@ runtime is also safe.
 
 Request-scoped SSR state is backed by `AsyncLocalStorage`, verified across 1 000
 genuinely interleaved concurrent requests (1 000 distinct cache maps,
-per-request suspense id sequences). On runtimes **without** `AsyncLocalStorage`
-the implementation falls back to a mutated module-global store, and **concurrent
-request isolation is not guaranteed there**. Anyone running SSR off-Node must
-confirm `AsyncLocalStorage` is available.
+per-request suspense id sequences) and re-verified per Node version in both ESM
+and CommonJS.
+
+On runtimes **without** `AsyncLocalStorage` the implementation falls back to a
+mutated module-global store, and **concurrent request isolation is not
+guaranteed there**. A fully synchronous render is still correct — the fallback
+saves and restores around the call — but two requests interleaving across an
+`await` share one store.
+
+That fallback is now **loud**: `runInSSRContext` emits a one-time warning when it
+is reached on a Node runtime, so the degradation cannot pass unnoticed the way
+NODE-002 did. Browsers and DOM-less edge runtimes reach it legitimately and are
+not warned.
+
+Anyone running SSR off-Node must confirm `AsyncLocalStorage` is available.
 
 ## Bundlers
 
@@ -144,7 +191,7 @@ failure.
 
 | Environment | Status | Notes |
 |---|---|---|
-| TypeScript 5.9.3, `strict: true` | **Verified** | `tsc --noEmit` clean over `src` |
+| TypeScript 5.9.3, `strict: true` | **Verified** | `tsc --noEmit` clean over `src`; `tsc -p tsconfig.test.json` clean over `tests/` + all 16 entry files (was 130 errors) |
 | Declared minimum TS version | **None declared** | no `typesVersions`, no documented floor |
 | Consumer-side `moduleResolution: bundler` / `node16` | **Not tested** | see below |
 
@@ -175,8 +222,14 @@ These are documented architectural characteristics, not defects:
 7. **`query()` does not fetch under SSR** — effects are suppressed; SSR data
    comes from loaders and `serializeState()`.
 8. **`router.go()/back()/forward()` call `history.*` unguarded** and will throw
-   in a DOM-less runtime. Construction and initial resolution are safe
-   (RC-001); these remain client-only calls.
-9. **A raw `NUL` byte does not survive HTML serialization** — a conforming
+   in a DOM-less runtime. Construction, initial resolution, and now `push` /
+   `replace` / redirects are all safe there (RC-001, NODE-001); these three
+   remain client-only calls into browser-history semantics a memory router
+   cannot provide.
+9. **SSR request isolation requires `AsyncLocalStorage`** — Node ≥ 22.3 under
+   ESM (any supported Node under CommonJS). Where it is unavailable the runtime
+   warns once and falls back to a shared store; synchronous renders are still
+   correct (NODE-002).
+10. **A raw `NUL` byte does not survive HTML serialization** — a conforming
    parser yields `U+FFFD` or drops it, and `CRLF`/`CR` fold to `LF`. This is the
    HTML format, not SibuJS.

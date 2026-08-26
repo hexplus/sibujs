@@ -42,10 +42,16 @@ test: one router fuzz ran 1 500 operations while exercising **zero** component
 loads, and one SSR isolation test checked for cross-request data bleed where
 **0 of 1 000** requests ever resolved any data.
 
-**Recommendation: `PRODUCTION-HARDENED CANDIDATE — BEGIN REAL-WORLD VALIDATION`**,
-with the qualification in [Release recommendation](#release-recommendation): the
-declared Node 18/20/22 support is inherited rather than verified, and closing
-that is the one cheap gap that should precede a stable release.
+**Recommendation: `PRODUCTION-HARDENED CANDIDATE — BEGIN REAL-WORLD VALIDATION`.**
+
+> **Update — stable preflight.** The two gaps this report left open have since
+> been closed: the declared Node range is now executed by CI, and the test suite
+> type-checks at zero errors. Doing so found two further P1s — NODE-001 (every
+> navigation failed in a DOM-less runtime) and NODE-002 (SSR request isolation
+> silently unavailable below Node 22.3) — both fixed, with `engines.node` raised
+> to `>=22.3.0`. See
+> [`stable-preflight-findings.md`](stable-preflight-findings.md) and
+> [`test-type-errors.md`](test-type-errors.md).
 
 ---
 
@@ -56,8 +62,9 @@ Full detail in [`../support-matrix.md`](../support-matrix.md).
 | Environment | Status |
 |---|---|
 | Chromium / Firefox / WebKit (latest) | **Verified** — 150/150 |
-| Node 24.19.0 | **Verified** |
-| Node 18 / 20 / 22 | **Not tested** — declared in `engines`, not exercised |
+| Node 22.14.0 | **Verified** — 13/13 gates |
+| Node 24.19.0 | **Verified** — 13/13 gates |
+| Node 18 / 20 | **Not supported** — below the raised `engines` floor (NODE-002) |
 | Bun / Deno | **Not tested** — not installed on the host |
 | Cloudflare Workers / DOM-less edge | **Supported only with a DOM implementation** |
 | Vite 7 / Rollup 4 / esbuild 0.25 / Webpack 5 | **Verified** |
@@ -474,16 +481,16 @@ Suspense remains production-capable with documented caveats.**
 
 Non-blocking, recommended before a *stable* release (not before an RC):
 
-1. **Run the suite on Node 18, 20, and 22.** `engines` claims `>=18` on
-   inherited evidence. This is a cheap CI matrix job and is the single largest
-   unverified claim in the package. RC-002 is proof that Node-specific
-   behaviour does not come free with a green jsdom suite.
+1. ~~**Run the suite on Node 18, 20, and 22.**~~ **Done.** The full range was
+   executed and found two P1s. `engines.node` is now `>=22.3.0`, and CI runs
+   every version in that range. See
+   [`stable-preflight-findings.md`](stable-preflight-findings.md).
 2. **Re-record `bench-baseline.json`** on a controlled host so
    `npm run bench:check` becomes a usable gate instead of reporting 21 false
-   regressions on an untouched tree.
-3. **Burn down the 130 test type errors** (TEST-004). Some indicate tests
-   exercising APIs in ways the type system forbids, which weakens what they
-   prove.
+   regressions on an untouched tree. **Still open.**
+3. ~~**Burn down the 130 test type errors** (TEST-004).~~ **Done.** 0 errors;
+   the burn-down found five framework declaration bugs and one vacuous test.
+   See [`test-type-errors.md`](test-type-errors.md).
 
 ---
 
@@ -527,9 +534,11 @@ Bundle regression:                 PASS   (recorded; no gate breach)
 Benchmark regression:              NOT USABLE — stale baseline; differential
                                    shows no regression from the RC fixes
 
-TypeScript (tests + entries):      FAIL   130 pre-existing errors [non-blocking]
+TypeScript (tests + entries):      PASS   0 errors (was 130)
 
-Node 18 / 20 / 22:                 NOT TESTED
+Node 22:                           PASS   13/13 gates
+Node 24:                           PASS   13/13 gates
+Node 18 / 20:                      NOT SUPPORTED (below engines floor)
 Bun / Deno / DOM-less edge:        NOT TESTED / NOT SUPPORTED
 Minimum browser versions:          NOT TESTED
 ```
@@ -589,8 +598,8 @@ testing can substitute for. The three distinctions:
 ### Recommended next phase
 
 1. **Freeze features.** Accept only fixes, docs, and release tooling.
-2. **Close the Node version gap** — a CI matrix on 18/20/22. This is the one
-   item that could still invalidate a support claim.
+2. ~~**Close the Node version gap.**~~ Done — see the preflight findings. The
+   remaining unverified claims are Bun, Deno, and the `browserslist` minimums.
 3. **Release the RC.**
 4. **Deploy to reference applications** — at minimum one client-only app, one
    SSR app, and one data-heavy app.

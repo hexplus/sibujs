@@ -286,9 +286,13 @@ describe("serializeRouteState / deserializeRouteState", () => {
     // The serialized format is: <script>window.__SIBU_ROUTE_STATE__={...}</script>
     const jsonMatch = serialized.match(/window\.__SIBU_ROUTE_STATE__=(.+)<\/script>/);
     expect(jsonMatch).not.toBeNull();
+    // Narrow for real rather than relying on the `expect` above, which TypeScript
+    // cannot see. The old `jsonMatch?.[1]` typed as `string | undefined` and would
+    // have fed `undefined` straight into `JSON.parse`.
+    if (!jsonMatch) throw new Error("serialized route state did not match the expected shape");
 
     // Unescape the unicode escapes and parse
-    const rawJson = jsonMatch?.[1]
+    const rawJson = jsonMatch[1]
       .replace(/\\u003c/g, "<")
       .replace(/\\u003e/g, ">")
       .replace(/\\u0026/g, "&");
