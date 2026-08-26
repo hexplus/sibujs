@@ -7,7 +7,7 @@ that — it is never a synonym for "works".
 Certification host: Windows 11 (win32 10.0.26200 x64), 12th-gen Intel Core
 i7-12650H, 32 GB RAM. Node interpreters invoked directly from their install
 roots, each with its own bundled npm.
-Package under test: `sibujs@3.4.1`, installed from a real `npm pack` tarball in
+Package under test: `sibujs@4.0.0-rc.1`, installed from a real `npm pack` tarball in
 throwaway consumer projects — never a workspace link.
 
 ## Browsers

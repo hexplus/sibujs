@@ -4,7 +4,8 @@
 
 | Item | Value |
 |---|---|
-| Current version in `package.json` | `3.4.1` — **deliberately unchanged** |
+| Version in `package.json` | `4.0.0-rc.1` |
+| Previous released version | `3.4.1` |
 | Previous engine support | `node >=18.0.0` |
 | New engine support | `node >=22.3.0` |
 | Breaking change | **YES** |
@@ -17,9 +18,9 @@ independent of any source change: an install that succeeded yesterday now emits
 `EBADENGINE`, and fails outright under `engine-strict=true`. Publishing this as
 `3.4.x` or `3.5.x` would misrepresent the compatibility break.
 
-`package.json` is left at `3.4.1` on purpose — this repository versions at
-release time, not in feature commits. **Do not publish the current version with
-the new engine constraint.**
+`package.json` is now set to `4.0.0-rc.1` and `CHANGELOG.md` carries a
+`## [4.0.0-rc.1]` section. **Do not publish 3.x with the new engine
+constraint** — the two must move together.
 
 ### Why 22.3.0 and not 22.0.0
 
@@ -40,7 +41,7 @@ node 22.3.0   getBuiltinModule=function    isolation SUPPORTED
 
 Ordered. Nothing here should be automated away — each step is a decision point.
 
-- [ ] **Set the version** to `4.0.0-rc.1` in `package.json`.
+- [x] **Set the version** to `4.0.0-rc.1` in `package.json`. Done.
 - [ ] Confirm `engines.node` is `>=22.3.0` in the packed tarball, not just the
       repository (`npm pack` then inspect `package/package.json`).
 - [ ] Run `npm run certify:rc` and confirm **all gates PASS, 0 NOT TESTED**.

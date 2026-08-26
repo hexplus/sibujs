@@ -6,14 +6,27 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased] — targeting 4.0.0
+## [4.0.0-rc.1] — 2026-08-25
 
-> **This release requires a major version bump.** The supported Node range moves
-> from `>=18.0.0` to `>=22.3.0`, which is a breaking compatibility change under
-> Semantic Versioning regardless of the source-level changes. Plan it as
-> **4.0.0**, entering real-world validation as **4.0.0-rc.1**. The version in
-> `package.json` is deliberately left at its current value — this repository
-> versions at release time, not in feature commits.
+First release candidate for 4.0. **The only breaking change is the Node.js
+requirement**; everything else is a fix, a widened type, or new certification
+infrastructure.
+
+This entry covers three passes: a release-candidate certification of the packed
+package against real bundlers, browsers and randomized workloads; a stable
+preflight that executed the declared Node range for the first time; and a final
+gap-closure pass before tagging.
+
+The recurring theme of the underlying fixes is **async ownership**: when
+asynchronous work finishes, who still holds the right to commit it? Navigation,
+queries, hydration bootstrap, island activation, and SSR Suspense boundaries now
+answer that with monotonic generations rather than by comparing keys, URLs, or
+values — because returning to the same key or URL is *not* the same generation.
+
+Beyond the engine floor there are no breaking changes: one new public export,
+one additive field on an existing result type, several type declarations that
+became *more* permissive, and no change to any existing signature or behaviour
+that was already correct.
 
 ### Migration to 4.0
 
@@ -23,8 +36,8 @@ by 4.0 and are both already end-of-life (April 2025 and April 2026). Run Node
 
 Nothing else in your application needs to change: no public API was removed or
 renamed, and no existing signature or behaviour that was already correct was
-altered. Four type declarations became *more* permissive (see Fixed below), so
-code that compiled against 3.x still compiles.
+altered. Several type declarations became *more* permissive (see Fixed below),
+so code that compiled against 3.x still compiles.
 
 If you cannot move off Node 18/20 yet, stay on 3.4.x. Note that SSR request
 isolation never actually worked there under ESM — see below.
@@ -52,57 +65,6 @@ isolation never actually worked there under ESM — see below.
   runtime — `runInSSRContext` now emits a one-time warning instead of degrading
   silently. A fully synchronous render was never affected.
 
-### Fixed
-
-- **Router navigation in DOM-less runtimes.** `updateHistory()` referenced the
-  bare `history` global, so every `push`, `replace`, and redirect failed with
-  `ReferenceError: history is not defined` outside a browser. `createMemoryRouter`
-  — documented as "a router that doesn't interact with browser history" and
-  advertised for testing/SSR — could be constructed and then never navigated. The
-  route now commits and only the address-bar side effect is skipped.
-- **`eventBus()` and the `normalize` family reject an `interface`.** Their
-  generic constraint was `Record<string, unknown>`, which an `interface` cannot
-  satisfy because it has no implicit index signature — so the identical shape
-  compiled or failed depending on whether it was declared with `type` or
-  `interface`, while the runtime handled both. Constraints widened to
-  `T extends object`.
-- **`globalStore` actions could not have typed payloads.** The action-map
-  constraint required every action to *accept* `payload?: unknown`, making
-  `add: (state, amount: number) => ...` unassignable and collapsing
-  `Parameters<A[K]>[1]` — which `dispatch` already used — to `unknown`. Replaced
-  with an exported `StoreActionMap<S>`.
-- **`RouterLink` now returns `HTMLAnchorElement`.** It always builds an `<a>`,
-  but was declared `HTMLElement`, so reading back the props it sets (`.href`,
-  `.target`, `.rel`) did not type-check.
-
-### Changed
-
-- The test suite and all 16 subpath entry files are now type-checked
-  (`npm run typecheck:tests`), and both typechecks are CI gates. This went from
-  130 errors to 0; the burn-down is what surfaced the four type fixes above.
-- `@types/node` aligned to `^22.20.1` (was `^25.5.0`) so the type definitions
-  match the supported runtime floor. Typing against Node 25 while claiming Node
-  22.3 lets TypeScript quietly accept an API the minimum runtime does not have.
-  The source uses a small Node surface (`node:async_hooks`, `node:fs`,
-  `node:path`, and four `process` members) and compiles clean against Node 22
-  definitions. Development tooling is unaffected — it runs on whatever Node the
-  contributor has.
-
----
-
-A sustained production-hardening pass across disposal, the client router, SSR,
-hydration, islands, and the data layer. Twenty-four confirmed bugs fixed, every
-one reproduced by a failing test before the fix. Beyond the Node engine bump
-above, no breaking changes: one new public export, one additive field on an
-existing result type, and no change to
-any existing signature or behaviour that was already correct.
-
-The recurring theme is **async ownership**: when asynchronous work finishes, who
-still holds the right to commit it? Navigation, queries, hydration bootstrap,
-island activation, and SSR Suspense boundaries now answer that with monotonic
-generations rather than by comparing keys, URLs, or values — because returning
-to the same key or URL is *not* the same generation.
-
 ### Added
 
 - **`replaceChildrenSafely(parent, ...next)`** — replaces a node's children,
@@ -125,7 +87,6 @@ to the same key or URL is *not* the same generation.
   values are unchanged, so code branching on `type` is unaffected.
 
 ### Fixed
-
 #### Disposal and lifecycle
 
 - **`each()` no longer leaves its rows behind when torn down.** Rows and the
@@ -261,6 +222,77 @@ to the same key or URL is *not* the same generation.
   `fetching: true` permanently with no request in flight. Abort detection also no
   longer depends on `DOMException`, which is unavailable in some runtimes.
 
+#### Node compatibility
+
+- **Router navigation in DOM-less runtimes.** `updateHistory()` referenced the
+  bare `history` global, so every `push`, `replace`, and redirect failed with
+  `ReferenceError: history is not defined` outside a browser. `createMemoryRouter`
+  — documented as a router that "doesn't interact with browser history" and
+  advertised for testing/SSR — could be constructed and then never navigated. The
+  route now commits and only the address-bar side effect is skipped. Every router
+  test ran under jsdom, where `history` is always present, which is why this
+  survived; a consumer wiring up jsdom by hand has no reason to copy it.
+
+#### Type declarations
+
+These are all *widenings*: they accept strictly more than before, so code that
+compiled against 3.x still compiles. They were found by type-checking the test
+suite for the first time, which went from 130 errors to 0.
+
+- **Public generics rejected an `interface`.** Twenty-five generic constraints
+  across thirteen modules read `T extends Record<string, unknown>`, which an
+  `interface` cannot satisfy because it has no implicit index signature. The
+  identical shape therefore compiled or failed depending on whether it was
+  declared with `type` or `interface`, while the runtime always accepted both.
+  Affected `eventBus`, the `normalize` family, `machine`, `defineComponent`,
+  `defineSlottedComponent`, `withProps`, `withDefaults`, `validateProps`,
+  `defineStrictComponent`, `createSharedScope`, `wasm`, `createWasmBridge`,
+  `offlineStore`, and others. All widened to `T extends object`; no
+  implementation needed the index signature.
+- **`globalStore` actions could not have typed payloads.** The action-map
+  constraint required every action to *accept* `payload?: unknown`, making
+  `add: (state, amount: number) => ...` unassignable and collapsing
+  `Parameters<A[K]>[1]` — which `dispatch` already used — to `unknown`. Replaced
+  with an exported `StoreActionMap<S>`.
+- **`RouterLink` now returns `HTMLAnchorElement`.** It always builds an `<a>`,
+  but was declared `HTMLElement`, so reading back the props it sets (`.href`,
+  `.target`, `.rel`) did not type-check.
+- **An action with an optional parameter can be applied without one.**
+  `copyOnClick` is `ActionFn<(() => string) | undefined>`, but the two-argument
+  `action()` overload demanded `ActionFn<void>`, so `action(el, copyOnClick)` did
+  not compile despite being the documented usage. Fixed with an additive
+  overload; the three-argument form is unchanged.
+- **`bindField()` preserves the field's value type.** It documents itself as
+  returning props ready to pass directly to a tag factory, but returned
+  `value: () => unknown`, which does not satisfy the typed factories'
+  `reactive<string>` — so every call site needed a cast. `BoundFieldProps<T>` is
+  now generic (defaulting to `unknown`, so bare annotations still compile) and a
+  single-value field spreads onto a tag factory with no cast. A
+  `<select multiple>` still needs one: it binds `string[]` while
+  `SelectProps.value` is `reactive<string>`, which needs wider tag-prop-type
+  changes.
+
+
+### Changed
+
+- **`@types/node` aligned to `^22.20.1`** (was `^25.5.0`) so the type definitions
+  match the supported runtime floor. Typing against Node 25 while claiming Node
+  22.3 lets TypeScript quietly accept an API the minimum runtime does not have.
+  The source uses a small Node surface — `node:async_hooks`, `node:fs`,
+  `node:path`, and `process.env` / `versions` / `getBuiltinModule` / `cwd` — and
+  compiles clean against Node 22 definitions. Development tooling is unaffected;
+  it runs on whatever Node the contributor has.
+- **`package-lock.json` is now committed.** A library's lockfile does not affect
+  consumers' dependency resolution, but without one CI could not use `npm ci` and
+  silently re-resolved transitive dev dependencies on every run. It is not
+  included in the published tarball.
+- **Benchmark baseline re-recorded** with its environment captured alongside it
+  (`bench-baseline.meta.json`: commit, Node, npm, OS, CPU, RAM, jsdom version).
+  `npm run bench:check` remains **informational only** — on a shared host,
+  consecutive runs against a freshly recorded baseline flag different benchmarks
+  at the 20% threshold, so it is noise rather than a usable gate until it is
+  re-recorded on the machine that will enforce it.
+
 ### Documented
 
 Behaviours that are deliberate but were easy to misread. Full detail lives in
@@ -322,6 +354,43 @@ New tooling, all opt-in and excluded from the default test loop:
 - `npm run certify:rc` — a release-candidate check that runs an export audit and
   a bundler matrix against minimal probe fixtures, verifying that subpath
   imports pull in only what they should.
+
+---
+
+#### Release certification
+
+The package is now certified the way a consumer receives it — installed from a
+real `npm pack` tarball into throwaway projects, never a workspace link.
+
+- **`npm run certify:rc`** runs every release gate and reports each as PASS,
+  FAIL, NOT SUPPORTED, or NOT TESTED. A gate that could not run is never
+  reported as a pass.
+- **Node support matrix** (`scripts/certify/node-matrix.mjs`) executes the
+  declared minimum *exactly* plus the current release lines — Node 22.3.0, 22.x,
+  24.x — each against the packed tarball, in both ESM and CommonJS. A version
+  with any gate unrun is reported INCOMPLETE.
+- **Engine-floor probe** (`scripts/certify/node-probes/engine-floor.mjs`)
+  documents why 22.3.0 is the floor by measuring the boundary rather than
+  asserting a version string: Node 22.2.0 reports isolation UNSUPPORTED, 22.3.0
+  SUPPORTED. It fails if capability and behaviour ever disagree.
+- **Bundler matrix** — Vite, Rollup, esbuild and Webpack each build, run, and
+  exit cleanly from the packed tarball, with tree-shaking and bundle size
+  recorded. Browser-target bundles are verified to run with no `process` global.
+- **Subpath export audit** — every declared export resolves, imports, exposes
+  types, starts no timers, installs no listeners, and creates no new globals.
+- **Seeded model fuzzing** for the query cache and the router, and security
+  fuzzing for every SSR output path. Deterministic seeds, so a failure replays
+  exactly; no `Math.random()` in CI.
+- **Soak suite** (`npm run test:soak`) for lifecycle, router, query and SSR
+  request isolation, asserting framework counters return to baseline rather than
+  relying on heap size.
+- **Vacuity guards** throughout the fuzz and soak suites, which fail if the
+  interesting path was never exercised. Several tests that passed while testing
+  nothing were found and fixed this way.
+- **CI** now runs source and test typechecks as gates, and a Node matrix pinned
+  to `engines.node`. Large-list stress tests were given explicit timeouts: they
+  assert correctness, not throughput, and the default budget made them fail on a
+  loaded machine.
 
 ---
 
