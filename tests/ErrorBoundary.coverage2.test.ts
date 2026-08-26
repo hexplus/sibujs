@@ -166,14 +166,20 @@ describe("ErrorBoundary coverage", () => {
     const throwingKey = () => {
       throw new Error("key getter threw");
     };
+    const [fail, setFail] = signal(false);
     const boundary = ErrorBoundary({ resetKeys: [throwingKey] }, () => {
       const el = document.createElement("div");
+      if (fail()) throw new Error("child broke");
       el.textContent = "alive";
       return el;
     });
     document.body.appendChild(boundary);
     await flush();
     expect(boundary.textContent).toBe("alive");
+
+    // Reset keys are consulted only during a failed episode, so open one.
+    setFail(true);
+    await flush();
     expect(err).toHaveBeenCalled();
     expect(err.mock.calls.map((c) => String(c[0])).join(" ")).toContain("key getter threw");
   });

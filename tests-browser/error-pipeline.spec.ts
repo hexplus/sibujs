@@ -116,3 +116,24 @@ test("a reset key changing while healthy does not auto-clear a later failure", a
   await page.evaluate(() => (window as never as { __t: { rkChangeKey(v: string): void } }).__t.rkChangeKey("c"));
   await expect(page.locator("#resetkeys .rk-content")).toHaveText("ok");
 });
+
+test("a selector reset key ignores object replacement that leaves its value equal", async ({ page }) => {
+  // resetKeys are VALUES. `() => route().pathname` re-runs whenever the route
+  // object is replaced, but only a genuine change of the selected string may
+  // recover a failed boundary — otherwise any unrelated field write silently
+  // dismisses the error UI.
+  await page.evaluate(() => (window as never as { __t: { mountSelectorResetKey(): void } }).__t.mountSelectorResetKey());
+  await expect(page.locator("#rk-selector .sel-content")).toHaveText("ok");
+
+  await page.evaluate(() => (window as never as { __t: { selFail(): void } }).__t.selFail());
+  await expect(page.locator("#rk-selector .sel-fallback")).toHaveText("failed");
+
+  // Object replaced, pathname unchanged -> stays failed.
+  await page.evaluate(() => (window as never as { __t: { selHeal(): void } }).__t.selHeal());
+  await page.evaluate(() => (window as never as { __t: { selReplaceSamePath(): void } }).__t.selReplaceSamePath());
+  await expect(page.locator("#rk-selector .sel-fallback")).toHaveText("failed");
+
+  // Selected value genuinely changes -> recovers.
+  await page.evaluate(() => (window as never as { __t: { selChangePath(): void } }).__t.selChangePath());
+  await expect(page.locator("#rk-selector .sel-content")).toHaveText("ok");
+});

@@ -16,6 +16,7 @@
     <section id="boundary-binding"></section>
     <section id="siblings"></section>
     <section id="resetkeys"></section>
+    <section id="rk-selector"></section>
 
     <script type="module">
       import {
@@ -170,6 +171,34 @@
           api.rkChangeKey = (v) => setRoute(v);
           api.rkFail = () => setFail(true);
           api.rkHeal = () => setFail(false);
+        },
+
+        // A selector reset key over a larger object: replacing the object must
+        // not recover the boundary unless the SELECTED value actually differs.
+        mountSelectorResetKey() {
+          const host = document.getElementById("rk-selector");
+          const [route, setRoute] = signal({ pathname: "/a", nonce: 1 });
+          const [fail, setFail] = signal(false);
+
+          const tree = ErrorBoundary(
+            {
+              resetKeys: [() => route().pathname],
+              fallback: () => div({ class: "sel-fallback" }, "failed"),
+            },
+            () =>
+              div({
+                class: "sel-content",
+                nodes: () => {
+                  if (fail()) throw new Error("sel-boom");
+                  return "ok";
+                },
+              }),
+          );
+          host.appendChild(tree);
+          api.selFail = () => setFail(true);
+          api.selHeal = () => setFail(false);
+          api.selReplaceSamePath = () => setRoute({ pathname: "/a", nonce: 2 });
+          api.selChangePath = () => setRoute({ pathname: "/b", nonce: 3 });
         },
       };
 

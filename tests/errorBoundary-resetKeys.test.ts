@@ -92,31 +92,39 @@ describe("resetKeys are triggers, not subscriptions", () => {
     expect(container.querySelector(".fallback")).not.toBeNull();
   });
 
-  it("the watcher never subscribes to the boundary's error signal", async () => {
-    // Direct dependency-graph assertion: whatever the boundary's own error
-    // signal has as subscribers, a reset-key change must not add one.
+  it("watches reset keys only while failed, and never the error signal", async () => {
+    // The watcher belongs to a failed EPISODE. Its absence while healthy is
+    // what makes "changes AFTER an error has been caught" structural rather
+    // than something the watcher has to reason about — and it is why the
+    // watcher can never subscribe itself to the boundary's own error signal.
     setRuntimeErrorHandler(() => {});
     const [route, setRoute] = signal("a");
+    const keyState = (route as unknown as { __signal: object }).__signal;
     const b = makeBoundary([route]);
-    mount(b.node);
+    const container = mount(b.node);
     await flush();
 
-    const routeSubscribersBefore = getSubscriberCount((route as unknown as { __signal: object }).__signal as never);
-    expect(routeSubscribersBefore).toBeGreaterThan(0); // the watcher tracks the KEY
+    // Healthy: no episode, so no reset-key subscription at all.
+    expect(getSubscriberCount(keyState as never)).toBe(0);
 
+    // A key change while healthy is simply not observed.
     setRoute("b");
     await flush();
+    expect(getSubscriberCount(keyState as never)).toBe(0);
+    expect(container.querySelector(".fallback")).toBeNull();
 
-    // The key is still tracked...
-    expect(getSubscriberCount((route as unknown as { __signal: object }).__signal as never)).toBe(
-      routeSubscribersBefore,
-    );
-
-    // ...and a failure does not cause a self-reset, which is the observable
-    // proof that the error signal did not gain the watcher as a subscriber.
+    // Failing starts an episode, which subscribes to the key.
     b.fail();
     await flush();
-    expect(document.querySelector(".fallback")).not.toBeNull();
+    expect(container.querySelector(".fallback")).not.toBeNull();
+    expect(getSubscriberCount(keyState as never)).toBeGreaterThan(0);
+
+    // Recovering ends the episode and releases the subscription again.
+    b.heal();
+    setRoute("c");
+    await flush();
+    expect(container.querySelector(".fallback")).toBeNull();
+    expect(getSubscriberCount(keyState as never)).toBe(0);
   });
 });
 
@@ -287,22 +295,23 @@ describe("throwing reset-key getters (PR #54 behaviour preserved)", () => {
     const container = mount(b.node);
     await flush();
 
-    expect(seen.filter((s) => s.message === "bad reset key").length).toBeGreaterThan(0);
-    expect(seen[0].phase).toBe("effect");
-    expect(seen[0].name).toBe("ErrorBoundary.resetKeys");
-
-    // The throwing getter must not corrupt the watcher: the valid key still
-    // drives recovery, and a healthy key change still does not arm auto-reset.
-    setRoute("b");
-    await flush();
-    expect(container.querySelector(".fallback")).toBeNull();
+    // Reset keys are only consulted during a failed episode, so a broken
+    // getter surfaces when the boundary actually fails — not at construction.
+    expect(seen.filter((s) => s.message === "bad reset key")).toHaveLength(0);
 
     b.fail();
     await flush();
     expect(container.querySelector(".fallback")).not.toBeNull();
 
+    const reports = seen.filter((s) => s.message === "bad reset key");
+    expect(reports.length).toBeGreaterThan(0);
+    expect(reports[0].phase).toBe("effect");
+    expect(reports[0].name).toBe("ErrorBoundary.resetKeys");
+
+    // The throwing getter must not corrupt the watcher: the valid sibling key
+    // still drives recovery.
     b.heal();
-    setRoute("c");
+    setRoute("b");
     await flush();
     expect(container.querySelector(".fallback")).toBeNull();
   });
@@ -410,6 +419,10 @@ describe("disposal", () => {
 
     const b = makeBoundary([route]);
     const container = mount(b.node);
+    await flush();
+
+    // A watcher exists only while an episode is open, so fail first.
+    b.fail();
     await flush();
     expect(getSubscriberCount(state as never)).toBeGreaterThan(0);
 

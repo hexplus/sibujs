@@ -96,6 +96,19 @@ export and one additive field were added.
 - **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
   runtime error pipeline.** They previously went to `console.warn` only, which
   no configured runtime error handler could observe.
+- **`ErrorBoundary` `resetKeys` now compare selected VALUES, not dependency
+  invalidation.** A getter is a selector, and re-running because its source was
+  replaced is not a change. `resetKeys: [() => route().pathname]` no longer
+  recovers a failed boundary when an unrelated field of the route object is
+  written; values are compared with `Object.is` against the values captured
+  when the error was caught.
+- **A reset-key change that causes an error no longer immediately resets the
+  newly-failed boundary.** Reset keys are now watched only while the boundary is
+  failed, with the values at the moment of failure as the baseline — so a single
+  update that both moves a reset key and makes the children throw leaves the
+  boundary failed. Only changes observed after the failure trigger recovery.
+  Because the getters are evaluated only during a failed episode, a getter that
+  throws is now reported when the boundary fails rather than at construction.
 - **`ErrorBoundary` `resetKeys` watchers no longer subscribe to the boundary's
   own error state.** Once a reset key had changed while the boundary was
   healthy, the watcher became a subscriber of that boundary's error signal, so a

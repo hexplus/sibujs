@@ -325,6 +325,7 @@ describe("resetKeys getter failures use the central pipeline", () => {
     setRuntimeErrorHandler((error, context) => calls.push({ error, context }));
 
     const [k, setK] = signal(0);
+    const [fail, setFail] = signal(false);
     const node = ErrorBoundary(
       {
         resetKeys: [
@@ -333,23 +334,40 @@ describe("resetKeys getter failures use the central pipeline", () => {
             throw new Error("reset-key failure");
           },
         ],
+        fallback: () => div({ class: "rk-fb", nodes: "failed" }),
       },
-      () => div({ nodes: "content" }),
+      () =>
+        div({
+          nodes: () => {
+            if (fail()) throw new Error("child broke");
+            return "content";
+          },
+        }),
     );
     mount(node);
     await flush();
 
-    expect(calls).toHaveLength(1);
-    expect((calls[0].error as Error).message).toBe("reset-key failure");
-    expect(calls[0].context.phase).toBe("effect");
-    expect(calls[0].context.name).toBe("ErrorBoundary.resetKeys");
+    // Reset keys are consulted only during a failed episode.
+    setFail(true);
+    await flush();
+
+    const resetKeyCalls = calls.filter((c) => (c.error as Error).message === "reset-key failure");
+    expect(resetKeyCalls).toHaveLength(1);
+    expect(resetKeyCalls[0].context.phase).toBe("effect");
+    expect(resetKeyCalls[0].context.name).toBe("ErrorBoundary.resetKeys");
+
+    // The getter is tracked for this episode, so a dependency change re-reads
+    // it and reports again — once per invocation, never batched away.
     setK(1);
+    await flush();
+    expect(calls.filter((c) => (c.error as Error).message === "reset-key failure")).toHaveLength(2);
   });
 
   it("reaches console.error — not console.warn — when no handler is installed", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
+    const [fail, setFail] = signal(false);
     const node = ErrorBoundary(
       {
         resetKeys: [
@@ -357,10 +375,19 @@ describe("resetKeys getter failures use the central pipeline", () => {
             throw new Error("reset-key console path");
           },
         ],
+        fallback: () => div({ class: "rk-fb", nodes: "failed" }),
       },
-      () => div({ nodes: "content" }),
+      () =>
+        div({
+          nodes: () => {
+            if (fail()) throw new Error("child broke");
+            return "content";
+          },
+        }),
     );
     mount(node);
+    await flush();
+    setFail(true); // open an episode so the reset keys are consulted
     await flush();
 
     const errMessages = errSpy.mock.calls.map((c) => String(c[0]));
@@ -376,6 +403,7 @@ describe("resetKeys getter failures use the central pipeline", () => {
       const seen: string[] = [];
       setRuntimeErrorHandler((error) => seen.push((error as Error).message));
 
+      const [fail, setFail] = signal(false);
       const node = ErrorBoundary(
         {
           resetKeys: [
@@ -383,13 +411,22 @@ describe("resetKeys getter failures use the central pipeline", () => {
               throw new Error("reset-key in production");
             },
           ],
+          fallback: () => div({ class: "rk-fb", nodes: "failed" }),
         },
-        () => div({ nodes: "content" }),
+        () =>
+          div({
+            nodes: () => {
+              if (fail()) throw new Error("child broke");
+              return "content";
+            },
+          }),
       );
       mount(node);
       await flush();
+      setFail(true); // open an episode so the reset keys are consulted
+      await flush();
 
-      expect(seen).toEqual(["reset-key in production"]);
+      expect(seen).toContain("reset-key in production");
     } finally {
       if (previous === undefined) delete g.__SIBU_DEV_WARN__;
       else g.__SIBU_DEV_WARN__ = previous;

@@ -5,7 +5,6 @@ import { takePendingError } from "../core/rendering/lazy";
 import { onMount } from "../core/rendering/lifecycle";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-import { untracked } from "../reactivity/track";
 import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryOptions {
@@ -23,11 +22,27 @@ export interface ErrorBoundaryOptions {
    */
   onError?: (error: Error) => void;
   /**
-   * A list of reactive getters. Whenever any of these values change
-   * after an error has been caught, the boundary automatically resets
-   * (clears the error and re-renders). Useful for recovering from a
-   * failed render after the user navigates, changes filters, or
-   * otherwise picks a new input that might not fail this time.
+   * A list of reactive getters. Whenever any of these VALUES changes AFTER an
+   * error has been caught, the boundary automatically resets (clears the error
+   * and re-renders). Useful for recovering from a failed render after the user
+   * navigates, changes filters, or otherwise picks a new input that might not
+   * fail this time.
+   *
+   * Getters are selectors, compared by `Object.is` against the values captured
+   * when the error was caught. Replacing the source object without changing the
+   * selected result does not reset the boundary:
+   *
+   * ```ts
+   * resetKeys: [() => route().pathname]   // only the pathname matters
+   * ```
+   *
+   * "After" is literal: a key change that is itself the reason the children
+   * threw belongs to that failure and will not undo it. Only a change observed
+   * once the boundary is already showing its fallback triggers recovery.
+   *
+   * The getters are evaluated only while the boundary is failed, so a getter
+   * that throws is reported through the runtime error pipeline at that point
+   * rather than at construction.
    *
    * @example
    * ```ts
@@ -201,6 +216,15 @@ const errorBoundaryStyles = `
   }
 `;
 
+/**
+ * Stable marker for "this reset-key getter threw on this run".
+ *
+ * Module-level and reused so repeated failures of the same getter compare
+ * EQUAL. A per-run object would look like a new value each time and would
+ * recover a failed boundary simply because one of its keys was still broken.
+ */
+const RESET_KEY_THREW = Symbol("sibujs.ErrorBoundary.resetKeyThrew");
+
 // Inject styles only once
 let stylesInjected = false;
 function injectStyles() {
@@ -274,55 +298,104 @@ export function ErrorBoundary(
 
   // Closes over THIS boundary's error signal and nothing else, so a fallback
   // can never be handed another boundary's retry.
+  //
+  // The episode watcher is disposed BEFORE the error clears: it belongs to the
+  // failed episode, and leaving it alive through recovery would let it observe
+  // healthy-state key changes that are none of its business.
   const retry = () => {
+    stopResetKeysWatcher();
     setError(null);
   };
 
-  // Wire `resetKeys` — when any listed getter changes after an error has
-  // been caught, clear the error and re-render. Skip the first run so we
-  // do not retry before an error has even occurred.
-  // Capture the effect teardown so it can be disposed with the boundary.
+  // ---------------------------------------------------------------------
+  // `resetKeys` — "whenever any of these VALUES change AFTER an error has
+  // been caught". Both capitalised words are load-bearing.
+  //
+  // VALUES: a getter is a selector. `() => route().pathname` re-runs whenever
+  // the whole route object is replaced, but the boundary must only react when
+  // the selected result actually differs — otherwise every unrelated field
+  // write recovers a boundary that was never meant to recover. So the getter
+  // results are kept and compared with `Object.is`, rather than being invoked
+  // purely to register a dependency and discarded.
+  //
+  // AFTER: the watcher exists ONLY while the boundary is failed. It is created
+  // by `handleError` once the error state is set, its first run establishes the
+  // baseline for that episode, and `retry()` disposes it before clearing the
+  // error. That makes the temporal rule structural rather than something the
+  // watcher has to reason about: a key write that is itself the reason the
+  // children threw is captured as part of the baseline and cannot undo the
+  // failure it just caused. Sibling subscriber order is LIFO, so a child
+  // binding on the same source can run before a permanently-installed watcher
+  // would have — correctness must not depend on that ordering.
+  //
+  // Because the watcher only lives during a failed episode, it needs no read of
+  // `error()` at all, which structurally rules out ever subscribing itself to
+  // the boundary's own error signal.
+  // ---------------------------------------------------------------------
   let resetKeysTeardown: (() => void) | null = null;
-  if (resetKeys && resetKeys.length > 0) {
-    let initialized = false;
-    resetKeysTeardown = effect(() => {
-      // Read every key so each one is tracked as a dependency
-      for (const k of resetKeys) {
-        try {
-          k();
-        } catch (err) {
-          // A key getter that throws is still a valid dependency — the value is
-          // ignored and the effect keeps going. But the getter is APPLICATION
-          // code, so its exception goes through the central pipeline rather
-          // than a bare console.warn that no handler could ever observe.
-          //
-          // Deliberately NO node: this failure happens while the boundary is
-          // evaluating its own reset conditions, so offering it to this very
-          // boundary would let it catch its own internal bookkeeping error —
-          // and, once it is showing a fallback, its resetKeys effect is exactly
-          // what is meant to get it out again. It resolves to the runtime
-          // handler or the console instead.
-          reportError(err, { phase: "effect", name: "ErrorBoundary.resetKeys" });
-        }
+
+  const stopResetKeysWatcher = (): void => {
+    if (!resetKeysTeardown) return;
+    const teardown = resetKeysTeardown;
+    resetKeysTeardown = null;
+    teardown();
+  };
+
+  /** Evaluate every key, reporting (not swallowing) a getter that throws. */
+  const readResetKeyValues = (keys: Array<() => unknown>): unknown[] => {
+    const values: unknown[] = new Array(keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      try {
+        values[i] = keys[i]();
+      } catch (err) {
+        // The getter is APPLICATION code, so its exception goes through the
+        // central pipeline rather than a bare console.warn no handler could
+        // observe. Deliberately NO node: this happens while the boundary is
+        // evaluating its own reset conditions, and offering it to this very
+        // boundary would let it catch its own internal bookkeeping error.
+        reportError(err, { phase: "effect", name: "ErrorBoundary.resetKeys" });
+        // ONE shared sentinel, not a fresh object per run: a per-run value
+        // would compare unequal every time and spuriously recover the boundary
+        // while the getter is simply still broken. With a stable sentinel the
+        // transitions read naturally — valid→thrown and thrown→valid are
+        // changes, thrown→thrown is not.
+        values[i] = RESET_KEY_THREW;
       }
-      if (!initialized) {
-        initialized = true;
+    }
+    return values;
+  };
+
+  /** Begin watching reset keys for the error episode that just started. */
+  const startResetKeysWatcher = (): void => {
+    const keys = resetKeys;
+    if (!keys || keys.length === 0) return;
+    // One watcher per episode; a re-entered error state re-baselines.
+    stopResetKeysWatcher();
+
+    let baseline: unknown[] | null = null;
+    resetKeysTeardown = effect(() => {
+      // Read inside the effect so every key is tracked for this episode.
+      const current = readResetKeyValues(keys);
+
+      if (baseline === null) {
+        baseline = current;
         return;
       }
-      // Reset keys are TRIGGERS; the boundary's error is STATE this watcher
-      // inspects when a trigger fires. Reading `error()` reactively here would
-      // subscribe the watcher to `setError()` — and because the initialization
-      // guard above returns early, that subscription was acquired on the first
-      // NON-initial run, i.e. the first time a reset key changed. From then on
-      // any later, unrelated failure re-ran this watcher, which saw a non-null
-      // error and called retry(), clearing the failure it had just been told
-      // about. The boundary un-failed itself with no reset key involved.
-      //
-      //   reset key changed -> maybe retry   (correct)
-      //   error changed     -> retry         (wrong)
-      if (untracked(error) !== null) retry();
+
+      let changed = current.length !== baseline.length;
+      if (!changed) {
+        for (let i = 0; i < current.length; i++) {
+          if (!Object.is(current[i], baseline[i])) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      baseline = current;
+
+      if (changed) retry();
     });
-  }
+  };
 
   const handleError = (e: unknown): Error => {
     // Shared normalization: an existing Error passes through by reference
@@ -330,6 +403,9 @@ export function ErrorBoundary(
     // original value as `cause` rather than being flattened to a string.
     const errorObj = normalizeError(e);
     setError(errorObj);
+    // The episode has begun: baseline the reset keys from here. Anything that
+    // contributed to THIS failure is part of the baseline, not a recovery.
+    startResetKeysWatcher();
     if (onError) {
       try {
         onError(errorObj);
@@ -490,7 +566,7 @@ export function ErrorBoundary(
   // Tear down resetKeys effect + remove the propagation listener when the
   // boundary root is disposed (via when/match/each/dispose).
   registerDisposer(container, () => {
-    if (resetKeysTeardown) resetKeysTeardown();
+    stopResetKeysWatcher();
     container.removeEventListener("sibu:error-propagate", propagateListener);
   });
 
