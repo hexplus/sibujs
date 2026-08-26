@@ -14,6 +14,7 @@
     <section id="claimed"></section>
     <section id="boundary-each"></section>
     <section id="boundary-binding"></section>
+    <section id="siblings"></section>
 
     <script type="module">
       import {
@@ -97,6 +98,49 @@
           );
           host.appendChild(tree);
           api.breakBinding = () => setValue("bad");
+        },
+
+        // Two sibling boundaries sharing ONE fallback function, failing with
+        // errors that carry the SAME message. Each must render its own error
+        // identity and own its own retry control.
+        mountSiblings() {
+          const host = document.getElementById("siblings");
+          const sharedFallback = (error, retry) => {
+            const wrap = div({ class: "sib-fb" });
+            wrap.setAttribute("data-error-id", String(error.errorId ?? "?"));
+            const btn = document.createElement("button");
+            btn.className = "sib-retry";
+            btn.setAttribute("data-retry-for", String(error.errorId ?? "?"));
+            btn.textContent = "retry";
+            btn.addEventListener("click", retry);
+            wrap.appendChild(btn);
+            return wrap;
+          };
+
+          const make = (id) => {
+            const err = Object.assign(new Error("Load failed"), { errorId: id });
+            const [fail, setFail] = signal(false);
+            const node = ErrorBoundary({ fallback: sharedFallback }, () =>
+              div({
+                class: `sib-ok sib-ok-${id}`,
+                nodes: () => {
+                  if (fail()) throw err;
+                  return `ok-${id}`;
+                },
+              }),
+            );
+            return { node, break: () => setFail(true), heal: () => setFail(false) };
+          };
+
+          const a = make("A");
+          const b = make("B");
+          host.appendChild(a.node);
+          host.appendChild(b.node);
+          api.breakSiblings = () => {
+            a.break();
+            b.break();
+          };
+          api.healB = () => b.heal();
         },
       };
 

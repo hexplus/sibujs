@@ -68,3 +68,29 @@ test("ErrorBoundary claims a binding that throws on a later update", async ({ pa
   );
   expect(reports.filter((r) => r.message === "binding-exploded")).toHaveLength(0);
 });
+
+test("sibling boundaries sharing one fallback stay independent", async ({ page }) => {
+  // The bug this pins: a global fallback cache keyed by (fallback fn,
+  // error.message) handed Boundary B the Error and retry captured by
+  // Boundary A. Both boundaries below share one fallback function and fail
+  // with the SAME message, so an aliasing regression is immediately visible in
+  // the rendered DOM.
+  await page.evaluate(() => (window as never as { __t: { mountSiblings(): void } }).__t.mountSiblings());
+  await page.evaluate(() => (window as never as { __t: { breakSiblings(): void } }).__t.breakSiblings());
+
+  const ids = await page.locator("#siblings .sib-fb").evaluateAll((els) =>
+    els.map((el) => el.getAttribute("data-error-id")),
+  );
+  expect(ids).toEqual(["A", "B"]);
+
+  // Each fallback's retry control belongs to its own boundary.
+  await page.evaluate(() => (window as never as { __t: { healB(): void } }).__t.healB());
+  await page.locator('#siblings .sib-retry[data-retry-for="B"]').click();
+
+  await expect(page.locator("#siblings .sib-ok-B")).toHaveText("ok-B");
+  // A is untouched: still showing its own fallback, not B's and not recovered.
+  const after = await page.locator("#siblings .sib-fb").evaluateAll((els) =>
+    els.map((el) => el.getAttribute("data-error-id")),
+  );
+  expect(after).toEqual(["A"]);
+});

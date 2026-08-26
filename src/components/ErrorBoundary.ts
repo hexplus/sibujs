@@ -9,8 +9,12 @@ import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryOptions {
   /**
-   * Fallback renderer given an Error and retry callback.
-   * Memoized internally — only re-created when the error changes.
+   * Fallback renderer, called with this boundary's Error and its own `retry`.
+   *
+   * Safe to share one fallback function across many boundaries: the Error and
+   * the retry callback always belong to the boundary that invoked it, even when
+   * two boundaries fail with identical messages. It is re-invoked whenever the
+   * boundary re-renders its error state; do not rely on it running only once.
    */
   fallback?: (error: Error, retry: () => void) => Element;
   /**
@@ -206,42 +210,32 @@ function injectStyles() {
   }
 }
 
-// Memoization cache for fallback renderers keyed by error message.
-// We cache a *factory* (bound to the error) rather than a live Element to
-// avoid re-inserting the same DOM node into multiple parents and to bound
-// memory growth. Each fallback function gets its own LRU Map capped at
-// FALLBACK_CACHE_MAX entries — oldest key evicted when full.
-const FALLBACK_CACHE_MAX = 50;
-const fallbackCache = new WeakMap<(...args: never[]) => unknown, Map<string, () => Element>>();
-
-function getMemoizedFallback(
-  fallbackFn: (error: Error, retry: () => void) => Element,
-  error: Error,
-  retry: () => void,
-): Element {
-  let cache = fallbackCache.get(fallbackFn);
-  if (!cache) {
-    cache = new Map();
-    fallbackCache.set(fallbackFn, cache);
-  }
-  const key = error.message;
-  let factory = cache.get(key);
-  if (factory) {
-    // LRU touch: move to most-recently-used end
-    cache.delete(key);
-    cache.set(key, factory);
-  } else {
-    factory = () => fallbackFn(error, retry);
-    cache.set(key, factory);
-    // Evict oldest if over limit
-    if (cache.size > FALLBACK_CACHE_MAX) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey !== undefined) cache.delete(oldestKey);
-    }
-  }
-  // Always return a *fresh* Element so the same node is never inserted twice
-  return factory();
-}
+// ---------------------------------------------------------------------------
+// There is deliberately NO fallback cache.
+//
+// A previous revision memoized fallbacks in a module-global
+// `WeakMap<fallbackFn, Map<error.message, factory>>`. That modelled ownership
+// wrongly in two ways at once:
+//
+//   1. The cached factory closed over a SPECIFIC Error and a SPECIFIC
+//      boundary's `retry`, but the cache was shared by every boundary using
+//      that fallback function. Sharing one `AppErrorFallback` across an app is
+//      the idiomatic use, so two sibling boundaries whose errors happened to
+//      carry the same message aliased each other: B's fallback was handed A's
+//      Error and A's retry callback. `retry()` compounded it by deleting the
+//      shared entry by message, wiping the OTHER boundary's state.
+//   2. It never actually memoized any rendering. The cached value was a
+//      closure that was invoked on every call, so the fallback element was
+//      rebuilt each time regardless — the cache bought a skipped closure
+//      allocation on an ERROR path, in exchange for a correctness bug.
+//
+// Elaborating the key (message + stack + name + …) would not have fixed it:
+// boundary-specific state simply does not belong in global storage.
+// Configuration may be shared; failure state may not.
+//
+// The boundary's own reactive `error` signal already governs when the fallback
+// re-renders, so no additional memoization layer is needed.
+// ---------------------------------------------------------------------------
 
 // Stack parsing is now handled by ErrorDisplay. The helper used to
 // live here but was removed along with the inline legacy renderer.
@@ -257,7 +251,8 @@ function getMemoizedFallback(
  *   `unhandledrejection` events instead.
  * - Supports nested ErrorBoundaries (inner catches first, outer catches propagation)
  * - Retry functionality to clear error and re-render children
- * - Memoized fallback to avoid re-creating fallback UI on every render
+ * - Fallback state is per-boundary: a shared fallback function never leaks one
+ *   boundary's Error or retry callback into another
  * - onError callback for logging/telemetry
  * - Improved CSS styling
  */
@@ -276,15 +271,9 @@ export function ErrorBoundary(
 
   const [error, setError] = signal<Error | null>(null);
 
+  // Closes over THIS boundary's error signal and nothing else, so a fallback
+  // can never be handed another boundary's retry.
   const retry = () => {
-    // Drop only the cached factory bound to the current error message, so
-    // memoized fallbacks for OTHER errors (e.g. unrelated boundary instances
-    // sharing the same fallback fn) survive.
-    if (fallback) {
-      const cur = error();
-      const inner = fallbackCache.get(fallback);
-      if (cur && inner) inner.delete(cur.message);
-    }
     setError(null);
   };
 
@@ -301,11 +290,18 @@ export function ErrorBoundary(
         try {
           k();
         } catch (err) {
-          // A key getter that throws is still a valid dependency — we
-          // just ignore the value. Do not let it crash the effect.
-          if (typeof console !== "undefined") {
-            console.warn("[SibuJS ErrorBoundary] resetKeys getter threw:", err);
-          }
+          // A key getter that throws is still a valid dependency — the value is
+          // ignored and the effect keeps going. But the getter is APPLICATION
+          // code, so its exception goes through the central pipeline rather
+          // than a bare console.warn that no handler could ever observe.
+          //
+          // Deliberately NO node: this failure happens while the boundary is
+          // evaluating its own reset conditions, so offering it to this very
+          // boundary would let it catch its own internal bookkeeping error —
+          // and, once it is showing a fallback, its resetKeys effect is exactly
+          // what is meant to get it out again. It resolves to the runtime
+          // handler or the console instead.
+          reportError(err, { phase: "effect", name: "ErrorBoundary.resetKeys" });
         }
       }
       if (!initialized) {
@@ -345,7 +341,8 @@ export function ErrorBoundary(
   const tryRenderFallback = (err: Error): Element => {
     const fn = fallback || defaultFallback;
     try {
-      return getMemoizedFallback(fn, err, retry);
+      // `err` and `retry` both belong to THIS boundary instance.
+      return fn(err, retry);
     } catch (fallbackError) {
       // The fallback renderer itself failed. This second error must not vanish:
       // route it through the central pipeline so an OUTER boundary can claim it

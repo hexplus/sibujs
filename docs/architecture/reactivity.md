@@ -122,9 +122,10 @@ Both ceilings are configurable via `setMaxSubscriberRepeats()` and
 
 ### Errors
 
-Every exception the runtime catches and contains — from an effect, a binding, a
-renderer, a cleanup, a lifecycle hook, or the scheduler itself — is routed
-through one pipeline, and **exactly one** of these three runs for a given
+Every **user/application exception** the reactive, render and lifecycle runtime
+catches and contains — from an effect, a binding, a renderer, a cleanup, a
+lifecycle hook, an `ErrorBoundary` reset key, or the scheduler itself — is
+routed through one pipeline, and **exactly one** of these three runs for a given
 failure:
 
 1. the nearest `ErrorBoundary`, but only if it **explicitly claims** the error;
@@ -196,6 +197,34 @@ contained by the shared engine.
 The `sibu:error-propagate` event is an internal implementation detail of
 boundary routing, not a supported extension point — use `ErrorBoundary` or
 `setRuntimeErrorHandler()`.
+
+**Deliberate exceptions**, so the rule above is precise rather than absolute:
+
+- `asyncDerived()` exposes a rejection through its own `error()` accessor. That
+  is its documented contract, so it is *not* also sent to the runtime handler —
+  one failure, one application-facing channel. Stale and post-disposal
+  rejections stay ignored.
+- Peripheral subsystems (router preload, query background refetch, ISR,
+  offline storage, wake lock, devtools, `strict()`) log recoverable
+  *operational* conditions with `console.warn`. These are not contained
+  application exceptions from the render/reactive path and are already visible
+  in production.
+- A binding whose getter throws while its element is still being constructed
+  has no parent yet, and boundary lookup walks `parentNode` — so it resolves to
+  the handler or console rather than to an enclosing boundary. A component that
+  throws directly out of `children()` is still caught by the boundary normally.
+
+### Boundary ownership
+
+`ErrorBoundary` state is per-instance and never global. A `fallback` function is
+*configuration* and is meant to be shared across an application; the `Error`
+object, the `retry` callback and the rendered fallback are *failure state* and
+belong to exactly one boundary. Two boundaries sharing a fallback function
+cannot observe each other, even when their errors carry identical messages —
+two errors with the same message are not the same failure.
+
+There is no fallback memoization: the fallback is re-invoked whenever the
+boundary re-renders its error state, and returns a fresh element each time.
 
 ## Invariants
 

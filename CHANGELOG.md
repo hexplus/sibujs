@@ -82,6 +82,20 @@ export and one additive field were added.
   `__SIBU_DEV_WARN__` was `false`.** That flag controls optional developer
   diagnostics; reaching a safety ceiling means the framework forcibly stopped
   the user's work, which stays observable regardless.
+- **`ErrorBoundary` fallback state was shared between independent boundaries.**
+  Fallbacks were memoized in a module-global cache keyed by the fallback
+  function plus `error.message`, and the cached entry closed over one specific
+  boundary's `Error` and `retry`. Two boundaries sharing a fallback function —
+  the idiomatic way to use one — whose errors carried the same message therefore
+  aliased each other: a boundary could render another boundary's Error and be
+  handed another boundary's `retry`, and retrying one wiped the other's state.
+  The cache is removed; each boundary owns its error, its retry and its rendered
+  fallback. Sharing one fallback function across an application is safe.
+  (The cache also never memoized any rendering — it cached a closure that was
+  invoked on every call — so nothing observable is lost.)
+- **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
+  runtime error pipeline.** They previously went to `console.warn` only, which
+  no configured runtime error handler could observe.
 - **Reporting an error no longer runs inside the failing subscriber's tracking
   context.** An `ErrorBoundary` listener (or an application handler) that reads
   a signal while deciding what to do would otherwise have that read attributed
