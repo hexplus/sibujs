@@ -16,20 +16,88 @@ import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from
 // The allowlist is "path-ish strings" — we accept anything that does NOT
 // look like a dangerous scheme. `sanitizeUrl` returns the empty string for
 // blocked schemes, so we can reuse it.
-function isSafeNavigationTarget(path: string): boolean {
-  // An empty string from `sanitizeUrl` means the input was unsafe.
-  // But an originally-empty input is also legitimate ("" → root relative),
-  // so treat those separately.
-  if (path === "") return true;
+/**
+ * How the router regards a navigation target.
+ *
+ * - `internal` — a path, `?query`, `#hash`, or relative reference. SPA routing
+ *   can service it.
+ * - `external` — an absolute URL with an allowed scheme (`http:`, `https:`,
+ *   `mailto:`, `tel:`, `ftp:`), or a protocol-relative `//host`. Not dangerous,
+ *   but not something SPA routing can service either.
+ * - `unsafe` — a dangerous scheme (`javascript:`, `data:`, `vbscript:`,
+ *   `blob:`, `file:`, …). Never rendered as a live href, never navigated.
+ *
+ * Protocol-relative `//host` is classified `unsafe` rather than `external`
+ * because it carries no scheme to vet and is the classic open-redirect
+ * obfuscation (CWE-601); collapsing its href to `#` is the safe rendering.
+ *
+ * Internal, not public. Single source of truth for every target decision in
+ * this module, so the rules cannot drift between entrypoints. (NAV-001)
+ */
+type NavigationTargetKind = "internal" | "external" | "unsafe";
+
+function classifyNavigationTarget(path: string): NavigationTargetKind {
+  // An originally-empty input is legitimate ("" → root relative).
+  if (path === "") return "internal";
   // Browsers ignore leading control chars / whitespace and treat "\" as "/"
   // when parsing a URL. Normalize the same way *before* the checks, otherwise
   // "\t//evil.com" or "/\/evil.com" slip past the scheme/host guard and the
   // browser resolves them to an off-origin host (open redirect, CWE-601).
   const normalized = stripControlChars(path).replace(/\\/g, "/");
+  if (normalized === "") return "internal";
   // Protocol-relative ("//host") navigation points off the current origin.
-  if (normalized.startsWith("//")) return false;
+  if (normalized.startsWith("//")) return "unsafe";
+  // Classification inspects the target's *structure*, never arbitrary
+  // substrings: a scheme exists only when the ":" precedes any "/", "?" or "#".
+  // That is what keeps `/search?q=https%3A%2F%2Fexample.com` and
+  // `/path/javascript%3Afoo` correctly internal — the dangerous-looking text is
+  // query/path *data*, not a scheme.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(normalized)) return "internal";
   // Dangerous scheme (javascript:, data:, vbscript:, blob:, ...) → empty.
-  return sanitizeUrl(normalized) !== "";
+  return sanitizeUrl(normalized) === "" ? "unsafe" : "external";
+}
+
+/**
+ * May the SPA router navigate to `path`?
+ *
+ * Internal targets only. Both refusals report `unsafe-target`: `external`
+ * because SPA routing cannot service an off-origin URL (and an absolute
+ * redirect derived from untrusted input is an open-redirect vector), `unsafe`
+ * because the scheme is dangerous. One policy, applied identically by
+ * `navigate()`, route redirects, and every guard redirect. (NAV-002)
+ */
+function isRouterNavigable(path: string): boolean {
+  return classifyNavigationTarget(path) === "internal";
+}
+
+/** Strip a trailing slash so `/users/` and `/users` compare equal; root stays `/`. */
+function normalizePathname(path: string): string {
+  if (!path) return "/";
+  const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  return trimmed || "/";
+}
+
+/** Order-independent serialization, so `?b=2&a=1` and `?a=1&b=2` compare equal. */
+function normalizeQuery(query: string | Params): string {
+  const params = new URLSearchParams(query);
+  return [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+}
+
+/**
+ * Is `target` the current pathname, or one of its ancestors on a *segment*
+ * boundary? `/user` is an ancestor of `/user/123` but never of `/users`.
+ *
+ * Root is deliberately not an ancestor of everything: a "Home" link highlighted
+ * on every page in the app is not useful navigation UI, so `/` is active only
+ * on `/`. Both arguments must already be normalized.
+ */
+function isPathnameAncestor(target: string, current: string): boolean {
+  if (target === current) return true;
+  if (target === "/") return false;
+  return current.startsWith(`${target}/`);
 }
 
 // ============================================================================
@@ -1027,11 +1095,17 @@ export class SibuRouter {
       await this.navigator.navigate(async (signal) => {
         const targetPath = this.resolvePath(to);
 
-        // Security: refuse navigation targets that carry a dangerous
-        // protocol. `javascript:`, `data:`, `vbscript:`, and `blob:` URIs
-        // can otherwise end up stored in `history.state` and reflected
-        // into `<a href>` elements by downstream code.
-        if (!isSafeNavigationTarget(targetPath)) {
+        // Security: refuse anything the SPA router may not navigate — a
+        // dangerous protocol (`javascript:`, `data:`, `vbscript:`, `blob:`,
+        // which could end up stored in `history.state` and reflected into an
+        // `<a href>` downstream) *and* an absolute or protocol-relative URL,
+        // which is an open-redirect vector when derived from untrusted input.
+        //
+        // Validated here, before route resolution and before any history
+        // mutation. A cross-origin `pushState` throwing `SecurityError` is not
+        // the enforcement mechanism — it reports `error`, not `unsafe-target`,
+        // and only after the navigation has already started. (NAV-001)
+        if (!isRouterNavigable(targetPath)) {
           const from = this.currentRouteGetter();
           const toContext = this.createRouteContext(targetPath);
           throw new NavigationFailureError("aborted", from, toContext, undefined, "unsafe-target");
@@ -1102,8 +1176,8 @@ export class SibuRouter {
     const beforeEachResult = await this.guards.runBeforeEach(to, from, signal);
     if (beforeEachResult !== true) {
       if (typeof beforeEachResult === "string") {
-        // Security: refuse guard-redirect targets with dangerous protocols.
-        if (!isSafeNavigationTarget(beforeEachResult)) {
+        // Same policy as navigate(): a guard redirect is a navigation target.
+        if (!isRouterNavigable(beforeEachResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
@@ -1138,8 +1212,8 @@ export class SibuRouter {
             }
             if (result !== true) {
               if (typeof result === "string") {
-                // Security: refuse guard-redirect targets with dangerous protocols.
-                if (!isSafeNavigationTarget(result)) {
+                // Same policy as navigate(): a guard redirect is a navigation target.
+                if (!isRouterNavigable(result)) {
                   throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
@@ -1156,18 +1230,17 @@ export class SibuRouter {
       // Handle redirects
       if ("redirect" in route) {
         const redirectPath = typeof route.redirect === "function" ? route.redirect(to) : route.redirect;
-        // Refuse cross-origin / protocol-relative redirects by default —
-        // these are open-redirect vectors (CWE-601) when redirect targets
-        // are derived from untrusted route params.
-        if (typeof redirectPath === "string" && /^(https?:)?\/\//i.test(redirectPath)) {
-          if (typeof console !== "undefined") {
+        // Same policy as navigate(). This used to carry an extra, stricter
+        // `^(https?:)?//` check that no other entrypoint had, so an absolute
+        // target was refused as a route redirect but accepted by navigate()
+        // and by every guard redirect. One classifier now serves all five.
+        // (NAV-002)
+        if (typeof redirectPath === "string" && !isRouterNavigable(redirectPath)) {
+          if (classifyNavigationTarget(redirectPath) === "external" && typeof console !== "undefined") {
             console.error(
               `[SibuJS Router] Refusing absolute/protocol-relative redirect "${redirectPath}" — open-redirect risk.`,
             );
           }
-          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
-        }
-        if (typeof redirectPath === "string" && !isSafeNavigationTarget(redirectPath)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
@@ -1181,8 +1254,8 @@ export class SibuRouter {
     const beforeResolveResult = await this.guards.runBeforeResolve(to, from, signal);
     if (beforeResolveResult !== true) {
       if (typeof beforeResolveResult === "string") {
-        // Security: refuse guard-redirect targets with dangerous protocols.
-        if (!isSafeNavigationTarget(beforeResolveResult)) {
+        // Same policy as navigate(): a guard redirect is a navigation target.
+        if (!isRouterNavigable(beforeResolveResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
@@ -2219,8 +2292,14 @@ export function RouterLink(
   // `javascript:…`/`data:…` — clicking the rendered link would execute it
   // (click-to-XSS). navigate() guards every other entry point; the link must
   // too. Unsafe targets collapse to "#".
-  const href = isSafeNavigationTarget(rawHref) ? rawHref : "#";
-  const hrefPath = href.split("?")[0].split("#")[0];
+  const kind = classifyNavigationTarget(rawHref);
+  const href = kind === "unsafe" ? "#" : rawHref;
+  // Split exactly as `createRouteContext()` does — hash first, then query — so
+  // both sides of every active-state comparison are normalized the same way.
+  const [hrefBeforeHash, hrefHash = ""] = href.split("#");
+  const [hrefPathRaw, hrefQueryRaw = ""] = hrefBeforeHash.split("?");
+  const targetPath = normalizePathname(hrefPathRaw);
+  const targetQuery = normalizeQuery(hrefQueryRaw);
 
   const link = document.createElement("a");
   link.href = href;
@@ -2242,8 +2321,15 @@ export function RouterLink(
   const options = _routerRef.current["options"];
   const effectCleanup = effect(() => {
     const route = routeGetter();
-    const isActive = route.path.startsWith(hrefPath);
-    const isExactActive = route.path === hrefPath;
+    const currentPath = normalizePathname(route.path);
+    // Ancestor matching, on segment boundaries. Raw prefix matching made
+    // `/user` active on `/users`. (LINK-001)
+    const isActive = isPathnameAncestor(targetPath, currentPath);
+    // Exact-active is full normalized target identity: pathname *and* query
+    // *and* hash. `/search?q=a` and `/search?q=b` are distinct navigation
+    // targets, as are `/docs#one` and `/docs#two`. (LINK-002)
+    const isExactActive =
+      currentPath === targetPath && normalizeQuery(route.query) === targetQuery && route.hash === hrefHash;
 
     const classes: string[] = [];
     if (isActive) {
@@ -2306,7 +2392,15 @@ export function RouterLink(
     if (e.defaultPrevented || target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
       return;
     }
+    // An external absolute URL is a legitimate `<a href>`, and RouterLink is
+    // not an external-navigation API: leave the browser's own behaviour alone
+    // rather than feeding an off-origin URL into SPA routing, where it would be
+    // refused and the click would silently do nothing at all. (NAV-001)
+    if (kind === "external") return;
     e.preventDefault();
+    // Unsafe target: the href is already collapsed to "#". Swallow the click so
+    // it neither routes nor scrolls to the top of the document.
+    if (kind === "unsafe") return;
     _routerRef.current?.navigate(to, { replace }).catch((err) => {
       if (typeof console !== "undefined") console.error("[router] link navigate failed:", err);
     });
@@ -2323,6 +2417,27 @@ export function RouterLink(
 // SUSPENSE COMPONENT (for code splitting)
 // ============================================================================
 
+/**
+ * Async boundary for code-split / deferred content.
+ *
+ * **Ownership contract.** The boundary owns every node it creates or installs.
+ * A node that leaves the boundary — replaced by resolved content, or dropped on
+ * teardown — is lifecycle-disposed exactly once. Native detachment alone is not
+ * cleanup: a detached subtree keeps its effects, listeners and registered
+ * disposers alive, firing against DOM nobody can see. (SUS-001)
+ *
+ * **Async completion grants no commit permission.** A resolution that arrives
+ * after the boundary was torn down, or after a newer generation superseded it,
+ * may never insert into the DOM. Because the promise typically resolves with an
+ * *already constructed* Element — whose effects and listeners were created
+ * before the boundary discovered it lost ownership — the stale result is
+ * disposed rather than merely dropped. (SUS-002)
+ *
+ * The boundary is **single-shot**: `props.nodes()` is invoked exactly once, so
+ * only one async generation is reachable in practice. The generation token is
+ * kept anyway because teardown must be able to invalidate the in-flight one, and
+ * because ownership is the correct primitive to express that with.
+ */
 export function Suspense(props: {
   fallback?: () => HTMLElement | HTMLElement;
   nodes: () => HTMLElement | Promise<HTMLElement>;
@@ -2331,80 +2446,107 @@ export function Suspense(props: {
   let currentNode: Node | null = null;
   let fallbackNode: Node | null = null;
   let isLoading = false;
+  let generation = 0;
+  let tornDown = false;
+
+  /**
+   * Lifecycle-safe removal. `dispose()` runs the node's teardowns (and its
+   * descendants'); the detach afterwards is what a bare `removeChild` used to
+   * do on its own.
+   */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
+
+  /**
+   * The parent `myGeneration` may still commit into, or `null` if it has lost
+   * ownership — torn down, superseded, or the anchor was detached natively.
+   */
+  const commitTarget = (myGeneration: number): (Node & ParentNode) | null =>
+    tornDown || myGeneration !== generation ? null : anchor.parentNode;
 
   const cleanupNodes = () => {
-    [currentNode, fallbackNode].forEach((node) => {
-      if (node?.parentNode) {
-        node.parentNode.removeChild(node);
-      }
-    });
+    release(currentNode);
+    release(fallbackNode);
     currentNode = null;
     fallbackNode = null;
   };
 
   const showFallback = () => {
-    if (fallbackNode || !props.fallback || !anchor.parentNode) return;
+    if (fallbackNode || !props.fallback || tornDown) return;
+    const parent = anchor.parentNode;
+    if (!parent) return;
 
     try {
       const fallback = typeof props.fallback === "function" ? props.fallback() : props.fallback;
 
       if (fallback instanceof HTMLElement) {
         fallbackNode = fallback;
-        anchor.parentNode.insertBefore(fallbackNode, anchor.nextSibling);
+        parent.insertBefore(fallbackNode, anchor.nextSibling);
       }
     } catch (error) {
       console.error("[Suspense] Fallback error:", error);
     }
   };
 
-  const hideFallback = () => {
-    if (fallbackNode?.parentNode) {
-      fallbackNode.parentNode.removeChild(fallbackNode);
-      fallbackNode = null;
-    }
-  };
-
   const render = async () => {
-    if (isLoading) return;
+    if (tornDown || isLoading) return;
     isLoading = true;
+    const myGeneration = ++generation;
 
     try {
       const result = props.nodes();
-
+      let element: HTMLElement;
       if (result instanceof Promise) {
         showFallback();
-        const element = await result;
-
-        if (anchor.parentNode) {
-          cleanupNodes();
-          anchor.parentNode.insertBefore(element, anchor.nextSibling);
-          currentNode = element;
-        }
+        element = await result;
       } else {
-        if (anchor.parentNode) {
-          cleanupNodes();
-          anchor.parentNode.insertBefore(result, anchor.nextSibling);
-          currentNode = result;
-        }
+        element = result;
       }
+
+      // Re-checked *after* the await, immediately before the synchronous
+      // commit. Nothing runs between this check and the insertion below.
+      const parent = commitTarget(myGeneration);
+      if (!parent) {
+        // Stale: the Element already exists and owns lifecycle resources, so it
+        // must be disposed, not dropped. Anything this generation installed
+        // (the fallback) goes with it.
+        release(element);
+        cleanupNodes();
+        return;
+      }
+
+      cleanupNodes();
+      parent.insertBefore(element, anchor.nextSibling);
+      currentNode = element;
     } catch (error) {
-      hideFallback();
       console.error("[Suspense] Nodes error:", error);
 
-      // Show error in place of content
-      if (anchor.parentNode) {
-        const errorElement = document.createElement("div");
-        errorElement.className = "suspense-error";
-        errorElement.textContent = error instanceof Error ? error.message : "Failed to load";
+      const parent = commitTarget(myGeneration);
+      cleanupNodes();
+      if (!parent) return;
 
-        cleanupNodes();
-        anchor.parentNode.insertBefore(errorElement, anchor.nextSibling);
-        currentNode = errorElement;
-      }
+      // Show error in place of content
+      const errorElement = document.createElement("div");
+      errorElement.className = "suspense-error";
+      errorElement.textContent = error instanceof Error ? error.message : "Failed to load";
+      parent.insertBefore(errorElement, anchor.nextSibling);
+      currentNode = errorElement;
     } finally {
       isLoading = false;
     }
   };
+
+  // Teardown. Invalidating the generation *before* releasing nodes is what
+  // makes a late resolution permanently non-committing rather than merely
+  // late: `commitTarget` fails closed from here on.
+  registerDisposer(anchor, () => {
+    tornDown = true;
+    generation++;
+    cleanupNodes();
+  });
 
   queueMicrotask(render);
 

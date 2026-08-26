@@ -273,3 +273,114 @@ test.describe("focus behaviour", () => {
   });
 });
 
+
+/**
+ * Navigation-target policy in a real engine. jsdom cannot show what a browser
+ * actually does with an external `<a href>`, a `javascript:` URI, or a
+ * protocol-relative host, so the policy is re-proved here per engine.
+ */
+test.describe("navigation target policy", () => {
+  type Click = { id: string | null; href: string | null; intercepted: boolean };
+  const lastClick = (page: import("@playwright/test").Page) =>
+    page.evaluate(() => (window as never as { __router: { lastClick: () => Click } }).__router.lastClick());
+
+  test("does not SPA-intercept an external absolute URL", async ({ page }) => {
+    const before = await routerPath(page);
+    await page.click("#link-external");
+
+    const click = await lastClick(page);
+    // A real, working external href — RouterLink is not an external-navigation
+    // API, so the browser's own behaviour is left untouched.
+    expect(click.href).toBe("https://example.com/");
+    expect(click.intercepted).toBe(false);
+
+    // The SPA is still alive and its route is unchanged: nothing was routed.
+    expect(await page.evaluate(() => (window as never as { __ready?: boolean }).__ready === true)).toBe(true);
+    expect(await routerPath(page)).toBe(before);
+  });
+
+  for (const [id, label] of [
+    ["#link-proto-relative", "protocol-relative"],
+    ["#link-js", "javascript:"],
+    ["#link-data", "data:"],
+    ["#link-vbscript", "vbscript:"],
+  ] as const) {
+    test(`neutralizes a ${label} target`, async ({ page }) => {
+      const before = await routerPath(page);
+      await page.click(id);
+
+      const click = await lastClick(page);
+      // No executable href is ever exposed to the engine…
+      expect(click.href).toBe("#");
+      // …and the click is swallowed rather than routed or followed.
+      expect(click.intercepted).toBe(true);
+      expect(await routerPath(page)).toBe(before);
+      // Nothing in a dangerous URI ever executed.
+      expect(await page.evaluate(() => (window as never as { __pwned?: boolean }).__pwned)).toBeUndefined();
+    });
+  }
+
+  test("still SPA-intercepts an internal target", async ({ page }) => {
+    await page.click("#link-match-users");
+
+    const click = await lastClick(page);
+    expect(click.href).toBe("/users");
+    expect(click.intercepted).toBe(true);
+    expect(await routerPath(page)).toBe("/users");
+  });
+});
+
+/**
+ * Active-class matching in a real engine, driven through genuine `pushState`
+ * navigation rather than a synthetic route signal.
+ */
+test.describe("RouterLink active matching", () => {
+  const classOf = (page: import("@playwright/test").Page, id: string) =>
+    page.evaluate((elId) => (window as never as { __router: { classOf: (i: string) => string } }).__router.classOf(elId), id);
+
+  test("does not mark /user active on /users", async ({ page }) => {
+    await page.click("#link-match-users");
+    expect(await routerPath(page)).toBe("/users");
+
+    // Segment boundaries are respected: /user is not a prefix-match for /users.
+    expect(await classOf(page, "link-match-user")).not.toContain("router-link-active");
+    expect(await classOf(page, "link-match-users")).toContain("router-link-active");
+    expect(await classOf(page, "link-match-users")).toContain("router-link-exact-active");
+  });
+
+  test("marks /user active but not exact on /user/123", async ({ page }) => {
+    await page.evaluate(() =>
+      (window as never as { __router: { navigate: (t: string) => Promise<unknown> } }).__router.navigate("/user/123"),
+    );
+    await expect(page.locator(".page")).toHaveAttribute("data-page", "user-detail-singular");
+
+    expect(await classOf(page, "link-match-user")).toContain("router-link-active");
+    expect(await classOf(page, "link-match-user")).not.toContain("router-link-exact-active");
+    // The plural link is unrelated to /user/123.
+    expect(await classOf(page, "link-match-users")).not.toContain("router-link-active");
+  });
+
+  test("does not mark the root link active on a non-root route", async ({ page }) => {
+    await page.click("#link-match-users");
+    expect(await routerPath(page)).toBe("/users");
+
+    expect(await classOf(page, "link-match-root")).not.toContain("router-link-active");
+  });
+
+  test("exact-active distinguishes query and hash targets", async ({ page }) => {
+    await page.evaluate(() =>
+      (window as never as { __router: { navigate: (t: string) => Promise<unknown> } }).__router.navigate("/about?q=b"),
+    );
+    await expect(page.locator(".page")).toHaveAttribute("data-page", "about");
+
+    // Same pathname, different query — active but not the *same* target.
+    expect(await classOf(page, "link-query-a")).toContain("router-link-active");
+    expect(await classOf(page, "link-query-a")).not.toContain("router-link-exact-active");
+
+    await page.evaluate(() =>
+      (window as never as { __router: { navigate: (t: string) => Promise<unknown> } }).__router.navigate("/about#two"),
+    );
+    expect(await classOf(page, "link-hash-one")).toContain("router-link-active");
+    expect(await classOf(page, "link-hash-one")).not.toContain("router-link-exact-active");
+  });
+});

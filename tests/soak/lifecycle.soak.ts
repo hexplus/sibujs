@@ -26,7 +26,7 @@ import { signal } from "../../src/core/signals/signal";
 import { __resetQueryCache, clearQueryCache, query } from "../../src/data/query";
 import { getSubscriberCount } from "../../src/devtools/introspect";
 import type { RouteDef } from "../../src/plugins/router";
-import { createRouter, destroyRouter, KeepAliveRoute, navigate, Route } from "../../src/plugins/router";
+import { createRouter, destroyRouter, KeepAliveRoute, navigate, Route, Suspense } from "../../src/plugins/router";
 import { batch } from "../../src/reactivity/batch";
 
 const flush = async (n = 6) => {
@@ -383,6 +383,79 @@ describe("KeepAlive outlet soak", () => {
     await flush(10);
 
     expect(checkLeaks(), "bindings leaked across 1 000 KeepAlive outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
+  });
+});
+
+describe("router Suspense soak", () => {
+  /**
+   * A fallback/content node carrying real lifecycle resources, so the soak
+   * measures teardown rather than mere detachment. `checkLeaks()` counts
+   * registered disposers; an effect that is never stopped keeps its
+   * subscription regardless of where the node sits in the DOM.
+   */
+  const probe = (label: string) => {
+    const el = document.createElement("div");
+    el.textContent = label;
+    const [v, setV] = signal(0);
+    const stop = effect(() => v());
+    const onClick = () => setV(v() + 1);
+    el.addEventListener("click", onClick);
+    registerDisposer(el, () => {
+      stop();
+      el.removeEventListener("click", onClick);
+    });
+    return el;
+  };
+
+  it("1 000 create/fallback/resolve/dispose cycles return bindings to baseline", async () => {
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 1_000; i++) {
+      let resolveContent!: (el: HTMLElement) => void;
+      const pending = new Promise<HTMLElement>((r) => {
+        resolveContent = r;
+      });
+
+      const boundary = Suspense({ fallback: () => probe(`f${i}`), nodes: () => pending });
+      host.appendChild(boundary);
+      await flush();
+      resolveContent(probe(`c${i}`));
+      await flush();
+
+      dispose(boundary);
+      boundary.parentNode?.removeChild(boundary);
+    }
+
+    expect(host.childNodes.length, "Suspense left DOM behind across 1 000 cycles").toBe(0);
+    expect(checkLeaks(), "DOM bindings leaked across 1 000 Suspense cycles").toBeLessThanOrEqual(baseline + 2);
+  });
+
+  it("500 torn-down-while-pending cycles do not retain late resolutions", async () => {
+    const baseline = checkLeaks();
+    const resolvers: Array<() => void> = [];
+
+    for (let i = 0; i < 500; i++) {
+      let resolveContent!: (el: HTMLElement) => void;
+      const pending = new Promise<HTMLElement>((r) => {
+        resolveContent = r;
+      });
+
+      const boundary = Suspense({ fallback: () => probe(`f${i}`), nodes: () => pending });
+      host.appendChild(boundary);
+      await flush();
+
+      // Tear the boundary down while the content is still in flight, then let
+      // it resolve afterwards with a fully-built node.
+      dispose(boundary);
+      boundary.parentNode?.removeChild(boundary);
+      resolvers.push(() => resolveContent(probe(`late${i}`)));
+    }
+
+    for (const r of resolvers) r();
+    await flush(12);
+
+    expect(host.childNodes.length, "a late resolution resurrected DOM").toBe(0);
+    expect(checkLeaks(), "late Suspense resolutions leaked bindings").toBeLessThanOrEqual(baseline + 2);
   });
 });
 

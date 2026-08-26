@@ -53,6 +53,7 @@ Enforced by monotonic counters:
 | `infiniteQuery()` | `runId` | every new run |
 | `Route()` outlet | `navSeq` | every render pass |
 | `KeepAliveRoute()` outlet | `updateSeq` | every update pass, **and outlet disposal** |
+| router `Suspense()` boundary | `generation` | every render pass, **and boundary disposal** |
 
 For the KeepAlive outlet the distinction the invariant names is unusually easy
 to get wrong, because the outlet holds a second identifier that *looks* like an
@@ -99,6 +100,27 @@ request settles
       │
       └─► local commit    — gated on generation AND this observer's liveness
 ```
+
+### Stale-result disposal
+
+> Discarding a stale async result is not the same as dropping it.
+
+An async run that loses ownership usually resolves with something already
+**built** — a DOM node with live effects, listeners and registered disposers,
+created before the run discovered it had been superseded. Letting the reference
+go leaves those resources running against a node nobody will ever see.
+
+```text
+run loses ownership
+        ↓
+result already constructed?
+        ├── yes → dispose(result), then discard
+        └── no  → discard
+```
+
+The router `Suspense()` boundary is the clearest instance: its promise resolves
+with a fully constructed `Element`. See
+[router.md](./router.md#suspense-boundaries).
 
 ### Disposal invariant
 
@@ -231,5 +253,6 @@ detection therefore tests the `name` property rather than the constructor.
 | `infiniteQuery()` page | the run | superseded run | `runId` |
 | `mutation()` | the call | superseded call | run id |
 | SSR Suspense boundary | the boundary | stream abandoned | per-request id |
+| router `Suspense()` boundary | the boundary | boundary disposed, or anchor detached | `generation` + `tornDown` |
 | island activation | the mount scope | `cleanup()` | `activated` + `torndown` |
 | hydration | the container | container disposed | — |

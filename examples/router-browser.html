@@ -52,6 +52,8 @@
       createRouter({ mode: "history", base: "" });
       setRoutes([
         { path: HOME, component: page("home") },
+        { path: "/user", component: page("user") },
+        { path: "/user/:id", component: page("user-detail-singular") },
         { path: "/users", component: page("users") },
         { path: "/users/:id", component: page("user-detail") },
         { path: "/about", component: page("about") },
@@ -81,6 +83,23 @@
       nested.textContent = "Users";
       add(RouterLink({ to: "/users", nodes: nested }), "link-users");
 
+      // ---- Target-policy links (NAV-001) ------------------------------------
+      // External absolute URL: RouterLink must NOT intercept it; the browser's
+      // own navigation is left intact.
+      add(RouterLink({ to: "https://example.com/", nodes: "External" }), "link-external");
+      // Protocol-relative and dangerous schemes must never yield a live href.
+      add(RouterLink({ to: "//example.com/path", nodes: "Proto-relative" }), "link-proto-relative");
+      add(RouterLink({ to: "javascript:window.__pwned = true", nodes: "JS" }), "link-js");
+      add(RouterLink({ to: "data:text/html,<script>window.__pwned=true<\/script>", nodes: "Data" }), "link-data");
+      add(RouterLink({ to: "vbscript:msgbox(1)", nodes: "VB" }), "link-vbscript");
+
+      // ---- Active-matching links (LINK-001 / LINK-002) ----------------------
+      add(RouterLink({ to: "/user", nodes: "User (singular)" }), "link-match-user");
+      add(RouterLink({ to: "/users", nodes: "Users (plural)" }), "link-match-users");
+      add(RouterLink({ to: "/", nodes: "Root" }), "link-match-root");
+      add(RouterLink({ to: "/about?q=a", nodes: "Query A" }), "link-query-a");
+      add(RouterLink({ to: "/about#one", nodes: "Hash one" }), "link-hash-one");
+
       // App code prevents the default before the router's own listener runs.
       const prevented = add(RouterLink({ to: "/users", nodes: "Prevented" }), "link-prevented");
       prevented.addEventListener(
@@ -93,8 +112,36 @@
         true,
       );
 
+      // ---- Click instrumentation --------------------------------------------
+      // Records, for every click that reaches the document, whether anything
+      // upstream cancelled it. The router's own anchor listener runs in the
+      // bubble phase *before* this one, so `defaultPrevented` here is exactly
+      // "did RouterLink intercept this click?".
+      //
+      // The trailing preventDefault() keeps the test on-origin — the external
+      // link would otherwise really leave the page. It is deliberately scoped
+      // to that one link so it cannot alter the native behaviour the existing
+      // `target="_blank"` / modifier-click tests depend on, and it runs after
+      // the reading, so it cannot affect what was measured.
+      const clicks = [];
+      document.addEventListener("click", (e) => {
+        const anchor = e.target.closest ? e.target.closest("a") : null;
+        clicks.push({
+          id: anchor ? anchor.id : null,
+          href: anchor ? anchor.getAttribute("href") : null,
+          intercepted: e.defaultPrevented,
+        });
+        if (anchor && anchor.id === "link-external") e.preventDefault();
+      });
+
       // ---- Test hooks -------------------------------------------------------
       window.__router = {
+        clicks,
+        lastClick: () => clicks[clicks.length - 1] || null,
+        clearClicks: () => {
+          clicks.length = 0;
+        },
+        classOf: (id) => document.getElementById(id).className,
         path: () => route().path,
         params: () => route().params,
         hash: () => route().hash,

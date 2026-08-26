@@ -213,11 +213,11 @@ visible:
   "/login" -> "/dashboard" -> "/login" -> ...
 ```
 
-Security rules applied at every redirect and navigation target:
-
-- `javascript:`, `data:`, `vbscript:`, `blob:` URIs are refused.
-- Absolute and protocol-relative targets (`https://…`, `//…`) are refused as
-  open-redirect vectors (CWE-601).
+Every redirect target is a navigation target, and is validated by exactly the
+same policy as `navigate()` — see
+[Navigation target policy](#navigation-target-policy). Route `redirect`,
+`beforeEach`, `beforeEnter` and `beforeResolve` redirects are not special-cased:
+a target that one of them refuses is refused by all of them.
 
 ## Route tree ownership and the Outlet
 
@@ -350,12 +350,69 @@ if (!result.success && result.reason === "guard") {
 | `superseded` | a newer navigation started first | no — routine during rapid navigation |
 | `router-destroyed` | teardown cancelled it | no |
 | `redirect-loop` | exceeded the redirect hop limit | dev diagnostic |
-| `unsafe-target` | blocked scheme, or open-redirect refusal | dev diagnostic |
+| `unsafe-target` | target is not SPA-navigable — see [Navigation target policy](#navigation-target-policy) | dev diagnostic |
 | `duplicate` | identical to the current route | no |
 | `error` | unexpected fault | yes |
 
 `reason` is additive: `type` values are unchanged, so existing code branching on
 `type` is unaffected.
+
+## Navigation target policy
+
+Router navigation accepts **internal targets only**. A single private
+classifier decides, and every programmatic entrypoint calls it, so the rules
+cannot drift apart between them.
+
+| Kind | What it is | Router behaviour |
+|---|---|---|
+| `internal` | a path, `?query`, `#hash`, or relative reference | navigated |
+| `external` | absolute URL with an allowed scheme (`http:`, `https:`, `mailto:`, `tel:`, `ftp:`) | refused — SPA routing cannot service an off-origin URL, and an absolute target derived from untrusted input is an open-redirect vector (CWE-601) |
+| `unsafe` | dangerous scheme (`javascript:`, `data:`, `vbscript:`, `blob:`, `file:`, …) or protocol-relative `//host` | refused, and never rendered as a live `href` |
+
+Both refusals report `reason: "unsafe-target"`. The distinction between
+"dangerous" and "merely unsupported" is internal — it changes the diagnostic,
+not the outcome, and no public API was added for it.
+
+Protocol-relative `//host` is classified `unsafe` rather than `external`: it
+carries no scheme to vet and is the classic open-redirect obfuscation.
+
+### One policy, every entrypoint
+
+| Target | `navigate()` | RouterLink click | Redirect (route / `beforeEach` / `beforeEnter` / `beforeResolve`) |
+|---|---|---|---|
+| `/internal` | navigates | intercepts → SPA navigation | followed |
+| `?q=x` | navigates | intercepts → SPA navigation | followed |
+| `#hash` | navigates | intercepts → SPA navigation | followed |
+| `https://external` | refused, `unsafe-target` | **not intercepted** — native browser navigation | refused, `unsafe-target` |
+| `//external` | refused, `unsafe-target` | `href="#"`, click swallowed | refused, `unsafe-target` |
+| `javascript:` | refused, `unsafe-target` | `href="#"`, click swallowed | refused, `unsafe-target` |
+| `data:` | refused, `unsafe-target` | `href="#"`, click swallowed | refused, `unsafe-target` |
+
+RouterLink's external column is the one deliberate divergence, and it is
+explained under [Link interception](#link-interception).
+
+### Validation precedes side effects
+
+The target is classified **before** route resolution and before any history
+mutation. A cross-origin `pushState` throwing `SecurityError` is never the
+enforcement mechanism: it would report `error` rather than `unsafe-target`, and
+only after the navigation had already begun.
+
+### Classification is structural, not textual
+
+The classifier inspects the target's *structure*. A scheme exists only when the
+`:` precedes any `/`, `?` or `#`. That is what keeps these ordinary internal
+paths working, despite the dangerous-looking text they carry as **data**:
+
+```text
+/search?q=https%3A%2F%2Fexample.com    → internal
+/path/javascript%3Afoo                  → internal
+```
+
+Leading control characters and whitespace are stripped, and `\` is folded to
+`/`, before any check — browsers do the same when parsing a URL, so
+`"	//evil.com"` and `"/\/evil.com"` are classified on what the browser would
+actually resolve them to.
 
 ## Link interception
 
@@ -376,10 +433,103 @@ button !== 0              — middle or right click
 
 In every one of those cases the browser's own behaviour is left untouched.
 
+`RouterLink` also declines to intercept an **external absolute URL**:
+
+```ts
+RouterLink({ to: "https://example.com" })   // real href, native navigation
+```
+
+`RouterLink` performs SPA navigation only for internal router targets. An
+external URL is a perfectly good `<a href>`, but `RouterLink` is not an
+external-navigation API — intercepting one would feed an off-origin URL into
+SPA routing, where it is refused, leaving a link that silently does nothing at
+all. For a purely external link, an ordinary `<a href>` is the clearer choice;
+`RouterLink` is worth it only when the same component may render either an
+internal or an external target.
+
+A **dangerous** target is neutralized rather than delegated: the `href`
+collapses to `"#"` and the click is swallowed, so it neither routes nor scrolls
+the document.
+
 Note that engines differ in what that native behaviour *is*: Chromium fires
 `auxclick` for a middle click and opens a new tab for modifier clicks, while
 WebKit performs a real same-tab navigation. Both are correct; neither involves
 the router.
+
+## RouterLink active state
+
+Two classes, two different questions.
+
+```text
+activeClass       — is this link's target the current route, or an ancestor of it?
+exactActiveClass  — is this link's target the current location exactly?
+```
+
+Defaults are `router-link-active` and `router-link-exact-active`, overridable
+per link (`activeClass` / `exactActiveClass`) or per router
+(`linkActiveClass` / `linkExactActiveClass`).
+
+### activeClass — segment-boundary ancestor matching
+
+The target matches when it **is** the current pathname, or is one of its
+ancestors **on a path segment boundary**:
+
+```text
+current === target   OR   current starts with target + "/"
+```
+
+Raw prefix matching would make `/user` active on `/users`, which is why the
+boundary is explicit:
+
+| Link | Current route | `active` |
+|---|---|---|
+| `/user` | `/users` | no — different segment |
+| `/product` | `/products` | no — different segment |
+| `/user` | `/user` | yes |
+| `/user` | `/user/123` | yes — descendant |
+| `/users` | `/users/123` | yes — descendant |
+
+This is `RouterLink` state only; route *matcher* semantics are untouched. It
+also operates on resolved URLs, not route pattern strings — a link to `/users`
+is active on `/users/123` whether that route was declared as `/users/:id` or
+literally.
+
+### Root is active only on root
+
+```text
+link "/"   current "/"        → active + exact-active
+link "/"   current "/users"   → NOT active
+```
+
+Every path descends from `/`, so generic ancestor logic would light up a "Home"
+link on every page in the app. That is not useful navigation UI, so `/` is
+special-cased: it is active only when the current pathname is `/`. This is a
+deliberate contract, pinned by tests — not a side effect of the prefix rule.
+
+### exactActiveClass — full target identity
+
+`exactActive` compares the **whole normalized target**: pathname *and* query
+*and* hash.
+
+```text
+/search?q=a   vs   /search?q=a    → active + exact-active
+/search?q=a   vs   /search?q=b    → active, NOT exact-active
+/docs#one     vs   /docs#one      → active + exact-active
+/docs#one     vs   /docs#two      → active, NOT exact-active
+```
+
+`/search?q=a` and `/search?q=b` are distinct navigation targets, so a link to
+one is not "exactly" the other. Query parameter **order is not significant**:
+`?b=2&a=1` and `?a=1&b=2` are the same target.
+
+Note that this is `RouterLink`'s decision alone. The `KeepAlive` cache keys on
+`path + query + hash` too, but the two are independent choices that happen to
+agree; neither implies the other.
+
+### Trailing slashes
+
+Normalized away on both sides, so `/users/` and `/users` are the same target.
+Root remains `/`.
 
 ## Focus
 
@@ -387,6 +537,69 @@ The router **delegates focus entirely to the application**. It never moves,
 resets, or restores focus on navigation or history traversal. Applications
 needing route-change focus management — an accessibility requirement for many —
 should implement it in an `afterEach` hook.
+
+## Suspense boundaries
+
+`Suspense()` from `sibujs/plugins` renders deferred content behind an optional
+fallback. Its lifecycle contract has two halves.
+
+### Ownership
+
+> A Suspense boundary owns every node it creates or installs. It disposes its
+> fallback and its content when they are replaced or when the boundary is torn
+> down — exactly once each.
+
+Native detachment is **not** cleanup. A `removeChild`'d subtree keeps its
+effects, listeners and registered disposers alive, firing against DOM nobody can
+see. Every removal on this path disposes first, then detaches.
+
+```text
+fallback mounted  →  content resolves  →  fallback disposed, content committed
+content committed →  boundary disposed →  content disposed
+```
+
+### Async completion grants no commit permission
+
+> Async resolutions that arrive after the boundary loses ownership are discarded
+> **and lifecycle-disposed**.
+
+A boundary loses ownership when it is torn down, when a newer generation
+supersedes it, or when its anchor is detached. The check happens immediately
+before the synchronous commit, with nothing running in between.
+
+The distinction that matters: a promise usually resolves with an **already
+constructed** `Element`, whose effects and listeners were created before the
+boundary discovered it had lost ownership. Dropping the reference would leak
+them, so the stale result is disposed instead:
+
+```text
+boundary active, promise pending
+        ↓
+boundary disposed
+        ↓
+component finishes building its Element (+ effects, listeners, disposers)
+        ↓
+promise resolves with that Element
+        ↓
+Suspense: not my generation → dispose(element), no insertion
+```
+
+There is no DOM resurrection, no fallback resurrection, and no double cleanup.
+
+### Single-shot
+
+`props.nodes()` is invoked exactly once, so only one async generation is
+reachable per boundary. A generation token is still carried, because teardown
+must be able to invalidate the in-flight one; a generation *race* between two
+concurrent runs is not reachable through the public API.
+
+### Rejection
+
+A rejected promise removes the fallback and commits a `div.suspense-error`
+carrying the error message (`textContent`, never `innerHTML`). The boundary
+stays lifecycle-safe: the fallback is disposed, no resolved node leaks, and a
+rejection arriving after teardown produces no unhandled rejection and inserts
+nothing.
 
 ## DOM-less runtimes and the memory router
 
