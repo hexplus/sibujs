@@ -1,6 +1,7 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -137,7 +138,7 @@ export function resource<T, S = void>(
       runCallback("resource onSuccess", () => options.onSuccess?.(result));
     } catch (err) {
       if (version !== fetchVersion || disposed) return;
-      if (err instanceof DOMException && err.name === "AbortError") {
+      if (isAbortError(err)) {
         if (version === fetchVersion) setLoading(false);
         return;
       }

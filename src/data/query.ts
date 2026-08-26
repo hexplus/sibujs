@@ -4,6 +4,7 @@ import { signal } from "../core/signals/signal";
 import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import { globalSingleton } from "../utils/globalSingleton";
+import { isAbortError } from "./abort";
 import { notifyListeners, runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -128,15 +129,6 @@ const globalQueryCache = globalSingleton(Symbol.for("sibujs.query.cache.v1"), ()
 
 function getActiveQueryCache(): Map<string, CacheEntry> {
   return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;
-}
-
-/**
- * Recognise an abort across environments. `DOMException` is not guaranteed
- * everywhere a fetcher might run, and userland fetchers commonly reject with a
- * plain `{ name: "AbortError" }`.
- */
-function isAbortError(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
 }
 
 /**

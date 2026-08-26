@@ -1,3 +1,5 @@
+import { createAbortError } from "./abort";
+
 /**
  * Configurable retry strategies for async operations.
  * Used by `resource` and `query` for automatic error recovery.
@@ -86,30 +88,64 @@ export async function withRetry<T>(
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (signal?.aborted) throw createAbortError();
     try {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       return await fn();
     } catch (error) {
       lastError = error;
+
+      // CANCELLATION OUTRANKS RETRY POLICY.
+      //
+      // A rejection that arrives once the signal is already aborted is a
+      // consequence of the cancellation, not an independent failure worth
+      // retrying. Checking here — before `shouldRetry` and before `onRetry` —
+      // is what stops a cancelled request from reporting a retry it will never
+      // perform, and from waiting out a backoff nobody is waiting for.
+      if (signal?.aborted) throw createAbortError();
+
       if (attempt >= maxRetries || !shouldRetry(error, attempt)) throw error;
       const delay = calculateDelay(attempt, strategy, baseDelay, maxDelay, jitter);
       onRetry?.(error, attempt, delay);
-      await new Promise<void>((resolve, reject) => {
-        let onAbort: (() => void) | null = null;
-        const timer = setTimeout(() => {
-          if (onAbort && signal) signal.removeEventListener("abort", onAbort);
-          resolve();
-        }, delay);
-        if (signal) {
-          onAbort = () => {
-            clearTimeout(timer);
-            reject(new DOMException("Aborted", "AbortError"));
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-        }
-      });
+      await waitForRetryDelay(delay, signal);
     }
   }
   throw lastError;
+}
+
+/**
+ * Sleep for the backoff, resolving on the timer and rejecting on abort.
+ *
+ * THE RACE THIS CLOSES: an `AbortSignal` does not replay a past `abort` event to
+ * a listener registered afterwards. Attaching the listener without first testing
+ * `signal.aborted` therefore meant an already-cancelled operation slept the full
+ * backoff — up to `maxDelay` — before anything noticed. The guarantee here is
+ * that there is no instant in which the signal can be aborted while neither an
+ * `aborted` check nor a live listener can observe it: the state is tested before
+ * the listener is attached AND again immediately after.
+ *
+ * Settles exactly once, and always removes the listener and clears the timer.
+ */
+function waitForRetryDelay(delay: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      action();
+    };
+
+    const onAbort = () => finish(() => reject(createAbortError()));
+    const timer = setTimeout(() => finish(resolve), delay);
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+      // Closes the window between the check above and this registration.
+      if (signal.aborted) onAbort();
+    }
+  });
 }

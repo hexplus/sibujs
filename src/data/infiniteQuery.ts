@@ -2,6 +2,7 @@ import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -63,15 +64,6 @@ export interface InfiniteQueryResult<TData> {
   refetch: () => Promise<void>;
   /** Cleanup */
   dispose: () => void;
-}
-
-/**
- * Recognise an abort across environments. `DOMException` is not available in
- * every runtime a fetcher might execute in, and userland fetchers commonly
- * reject with a plain `{ name: "AbortError" }`.
- */
-function isAbortError(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
 }
 
 export function infiniteQuery<TData, TPageParam = number>(

@@ -756,9 +756,23 @@ export function island(id: string, component: () => HTMLElement): HTMLElement {
  * Security: uses `hasOwnProperty.call` to guard against prototype-pollution
  * lookups (e.g. an island id of `__proto__` must not resolve to `Object.prototype`).
  */
+/**
+ * Has this island already been activated by some hydration pass?
+ *
+ * `data-sibu-hydrated` is the authoritative marker and every hydration entry
+ * point must consult it — including the one that wrote it. A hydrated client
+ * tree deliberately KEEPS its `data-sibu-island` attribute so consumers can
+ * re-query it, which means marker-blind candidate selection re-finds live
+ * islands and replaces them, destroying their state and listeners.
+ */
+function isAlreadyHydrated(element: Element): boolean {
+  return element.hasAttribute("data-sibu-hydrated");
+}
+
 export function hydrateIslands(container: HTMLElement, islands: Record<string, () => HTMLElement>): void {
   const markers = container.querySelectorAll("[data-sibu-island]");
   for (const marker of Array.from(markers)) {
+    if (isAlreadyHydrated(marker)) continue;
     const id = marker.getAttribute("data-sibu-island") ?? "";
     if (!Object.hasOwn(islands, id)) continue;
     const factory = islands[id];
@@ -790,6 +804,7 @@ export function hydrateProgressively(
   const cleanups: Array<() => void> = [];
 
   for (const marker of Array.from(markers)) {
+    if (isAlreadyHydrated(marker)) continue;
     const id = marker.getAttribute("data-sibu-island") ?? "";
     if (!Object.hasOwn(islands, id)) continue;
     const factory = islands[id];
@@ -803,6 +818,17 @@ export function hydrateProgressively(
             // torn down, otherwise it stays live and re-fires the failing
             // hydration on every subsequent intersection (leak + repeat error).
             observer.disconnect();
+            // Re-check at EXECUTION time, not only at discovery: the observer
+            // fires asynchronously, so another hydration pass may have
+            // activated this island while this trigger was pending.
+            //
+            // Two ways that shows up. The marker may have gained the hydrated
+            // attribute; or — because activation REPLACES the marker node — the
+            // node this observer captured may already be the detached original,
+            // in which case the live island is a different element carrying the
+            // attribute and this one has no parent. Hydrating a detached node
+            // would build a second island nobody can see and leak it.
+            if (isAlreadyHydrated(marker) || marker.parentNode === null) break;
             const clientTree = factory();
             // Replace strategy: same fix as `hydrate()` — in-place attribute
             // copy leaves reactive bindings wired to the orphan client tree

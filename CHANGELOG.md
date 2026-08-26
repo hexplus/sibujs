@@ -8,6 +8,47 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Retry cancellation now wins immediately.** A request that rejected *after*
+  its `AbortSignal` had already aborted was still treated as a retryable
+  failure: `shouldRetry` was consulted, `onRetry` fired, and the backoff was
+  scheduled. The backoff itself then attached its `abort` listener without
+  first checking `signal.aborted` — and a signal does not replay a past `abort`
+  event — so cancellation was delayed by the entire delay, up to `maxDelay`.
+  This affected every primitive built on `withRetry()` (`resource`, `query`,
+  `infiniteQuery`, `mutation` and data loaders).
+- **Data primitives now share one `AbortError` classifier.** `resource` and
+  `mutation` recognised only `DOMException`, while `query` and `infiniteQuery`
+  accepted any object named `AbortError`. A fetcher rejecting with an ordinary
+  `Error` named `AbortError` was therefore silently ignored by two primitives
+  and stored as application error state by the other two. Classification is by
+  `name`, never by message: `new Error("AbortError")` remains a real failure.
+- **Progressive island hydration is idempotent.** `hydrateIslands()` and
+  `hydrateProgressively()` selected candidates without consulting
+  `data-sibu-hydrated`, and a hydrated island deliberately keeps its
+  `data-sibu-island` marker — so a second pass over an overlapping root
+  re-ran the factory and replaced the live subtree, destroying its state and
+  listeners. Both now skip already-hydrated islands, at candidate discovery and
+  again when an asynchronous trigger actually fires.
+- **`RouterLink` preserves native behaviour for `download` anchors.** A link
+  carrying `download` was `preventDefault()`ed and routed, so the file never
+  downloaded and a history entry appeared for a URL that was never a view.
+  Presence is what counts — `download`, `download=""` and `download="a.pdf"`
+  all mean the same thing.
+- **String and reactive-string `style` props are sanitized like object styles.**
+  Object-valued styles ran every property through the CSS sanitizer while the
+  string forms went straight to `setAttribute("style", …)`, making the string
+  form a silent escape hatch (`url()` exfiltration, `expression()`, `behavior:`,
+  `-moz-binding`, `@import`). All whole-style-string sinks — the tag factory,
+  reactive bindings, `html``  `` expressions, prop spreads and `RouterLink` —
+  now share one declaration-list policy.
+
+  Two observable consequences: a `url()` in a string style is now dropped, as it
+  already was in the object form; and string styles are re-serialized
+  canonically by the CSS parser, so `"width:10px"` reads back as `width: 10px`.
+
+
 A correctness and release-hardening pass over the reactive core, keyed lists,
 error reporting and packaging. No public API was removed or renamed; one new
 export and one additive field were added.

@@ -194,6 +194,64 @@ export function sanitizeCSSValue(value: string): string {
 }
 
 /**
+ * Sanitize a WHOLE `style` attribute — a declaration list, not one value.
+ *
+ * `sanitizeCSSValue` judges a single property value. A style attribute is a
+ * list of them, so the two are not interchangeable: applied to a whole
+ * declaration list, `sanitizeCSSValue` can only answer all-or-nothing, and
+ * applied to nothing at all the list is simply trusted. String-valued `style`
+ * props took the latter path while object-valued ones were sanitized per
+ * property, so the same authoring intent had two different security policies:
+ *
+ *   style: { background: dangerous }   → sanitized
+ *   style: "background: dangerous"     → raw
+ *
+ * This closes that gap by splitting the list properly and applying the EXISTING
+ * per-value policy to each declaration. Both authoring forms now behave alike.
+ *
+ * Parsing is delegated to the engine's own `CSSStyleDeclaration` rather than a
+ * hand-rolled split on `;`, which would corrupt declarations that legitimately
+ * contain semicolons inside quoted strings or functions (`url('a;b.png')`,
+ * `content: 'a;b'`). Custom properties and `!important` survive. The probe
+ * element is created detached and never inserted, so assigning to it parses
+ * without fetching anything or affecting layout.
+ *
+ * Without a DOM (SSR in a bare runtime) there is no parser available, so the
+ * conservative all-or-nothing check applies: a list containing anything
+ * dangerous is dropped entirely rather than partially trusted.
+ */
+export function sanitizeStyleAttribute(cssText: string): string {
+  const input = String(cssText);
+  if (input.trim() === "") return "";
+
+  if (typeof document === "undefined") {
+    return sanitizeCSSValue(input) === "" ? "" : input;
+  }
+
+  const probe = document.createElement("div");
+  try {
+    probe.style.cssText = input;
+    /* v8 ignore next 3 -- assigning cssText does not throw in supported engines */
+  } catch {
+    return "";
+  }
+
+  const declarations: string[] = [];
+  for (let i = 0; i < probe.style.length; i++) {
+    const property = probe.style[i];
+    const value = probe.style.getPropertyValue(property);
+    // Check the value on its own AND joined to its property name: the danger
+    // list contains property-qualified forms (`behavior:`, `filter:progid`)
+    // that only match once the name is present.
+    if (sanitizeCSSValue(value) === "") continue;
+    if (sanitizeCSSValue(`${property}:${value}`) === "") continue;
+    const priority = probe.style.getPropertyPriority(property);
+    declarations.push(`${property}: ${value}${priority ? ` !${priority}` : ""}`);
+  }
+  return declarations.join("; ");
+}
+
+/**
  * Sanitizes HTML by stripping all tags, leaving only text content.
  *
  * A naive `replace(/<[^>]*>/g, "")` is NOT safe: it leaves dangerous residue
@@ -325,6 +383,11 @@ export function sanitizeAttributeString(attr: string, value: string): string {
   const lower = attr.toLowerCase();
   if (lower === "srcset") return sanitizeSrcset(value);
   if (URL_ATTRIBUTES.has(lower)) return sanitizeUrl(value);
+  // `style` being an allowed attribute NAME does not make an arbitrary style
+  // VALUE trusted. Every generic writer (reactive bindings, html`` expressions,
+  // prop spreads) funnels through here, so the declaration-list policy applies
+  // to all of them rather than only to the tag factory.
+  if (lower === "style") return sanitizeStyleAttribute(value);
   return value;
 }
 

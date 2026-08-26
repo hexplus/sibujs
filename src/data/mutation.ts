@@ -1,6 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -127,7 +128,7 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
       // A mutation aborted by reset()/supersession must not surface as an
       // error state — it was intentionally cancelled.
-      if (errorObj instanceof DOMException && errorObj.name === "AbortError") throw errorObj;
+      if (isAbortError(errorObj)) throw errorObj;
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;
@@ -173,7 +174,7 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       // failures aren't completely invisible when onError isn't wired.
       execute(variables).catch((err) => {
         // An abort (reset()/supersession) is intentional — don't warn for it.
-        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (isAbortError(err)) return;
         if (typeof console !== "undefined") {
           console.warn("[SibuJS mutation] mutate() failed; check `.error()` signal or onError option.", err);
         }

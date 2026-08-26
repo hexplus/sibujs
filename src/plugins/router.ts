@@ -3,7 +3,7 @@ import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
-import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
@@ -2595,8 +2595,9 @@ export function RouterLink(
         if (safe) link.setAttribute(key, safe);
       } else if (lkey === "style") {
         // Inline style is a CSS-injection sink (url() exfiltration, legacy
-        // expression()/behavior). Match the tagFactory style path.
-        link.setAttribute(key, sanitizeCSSValue(str));
+        // expression()/behavior). Uses the shared declaration-list sanitizer so
+        // one dangerous declaration no longer discards the safe ones with it.
+        link.setAttribute(key, sanitizeStyleAttribute(str));
       } else {
         link.setAttribute(key, str);
       }
@@ -2626,6 +2627,15 @@ export function RouterLink(
     if (e.defaultPrevented || target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
       return;
     }
+    // `download` means the anchor is a file transfer, not a navigation: the
+    // browser saves the resource and never leaves the page. Routing it instead
+    // swallowed the download entirely and pushed a history entry for a URL that
+    // was never meant to become a view.
+    //
+    // Presence, not truthiness — `download`, `download=""` and
+    // `download="report.pdf"` all carry the same meaning, and the empty-string
+    // form is the common one.
+    if (link.hasAttribute("download")) return;
     // An external absolute URL is a legitimate `<a href>`, and RouterLink is
     // not an external-navigation API: leave the browser's own behaviour alone
     // rather than feeding an off-origin URL into SPA routing, where it would be
