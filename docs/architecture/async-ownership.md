@@ -51,8 +51,10 @@ Enforced by monotonic counters:
 | `hydrateRouter` bootstrap | captures `navEpoch` | — re-checked at the commit |
 | `query()` | `entry.generation` | every new request on that entry, **and abandonment** |
 | `infiniteQuery()` | `runId` | every new run |
-| `Route()` outlet | `navSeq` | every render pass |
+| `Route()` outlet | `navSeq` | every render pass, **and outlet disposal** |
+| `Outlet()` (nested) | `navSeq` | every update pass, **and outlet disposal** |
 | `KeepAliveRoute()` outlet | `updateSeq` | every update pass, **and outlet disposal** |
+| router `Suspense()` boundary | `generation` | every render pass, **and boundary disposal** |
 
 For the KeepAlive outlet the distinction the invariant names is unusually easy
 to get wrong, because the outlet holds a second identifier that *looks* like an
@@ -99,6 +101,133 @@ request settles
       │
       └─► local commit    — gated on generation AND this observer's liveness
 ```
+
+### User-code reentrancy invariant
+
+> Ownership must be revalidated after executing arbitrary user code, even when
+> no `await` occurs.
+
+An `await` is not the only way ownership moves. Synchronous user code can
+navigate, dispose its own owner, unmount a subtree, or otherwise invalidate the
+current generation — and it runs *between* the check and the commit:
+
+```text
+OWNERSHIP CHECK
+      ↓
+ARBITRARY USER CODE      ← component(), fallback(), a hook, a callback
+      ↓
+OWNERSHIP CHECK AGAIN
+      ↓
+COMMIT
+```
+
+Every arbitrary user-code boundary between validation and commit requires a
+second validation. Two corollaries:
+
+- **Re-read the parent.** A `parentNode` captured before user code ran is not
+  evidence the outlet is still mounted after it returns.
+- **`parentNode` is not a liveness test.** A subtree detached from the document
+  still has internal parent links, so a node orphaned without disposal looks
+  "attached" from the inside. Liveness is a `torn`/generation flag set by
+  disposal, never a DOM query.
+
+Where the check runs before user code as well as after, stale work never invokes
+user code at all — the strongest form, because a component factory may have side
+effects of its own.
+
+### Load-vs-instantiate invariant
+
+> Resolving *how* to build something is not building it.
+
+A loader may fetch a module, resolve a factory, and cache both. It must never
+invoke user code merely to inspect what that code returns: a speculative call
+runs side effects the framework cannot undo, and its result is either leaked or
+disposed — and if the result happens to be the very instance that will later be
+mounted, disposing it corrupts the mount.
+
+```text
+LOAD DEFINITION
+      ↓
+no user component execution
+      ↓
+a generation needs an instance
+      ↓
+INVOKE ONCE  →  Element | Promise<Element>
+      ↓
+ownership check
+      ↓
+COMMIT or DISPOSE
+```
+
+Two shapes to avoid:
+
+```text
+invoke for validation → discard/dispose → invoke again for real
+AsyncComponent resolves E → cache `() => E` → dispose E → mount E again
+```
+
+Classification must never require duplicate user-code execution: detect a
+thenable on the *real* invocation instead of calling once to decide and again to
+use.
+
+The same boundary governs **preloading**:
+
+```text
+PRELOAD
+   ↓
+module/factory resolution only
+   ↓
+NO COMPONENT INVOCATION
+   ↓
+NO DOM
+   ↓
+NO LIFECYCLE RESOURCES
+```
+
+`preload ≠ instantiate`. Preloading may run module-loading machinery; it may not
+run application component code. Where a component form has nothing separately
+loadable — a directly supplied factory, however async — preloading is a no-op
+rather than a speculative call. See
+[router.md § Preloading](./router.md#preloading).
+
+And the rule that makes that enforceable rather than aspirational:
+
+> Preloadability is explicit metadata or branding. It is never inferred by
+> executing application code, and never by parsing it.
+
+Both inference routes fail, for the same underlying reason — neither runtime
+behaviour nor source representation is a declaration of intent:
+
+| Inference | Why it fails |
+|---|---|
+| call it and inspect the result | that *is* instantiation; the side effects have already happened |
+| `constructor.name === "AsyncFunction"` | an async component is indistinguishable from an async module loader |
+| `toString()` contains `import(` | ordinary components mention it in strings and comments; bundlers rewrite real ones away |
+
+A brand set at registration is metadata: it survives compilation, bundling and
+minification, because it is part of what the value *is* rather than how it was
+written.
+
+### Stale-result disposal
+
+> Discarding a stale async result is not the same as dropping it.
+
+An async run that loses ownership usually resolves with something already
+**built** — a DOM node with live effects, listeners and registered disposers,
+created before the run discovered it had been superseded. Letting the reference
+go leaves those resources running against a node nobody will ever see.
+
+```text
+run loses ownership
+        ↓
+result already constructed?
+        ├── yes → dispose(result), then discard
+        └── no  → discard
+```
+
+The router `Suspense()` boundary is the clearest instance: its promise resolves
+with a fully constructed `Element`. See
+[router.md](./router.md#suspense-boundaries).
 
 ### Disposal invariant
 
@@ -224,12 +353,14 @@ detection therefore tests the `name` property rather than the constructor.
 | Subsystem | Owner | Cancels when | Generation guard |
 |---|---|---|---|
 | router navigation | the navigation transaction | superseded, or router destroyed | `navEpoch` |
-| `Route()` outlet | the update pass | superseded, or anchor disposed | `navSeq` |
+| `Route()` outlet | the update pass | superseded, or anchor disposed | `navSeq` + `routeTorn` |
+| `Outlet()` (nested) | the update pass | superseded, or outlet disposed | `navSeq` + `outletTorn` |
 | `KeepAliveRoute()` outlet | the update pass | superseded, or outlet disposed | `updateSeq` + `kaTorn` |
 | `hydrateRouter` bootstrap | the bootstrap | — | captured `navEpoch` |
 | `query()` fetch | the **cache entry** | entry cleared or GC'd | `entry.generation` |
 | `infiniteQuery()` page | the run | superseded run | `runId` |
 | `mutation()` | the call | superseded call | run id |
 | SSR Suspense boundary | the boundary | stream abandoned | per-request id |
+| router `Suspense()` boundary | the boundary | boundary disposed, or anchor detached | `generation` + `tornDown` |
 | island activation | the mount scope | `cleanup()` | `activated` + `torndown` |
 | hydration | the container | container disposed | — |

@@ -26,7 +26,16 @@ import { signal } from "../../src/core/signals/signal";
 import { __resetQueryCache, clearQueryCache, query } from "../../src/data/query";
 import { getSubscriberCount } from "../../src/devtools/introspect";
 import type { RouteDef } from "../../src/plugins/router";
-import { createRouter, destroyRouter, KeepAliveRoute, navigate, Route } from "../../src/plugins/router";
+import {
+  createRouter,
+  destroyRouter,
+  KeepAliveRoute,
+  navigate,
+  Outlet,
+  Route,
+  Suspense,
+  setRoutes,
+} from "../../src/plugins/router";
 import { batch } from "../../src/reactivity/batch";
 
 const flush = async (n = 6) => {
@@ -383,6 +392,169 @@ describe("KeepAlive outlet soak", () => {
     await flush(10);
 
     expect(checkLeaks(), "bindings leaked across 1 000 KeepAlive outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
+  });
+});
+
+describe("router Suspense soak", () => {
+  /**
+   * A fallback/content node carrying real lifecycle resources, so the soak
+   * measures teardown rather than mere detachment. `checkLeaks()` counts
+   * registered disposers; an effect that is never stopped keeps its
+   * subscription regardless of where the node sits in the DOM.
+   */
+  const probe = (label: string) => {
+    const el = document.createElement("div");
+    el.textContent = label;
+    const [v, setV] = signal(0);
+    const stop = effect(() => v());
+    const onClick = () => setV(v() + 1);
+    el.addEventListener("click", onClick);
+    registerDisposer(el, () => {
+      stop();
+      el.removeEventListener("click", onClick);
+    });
+    return el;
+  };
+
+  it("1 000 create/fallback/resolve/dispose cycles return bindings to baseline", async () => {
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 1_000; i++) {
+      let resolveContent!: (el: HTMLElement) => void;
+      const pending = new Promise<HTMLElement>((r) => {
+        resolveContent = r;
+      });
+
+      const boundary = Suspense({ fallback: () => probe(`f${i}`), nodes: () => pending });
+      host.appendChild(boundary);
+      await flush();
+      resolveContent(probe(`c${i}`));
+      await flush();
+
+      dispose(boundary);
+      boundary.parentNode?.removeChild(boundary);
+    }
+
+    expect(host.childNodes.length, "Suspense left DOM behind across 1 000 cycles").toBe(0);
+    expect(checkLeaks(), "DOM bindings leaked across 1 000 Suspense cycles").toBeLessThanOrEqual(baseline + 2);
+  });
+
+  it("500 torn-down-while-pending cycles do not retain late resolutions", async () => {
+    const baseline = checkLeaks();
+    const resolvers: Array<() => void> = [];
+
+    for (let i = 0; i < 500; i++) {
+      let resolveContent!: (el: HTMLElement) => void;
+      const pending = new Promise<HTMLElement>((r) => {
+        resolveContent = r;
+      });
+
+      const boundary = Suspense({ fallback: () => probe(`f${i}`), nodes: () => pending });
+      host.appendChild(boundary);
+      await flush();
+
+      // Tear the boundary down while the content is still in flight, then let
+      // it resolve afterwards with a fully-built node.
+      dispose(boundary);
+      boundary.parentNode?.removeChild(boundary);
+      resolvers.push(() => resolveContent(probe(`late${i}`)));
+    }
+
+    for (const r of resolvers) r();
+    await flush(12);
+
+    expect(host.childNodes.length, "a late resolution resurrected DOM").toBe(0);
+    expect(checkLeaks(), "late Suspense resolutions leaked bindings").toBeLessThanOrEqual(baseline + 2);
+  });
+});
+
+describe("nested Outlet soak", () => {
+  /** A child node carrying real lifecycle resources. */
+  const child = (label: string) => {
+    const el = document.createElement("div");
+    el.textContent = label;
+    const [v, setV] = signal(0);
+    const stop = effect(() => v());
+    const onClick = () => setV(v() + 1);
+    el.addEventListener("click", onClick);
+    registerDisposer(el, () => {
+      stop();
+      el.removeEventListener("click", onClick);
+    });
+    return el;
+  };
+
+  const layout = () => {
+    const el = document.createElement("div");
+    el.appendChild(Outlet());
+    return el;
+  };
+
+  it("500 nested child mount/replace cycles return bindings to baseline", async () => {
+    createRouter({ mode: "history", base: "" });
+    setRoutes([
+      {
+        path: "/parent",
+        component: layout,
+        children: [
+          { path: "/a", component: () => child("a") },
+          { path: "/b", component: () => child("b") },
+        ],
+      },
+    ]);
+    const anchorNode = host.appendChild(Route());
+
+    // Warm up so first-run singletons (component cache, validation probes) are
+    // not counted against the baseline.
+    await navigate("/parent/a");
+    await flush();
+    await navigate("/parent/b");
+    await flush();
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 500; i++) {
+      await navigate(i % 2 === 0 ? "/parent/a" : "/parent/b");
+      await flush();
+    }
+
+    // Exactly one child is mounted, and nothing accumulated.
+    expect(host.querySelectorAll("div").length, "nested Outlet accumulated DOM").toBeLessThanOrEqual(2);
+    expect(checkLeaks(), "bindings leaked across 500 nested Outlet cycles").toBeLessThanOrEqual(baseline + 2);
+
+    dispose(anchorNode);
+    anchorNode.parentNode?.removeChild(anchorNode);
+    destroyRouter();
+  });
+
+  it("300 outlet mount/teardown cycles do not accumulate tracking", async () => {
+    createRouter({ mode: "history", base: "" });
+    setRoutes([
+      {
+        path: "/parent",
+        component: layout,
+        children: [{ path: "/a", component: () => child("a") }],
+      },
+    ]);
+
+    // Warm the component cache before measuring.
+    const warm = host.appendChild(Route());
+    await navigate("/parent/a");
+    await flush();
+    dispose(warm);
+    warm.parentNode?.removeChild(warm);
+    const baseline = checkLeaks();
+
+    for (let i = 0; i < 300; i++) {
+      const node = host.appendChild(Route());
+      await navigate("/parent/a");
+      await flush();
+      dispose(node);
+      node.parentNode?.removeChild(node);
+    }
+
+    expect(host.childNodes.length, "Route/Outlet left DOM behind").toBe(0);
+    expect(checkLeaks(), "bindings leaked across 300 Outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
+    destroyRouter();
   });
 });
 

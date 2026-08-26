@@ -884,8 +884,10 @@ describe("ComponentLoader", () => {
     await wait(120);
     // First load failed -> error node visible
     expect(container.querySelector(".route-error")).toBeTruthy();
-    // Direct loadComponent while error cache is hot must reject quickly.
-    await expect(r.loadComponent({ path: "/ef", component: failing }, "/ef")).rejects.toThrow();
+    // Instantiating while the error cache is hot must reject quickly.
+    const def = { path: "/ef", component: failing };
+    const plan = await r.loadPlan(def, "/ef");
+    await expect(r.instantiateComponent(plan, def, "/ef")).rejects.toThrow();
   });
 
   it("preloadRoute warms the cache and swallows errors", async () => {
@@ -903,28 +905,33 @@ describe("ComponentLoader", () => {
       { path: "/", component: makeComp("Home") },
       { path: "/r", redirect: "/" },
     ]);
-    await expect(r.loadComponent({ path: "/r", redirect: "/" } as any, "/r")).rejects.toThrow(
-      /does not have a component/,
-    );
+    await expect(r.loadPlan({ path: "/r", redirect: "/" } as any, "/r")).rejects.toThrow(/does not have a component/);
   });
 
   it("validates that a sync component returns an Element", async () => {
     const r = createRouter([{ path: "/", component: makeComp("Home") }]);
     const bad = (() => "not-an-element") as any;
-    await expect(r.loadComponent({ path: "/bad", component: bad }, "/bad")).rejects.toThrow(/must return Element/);
+    const def = { path: "/bad", component: bad };
+    // Loading never invokes the factory, so the plan resolves fine...
+    const plan = await r.loadPlan(def, "/bad");
+    // ...and the return value is validated on the instance that would be mounted.
+    await expect(r.instantiateComponent(plan, def, "/bad")).rejects.toThrow(/must return Element/);
   });
 
   it("wraps async component module that lacks a default Element", async () => {
     const r = createRouter([{ path: "/", component: makeComp("Home") }]);
     const badAsync = lazy(async () => ({ default: (() => "nope") as any }));
-    await expect(r.loadComponent({ path: "/ba", component: badAsync }, "/ba")).rejects.toThrow();
+    const def = { path: "/ba", component: badAsync };
+    const plan = await r.loadPlan(def, "/ba");
+    await expect(r.instantiateComponent(plan, def, "/ba")).rejects.toThrow();
   });
 
   it("extracts a component from an async loader returning a bare function", async () => {
     const r = createRouter([{ path: "/", component: makeComp("Home") }]);
     const asyncFn = (async () => makeComp("BareFn")) as any;
-    const loaded = await r.loadComponent({ path: "/bf", component: asyncFn }, "/bf");
-    expect(loaded()).toBeInstanceOf(Element);
+    const def = { path: "/bf", component: asyncFn };
+    const plan = await r.loadPlan(def, "/bf");
+    expect(await r.instantiateComponent(plan, def, "/bf")).toBeInstanceOf(Element);
   });
 
   it("extracts a component from an async loader returning an Element directly", async () => {
@@ -934,8 +941,15 @@ describe("ComponentLoader", () => {
       el.textContent = "DirectEl";
       return el;
     }) as any;
-    const loaded = await r.loadComponent({ path: "/de", component: asyncEl }, "/de");
-    expect(loaded()).toBeInstanceOf(Element);
+    const def = { path: "/de", component: asyncEl };
+    const plan = await r.loadPlan(def, "/de");
+    const first = await r.instantiateComponent(plan, def, "/de");
+    expect(first).toBeInstanceOf(Element);
+    // A direct AsyncComponent is never collapsed into a reusable factory: each
+    // instantiation invokes it again and yields its own Element. (LOAD-002)
+    const second = await r.instantiateComponent(plan, def, "/de");
+    expect(second).toBeInstanceOf(Element);
+    expect(second).not.toBe(first);
   });
 
   it("serves a cached component on the second load", async () => {
@@ -947,10 +961,14 @@ describe("ComponentLoader", () => {
     });
     // The router always passes the same route-definition object from its table.
     const def = { path: "/c1", component: ld };
-    const c1 = await r.loadComponent(def, "/c1");
-    const c2 = await r.loadComponent(def, "/c1");
-    expect(c1).toBe(c2);
+    const p1 = await r.loadPlan(def, "/c1");
+    const e1 = await r.instantiateComponent(p1, def, "/c1");
+    const p2 = await r.loadPlan(def, "/c1");
+    const e2 = await r.instantiateComponent(p2, def, "/c1");
+    // The module is loaded once; each mount gets its own instance.
     expect(calls).toBe(1);
+    expect(e1).toBeInstanceOf(Element);
+    expect(e2).not.toBe(e1);
   });
 
   it("caches by route definition, so different resolved param paths share one load", async () => {
@@ -962,9 +980,10 @@ describe("ComponentLoader", () => {
     });
     // One route definition (/users/:id) visited at two resolved paths.
     const def = { path: "/users/:id", component: ld };
-    const c1 = await r.loadComponent(def, "/users/1");
-    const c2 = await r.loadComponent(def, "/users/2");
-    expect(c1).toBe(c2);
+    const p1 = await r.loadPlan(def, "/users/1");
+    await r.instantiateComponent(p1, def, "/users/1");
+    const p2 = await r.loadPlan(def, "/users/2");
+    await r.instantiateComponent(p2, def, "/users/2");
     expect(calls).toBe(1); // not reloaded per-param (cardinality fix)
   });
 
@@ -977,9 +996,15 @@ describe("ComponentLoader", () => {
       return { default: makeComp("Shared") };
     });
     const def = { path: "/cc", component: ld };
-    const [a, b] = await Promise.all([r.loadComponent(def, "/cc"), r.loadComponent(def, "/cc")]);
-    expect(a).toBe(b);
+    const plan = await r.loadPlan(def, "/cc");
+    const [a, b] = await Promise.all([
+      r.instantiateComponent(plan, def, "/cc"),
+      r.instantiateComponent(plan, def, "/cc"),
+    ]);
+    // One module load shared by both concurrent mounts, but two instances.
     expect(calls).toBe(1);
+    expect(a).toBeInstanceOf(Element);
+    expect(b).not.toBe(a);
   });
 });
 

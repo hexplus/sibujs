@@ -16,20 +16,89 @@ import { isUrlAttribute, sanitizeCSSValue, sanitizeUrl, stripControlChars } from
 // The allowlist is "path-ish strings" — we accept anything that does NOT
 // look like a dangerous scheme. `sanitizeUrl` returns the empty string for
 // blocked schemes, so we can reuse it.
-function isSafeNavigationTarget(path: string): boolean {
-  // An empty string from `sanitizeUrl` means the input was unsafe.
-  // But an originally-empty input is also legitimate ("" → root relative),
-  // so treat those separately.
-  if (path === "") return true;
+/**
+ * How the router regards a navigation target.
+ *
+ * - `internal` — a path, `?query`, `#hash`, or relative reference. SPA routing
+ *   can service it.
+ * - `external` — an absolute URL with an allowed scheme (`http:`, `https:`,
+ *   `mailto:`, `tel:`, `ftp:`). Not dangerous, but not something SPA routing
+ *   can service either, so it keeps native browser behaviour.
+ * - `unsafe` — a dangerous scheme (`javascript:`, `data:`, `vbscript:`,
+ *   `blob:`, `file:`, …) **or a protocol-relative `//host`**. Never rendered as
+ *   a live href, never navigated.
+ *
+ * Protocol-relative `//host` is classified `unsafe` rather than `external`
+ * because it carries no scheme to vet and is the classic open-redirect
+ * obfuscation (CWE-601); collapsing its href to `#` is the safe rendering.
+ *
+ * Internal, not public. Single source of truth for every target decision in
+ * this module, so the rules cannot drift between entrypoints. (NAV-001)
+ */
+type NavigationTargetKind = "internal" | "external" | "unsafe";
+
+function classifyNavigationTarget(path: string): NavigationTargetKind {
+  // An originally-empty input is legitimate ("" → root relative).
+  if (path === "") return "internal";
   // Browsers ignore leading control chars / whitespace and treat "\" as "/"
   // when parsing a URL. Normalize the same way *before* the checks, otherwise
   // "\t//evil.com" or "/\/evil.com" slip past the scheme/host guard and the
   // browser resolves them to an off-origin host (open redirect, CWE-601).
   const normalized = stripControlChars(path).replace(/\\/g, "/");
+  if (normalized === "") return "internal";
   // Protocol-relative ("//host") navigation points off the current origin.
-  if (normalized.startsWith("//")) return false;
+  if (normalized.startsWith("//")) return "unsafe";
+  // Classification inspects the target's *structure*, never arbitrary
+  // substrings: a scheme exists only when the ":" precedes any "/", "?" or "#".
+  // That is what keeps `/search?q=https%3A%2F%2Fexample.com` and
+  // `/path/javascript%3Afoo` correctly internal — the dangerous-looking text is
+  // query/path *data*, not a scheme.
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(normalized)) return "internal";
   // Dangerous scheme (javascript:, data:, vbscript:, blob:, ...) → empty.
-  return sanitizeUrl(normalized) !== "";
+  return sanitizeUrl(normalized) === "" ? "unsafe" : "external";
+}
+
+/**
+ * May the SPA router navigate to `path`?
+ *
+ * Internal targets only. Both refusals report `unsafe-target`: `external`
+ * because SPA routing cannot service an off-origin URL (and an absolute
+ * redirect derived from untrusted input is an open-redirect vector), `unsafe`
+ * because the scheme is dangerous. One policy, applied identically by
+ * `navigate()`, route redirects, and every guard redirect. (NAV-002)
+ */
+function isRouterNavigable(path: string): boolean {
+  return classifyNavigationTarget(path) === "internal";
+}
+
+/** Strip a trailing slash so `/users/` and `/users` compare equal; root stays `/`. */
+function normalizePathname(path: string): string {
+  if (!path) return "/";
+  const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  return trimmed || "/";
+}
+
+/** Order-independent serialization, so `?b=2&a=1` and `?a=1&b=2` compare equal. */
+function normalizeQuery(query: string | Params): string {
+  const params = new URLSearchParams(query);
+  return [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => `${k}=${v}`)
+    .join("&");
+}
+
+/**
+ * Is `target` the current pathname, or one of its ancestors on a *segment*
+ * boundary? `/user` is an ancestor of `/user/123` but never of `/users`.
+ *
+ * Root is deliberately not an ancestor of everything: a "Home" link highlighted
+ * on every page in the app is not useful navigation UI, so `/` is active only
+ * on `/`. Both arguments must already be normalized.
+ */
+function isPathnameAncestor(target: string, current: string): boolean {
+  if (target === current) return true;
+  if (target === "/") return false;
+  return current.startsWith(`${target}/`);
 }
 
 // ============================================================================
@@ -674,11 +743,30 @@ class GuardManager {
 /**
  * Component loader with caching and error recovery
  */
+/**
+ * How the router will produce an instance of a route's component.
+ *
+ * Deliberately never holds an `Element`: an instance produced by one invocation
+ * must never become a reusable factory. (LOAD-002)
+ *
+ * The two kinds are structural, not provisional:
+ *
+ * - `factory` — invoke once per instance, only when an instance is needed.
+ *   Everything unbranded lands here: synchronous, `async`, and
+ *   Promise-returning component factories alike.
+ * - `deferred` — an **explicitly branded** `lazy()` module loader. This is the
+ *   only kind preload may execute. (LOAD-004)
+ */
+type RoutePlan = { kind: "factory"; component: Component } | { kind: "deferred"; load: AsyncComponent | LazyComponent };
+
 class ComponentLoader {
   private static readonly MAX_ERROR_ENTRIES = 256;
-  private componentCache: LRUCache<string, Component>;
+  private planCache: LRUCache<string, RoutePlan>;
   private errorCache = new Map<string, { timestamp: number; count: number }>();
-  private loadingPromises = new Map<string, Promise<Component>>();
+  private loadingPromises = new Map<string, Promise<RoutePlan>>();
+  // In-flight *module* resolutions for deferred plans, so concurrent first
+  // mounts of a lazy route do not each run the loader arrow.
+  private moduleLoads = new Map<string, Promise<unknown>>();
   private retryDelay: number;
   // Stable per-route-definition id. Caching by the RESOLVED path (e.g.
   // /users/123) gave the cache one entry per visited URL, so parameterized
@@ -688,7 +776,7 @@ class ComponentLoader {
   private keyCounter = 0;
 
   constructor(cacheSize = 50, retryDelay = 1000) {
-    this.componentCache = new LRUCache(cacheSize);
+    this.planCache = new LRUCache(cacheSize);
     this.retryDelay = retryDelay;
   }
 
@@ -701,7 +789,16 @@ class ComponentLoader {
     return key;
   }
 
-  async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
+  /**
+   * Resolve the route's **plan** — how to produce an instance — without ever
+   * instantiating a component to inspect it.
+   *
+   * Loading a route component and instantiating one are separate operations.
+   * The loader never invokes a user component factory merely to validate its
+   * return type; validation happens on the instance that will actually be
+   * mounted. (LOAD-001)
+   */
+  async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
     if (!("component" in route)) {
       throw new Error(`Route ${routePath} does not have a component`);
     }
@@ -709,79 +806,234 @@ class ComponentLoader {
     const comp = route.component;
     const cacheKey = this.keyFor(route);
 
-    // Return cached component
-    const cached = this.componentCache.get(cacheKey);
+    const cached = this.planCache.get(cacheKey);
     if (cached) return cached;
 
-    // Check if there's already a loading promise
     const existingPromise = this.loadingPromises.get(cacheKey);
     if (existingPromise) return existingPromise;
 
-    // Check error cache
-    const errorInfo = this.errorCache.get(cacheKey);
-    if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
-      throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
-    }
+    this.assertNotHot(cacheKey);
 
-    // Create loading promise
-    const loadingPromise = this.doLoadComponent(comp, routePath);
+    const loadingPromise = this.doLoadPlan(comp, routePath);
     this.loadingPromises.set(cacheKey, loadingPromise);
 
     try {
-      const component = await loadingPromise;
-      this.componentCache.set(cacheKey, component);
+      const plan = await loadingPromise;
+      this.planCache.set(cacheKey, plan);
       this.errorCache.delete(cacheKey); // Clear error on success
-      return component;
+      return plan;
     } catch (error) {
-      // Keyed by route-definition id, so the error map is bounded by the number
-      // of route definitions; still cap defensively and evict the oldest.
-      const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
-      if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
-        const oldest = this.errorCache.keys().next().value;
-        if (oldest !== undefined) this.errorCache.delete(oldest);
-      }
-      this.errorCache.set(cacheKey, {
-        timestamp: Date.now(),
-        count: currentError.count + 1,
-      });
+      this.noteError(cacheKey);
       throw error;
     } finally {
       this.loadingPromises.delete(cacheKey);
     }
   }
 
-  private async doLoadComponent(
-    comp: Component | AsyncComponent | LazyComponent,
-    routePath: string,
-  ): Promise<Component> {
-    // Synchronous component
-    if (!this.isAsyncComponent(comp)) {
-      const result = (comp as Component)();
+  /** Reject early while a recent load failure for this route is still hot. */
+  private assertNotHot(cacheKey: string): void {
+    const errorInfo = this.errorCache.get(cacheKey);
+    if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
+      throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
+    }
+  }
 
-      // `isAsyncComponent` classifies SYNTACTICALLY — the `lazy()` marker, a
-      // genuine `async function`, or an `import(` in the source. A plain arrow
-      // that returns a promise (`() => fetchThing().then(...)`) matches none of
-      // those, yet it is a perfectly valid `AsyncComponent` per the exported
-      // type. Adopt the promise rather than dropping it: dropping produced a
-      // misleading "must return Element, got object" AND left the promise with
-      // no handler, so a later rejection escaped as an unhandled rejection —
-      // fatal to a Node process, and noise in every browser error reporter.
-      // (RC-003)
-      // `result` is statically `Element` (the `Component` signature), so the
-      // widening has to go through `unknown` — the whole point is that the
-      // static type is what turned out to be wrong at runtime.
-      if (this.isThenable(result)) {
-        return this.awaitComponent(result as unknown as Promise<Element>, routePath);
-      }
+  /**
+   * Record a load failure. Keyed by route-definition id, so the map is bounded
+   * by the number of route definitions; still capped defensively, evicting the
+   * oldest.
+   */
+  private noteError(cacheKey: string): void {
+    const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
+    if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
+      const oldest = this.errorCache.keys().next().value;
+      if (oldest !== undefined) this.errorCache.delete(oldest);
+    }
+    this.errorCache.set(cacheKey, { timestamp: Date.now(), count: currentError.count + 1 });
+  }
 
-      if (!this.isElement(result)) {
-        throw new Error(`Component for route "${routePath}" must return Element, got ${typeof result}`);
-      }
-      return comp as Component;
+  /**
+   * Classify without instantiating.
+   *
+   * The `lazy()` brand decides, and nothing else: a branded loader is
+   * `deferred`, everything else is a `factory`. No inspection of the function's
+   * type or source is involved, so an unbranded factory can never become
+   * preload-executable. (LOAD-004)
+   *
+   * An unbranded factory that happens to resolve to a module — an un-marked
+   * `async () => ({ default: Page })` — still works: that is unwrapped during
+   * real instantiation, where the produced value is used rather than discarded.
+   */
+  private async doLoadPlan(comp: Component | AsyncComponent | LazyComponent, routePath: string): Promise<RoutePlan> {
+    if (typeof comp !== "function") {
+      throw new Error(`Component for route "${routePath}" must be a function, got ${typeof comp}`);
+    }
+    // Only a *module loader* is deferred, because only a module loader has
+    // something to fetch that is separable from running the component.
+    // Everything else — a synchronous factory, a direct `AsyncComponent`, a
+    // plain arrow returning a promise — is a factory whose sole job is to
+    // produce an instance, so there is nothing to preload without invoking user
+    // code. Those become preload no-ops by construction. (LOAD-003)
+    //
+    // Runtime thenable detection at instantiation handles every async shape,
+    // applied to the real invocation rather than to a probe. (RC-003)
+    if (!this.isDeferredModule(comp)) {
+      return { kind: "factory", component: comp as Component };
+    }
+    return { kind: "deferred", load: comp as AsyncComponent | LazyComponent };
+  }
+
+  /**
+   * Create **one** real route component instance, validating what will actually
+   * be mounted.
+   *
+   * `route` is used only to upgrade a `deferred` plan once a lazy module has
+   * resolved, so the import happens once and later mounts call the module's
+   * factory directly.
+   */
+  async instantiate(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
+    if (plan.kind === "factory") {
+      return this.instantiateFactory(plan.component, route, routePath);
     }
 
-    // Async component
-    return this.awaitComponent((comp as AsyncComponent | LazyComponent)(), routePath);
+    const factory = await this.resolveModuleFactory(plan, route, routePath);
+    return this.instantiateFactory(factory, route, routePath);
+  }
+
+  /**
+   * Resolve a deferred plan's module and cache the factory it exports —
+   * **without invoking that factory**.
+   *
+   * Shared by instantiation and preloading, so a preload racing a navigation to
+   * the same route imports the module once. A deferred plan is only ever a
+   * module loader (see `isDeferredModule`), so a resolution that is not
+   * module-shaped is a configuration error and is reported as one.
+   */
+  private async resolveModuleFactory(
+    plan: Extract<RoutePlan, { kind: "deferred" }>,
+    route: RouteDef,
+    routePath: string,
+  ): Promise<Component> {
+    const cacheKey = this.keyFor(route);
+
+    // Someone (a preload, or an earlier mount) may already have upgraded it.
+    const cached = this.planCache.get(cacheKey);
+    if (cached && cached.kind === "factory") return cached.component;
+
+    this.assertNotHot(cacheKey);
+
+    let pending = this.moduleLoads.get(cacheKey);
+    const owner = pending === undefined;
+    if (pending === undefined) {
+      pending = plan.load();
+      this.moduleLoads.set(cacheKey, pending);
+    }
+
+    let resolved: unknown;
+    try {
+      resolved = await pending;
+    } catch (error) {
+      this.noteError(cacheKey);
+      throw error;
+    } finally {
+      if (owner) this.moduleLoads.delete(cacheKey);
+    }
+
+    const factory = this.extractFactory(resolved, routePath);
+    this.planCache.set(cacheKey, { kind: "factory", component: factory });
+    return factory;
+  }
+
+  /**
+   * Invoke a factory exactly once and validate the instance it produced.
+   *
+   * A factory may turn out to resolve to a *module* rather than an Element —
+   * an un-marked `async () => ({ default: Page })` is indistinguishable from a
+   * component factory until it runs. That is settled here, on the real
+   * invocation, and the plan is upgraded so later mounts skip the extra hop.
+   * `depth` bounds that unwrapping; a module whose default is itself a module
+   * is a configuration error, not something to chase.
+   */
+  private async instantiateFactory(
+    component: Component,
+    route: RouteDef,
+    routePath: string,
+    depth = 0,
+  ): Promise<Element> {
+    const result = component();
+
+    // Runtime thenable detection on the *real* invocation — never a second,
+    // speculative call made only to classify. (RC-003)
+    const value = this.isThenable(result) ? await (result as unknown as Promise<Element>) : result;
+
+    if (this.isElement(value)) return value;
+
+    if (depth === 0 && this.isFactoryLike(value)) {
+      const factory = this.extractFactory(value, routePath);
+      this.planCache.set(this.keyFor(route), { kind: "factory", component: factory });
+      return this.instantiateFactory(factory, route, routePath, depth + 1);
+    }
+
+    throw new Error(`Component for route "${routePath}" must return Element, got ${typeof value}`);
+  }
+
+  /**
+   * Something `extractFactory` can turn into a component factory: a bare
+   * callable, or a module namespace carrying a callable `default`. Both are
+   * long-supported shapes for an async loader's resolution.
+   */
+  private isFactoryLike(value: unknown): boolean {
+    if (typeof value === "function") return true;
+    return (
+      typeof value === "object" && value !== null && typeof (value as { default?: unknown }).default === "function"
+    );
+  }
+
+  /**
+   * Pull a factory out of a resolved lazy module **without calling it**. Only
+   * what can be checked without running user code is checked here: that a
+   * default export exists and is callable.
+   */
+  private extractFactory(result: unknown, routePath: string): Component {
+    if (typeof result === "function") return result as Component;
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      typeof (result as { default?: unknown }).default === "function"
+    ) {
+      return (result as { default: Component }).default;
+    }
+    throw new Error(`Invalid component module for route "${routePath}"`);
+  }
+
+  /**
+   * Prepare explicitly deferred route code without creating a component
+   * instance or any DOM.
+   *
+   * Only routes explicitly branded as deferred — a loader wrapped in `lazy()` —
+   * are resolved during preload. Direct component factories, whether
+   * synchronous, `async`, or Promise-returning, are `factory` plans and
+   * therefore require no preload work at all.
+   *
+   * ```text
+   * factory plan   → preload no-op
+   * deferred plan  → resolve module → cache factory → no component invocation
+   * ```
+   *
+   * Deferred module resolution caches the component factory the module exports
+   * **without invoking it**. (LOAD-004)
+   */
+  async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
+    const plan = await this.loadPlan(route, routePath);
+    // A directly supplied factory — synchronous, `async`, or plain
+    // promise-returning — has no separately loadable code. Invoking it to
+    // "warm" anything would run application code and create an instance, which
+    // is precisely what preloading must not do. No-op. (LOAD-003)
+    if (plan.kind === "factory") return;
+
+    // Import the module and cache its factory *uninvoked*. Shares the in-flight
+    // load with any concurrent navigation to the same route.
+    await this.resolveModuleFactory(plan, route, routePath);
   }
 
   private isThenable(value: unknown): boolean {
@@ -792,62 +1044,35 @@ class ComponentLoader {
     );
   }
 
-  /** Resolve an in-flight component promise and validate what it produced. */
-  private async awaitComponent(
-    pending: Promise<Element | { default: Component } | Component>,
-    routePath: string,
-  ): Promise<Component> {
-    try {
-      const result = await pending;
-      const component = this.extractComponent(result, routePath);
-
-      // Validate component
-      const testElement = component();
-      if (!this.isElement(testElement)) {
-        throw new Error(`Component for route "${routePath}" must return Element, got ${typeof testElement}`);
-      }
-
-      return component;
-    } catch (error) {
-      const wrapped = new Error(
-        `Failed to load component for route "${routePath}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-      wrapped.cause = error;
-      throw wrapped;
-    }
-  }
-
-  private isAsyncComponent(comp: Component | AsyncComponent | LazyComponent): boolean {
-    // Prefer the reliable signals: the LAZY_MARKER stamped by `lazy()` and a
-    // genuine async function. The `toString()` source sniff is a best-effort
-    // fallback for an un-wrapped `() => import("./Page")` shorthand — dynamic
-    // `import(` is preserved verbatim by bundlers (it drives code-splitting), so
-    // it survives minification, but wrapping in `lazy()` is the robust form.
-    return (
-      (comp as any)[LAZY_MARKER] === true ||
-      comp.constructor.name === "AsyncFunction" ||
-      (typeof comp === "function" && comp.toString().includes("import("))
-    );
+  /**
+   * Is this route component an **explicitly declared module loader**?
+   *
+   * Preload is the only place SibuJS executes a route function before the
+   * router needs an instance, so permission to do that must be explicit. The
+   * brand stamped by `lazy()` is the sole authority.
+   *
+   * Everything the loader once inferred is deliberately *not* a signal:
+   *
+   * - `constructor.name === "AsyncFunction"` — cannot distinguish
+   *   `async () => import("./Page")` from `async () => div()`. Treating the
+   *   latter as a module loader is what made preload invoke user
+   *   components. (LOAD-003)
+   * - `toString().includes("import(")` — source text is a representation, not
+   *   semantics. An ordinary component with `"import('./x')"` in a string, a
+   *   template literal, or a comment was executed during preload; and the same
+   *   text can vanish under a bundler that rewrites dynamic imports into its
+   *   own chunk-loader calls. Both directions are wrong, and no better regex
+   *   fixes that — the defect is source inspection itself. (LOAD-004)
+   *
+   * A brand is metadata: it survives TypeScript, every bundler, and
+   * minification, because it is part of runtime behaviour rather than syntax.
+   */
+  private isDeferredModule(comp: Component | AsyncComponent | LazyComponent): boolean {
+    return (comp as { [LAZY_MARKER]?: boolean })[LAZY_MARKER] === true;
   }
 
   private isElement(value: unknown): value is Element {
     return value instanceof Element;
-  }
-
-  private extractComponent(result: Element | { default: Component } | Component, routePath: string): Component {
-    if ("default" in result && typeof result.default === "function") {
-      return result.default;
-    }
-
-    if (typeof result === "function") {
-      return result;
-    }
-
-    if (this.isElement(result)) {
-      return () => result;
-    }
-
-    throw new Error(`Invalid component module for route "${routePath}"`);
   }
 
   clearErrors(): void {
@@ -855,9 +1080,10 @@ class ComponentLoader {
   }
 
   clearCache(): void {
-    this.componentCache.clear();
+    this.planCache.clear();
     this.errorCache.clear();
     this.loadingPromises.clear();
+    this.moduleLoads.clear();
   }
 }
 
@@ -1027,11 +1253,17 @@ export class SibuRouter {
       await this.navigator.navigate(async (signal) => {
         const targetPath = this.resolvePath(to);
 
-        // Security: refuse navigation targets that carry a dangerous
-        // protocol. `javascript:`, `data:`, `vbscript:`, and `blob:` URIs
-        // can otherwise end up stored in `history.state` and reflected
-        // into `<a href>` elements by downstream code.
-        if (!isSafeNavigationTarget(targetPath)) {
+        // Security: refuse anything the SPA router may not navigate — a
+        // dangerous protocol (`javascript:`, `data:`, `vbscript:`, `blob:`,
+        // which could end up stored in `history.state` and reflected into an
+        // `<a href>` downstream) *and* an absolute or protocol-relative URL,
+        // which is an open-redirect vector when derived from untrusted input.
+        //
+        // Validated here, before route resolution and before any history
+        // mutation. A cross-origin `pushState` throwing `SecurityError` is not
+        // the enforcement mechanism — it reports `error`, not `unsafe-target`,
+        // and only after the navigation has already started. (NAV-001)
+        if (!isRouterNavigable(targetPath)) {
           const from = this.currentRouteGetter();
           const toContext = this.createRouteContext(targetPath);
           throw new NavigationFailureError("aborted", from, toContext, undefined, "unsafe-target");
@@ -1102,8 +1334,8 @@ export class SibuRouter {
     const beforeEachResult = await this.guards.runBeforeEach(to, from, signal);
     if (beforeEachResult !== true) {
       if (typeof beforeEachResult === "string") {
-        // Security: refuse guard-redirect targets with dangerous protocols.
-        if (!isSafeNavigationTarget(beforeEachResult)) {
+        // Same policy as navigate(): a guard redirect is a navigation target.
+        if (!isRouterNavigable(beforeEachResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
@@ -1138,8 +1370,8 @@ export class SibuRouter {
             }
             if (result !== true) {
               if (typeof result === "string") {
-                // Security: refuse guard-redirect targets with dangerous protocols.
-                if (!isSafeNavigationTarget(result)) {
+                // Same policy as navigate(): a guard redirect is a navigation target.
+                if (!isRouterNavigable(result)) {
                   throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
@@ -1156,18 +1388,17 @@ export class SibuRouter {
       // Handle redirects
       if ("redirect" in route) {
         const redirectPath = typeof route.redirect === "function" ? route.redirect(to) : route.redirect;
-        // Refuse cross-origin / protocol-relative redirects by default —
-        // these are open-redirect vectors (CWE-601) when redirect targets
-        // are derived from untrusted route params.
-        if (typeof redirectPath === "string" && /^(https?:)?\/\//i.test(redirectPath)) {
-          if (typeof console !== "undefined") {
+        // Same policy as navigate(). This used to carry an extra, stricter
+        // `^(https?:)?//` check that no other entrypoint had, so an absolute
+        // target was refused as a route redirect but accepted by navigate()
+        // and by every guard redirect. One classifier now serves all five.
+        // (NAV-002)
+        if (typeof redirectPath === "string" && !isRouterNavigable(redirectPath)) {
+          if (classifyNavigationTarget(redirectPath) === "external" && typeof console !== "undefined") {
             console.error(
               `[SibuJS Router] Refusing absolute/protocol-relative redirect "${redirectPath}" — open-redirect risk.`,
             );
           }
-          throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
-        }
-        if (typeof redirectPath === "string" && !isSafeNavigationTarget(redirectPath)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
@@ -1181,8 +1412,8 @@ export class SibuRouter {
     const beforeResolveResult = await this.guards.runBeforeResolve(to, from, signal);
     if (beforeResolveResult !== true) {
       if (typeof beforeResolveResult === "string") {
-        // Security: refuse guard-redirect targets with dangerous protocols.
-        if (!isSafeNavigationTarget(beforeResolveResult)) {
+        // Same policy as navigate(): a guard redirect is a navigation target.
+        if (!isRouterNavigable(beforeResolveResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
@@ -1382,8 +1613,22 @@ export class SibuRouter {
   }
 
   // Component loading
-  async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
-    return this.loader.loadComponent(route, routePath);
+  /**
+   * Resolve how this route's component will be produced, without instantiating
+   * anything. Pair with {@link instantiateComponent} at the commit boundary.
+   */
+  async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
+    return this.loader.loadPlan(route, routePath);
+  }
+
+  /** Create exactly one real instance from an already-resolved plan. */
+  async instantiateComponent(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
+    return this.loader.instantiate(plan, route, routePath);
+  }
+
+  /** Resolve a route's module/factory without creating any component instance. */
+  async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
+    return this.loader.preloadPlan(route, routePath);
   }
 
   // Guards API
@@ -1705,6 +1950,26 @@ export function Route(): Node {
   // per-invocation token, superseded loads are simply dropped — "latest wins".
   let navSeq = 0;
   let currentTopRoute: RouteDef | null = null;
+  // Declared before `update` so an in-flight pass can consult it. A component
+  // load that resolves after teardown must lose ownership permanently,
+  // including the right to run user component code. (OUT-003)
+  let routeTorn = false;
+
+  /**
+   * The parent this `seq` may still commit into, or `null` if it has lost
+   * ownership — outlet torn down, superseded, or the anchor detached. Read
+   * fresh at every check: a parent captured before user code ran is not
+   * evidence that the outlet is still mounted now.
+   */
+  const commitTarget = (seq: number): (Node & ParentNode) | null =>
+    routeTorn || seq !== navSeq ? null : anchor.parentNode;
+
+  /** Lifecycle-safe discard of a node this pass built but may not commit. */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
 
   const cleanupNodes = () => {
     [currentNode, loadingNode, errorNode].forEach((node) => {
@@ -1761,8 +2026,14 @@ export function Route(): Node {
     (errorNode as HTMLElement).setAttribute("role", "alert");
     (errorNode as HTMLElement).setAttribute("aria-live", "assertive");
 
-    // Attach component source info so the app layer can display it.
-    // Extract the import path from the lazy function's source (e.g. import("./pages/Features.ts")).
+    // Attach component source info so the app layer can display it: best-effort
+    // extraction of an import path from the function's source, e.g.
+    // import("./pages/Features.ts").
+    //
+    // A *diagnostic hint* only. Like the loading-spinner guess below, reading
+    // source text here decides what an error node displays and nothing else —
+    // it never grants permission to execute a component. Preload authority
+    // comes solely from the `lazy()` brand; see `isDeferredModule`. (LOAD-004)
     if (routeDef && "component" in routeDef) {
       const src = routeDef.component.toString();
       const importMatch = src.match(/import\(["']([^"']+)["']\)/);
@@ -1811,7 +2082,7 @@ export function Route(): Node {
   };
 
   const update = async () => {
-    if (!_routerRef.current) return;
+    if (routeTorn || !_routerRef.current) return;
 
     // Claim the latest navigation slot. Any update still in flight for an
     // earlier slot becomes stale and must not mutate the DOM when it resolves.
@@ -1851,7 +2122,12 @@ export function Route(): Node {
       // Handle component routes
       if ("component" in routeDef) {
         try {
-          // Show loading for async components
+          // Show loading for async components.
+          //
+          // A best-effort *cosmetic* guess, and deliberately not the loader's
+          // classification: getting it wrong shows or omits a spinner, nothing
+          // more. Preload permission is granted only by the `lazy()` brand and
+          // never by source text — see `isDeferredModule`. (LOAD-004)
           const isAsync =
             routeDef.component.constructor.name === "AsyncFunction" ||
             routeDef.component.toString().includes("import(");
@@ -1860,23 +2136,41 @@ export function Route(): Node {
             showLoading();
           }
 
-          const component = await _routerRef.current.loadComponent(routeDef, route.path);
+          // Resolve *how* to build the component. This never invokes a user
+          // component factory — loading and instantiating are separate
+          // operations. (LOAD-001)
+          const plan = await _routerRef.current.loadPlan(routeDef, route.path);
 
-          // A newer navigation superseded us while loading — drop this result.
-          // The newer update() owns the DOM and will (or already did) render.
-          if (seq !== navSeq) return;
+          // A newer navigation superseded us while loading, or the outlet was
+          // disposed — drop this result. The newer update() owns the DOM and
+          // will (or already did) render. Checked *before* instantiation so
+          // stale work never invokes user code at all. (OUT-003)
+          if (!commitTarget(seq)) return;
 
-          const node = component();
+          // Create exactly one instance. This runs arbitrary user code, which
+          // may synchronously navigate, dispose this outlet's owner, or
+          // otherwise invalidate the generation — and for a direct
+          // AsyncComponent it also awaits, so ownership can move either way.
+          const node = await _routerRef.current.instantiateComponent(plan, routeDef, route.path);
 
-          if (node && anchor.parentNode) {
+          // Second ownership check, immediately before the synchronous commit,
+          // re-reading the parent rather than trusting one captured earlier.
+          // The node already owns lifecycle resources by now, so a stale pass
+          // disposes it instead of dropping the reference. (OUT-003)
+          const parent = commitTarget(seq);
+          if (!parent) {
+            release(node);
+            return;
+          }
+          if (node) {
             // Commit only now that we know we are the latest resolution.
             currentTopRoute = routeDef;
             cleanupNodes();
-            anchor.parentNode.insertBefore(node, anchor.nextSibling);
+            parent.insertBefore(node, anchor.nextSibling);
             currentNode = node;
           }
         } catch (error) {
-          if (seq !== navSeq) return;
+          if (routeTorn || seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
           showError(error instanceof Error ? error : new Error(String(error)), routeDef);
@@ -1884,6 +2178,7 @@ export function Route(): Node {
       }
     } catch (error) {
       if (seq !== navSeq) return;
+      if (routeTorn) return;
       console.error("[Route] Update failed:", error);
       showError(error instanceof Error ? error : new Error(String(error)));
     }
@@ -1904,12 +2199,16 @@ export function Route(): Node {
     });
   }
 
-  let routeTorn = false;
   const routeCleanup = () => {
     if (routeTorn) return;
+    // Order matters: mark torn and invalidate the generation *first*, so every
+    // pending continuation permanently loses ownership before anything else is
+    // released.
     routeTorn = true;
+    navSeq++;
     routeTeardown();
     cleanupNodes();
+    currentTopRoute = null;
   };
   // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
   // layout change) releases its tracking + nodes immediately — not only on
@@ -2064,14 +2363,15 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       fromCache = true;
     } else {
       try {
-        const component = await router.loadComponent(routeDef, route.path);
+        // Resolving the plan never invokes the component factory. (LOAD-001)
+        const plan = await router.loadPlan(routeDef, route.path);
 
         // Ownership check BEFORE building anything. A superseded generation
         // must not even *create* the node: creation runs user code that
         // registers effects and listeners, and none of it would ever be owned.
         if (kaTorn || seq !== updateSeq) return;
 
-        node = component();
+        node = await router.instantiateComponent(plan, routeDef, route.path);
       } catch (error) {
         if (kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
@@ -2219,8 +2519,14 @@ export function RouterLink(
   // `javascript:…`/`data:…` — clicking the rendered link would execute it
   // (click-to-XSS). navigate() guards every other entry point; the link must
   // too. Unsafe targets collapse to "#".
-  const href = isSafeNavigationTarget(rawHref) ? rawHref : "#";
-  const hrefPath = href.split("?")[0].split("#")[0];
+  const kind = classifyNavigationTarget(rawHref);
+  const href = kind === "unsafe" ? "#" : rawHref;
+  // Split exactly as `createRouteContext()` does — hash first, then query — so
+  // both sides of every active-state comparison are normalized the same way.
+  const [hrefBeforeHash, hrefHash = ""] = href.split("#");
+  const [hrefPathRaw, hrefQueryRaw = ""] = hrefBeforeHash.split("?");
+  const targetPath = normalizePathname(hrefPathRaw);
+  const targetQuery = normalizeQuery(hrefQueryRaw);
 
   const link = document.createElement("a");
   link.href = href;
@@ -2242,8 +2548,22 @@ export function RouterLink(
   const options = _routerRef.current["options"];
   const effectCleanup = effect(() => {
     const route = routeGetter();
-    const isActive = route.path.startsWith(hrefPath);
-    const isExactActive = route.path === hrefPath;
+    const currentPath = normalizePathname(route.path);
+    // Ancestor matching, on segment boundaries. Raw prefix matching made
+    // `/user` active on `/users`. (LINK-001)
+    // Active classes are router state, so only a target the router would
+    // actually navigate can carry them. An unsafe target's href is collapsed to
+    // "#", whose pathname parses as "/" — without this gate it would be
+    // exact-active on every root route. (LINK-003)
+    const isActive = kind === "internal" && isPathnameAncestor(targetPath, currentPath);
+    // Exact-active is full normalized target identity: pathname *and* query
+    // *and* hash. `/search?q=a` and `/search?q=b` are distinct navigation
+    // targets, as are `/docs#one` and `/docs#two`. (LINK-002)
+    const isExactActive =
+      kind === "internal" &&
+      currentPath === targetPath &&
+      normalizeQuery(route.query) === targetQuery &&
+      route.hash === hrefHash;
 
     const classes: string[] = [];
     if (isActive) {
@@ -2306,7 +2626,15 @@ export function RouterLink(
     if (e.defaultPrevented || target || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) {
       return;
     }
+    // An external absolute URL is a legitimate `<a href>`, and RouterLink is
+    // not an external-navigation API: leave the browser's own behaviour alone
+    // rather than feeding an off-origin URL into SPA routing, where it would be
+    // refused and the click would silently do nothing at all. (NAV-001)
+    if (kind === "external") return;
     e.preventDefault();
+    // Unsafe target: the href is already collapsed to "#". Swallow the click so
+    // it neither routes nor scrolls to the top of the document.
+    if (kind === "unsafe") return;
     _routerRef.current?.navigate(to, { replace }).catch((err) => {
       if (typeof console !== "undefined") console.error("[router] link navigate failed:", err);
     });
@@ -2323,6 +2651,27 @@ export function RouterLink(
 // SUSPENSE COMPONENT (for code splitting)
 // ============================================================================
 
+/**
+ * Async boundary for code-split / deferred content.
+ *
+ * **Ownership contract.** The boundary owns every node it creates or installs.
+ * A node that leaves the boundary — replaced by resolved content, or dropped on
+ * teardown — is lifecycle-disposed exactly once. Native detachment alone is not
+ * cleanup: a detached subtree keeps its effects, listeners and registered
+ * disposers alive, firing against DOM nobody can see. (SUS-001)
+ *
+ * **Async completion grants no commit permission.** A resolution that arrives
+ * after the boundary was torn down, or after a newer generation superseded it,
+ * may never insert into the DOM. Because the promise typically resolves with an
+ * *already constructed* Element — whose effects and listeners were created
+ * before the boundary discovered it lost ownership — the stale result is
+ * disposed rather than merely dropped. (SUS-002)
+ *
+ * The boundary is **single-shot**: `props.nodes()` is invoked exactly once, so
+ * only one async generation is reachable in practice. The generation token is
+ * kept anyway because teardown must be able to invalidate the in-flight one, and
+ * because ownership is the correct primitive to express that with.
+ */
 export function Suspense(props: {
   fallback?: () => HTMLElement | HTMLElement;
   nodes: () => HTMLElement | Promise<HTMLElement>;
@@ -2331,80 +2680,125 @@ export function Suspense(props: {
   let currentNode: Node | null = null;
   let fallbackNode: Node | null = null;
   let isLoading = false;
+  let generation = 0;
+  let tornDown = false;
+
+  /**
+   * Lifecycle-safe removal. `dispose()` runs the node's teardowns (and its
+   * descendants'); the detach afterwards is what a bare `removeChild` used to
+   * do on its own.
+   */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
+
+  /**
+   * The parent `myGeneration` may still commit into, or `null` if it has lost
+   * ownership — torn down, superseded, or the anchor was detached natively.
+   */
+  const commitTarget = (myGeneration: number): (Node & ParentNode) | null =>
+    tornDown || myGeneration !== generation ? null : anchor.parentNode;
 
   const cleanupNodes = () => {
-    [currentNode, fallbackNode].forEach((node) => {
-      if (node?.parentNode) {
-        node.parentNode.removeChild(node);
-      }
-    });
+    release(currentNode);
+    release(fallbackNode);
     currentNode = null;
     fallbackNode = null;
   };
 
-  const showFallback = () => {
-    if (fallbackNode || !props.fallback || !anchor.parentNode) return;
+  /**
+   * Build and mount the fallback for `myGeneration`.
+   *
+   * The fallback factory is arbitrary user code and may synchronously tear the
+   * boundary down or supersede it. A parent read *before* the factory runs is
+   * therefore not evidence that the boundary still exists after it returns, so
+   * ownership is revalidated — and the parent re-read — before the returned
+   * node is adopted. A fallback that loses the race is disposed, not dropped.
+   * (SUS-003)
+   */
+  const showFallback = (myGeneration: number) => {
+    if (fallbackNode || !props.fallback || tornDown) return;
+    // Cheap pre-check: nothing to mount into yet, so don't run user code.
+    if (!anchor.parentNode) return;
 
+    let fallback: HTMLElement | (() => HTMLElement) | undefined;
     try {
-      const fallback = typeof props.fallback === "function" ? props.fallback() : props.fallback;
-
-      if (fallback instanceof HTMLElement) {
-        fallbackNode = fallback;
-        anchor.parentNode.insertBefore(fallbackNode, anchor.nextSibling);
-      }
+      fallback = typeof props.fallback === "function" ? props.fallback() : props.fallback;
     } catch (error) {
       console.error("[Suspense] Fallback error:", error);
+      return;
     }
-  };
 
-  const hideFallback = () => {
-    if (fallbackNode?.parentNode) {
-      fallbackNode.parentNode.removeChild(fallbackNode);
-      fallbackNode = null;
+    if (!(fallback instanceof HTMLElement)) return;
+
+    const parent = commitTarget(myGeneration);
+    if (!parent) {
+      release(fallback);
+      return;
     }
+
+    fallbackNode = fallback;
+    parent.insertBefore(fallbackNode, anchor.nextSibling);
   };
 
   const render = async () => {
-    if (isLoading) return;
+    if (tornDown || isLoading) return;
     isLoading = true;
+    const myGeneration = ++generation;
 
     try {
       const result = props.nodes();
-
+      let element: HTMLElement;
       if (result instanceof Promise) {
-        showFallback();
-        const element = await result;
-
-        if (anchor.parentNode) {
-          cleanupNodes();
-          anchor.parentNode.insertBefore(element, anchor.nextSibling);
-          currentNode = element;
-        }
+        showFallback(myGeneration);
+        element = await result;
       } else {
-        if (anchor.parentNode) {
-          cleanupNodes();
-          anchor.parentNode.insertBefore(result, anchor.nextSibling);
-          currentNode = result;
-        }
+        element = result;
       }
+
+      // Re-checked *after* the await, immediately before the synchronous
+      // commit. Nothing runs between this check and the insertion below.
+      const parent = commitTarget(myGeneration);
+      if (!parent) {
+        // Stale: the Element already exists and owns lifecycle resources, so it
+        // must be disposed, not dropped. Anything this generation installed
+        // (the fallback) goes with it.
+        release(element);
+        cleanupNodes();
+        return;
+      }
+
+      cleanupNodes();
+      parent.insertBefore(element, anchor.nextSibling);
+      currentNode = element;
     } catch (error) {
-      hideFallback();
       console.error("[Suspense] Nodes error:", error);
 
-      // Show error in place of content
-      if (anchor.parentNode) {
-        const errorElement = document.createElement("div");
-        errorElement.className = "suspense-error";
-        errorElement.textContent = error instanceof Error ? error.message : "Failed to load";
+      const parent = commitTarget(myGeneration);
+      cleanupNodes();
+      if (!parent) return;
 
-        cleanupNodes();
-        anchor.parentNode.insertBefore(errorElement, anchor.nextSibling);
-        currentNode = errorElement;
-      }
+      // Show error in place of content
+      const errorElement = document.createElement("div");
+      errorElement.className = "suspense-error";
+      errorElement.textContent = error instanceof Error ? error.message : "Failed to load";
+      parent.insertBefore(errorElement, anchor.nextSibling);
+      currentNode = errorElement;
     } finally {
       isLoading = false;
     }
   };
+
+  // Teardown. Invalidating the generation *before* releasing nodes is what
+  // makes a late resolution permanently non-committing rather than merely
+  // late: `commitTarget` fails closed from here on.
+  registerDisposer(anchor, () => {
+    tornDown = true;
+    generation++;
+    cleanupNodes();
+  });
 
   queueMicrotask(render);
 
@@ -2438,7 +2832,7 @@ export async function preloadRoute(to: NavigationTarget): Promise<void> {
 
   if (match && "component" in match.route) {
     try {
-      await _routerRef.current.loadComponent(match.route, path);
+      await _routerRef.current.preloadPlan(match.route, path);
     } catch (error) {
       console.warn("[Router] Preload failed:", error);
     }
@@ -2549,6 +2943,10 @@ export function Outlet(): Node {
   // Mirror Route()'s "latest wins" guard so a superseded child load cannot
   // resurrect stale content after a newer navigation.
   let navSeq = 0;
+  // Declared before `update` so the update pass can actually consult it. A
+  // pending child load that resolves after teardown must lose ownership
+  // permanently — including the right to run user component code. (OUT-002)
+  let outletTorn = false;
 
   const clearCurrent = () => {
     if (currentNode) {
@@ -2561,8 +2959,24 @@ export function Outlet(): Node {
     currentChild = null;
   };
 
+  /**
+   * The parent `seq` may still commit into, or `null` if this pass has lost
+   * ownership — outlet torn down, superseded by a newer pass, or the anchor
+   * detached. Read fresh at every check: a parent captured before user code ran
+   * is not evidence that the outlet is still mounted now.
+   */
+  const commitTarget = (seq: number): (Node & ParentNode) | null =>
+    outletTorn || seq !== navSeq ? null : anchor.parentNode;
+
+  /** Lifecycle-safe discard of a node this pass built but may not commit. */
+  const release = (node: Node | null) => {
+    if (!node) return;
+    dispose(node);
+    node.parentNode?.removeChild(node);
+  };
+
   const update = async () => {
-    if (!_routerRef.current) return;
+    if (outletTorn || !_routerRef.current) return;
     const seq = ++navSeq;
     const route = _routerRef.current.currentRoute;
 
@@ -2586,21 +3000,36 @@ export function Outlet(): Node {
     try {
       // Use a composite cache key so parent and child don't collide
       const cacheKey = `${route.path}\0${childRoute.path}`;
-      const component = await _routerRef.current.loadComponent(childRoute, cacheKey);
+      // Resolving the plan never invokes the component factory. (LOAD-001)
+      const plan = await _routerRef.current.loadPlan(childRoute, cacheKey);
 
-      // A newer navigation superseded us while loading — discard.
-      if (seq !== navSeq) return;
+      // First ownership check: a newer navigation superseded us while loading,
+      // or the outlet was disposed. Deliberately *before* instantiation so
+      // stale work never invokes user code at all. (OUT-002)
+      if (!commitTarget(seq)) return;
 
-      const node = component();
+      // Create exactly one instance. Arbitrary user code: it may synchronously
+      // navigate, dispose this outlet's owner, or otherwise invalidate the
+      // generation — an `await` is not the only way ownership moves.
+      const node = await _routerRef.current.instantiateComponent(plan, childRoute, cacheKey);
 
-      if (node && anchor.parentNode) {
-        clearCurrent();
-        anchor.parentNode.insertBefore(node, anchor.nextSibling);
-        currentNode = node;
-        currentChild = childRoute;
+      // Second ownership check, immediately before the synchronous commit, and
+      // re-reading the parent rather than trusting one captured earlier. The
+      // node already exists and owns lifecycle resources by now, so a stale
+      // pass disposes it instead of dropping the reference. (OUT-001)
+      const parent = commitTarget(seq);
+      if (!parent) {
+        release(node);
+        return;
       }
+      if (!node) return;
+
+      clearCurrent();
+      parent.insertBefore(node, anchor.nextSibling);
+      currentNode = node;
+      currentChild = childRoute;
     } catch (error) {
-      if (seq !== navSeq) return;
+      if (outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
     }
   };
@@ -2611,16 +3040,20 @@ export function Outlet(): Node {
       if (anchor.parentNode) update();
     });
   }
-  let outletTorn = false;
   const outletCleanup = () => {
     if (outletTorn) return;
+    // Order matters: mark torn and invalidate the generation *first*, so every
+    // pending continuation permanently loses ownership before anything else is
+    // released.
     outletTorn = true;
+    navSeq++;
     outletTeardown();
     if (currentNode) {
       dispose(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       currentNode = null;
     }
+    currentChild = null;
   };
   registerDisposer(anchor, outletCleanup);
   routeCleanups.push(outletCleanup);

@@ -16,10 +16,10 @@
  *   - the cache key answers "which cached view is this?"
  *   - the update generation answers "may this async completion still commit?"
  *
- * Instrumentation note: `ComponentLoader.awaitComponent()` invokes a freshly
- * loaded factory once to validate that it returns an Element. Tests therefore
- * assert on which instances reach the DOM (via MutationObserver), never on the
- * raw factory call count, so they stay independent of that validation step.
+ * Instrumentation note: every factory invocation is a real instantiation — the
+ * loader no longer calls components speculatively to validate them (LOAD-001).
+ * Tests still assert primarily on which instances reach the DOM (via
+ * MutationObserver), because that is what ownership is actually about.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { dispose, registerDisposer } from "../src/core/rendering/dispose";
@@ -77,27 +77,19 @@ function attachmentLog(host: HTMLElement) {
  * A component factory that stamps every instance it creates with a unique id
  * and records that instance's disposal.
  *
- * The FIRST invocation is not recorded. `ComponentLoader.doLoadComponent()`
- * calls every newly loaded factory once, purely to assert it returns an
- * Element, and discards the result — exactly once per route definition, since
- * the resolved factory is then memoised. That throwaway instance is never
- * attached and never disposed, but it is not a leak either: disposers live in a
- * `WeakMap` keyed by the node, so it is collected with the element. Counting it
- * would make every "created but not committed" assertion permanently red for
- * reasons that have nothing to do with KeepAlive ownership.
+ * Every invocation is recorded, because every invocation is a real
+ * instantiation: the loader resolves a route's plan without ever calling the
+ * factory, and calls it exactly once when an instance is actually needed.
  */
 function instrumented(label: string, created: string[], disposed: string[]) {
   let n = 0;
   return () => {
-    const validationCall = n === 0;
     const id = `${label}-${++n}`;
     const el = document.createElement("div");
     el.setAttribute("data-instance", id);
     el.textContent = id;
-    if (!validationCall) {
-      created.push(id);
-      registerDisposer(el, () => disposed.push(id));
-    }
+    created.push(id);
+    registerDisposer(el, () => disposed.push(id));
     return el;
   };
 }
@@ -346,12 +338,10 @@ describe("router hardening: KeepAliveRoute temporal ownership", () => {
 
     let calls = 0;
     const SelfDestruct = () => {
-      // First call is the loader's Element validation (see `instrumented`).
-      // It must stay inert, or the outlet would be torn down before the real
-      // commit path is ever exercised and the test would pass vacuously.
-      const validationCall = calls++ === 0;
+      // Every call is a real instantiation now, so the very first one exercises
+      // the commit path directly.
+      calls++;
       const el = document.createElement("div");
-      if (validationCall) return el;
 
       const id = `sd-${calls}`;
       created.push(id);

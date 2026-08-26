@@ -87,6 +87,54 @@ isolation never actually worked there under ESM — see below.
   values are unchanged, so code branching on `type` is unaffected.
 
 ### Fixed
+#### Route component loading
+
+- **Route component factories now run once per instance, not twice.** The
+  component loader validated a route component by *invoking it* and checking it
+  returned an `Element`, discarding that node, and then invoking the component
+  again for the node it actually mounted. Any side effect in a component factory
+  — an analytics call, a store write, a push to a list — therefore happened
+  twice on first load, and no amount of cleanup could undo it. Loading a route
+  component and instantiating one are now separate operations: the loader
+  resolves a *plan* (a factory, or a module to import) without ever running user
+  component code, and the factory is invoked exactly once when an instance is
+  genuinely needed. The return value is validated on the instance that will be
+  mounted.
+- **`preloadRoute()` no longer renders the route.** Because validation ran at
+  cache-fill time, preloading a route instantiated its component and built DOM —
+  the opposite of what preloading is for. Preloading never invokes route
+  component factories now: only an explicitly branded loader — a route wrapped
+  with `lazy()` — is executed, importing the module and caching its factory
+  uninvoked. Every directly supplied factory, synchronous or `async` or plain
+  promise-returning, is left untouched until real navigation. Because the
+  factory is not invoked, preloading cannot surface component errors; those
+  appear at navigation. A lazy module's *load* failure is still reported.
+- **Preloadability is explicit, never inferred.** An earlier iteration decided
+  which route functions were safe to execute during preload by looking for
+  `import(` in `Function#toString()`. Source text is a representation, not
+  metadata: an ordinary component mentioning `import(` in a string or a comment
+  was executed during preload, and a bundler that rewrites dynamic imports into
+  its own chunk loader would hide a real one. The `lazy()` brand is now the sole
+  authority. A route written as `() => import("./Page")` still navigates
+  correctly, but is no longer preloaded — wrap it in `lazy()` to restore that.
+- **A direct `AsyncComponent` is no longer disposed before it is mounted.** For
+  `component: async () => element`, the resolved Element was handed to the
+  validation step, disposed as a discarded probe, cached as a reusable
+  `() => element` factory, and then mounted — dead, with its bindings and
+  listeners already torn down, and re-mounted on every later visit to that
+  route. A resolved Element is now recognised as the instance for that one
+  invocation: it belongs to the route generation that requested it, is never
+  disposed before commit, and is never cached as a factory. Each visit invokes
+  the component again and receives its own Element.
+- **Load errors are recorded where the load happens.** The `errorRetryDelay`
+  rate limit and the error-retry button behave as before; the bookkeeping moved
+  to the instantiation path along with the work.
+
+`AsyncComponent = () => Promise<Element>` remains a first-class supported route
+component, and plain (non-`async`-declared) promise-returning functions still
+work — the thenable check now runs on the real invocation instead of on a
+discarded probe, so classification never costs a duplicate call.
+
 #### Disposal and lifecycle
 
 - **`each()` no longer leaves its rows behind when torn down.** Rows and the
