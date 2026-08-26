@@ -100,6 +100,62 @@ early: after the raw `await` on a route's `beforeEnter`, and before the loop in
 each global guard runner — the latter because an empty guard list would
 otherwise never reach the in-loop check.
 
+### Post-commit side effects cannot revoke a navigation
+
+The boundary cuts the transaction in two, and the halves have opposite powers:
+
+```text
+resolve · guards · load
+commit route + history
+──────────────────────────── COMMIT BOUNDARY
+afterEach hooks
+scroll behaviour
+```
+
+```text
+pre-commit work      CAN prevent the navigation
+post-commit work     CANNOT revoke it
+```
+
+Once the route and history are committed they are authoritative. Anything below
+the boundary is an optional, fallible side effect, and its failure is reported
+rather than promoted into a navigation failure. The forbidden state is a
+`NavigationResult` that disagrees with the router's own state:
+
+```text
+router.currentRoute.path === "/b"   and   location shows /b
+                    but
+await router.navigate("/b") → { success: false }
+```
+
+`scrollBehavior` is the concrete case. It is a **browser-only** hook, and it is
+handled in this order:
+
+```text
+scrollBehavior configured?
+        ↓ yes
+scrolling primitives available?   (requestAnimationFrame AND window.scrollTo)
+        ↓ no  → return without invoking the callback
+        ↓ yes
+invoke scrollBehavior, isolated    → throws? report, keep the navigation
+        ↓
+position returned?
+        ↓ no  → return
+        ↓ yes
+schedule the scroll, isolated      → throws? report, no uncaught async error
+```
+
+The environment guard deliberately runs **before** the callback. A
+`scrollBehavior` implementation is browser code — it may read `window.scrollY`,
+measure an element, inspect `document` — so invoking it where its result would
+be discarded gains nothing and gives it a chance to throw on a global that does
+not exist. The two primitives are probed separately because they can be missing
+independently (a partial DOM shim; jsdom without `pretendToBeVisual`).
+
+The scheduled scroll is isolated on its own, because it runs on a frame callback
+outside the navigation promise entirely — an exception there has no catcher and
+would surface as an uncaught async error.
+
 ### Why cancellation is enforced, not just signalled
 
 The `AbortController` plumbing existed before this hardening pass. It was not
@@ -344,7 +400,7 @@ attempted and never fatal; the route itself always commits.
 | `currentRoute`, navigation results | works |
 | `history.pushState` / `replaceState` | **skipped** — probed via `globalThis.history` |
 | `popstate` / `hashchange` listeners | **not registered** — nothing to register on |
-| `scrollBehavior` | hook still runs; **applying** its result is skipped |
+| `scrollBehavior` | **not invoked at all** — the hook is browser code |
 | `go()` / `back()` / `forward()` | browser-only — no effect |
 | `Route()` / `KeepAliveRoute()` outlets | need a DOM; they build real nodes |
 
@@ -356,13 +412,13 @@ testing/SSR. Two things about it are worth stating plainly:
   directly. The configuration that reaches the scroll path in a DOM-less runtime
   is an explicit `createRouter(routes, { scrollBehavior })` rendered server-side.
 
-`scrollBehavior` guards the primitives it actually uses —
-`requestAnimationFrame` *and* `window.scrollTo` — not merely `typeof window`.
-The two can be missing independently (a partial DOM shim, jsdom without
-`pretendToBeVisual`), and the scroll call runs **after** the route has been
-committed: an exception there does not just skip scrolling, it propagates out of
-the navigation and reports `success: false` on a navigation that in fact
-succeeded. That was MEM-001.
+`scrollBehavior` is a **browser-only, post-navigation side effect**. In an
+environment without the required scrolling primitives, SibuJS skips scroll
+behaviour entirely — including the callback itself, which is never invoked.
+Errors thrown by a scroll callback are reported but never retroactively fail an
+already-committed navigation. See
+[Post-commit side effects cannot revoke a navigation](#post-commit-side-effects-cannot-revoke-a-navigation)
+for the ordering and the reasoning. That was MEM-001.
 
 ## Known limitations
 

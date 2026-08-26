@@ -99,6 +99,20 @@ export interface RouterOptions {
   readonly linkActiveClass?: string;
   readonly linkExactActiveClass?: string;
   readonly fallback?: boolean;
+  /**
+   * Scroll position to restore after a navigation commits.
+   *
+   * A **browser-only, post-navigation side effect**:
+   *
+   * - In a runtime without the required scrolling primitives
+   *   (`requestAnimationFrame` and `window.scrollTo`) the hook is **not invoked
+   *   at all** — it is browser code, and its result would be discarded anyway.
+   * - It runs *after* the route and history have committed. An exception it
+   *   throws is reported to the console but never retroactively fails an
+   *   already-committed navigation: `NavigationResult.success` stays `true` and
+   *   `currentRoute` stays authoritative.
+   * - Returning a falsy value means "do not scroll" and is not an error.
+   */
   readonly scrollBehavior?: ScrollBehavior;
   readonly guardTimeout?: number;
   readonly cacheSize?: number;
@@ -1319,19 +1333,51 @@ export class SibuRouter {
    * reject a bare call with "Illegal invocation".
    */
   private handleScrollBehavior(to: RouteContext, from: RouteContext): void {
-    if (!this.options.scrollBehavior) return;
+    const scrollBehavior = this.options.scrollBehavior;
+    if (!scrollBehavior) return;
 
-    const scrollTo = this.options.scrollBehavior(to, from, null);
-    if (!scrollTo) return;
-
+    // ── Environment guard, BEFORE the user callback ───────────────────────
+    // A `scrollBehavior` implementation is browser code by definition — it may
+    // read `window.scrollY`, measure an element, or inspect `document`. Running
+    // it in a runtime that cannot scroll gains nothing (its result would be
+    // discarded) and gives it the chance to throw on a global that is not
+    // there. Guarding only the framework's own use of these primitives, as the
+    // first MEM-001 fix did, left the callback itself unprotected.
+    //
+    // Both primitives are probed because they can be missing independently: a
+    // partial DOM shim, or jsdom without `pretendToBeVisual`.
     const g = globalThis as typeof globalThis & {
       requestAnimationFrame?: (cb: () => void) => unknown;
     };
     if (typeof g.requestAnimationFrame !== "function") return;
     if (typeof window === "undefined" || typeof window.scrollTo !== "function") return;
 
+    // ── Fallible post-commit side effect ──────────────────────────────────
+    // Everything below runs AFTER `currentRouteSetter(to)`. The route and
+    // history are already authoritative, so an exception escaping here would
+    // propagate out of `navigateInternal()` and report `success: false` for a
+    // navigation that demonstrably succeeded — router state and the reported
+    // result would disagree. Scrolling correctness is not navigation
+    // correctness: report the failure and leave the navigation alone.
+    let position: { x: number; y: number } | null | undefined;
+    try {
+      position = scrollBehavior(to, from, null);
+    } catch (error) {
+      if (typeof console !== "undefined") console.error("[router] scrollBehavior failed:", error);
+      return;
+    }
+    if (!position) return;
+
+    const { x, y } = position;
     g.requestAnimationFrame(() => {
-      window.scrollTo(scrollTo.x, scrollTo.y);
+      // Isolated separately: this runs on a frame callback, outside the
+      // navigation promise entirely, so an exception here has no catcher at
+      // all — it would surface as an uncaught async error.
+      try {
+        window.scrollTo(x, y);
+      } catch (error) {
+        if (typeof console !== "undefined") console.error("[router] scroll failed:", error);
+      }
     });
   }
 

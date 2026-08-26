@@ -399,7 +399,7 @@ navigation and was reported as `success: false` — while `router.currentRoute`
 said the navigation had succeeded. Route state and the reported result
 disagreed.
 
-### Fix — Policy A
+### First fix — Policy A (incomplete)
 
 Consistent with NODE-001: the route still commits, and only the browser-only
 side effect is skipped. Both primitives are probed, not just `window`, because
@@ -411,20 +411,117 @@ bare call with "Illegal invocation".
 Note on reachability: `createMemoryRouter(routes, initialPath)` takes no options
 object, so `scrollBehavior` cannot be passed to it directly. The reachable
 configuration is `createRouter(routes, { scrollBehavior })` rendered
-server-side — the same code path a memory router runs on every navigation. This
-is now documented rather than left implicit.
+server-side — the same code path a memory router runs on every navigation.
+
+### Why the first fix was incomplete
+
+**It guarded the framework's own use of the browser primitives, but placed those
+guards *after* the call to the user's callback.** The resulting order was:
+
+```text
+navigation commits
+      ↓
+scrollBehavior(to, from, null)     ← user code runs FIRST
+      ↓
+check requestAnimationFrame / window.scrollTo
+      ↓
+perform scroll
+```
+
+The guards protected the two lines SibuJS wrote and left the one line the
+*application* wrote completely exposed. Two defects survived.
+
+**Defect A — DOM-less callback execution.** A `scrollBehavior` implementation is
+browser code by definition. An entirely ordinary one —
+
+```ts
+scrollBehavior: () => ({ x: 0, y: window.scrollY })
+```
+
+— throws `ReferenceError: window is not defined` on the server, *before* any
+guard is reached. The first fix's own regression test even asserted the callback
+still ran (`expect(calls.some(...)).toBe(true)`), having reasoned that running a
+hook whose result is discarded is harmless. It is not: the hook is the thing
+most likely to touch the missing globals.
+
+**Defect B — a post-commit side effect revoking a committed navigation.**
+`handleScrollBehavior()` runs after `currentRouteSetter(to)`, so an exception
+from the callback propagated out of `navigateInternal()` and was reported as a
+failed `NavigationResult` — producing the state the router must never be in:
+
+```text
+router.currentRoute.path === "/a"   and   location shows /a
+                    but
+await router.push("/a") → { success: false }
+```
+
+The reproducer showed this is worse in a DOM-less runtime than a browser one: the
+bootstrap resolution also calls `handleScrollBehavior()`, so the callback threw
+twice and the router never reached the target route at all.
+
+A third, lower-severity gap: `window.scrollTo` was called inside the
+`requestAnimationFrame` callback with no isolation. That runs outside the
+navigation promise entirely, so a throw there has no catcher and surfaces as an
+uncaught async error.
+
+### Final fix
+
+The environment guard now runs **before** the user callback, and each fallible
+step is isolated at its own boundary:
+
+```text
+scrollBehavior configured?
+        ↓ yes
+primitives available?  → NO: return WITHOUT invoking the callback
+        ↓ yes
+invoke scrollBehavior, isolated   → throws? report, navigation stays successful
+        ↓
+position returned?     → falsy: return (unchanged contract)
+        ↓
+schedule scroll, isolated         → throws? report, no uncaught async error
+```
+
+Reporting uses `console.error` with the router's existing bracketed-prefix
+convention (`[router] scrollBehavior failed:` / `[router] scroll failed:`),
+matching the neighbouring `[router] redirect failed:`. No new public API, and no
+generic `try`/`catch` around `performNavigation()` — isolation is applied only at
+the two fallible post-commit side-effect boundaries, so genuine router defects
+stay visible.
+
+The callback arguments (`to`, `from`, `savedPosition`) and the falsy-return
+contract are unchanged; this is not a scroll API redesign.
+
+### Formalized semantics
+
+> `scrollBehavior` is an optional, fallible, **post-commit browser side effect**.
+> Navigation correctness is not scrolling correctness. Once the route has
+> committed, a scroll callback failure is reported — never promoted into a
+> navigation failure.
 
 ### Regression test
 
-- `tests/router-domless.test.ts` — 6 tests under the `node` environment,
-  including a premise guard asserting the primitives really are absent.
-- `tests/router-scroll-behavior.test.ts` — 6 tests under jsdom proving scrolling
-  still happens where the primitives exist, plus each primitive removed
-  independently.
+- `tests/router-domless.test.ts` — 9 tests under the `node` environment,
+  including a premise guard asserting the primitives really are absent, a
+  `vi.fn()` callback asserted **not** to have been called, a realistic
+  `window.scrollY` callback, and an explicit result/state coherence assertion.
+- `tests/router-scroll-behavior.test.ts` — 10 tests under jsdom: scrolling still
+  works where the primitives exist, each primitive removed independently, a
+  throwing callback that must leave the navigation successful and be reported, a
+  redirect path, and a throwing `window.scrollTo` asserted to produce no
+  unhandled rejection or uncaught exception.
+
+One assertion from the first fix was **inverted** rather than added to:
+`"a DOM-less router with scrollBehavior navigates without reaching scroll APIs"`
+previously asserted the hook still ran. It now asserts the opposite. That earlier
+assertion encoded the wrong contract and is the reason the gap shipped.
 
 ### Remaining risk
 
-Low.
+Low. The behaviour change is that a `scrollBehavior` hook no longer runs in
+DOM-less runtimes. This is intentional and is now the documented contract; a hook
+used for a non-scrolling side effect on the server would no longer fire, but such
+a hook was already unreliable there — it could only work by never touching a
+browser global.
 
 ---
 
@@ -504,8 +601,8 @@ Final state, measured against the baseline in
 
 | Suite | Before | After | Δ |
 |---|---:|---:|---:|
-| Full unit/integration | 4391 (363 files) | **4438** (366 files) | +47 |
-| Router subset | 338 | **347** | +9 |
+| Full unit/integration | 4391 (363 files) | **4445** (366 files) | +54 |
+| Router subset | 338 (25 files) | **366** (27 files) | +28 |
 | Data-layer subset | 195 | **221** | +26 |
 | Soak | 16 | **18** | +2 |
 | Browser (3 engines) | 150 | **156** | +6 |
@@ -513,9 +610,16 @@ Final state, measured against the baseline in
 | TypeScript — tests | 0 errors | **0 errors** | — |
 | Lint | clean | **clean** | — |
 
-The delta is exactly the regression tests added: 9 KeepAlive + 6 DOM-less scroll
-+ 6 DOM scroll + 26 data callback = 47. No previously passing test changed
-state.
+The delta is exactly the regression tests added: 9 KeepAlive + 9 DOM-less scroll
++ 10 DOM scroll + 26 data callback = 54. No previously passing test changed
+state, and exactly one pre-existing assertion was deliberately inverted — see
+"Why the first fix was incomplete" under MEM-001.
+
+> **Correction to an earlier draft of this table.** The router subset was
+> reported as `338 → 347`. That was a stale mid-pass measurement, taken before
+> the two `scrollBehavior` test files existed; the correct post-pass figure is
+> 366. The full-suite total was always measured at the end and was unaffected by
+> the error.
 
 `npm run certify:rc` — **ALL REQUIRED GATES PASSED**, 12 PASS / 0 FAIL /
 1 NOT TESTED. The single unverified gate is the Node support matrix at exactly

@@ -151,6 +151,19 @@ isolation never actually worked there under ESM — see below.
   state and the reported result disagreed. Both primitives are now probed
   independently (they can be missing separately), and the browser-only side
   effect is skipped while the route still commits.
+- **`scrollBehavior` is not invoked when the runtime cannot scroll.** The
+  environment guard now runs *before* the user callback rather than after it. A
+  scroll hook is browser code — `() => ({ x: 0, y: window.scrollY })` is entirely
+  ordinary — and running it server-side threw on the missing global before any
+  guard was reached. Where SibuJS knows it cannot scroll, the hook is skipped
+  entirely instead of being called for a result that would be discarded.
+- **A failing scroll callback cannot revoke a committed navigation.**
+  `scrollBehavior` is an optional, fallible **post-commit** side effect: once the
+  route and history are committed they are authoritative. An exception from the
+  callback — or from `window.scrollTo` on the scheduled frame, which runs outside
+  the navigation promise and previously had no catcher at all — is now reported
+  via `console.error` and leaves `NavigationResult.success` and `currentRoute` in
+  agreement. Navigation correctness is not scrolling correctness.
 - **`RouterLink` respects `event.defaultPrevented`.** It correctly declined
   modifier clicks, non-primary buttons, and `target`-bearing links, but never
   checked whether something had already cancelled the click — so a link the

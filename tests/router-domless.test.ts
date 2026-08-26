@@ -190,8 +190,97 @@ describe("router navigation without a DOM", () => {
     expect(result.success).toBe(true);
     expect(router.currentRoute.path).toBe("/a");
 
-    // The hook itself still runs — only applying its result is skipped.
-    expect(calls.some((c) => c.to === "/a")).toBe(true);
+    // The hook is not invoked at all: SibuJS knows it cannot scroll here, and a
+    // browser-oriented callback has no reason to run when its result would be
+    // discarded. See the dedicated reproducer below.
+    expect(calls).toHaveLength(0);
+
+    destroyRouter();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MEM-001 (completion) — the environment guard must precede the user callback
+  //
+  // The first MEM-001 fix guarded the framework's OWN use of
+  // requestAnimationFrame/window.scrollTo, but left those guards *after* the
+  // call to the user's scrollBehavior. A browser-oriented callback therefore
+  // still ran in a DOM-less runtime, where dereferencing `window` throws before
+  // any guard is reached — and it throws after the route has already committed.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  it("does not invoke scrollBehavior when the runtime cannot scroll", async () => {
+    const scrollBehavior = vi.fn(() => {
+      throw new Error("scrollBehavior must not run without scrolling primitives");
+    });
+
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      { mode: "history", scrollBehavior },
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+
+    expect(scrollBehavior).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/a");
+
+    destroyRouter();
+  });
+
+  it("a scrollBehavior that reads window is never given the chance to throw", async () => {
+    // The realistic shape of the bug: a perfectly ordinary browser callback,
+    // running on a server, reaching for a global that is not there.
+    const scrollBehavior = vi.fn(() => ({
+      x: 0,
+      y: (globalThis as { window?: { scrollY: number } }).window!.scrollY,
+    }));
+
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      { mode: "history", scrollBehavior },
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+
+    expect(scrollBehavior).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/a");
+
+    destroyRouter();
+  });
+
+  it("keeps the navigation result and committed route in agreement", async () => {
+    // The forbidden state: route says "/a", result says failure.
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+      ],
+      {
+        mode: "history",
+        scrollBehavior: () => {
+          throw new Error("scroll failure");
+        },
+      },
+    );
+    await flushBootstrap();
+
+    const result = await router.push("/a");
+    await flushBootstrap();
+
+    const committed = router.currentRoute.path === "/a";
+    expect(committed).toBe(true);
+    expect(result.success).toBe(true);
 
     destroyRouter();
   });
