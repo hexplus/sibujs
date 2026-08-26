@@ -173,8 +173,9 @@ A cleanup registering another cleanup is legitimate — a parent teardown
 releasing a child, a hook re-arming — and that follow-up work is owed the same
 guarantee as the first batch. So:
 
-- **Ordinary finite chains complete.** A chain of practical depth drains fully.
-  Cleanup work is never dropped for having crossed an internal boundary.
+- **Finite cleanup chains of ordinary depth drain completely.** The drain
+  continues until the queue stabilises **or** the total-work safety ceiling is
+  reached — cleanup is never dropped merely for crossing an internal boundary.
 - **The bound is a safety ceiling on total teardown executions**
   (`MAX_DRAIN_TEARDOWNS`, 10 000) — not a limit on iterations over the queue.
   Limiting iterations truncates ordinary finite chains; limiting total work does
