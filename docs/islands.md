@@ -74,6 +74,55 @@ Every helper accepts a target resolved against the enhanced root:
 
 Use `enhanceAll(selector, setup)` to enhance every match with one disposer.
 
+### Lifecycle: setup is a transaction
+
+**If your setup throws, nothing it wired stays alive.** Every binding, listener
+and cleanup registered through `ctx` before the throw is torn down, and the
+original error is rethrown unchanged for you to handle:
+
+```ts
+try {
+  enhance("[data-widget]", (ctx) => {
+    ctx.on("@save", "click", save);
+    throw new Error("bad config");
+  });
+} catch (err) {
+  // No listener was left attached, no effect is still subscribed,
+  // and every ctx.cleanup() you registered has already run.
+}
+```
+
+What rolls back is what SibuJS owns: `ctx.on`, `ctx.text`, `ctx.attr`,
+`ctx.classed`, `ctx.show`, `ctx.model`, `ctx.cleanup`, and a cleanup your setup
+returned. What SibuJS **cannot** reverse is work you did outside those helpers —
+writing `root.innerHTML`, mutating your own objects, firing a request. If setup
+must undo that too, register the undo with `ctx.cleanup()` as you go; registered
+cleanups run during rollback.
+
+A failed setup claims nothing, so **retrying is legal** — fix the cause and call
+`enhance()` again on the same element.
+
+### Disposal and re-enhancement
+
+`enhance()` marks the element it owns with `data-sibu-enhanced="true"`. That
+marker tracks *current ownership*, not history:
+
+| Event | Marker |
+| --- | --- |
+| successful `enhance()` | added |
+| `dispose()` | removed |
+| setup threw | never added |
+
+So a **disposed element can be enhanced again** — useful for re-initialising a
+widget after a client-side navigation, or remounting islands. Enhancing an
+element that is *still active* is refused (with a dev warning) so you can never
+end up with two competing sets of listeners on one node.
+
+`enhanceAll()` behaves as one transaction across the whole collection: if any
+element's setup throws, the ones already enhanced are rolled back and the
+original error is rethrown — you are never left holding live enhancements
+without a disposer.
+
 ### Avoiding a hydration flash
 
 `enhance` never re-paints static content: a binding whose value already matches
@@ -122,6 +171,15 @@ mountIslands(); // wires the whole page, honoring each island's strategy
 
 `mountIslands(root?, options?)` returns a cleanup function that cancels pending
 schedulers and disposes every mounted island.
+
+Cleanup releases the markup, so **the same DOM can be mounted again** — each
+island activates a fresh generation with a single set of bindings. Calling
+`mountIslands()` twice *without* cleaning up in between is safe too: islands
+that are already active are skipped rather than double-wired.
+
+An island whose setup throws is reported to the console and isolated — its
+siblings still activate, and the failed island leaves no bindings or listeners
+behind, so it can be mounted again once its setup is fixed.
 
 ### Activation strategies (`data-sibu-load`)
 

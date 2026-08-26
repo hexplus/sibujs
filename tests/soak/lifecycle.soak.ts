@@ -25,6 +25,7 @@ import { effect } from "../../src/core/signals/effect";
 import { signal } from "../../src/core/signals/signal";
 import { __resetQueryCache, clearQueryCache, query } from "../../src/data/query";
 import { getSubscriberCount } from "../../src/devtools/introspect";
+import { enhance } from "../../src/platform/enhance";
 import type { RouteDef } from "../../src/plugins/router";
 import {
   createRouter,
@@ -555,6 +556,166 @@ describe("nested Outlet soak", () => {
     expect(host.childNodes.length, "Route/Outlet left DOM behind").toBe(0);
     expect(checkLeaks(), "bindings leaked across 300 Outlet lifecycles").toBeLessThanOrEqual(baseline + 2);
     destroyRouter();
+  });
+});
+
+describe("enhancement lifecycle soak", () => {
+  const markup = `<div><b data-ref="n">0</b><button data-ref="b">x</button></div>`;
+
+  it("10 000 enhance/mutate/dispose cycles return bindings to baseline", () => {
+    const container = document.createElement("div");
+    container.innerHTML = markup;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const node = root.querySelector('[data-ref="n"]') as HTMLElement;
+    const button = root.querySelector('[data-ref="b"]') as HTMLButtonElement;
+    const [n, setN] = signal(0);
+
+    const baseline = checkLeaks();
+    let clicks = 0;
+
+    for (let i = 0; i < 10_000; i++) {
+      const stop = enhance(root, (ctx) => {
+        ctx.text("@n", () => n());
+        ctx.on("@b", "click", () => clicks++);
+      });
+      setN(i);
+      button.click();
+      stop();
+    }
+
+    // Every cycle really re-enhanced: a sticky ownership marker would have
+    // refused all but the first, and the counters below would be vacuous.
+    expect(clicks, "enhancement stopped re-binding partway through the soak").toBe(10_000);
+    expect(node.textContent).toBe("9999");
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
+    expect(checkLeaks(), "bindings leaked across 10 000 enhance/dispose cycles").toBe(baseline);
+
+    // Nothing outlives the final dispose.
+    button.click();
+    setN(-1);
+    expect(clicks).toBe(10_000);
+    expect(node.textContent).toBe("9999");
+  });
+
+  it("10 000 failed setups roll back completely and leave the root enhanceable", () => {
+    const container = document.createElement("div");
+    container.innerHTML = markup;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const node = root.querySelector('[data-ref="n"]') as HTMLElement;
+    const button = root.querySelector('[data-ref="b"]') as HTMLButtonElement;
+    const [n, setN] = signal(0);
+
+    const baseline = checkLeaks();
+    let clicks = 0;
+    let cleanups = 0;
+    let failures = 0;
+
+    for (let i = 0; i < 10_000; i++) {
+      try {
+        enhance(root, (ctx) => {
+          ctx.text("@n", () => n());
+          ctx.on("@b", "click", () => clicks++);
+          ctx.cleanup(() => cleanups++);
+          throw new Error("setup failed");
+        });
+      } catch {
+        failures++;
+      }
+    }
+
+    expect(failures, "setup did not actually fail — the soak proves nothing").toBe(10_000);
+    expect(cleanups, "rollback ran a cleanup more or less than once per attempt").toBe(10_000);
+
+    // A failed transaction registers no ownership and leaves nothing alive.
+    expect(checkLeaks(), "bindings leaked across 10 000 failed setups").toBe(baseline);
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
+    button.click();
+    setN(1);
+    expect(clicks, "a listener survived a failed setup").toBe(0);
+    expect(node.textContent, "an effect survived a failed setup").toBe("0");
+
+    // …and the root is still enhanceable after 10 000 failures.
+    const stop = enhance(root, (ctx) => ctx.text("@n", () => n()));
+    setN(42);
+    expect(node.textContent).toBe("42");
+    stop();
+  });
+});
+
+describe("reentrant teardown soak", () => {
+  it("1 000 cycles of a 12-level cleanup chain drain completely", () => {
+    const container = document.createElement("div");
+    container.innerHTML = `<div><b data-ref="n">0</b></div>`;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const [n, setN] = signal(0);
+
+    const baseline = checkLeaks();
+    let cleanups = 0;
+
+    for (let i = 0; i < 1_000; i++) {
+      const stop = enhance(root, (ctx) => {
+        ctx.text("@n", () => n());
+        // Each cleanup registers the next link *during* teardown.
+        const link = (at: number): void => {
+          ctx.cleanup(() => {
+            cleanups++;
+            if (at < 12) link(at + 1);
+          });
+        };
+        link(1);
+      });
+      setN(i);
+      stop();
+    }
+
+    // 12 links per cycle, none abandoned at any internal boundary.
+    expect(cleanups, "reentrant cleanups were dropped").toBe(12_000);
+    expect(checkLeaks(), "bindings leaked across 1 000 reentrant teardown cycles").toBe(baseline);
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
+
+    // Still re-enhanceable afterwards.
+    const stop = enhance(root, (ctx) => ctx.text("@n", () => n()));
+    setN(4242);
+    expect(root.querySelector('[data-ref="n"]')?.textContent).toBe("4242");
+    stop();
+  });
+
+  it("1 000 rollback cycles with a 12-level chain drain completely", () => {
+    const container = document.createElement("div");
+    container.innerHTML = `<div><b data-ref="n">0</b></div>`;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const [n] = signal(0);
+
+    const baseline = checkLeaks();
+    let cleanups = 0;
+    let failures = 0;
+
+    for (let i = 0; i < 1_000; i++) {
+      try {
+        enhance(root, (ctx) => {
+          ctx.text("@n", () => n());
+          const link = (at: number): void => {
+            ctx.cleanup(() => {
+              cleanups++;
+              if (at < 12) link(at + 1);
+            });
+          };
+          link(1);
+          throw new Error("setup failed");
+        });
+      } catch {
+        failures++;
+      }
+    }
+
+    expect(failures, "setup did not actually fail — the soak proves nothing").toBe(1_000);
+    expect(cleanups, "reentrant cleanups were dropped during rollback").toBe(12_000);
+    expect(checkLeaks(), "bindings leaked across 1 000 reentrant rollbacks").toBe(baseline);
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
   });
 });
 

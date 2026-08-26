@@ -98,6 +98,23 @@ export interface MountIslandsOptions {
  *   - `visible`     — when the element scrolls into view (IntersectionObserver).
  *   - `interaction` — on first pointer/focus/key/touch interaction.
  *   - `media`       — when `data-sibu-media` (a media query) matches.
+ *
+ * **Error isolation is lifecycle isolation.** Each island is one `enhance()`
+ * transaction, so an island whose setup throws is reported and leaves zero live
+ * bindings and zero live listeners; siblings activate normally, and the failed
+ * island can be mounted again once its setup is fixed.
+ *
+ * **Remounting is supported.** Cleanup disposes each island and releases its
+ * `data-sibu-enhanced` marker, so the same server markup can be mounted again
+ * with a fresh generation. Mounting twice *without* cleanup is also safe:
+ * islands that currently own an enhancement are skipped, never double-wired.
+ *
+ * Activation can never outlive its owner. Cleanup landing before a lazy chunk
+ * resolves prevents activation entirely, and cleanup landing *during* a setup
+ * disposes the island rather than stranding it — DISPOSED never becomes ACTIVE.
+ * `data-sibu-hydrated` is hydration provenance rather than ownership, and is
+ * therefore not cleared on disposal; see
+ * `docs/architecture/enhancement-lifecycle.md`.
  */
 export function mountIslands(
   root: ParentNode | null = typeof document !== "undefined" ? document : null,
@@ -142,9 +159,20 @@ export function mountIslands(
             return;
           }
           // Isolate setup failures so one broken island can't take down the
-          // rest of the page.
+          // rest of the page. enhance() is transactional, so a throw here has
+          // already rolled back the island's bindings/listeners — the isolation
+          // is real lifecycle isolation, not just control flow.
           try {
-            disposers.push(enhance(el, setup));
+            const disposeIsland = enhance(el, setup);
+            // Teardown can also land *during* setup (setup reaches the cleanup,
+            // directly or via a parent). The disposers list was drained before
+            // this disposer existed, so pushing it now would strand the island
+            // permanently active with nobody able to release it.
+            if (torndown) {
+              disposeIsland();
+              return;
+            }
+            disposers.push(disposeIsland);
             el.setAttribute("data-sibu-hydrated", "true");
           } catch (err) {
             if (typeof console !== "undefined") console.error(`[SibuJS islands] "${name}" failed to mount:`, err);

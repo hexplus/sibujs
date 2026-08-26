@@ -14,8 +14,73 @@
 // ---------------------------------------------------------------------------
 
 import { isDev } from "../core/dev";
-import { registerDisposer } from "../core/rendering/dispose";
+import {
+  MAX_DRAIN_TEARDOWNS,
+  registerDisposer,
+  reportDrainRunaway,
+  unregisterDisposer,
+} from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+
+/** Attribute marking a root that *currently* owns an active enhancement.
+ *  Added on commit, removed on disposal — see the lifecycle notes on
+ *  {@link enhance}. */
+const ENHANCED_ATTR = "data-sibu-enhanced";
+
+/**
+ * Which enhancement generation currently owns a root.
+ *
+ * A disposer releases the marker only while its own generation still holds it,
+ * so a stale disposer replayed after the root has been enhanced again cannot
+ * strip the newer generation's claim (`enhance → dispose → enhance → dispose#1`).
+ */
+const enhancementOwner = new WeakMap<HTMLElement, symbol>();
+
+/**
+ * Drain a teardown list exactly once per entry, isolating failures.
+ *
+ * A broken teardown must never abort the rest of the unwind, and a teardown may
+ * legitimately register another (`ctx.cleanup` stays reachable from inside one).
+ * The list is therefore drained **until it is stable, or until
+ * {@link MAX_DRAIN_TEARDOWNS} is reached** — a safety ceiling on total teardown
+ * executions, not on iterations over the list. Finite chains of ordinary
+ * practical depth complete; work is never abandoned merely for crossing an
+ * internal boundary. Splicing before running is what makes it idempotent and
+ * reentrancy-safe — an entry is off the list before it executes, so it runs at
+ * most once.
+ *
+ * The ceiling is an **absolute work bound**, not a recursion detector: it
+ * primarily catches cleanup production that does not terminate, but an
+ * exceptionally large finite chain reaches it too. Either way it is
+ * **reported** — this queue is local to one enhancement, so anything still on
+ * it once this returns is unreachable forever; the remainder is reported and
+ * then cleared deliberately rather than left to vanish. `dispose()` differs
+ * deliberately, restoring its remainder because a node-keyed queue stays
+ * reachable through a later `dispose(node)`.
+ *
+ * Batch-splicing keeps the normal case O(number of teardowns); no per-entry
+ * `shift()`.
+ */
+function drainTeardowns(teardowns: Array<() => void>, label: string): void {
+  let executed = 0;
+  while (teardowns.length > 0) {
+    const batch = teardowns.splice(0);
+    for (let i = 0; i < batch.length; i++) {
+      if (executed >= MAX_DRAIN_TEARDOWNS) {
+        const remaining = batch.length - i + teardowns.length;
+        teardowns.length = 0;
+        reportDrainRunaway(label, executed, remaining);
+        return;
+      }
+      executed++;
+      try {
+        batch[i]();
+      } catch (err) {
+        if (typeof console !== "undefined") console.error(`[SibuJS ${label}] teardown error:`, err);
+      }
+    }
+  }
+}
 
 /**
  * Helpers handed to an `enhance` setup. Every binding is fine-grained (its own
@@ -105,9 +170,26 @@ function writeControlValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAr
  * replacing it. Returns a dispose function; disposal is also wired to the
  * element, so removing its subtree cleans everything up.
  *
+ * **Setup is a transaction.** If `setup` throws, every binding, listener and
+ * cleanup it registered through the {@link EnhanceContext} is torn down and the
+ * original error is rethrown unchanged — the element is left exactly as
+ * unenhanced as it started, so a retry is legal. The rollback covers
+ * framework-owned resources only (`ctx.on`, `ctx.text`, `ctx.attr`,
+ * `ctx.classed`, `ctx.show`, `ctx.model`, `ctx.cleanup`, and a cleanup returned
+ * from setup); work the setup performed outside those helpers — `innerHTML`
+ * writes, network calls, global mutation — cannot be reversed generically, so
+ * register its undo with `ctx.cleanup()` as you go.
+ *
+ * **Ownership.** A successfully enhanced root is marked
+ * `data-sibu-enhanced="true"`; disposal removes it. The marker tracks *current*
+ * ownership rather than history, so a **disposed root can be enhanced again**,
+ * while enhancing a root that is still active is refused (dev-warns) to prevent
+ * two competing sets of bindings. See `docs/architecture/enhancement-lifecycle.md`.
+ *
  * @param target An `Element` or a CSS selector resolved against `document`
  *   (the first match is used; see {@link enhanceAll} for many).
  * @param setup  Wires reactivity via the {@link EnhanceContext}.
+ * @throws Whatever `setup` throws, after rolling its resources back.
  *
  * @example
  * ```ts
@@ -134,16 +216,21 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     return () => {};
   }
 
-  // Idempotency: enhancing the same element twice would double-wire it (two sets
-  // of listeners/effects). Refuse and warn in dev.
-  if (root.getAttribute("data-sibu-enhanced") === "true") {
+  // Idempotency: enhancing a root that *currently* owns an enhancement would
+  // double-wire it (two sets of listeners/effects, ambiguous ownership). Refuse
+  // and warn in dev. The marker tracks live ownership, not history, so a root
+  // whose enhancement has been disposed is enhanceable again.
+  if (root.getAttribute(ENHANCED_ATTR) === "true") {
     if (isDev() && typeof console !== "undefined") {
       console.warn("[SibuJS enhance] element is already enhanced; ignoring re-enhance.", root);
     }
+    // Inert: this call owns nothing, so its disposer must not release the
+    // marker (or anything else) belonging to the active enhancement.
     return () => {};
   }
 
   const teardowns: Array<() => void> = [];
+  const owner = Symbol("sibujs.enhance");
   let disposed = false;
 
   const bind = (target_: string | Element | null, fn: (el: HTMLElement) => void): void => {
@@ -262,25 +349,43 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     },
   };
 
-  const extra = setup(ctx);
+  // Setup is a transaction over framework-owned resources. If it throws, every
+  // binding/listener/cleanup registered through `ctx` before the throw is torn
+  // down and the original error is rethrown untouched — the root is left exactly
+  // as unenhanced as it started, so a retry is legal. Side effects the setup
+  // performed *outside* SibuJS (innerHTML writes, network calls, globals) are
+  // not framework-owned and are not reversed; see docs/architecture/enhancement-lifecycle.md.
+  // biome-ignore lint/suspicious/noConfusingVoidType: mirrors EnhanceSetup's "cleanup or nothing" return.
+  let extra: void | (() => void);
+  try {
+    extra = setup(ctx);
+  } catch (err) {
+    drainTeardowns(teardowns, "enhance");
+    throw err;
+  }
   if (typeof extra === "function") teardowns.push(extra);
 
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;
-    for (const fn of teardowns.splice(0)) {
-      try {
-        fn();
-      } catch (err) {
-        if (typeof console !== "undefined") console.error("[SibuJS enhance] teardown error:", err);
-      }
+    // Release ownership before running teardowns: a teardown may legitimately
+    // re-enhance the root, and it must not find a stale marker in its way.
+    if (enhancementOwner.get(root) === owner) {
+      enhancementOwner.delete(root);
+      root.removeAttribute(ENHANCED_ATTR);
     }
+    // The node-level entry is dead once drained; drop it so repeated
+    // enhance/dispose cycles on a long-lived root don't accumulate closures.
+    unregisterDisposer(root, dispose);
+    drainTeardowns(teardowns, "enhance");
   };
 
-  // Tie cleanup to the element so removing its subtree disposes the bindings.
+  // Commit. Ownership is recorded and only *then* is the root marked, so the
+  // marker is never observable for an enhancement that did not complete.
+  // Tie cleanup to the element too, so removing its subtree disposes the bindings.
   registerDisposer(root, dispose);
-  // Mark for tooling / idempotency in island bootstrapping.
-  root.setAttribute("data-sibu-enhanced", "true");
+  enhancementOwner.set(root, owner);
+  root.setAttribute(ENHANCED_ATTR, "true");
 
   return dispose;
 }
@@ -288,11 +393,42 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
 /**
  * Enhance every element matching a selector. Returns a single dispose that
  * tears down all of them.
+ *
+ * The whole collection is one transaction: if any element's setup throws, the
+ * elements already enhanced are rolled back (newest first, mirroring stack
+ * unwinding) and the original error is rethrown. A caller that never received
+ * the aggregate disposer is therefore never left holding live enhancements it
+ * has no way to release. A teardown that fails during that rollback is reported
+ * and skipped — it neither aborts the remaining rollback nor replaces the
+ * original setup error.
+ *
+ * The returned disposer is idempotent, and the collection may be enhanced again
+ * afterwards (see {@link enhance} on marker lifetime).
+ *
+ * @throws Whatever the failing element's setup threw, after rolling back.
  */
 export function enhanceAll(selector: string, setup: EnhanceSetup): () => void {
   if (typeof document === "undefined") return () => {};
-  const disposers = Array.from(document.querySelectorAll<HTMLElement>(selector)).map((el) => enhance(el, setup));
+  const disposers: Array<() => void> = [];
+  try {
+    for (const el of Array.from(document.querySelectorAll<HTMLElement>(selector))) {
+      disposers.push(enhance(el, setup));
+    }
+  } catch (err) {
+    // The failing element already rolled itself back inside enhance(); unwind
+    // the committed ones. A broken teardown must neither abort the remaining
+    // rollback nor replace the original setup error.
+    for (let i = disposers.length - 1; i >= 0; i--) {
+      try {
+        disposers[i]();
+      } catch (rollbackErr) {
+        if (typeof console !== "undefined") console.error("[SibuJS enhanceAll] rollback error:", rollbackErr);
+      }
+    }
+    disposers.length = 0;
+    throw err;
+  }
   return () => {
-    for (const d of disposers) d();
+    for (const d of disposers.splice(0)) d();
   };
 }
