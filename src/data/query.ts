@@ -224,6 +224,7 @@ export function query<T>(
         cache.delete(key);
       }
     }, cacheTime);
+<<<<<<< HEAD
     // This timer is pure cleanup bookkeeping — nothing is waiting on it. Under
     // Node a ref'd handle would hold the event loop open for the whole
     // retention window (300 s by default), so an SSG build, a CLI, or a
@@ -232,6 +233,8 @@ export function query<T>(
     // process alive, never when it fires. Browser timer handles have no
     // `unref`, hence the guard. (RC-002)
     (entry.gcTimer as { unref?: () => void }).unref?.();
+=======
+>>>>>>> main
   }
 
   /**
