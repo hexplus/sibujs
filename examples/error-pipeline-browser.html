@@ -15,6 +15,7 @@
     <section id="boundary-each"></section>
     <section id="boundary-binding"></section>
     <section id="siblings"></section>
+    <section id="resetkeys"></section>
 
     <script type="module">
       import {
@@ -141,6 +142,34 @@
             b.break();
           };
           api.healB = () => b.heal();
+        },
+
+        // resetKeys must be TRIGGERS, never subscriptions. Changing a key
+        // while healthy must not arm the boundary to auto-clear a later,
+        // unrelated failure.
+        mountResetKeys() {
+          const host = document.getElementById("resetkeys");
+          const [route, setRoute] = signal("a");
+          const [fail, setFail] = signal(false);
+
+          const tree = ErrorBoundary(
+            {
+              resetKeys: [route],
+              fallback: () => div({ class: "rk-fallback" }, "failed"),
+            },
+            () =>
+              div({
+                class: "rk-content",
+                nodes: () => {
+                  if (fail()) throw new Error("rk-boom");
+                  return "ok";
+                },
+              }),
+          );
+          host.appendChild(tree);
+          api.rkChangeKey = (v) => setRoute(v);
+          api.rkFail = () => setFail(true);
+          api.rkHeal = () => setFail(false);
         },
       };
 

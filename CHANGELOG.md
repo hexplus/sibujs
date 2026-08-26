@@ -96,6 +96,12 @@ export and one additive field were added.
 - **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
   runtime error pipeline.** They previously went to `console.warn` only, which
   no configured runtime error handler could observe.
+- **`ErrorBoundary` `resetKeys` watchers no longer subscribe to the boundary's
+  own error state.** Once a reset key had changed while the boundary was
+  healthy, the watcher became a subscriber of that boundary's error signal, so a
+  later unrelated failure re-ran the watcher and immediately reset itself — the
+  fallback appeared and vanished without any reset key changing. Reset keys are
+  triggers; the current error is only inspected when a trigger fires.
 - **Reporting an error no longer runs inside the failing subscriber's tracking
   context.** An `ErrorBoundary` listener (or an application handler) that reads
   a signal while deciding what to do would otherwise have that read attributed

@@ -5,6 +5,7 @@ import { takePendingError } from "../core/rendering/lazy";
 import { onMount } from "../core/rendering/lifecycle";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { untracked } from "../reactivity/track";
 import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryOptions {
@@ -308,7 +309,18 @@ export function ErrorBoundary(
         initialized = true;
         return;
       }
-      if (error() !== null) retry();
+      // Reset keys are TRIGGERS; the boundary's error is STATE this watcher
+      // inspects when a trigger fires. Reading `error()` reactively here would
+      // subscribe the watcher to `setError()` — and because the initialization
+      // guard above returns early, that subscription was acquired on the first
+      // NON-initial run, i.e. the first time a reset key changed. From then on
+      // any later, unrelated failure re-ran this watcher, which saw a non-null
+      // error and called retry(), clearing the failure it had just been told
+      // about. The boundary un-failed itself with no reset key involved.
+      //
+      //   reset key changed -> maybe retry   (correct)
+      //   error changed     -> retry         (wrong)
+      if (untracked(error) !== null) retry();
     });
   }
 

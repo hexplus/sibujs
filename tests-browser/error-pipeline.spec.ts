@@ -94,3 +94,25 @@ test("sibling boundaries sharing one fallback stay independent", async ({ page }
   );
   expect(after).toEqual(["A"]);
 });
+
+test("a reset key changing while healthy does not auto-clear a later failure", async ({ page }) => {
+  // resetKeys are triggers, not subscriptions. Reading the boundary's error
+  // reactively inside the reset watcher made the watcher a subscriber of
+  // setError() from the first key change onward, so a later unrelated failure
+  // re-ran the watcher and retried itself — the fallback vanished instantly.
+  await page.evaluate(() => (window as never as { __t: { mountResetKeys(): void } }).__t.mountResetKeys());
+  await expect(page.locator("#resetkeys .rk-content")).toHaveText("ok");
+
+  // Key changes while the boundary is healthy.
+  await page.evaluate(() => (window as never as { __t: { rkChangeKey(v: string): void } }).__t.rkChangeKey("b"));
+  await expect(page.locator("#resetkeys .rk-fallback")).toHaveCount(0);
+
+  // Later failure, with NO further key change: the fallback must persist.
+  await page.evaluate(() => (window as never as { __t: { rkFail(): void } }).__t.rkFail());
+  await expect(page.locator("#resetkeys .rk-fallback")).toHaveText("failed");
+
+  // And a genuine key change still recovers it.
+  await page.evaluate(() => (window as never as { __t: { rkHeal(): void } }).__t.rkHeal());
+  await page.evaluate(() => (window as never as { __t: { rkChangeKey(v: string): void } }).__t.rkChangeKey("c"));
+  await expect(page.locator("#resetkeys .rk-content")).toHaveText("ok");
+});
