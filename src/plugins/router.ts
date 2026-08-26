@@ -747,9 +747,15 @@ class GuardManager {
  * How the router will produce an instance of a route's component.
  *
  * Deliberately never holds an `Element`: an instance produced by one invocation
- * must never become a reusable factory. A `factory` is safe to invoke once per
- * instance; a `deferred` load has not yet been classified as lazy-module vs
- * direct `AsyncComponent`, which is settled at real instantiation. (LOAD-002)
+ * must never become a reusable factory. (LOAD-002)
+ *
+ * The two kinds are structural, not provisional:
+ *
+ * - `factory` — invoke once per instance, only when an instance is needed.
+ *   Everything unbranded lands here: synchronous, `async`, and
+ *   Promise-returning component factories alike.
+ * - `deferred` — an **explicitly branded** `lazy()` module loader. This is the
+ *   only kind preload may execute. (LOAD-004)
  */
 type RoutePlan = { kind: "factory"; component: Component } | { kind: "deferred"; load: AsyncComponent | LazyComponent };
 
@@ -849,13 +855,14 @@ class ComponentLoader {
   /**
    * Classify without instantiating.
    *
-   * A syntactically-async component is *provisionally* `deferred`: whether it
-   * is a `LazyComponent` (resolving to a module) or a direct `AsyncComponent`
-   * (resolving to an Element) cannot be known without calling it, and calling
-   * it speculatively is exactly what this pass removes. The ambiguity is
-   * settled during real instantiation, where the produced value is used rather
-   * than discarded — and a module resolution upgrades the cached plan so later
-   * mounts skip the import.
+   * The `lazy()` brand decides, and nothing else: a branded loader is
+   * `deferred`, everything else is a `factory`. No inspection of the function's
+   * type or source is involved, so an unbranded factory can never become
+   * preload-executable. (LOAD-004)
+   *
+   * An unbranded factory that happens to resolve to a module — an un-marked
+   * `async () => ({ default: Page })` — still works: that is unwrapped during
+   * real instantiation, where the produced value is used rather than discarded.
    */
   private async doLoadPlan(comp: Component | AsyncComponent | LazyComponent, routePath: string): Promise<RoutePlan> {
     if (typeof comp !== "function") {
@@ -1000,13 +1007,21 @@ class ComponentLoader {
   }
 
   /**
-   * Resolve a route's module/factory ahead of time without creating any
-   * component instance or DOM.
+   * Prepare explicitly deferred route code without creating a component
+   * instance or any DOM.
    *
-   * A `deferred` plan whose load turns out to be a direct `AsyncComponent`
-   * cannot be preloaded without producing an instance — resolving it *is*
-   * creating it — so that instance is disposed and the plan stays deferred.
-   * Lazy modules and synchronous factories preload with no instantiation.
+   * Only routes explicitly branded as deferred — a loader wrapped in `lazy()` —
+   * are resolved during preload. Direct component factories, whether
+   * synchronous, `async`, or Promise-returning, are `factory` plans and
+   * therefore require no preload work at all.
+   *
+   * ```text
+   * factory plan   → preload no-op
+   * deferred plan  → resolve module → cache factory → no component invocation
+   * ```
+   *
+   * Deferred module resolution caches the component factory the module exports
+   * **without invoking it**. (LOAD-004)
    */
   async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
     const plan = await this.loadPlan(route, routePath);
@@ -2011,8 +2026,14 @@ export function Route(): Node {
     (errorNode as HTMLElement).setAttribute("role", "alert");
     (errorNode as HTMLElement).setAttribute("aria-live", "assertive");
 
-    // Attach component source info so the app layer can display it.
-    // Extract the import path from the lazy function's source (e.g. import("./pages/Features.ts")).
+    // Attach component source info so the app layer can display it: best-effort
+    // extraction of an import path from the function's source, e.g.
+    // import("./pages/Features.ts").
+    //
+    // A *diagnostic hint* only. Like the loading-spinner guess below, reading
+    // source text here decides what an error node displays and nothing else —
+    // it never grants permission to execute a component. Preload authority
+    // comes solely from the `lazy()` brand; see `isDeferredModule`. (LOAD-004)
     if (routeDef && "component" in routeDef) {
       const src = routeDef.component.toString();
       const importMatch = src.match(/import\(["']([^"']+)["']\)/);

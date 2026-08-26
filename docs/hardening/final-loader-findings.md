@@ -221,18 +221,23 @@ That is the same "call it and throw the result away" shape this pass had just
 removed from validation, and it fails for the same reason: `dispose()` cannot
 undo an analytics call, a network request, a store write, or a log line.
 
-**Fix — architectural, not a special case.**
+**Fix at the time — architectural, not a special case.**
 
-`isAsyncComponent()` is replaced by `isDeferredModule()`, which recognises only
-what genuinely has separable code to fetch:
+> ⚠️ **Intermediate state — superseded by LOAD-004.** The classifier described
+> in this subsection still consulted function source text. It was replaced in
+> the very next finding. Read LOAD-004 for the current behaviour.
+
+`isAsyncComponent()` was replaced by `isDeferredModule()`, which recognised only
+what appeared to have separable code to fetch:
 
 - the `LAZY_MARKER` stamped by `lazy()`, or
-- a dynamic `import(` in the function source.
+- a dynamic `import(` in the function source. ← *removed by LOAD-004*
 
-`constructor.name === "AsyncFunction"` is deliberately no longer a signal. Every
-directly supplied factory — synchronous, `async`, or plain promise-returning —
-is now a `factory` plan, and `preloadPlan()` returns immediately for those. They
-become preload no-ops **by construction**, with no branch that could call them.
+`constructor.name === "AsyncFunction"` stopped being a signal. Every directly
+supplied factory — synchronous, `async`, or plain promise-returning — became a
+`factory` plan, and `preloadPlan()` returned immediately for those: preload
+no-ops **by construction**, with no branch that could call them. That part
+stands; only the source-text half of the classifier was later removed.
 
 Two supporting changes fell out of the reclassification:
 
@@ -250,12 +255,15 @@ styles, repeat-preload idempotency, preload/navigation race, preload of an
 unrelated route, module-load failure, and error-surfacing-at-navigation for both
 sync and async invalid components.
 
-**Remaining risk.** Low. One behaviour change worth stating: a route written as
-`async () => ({ default: Page })` **without** `lazy()` and without a literal
-`import(` is no longer preloadable — it is indistinguishable from a component
-factory without invoking it. It still works correctly on navigation; it simply
-gets no preload benefit. Wrapping it in `lazy()` restores that, which is what
-`lazy()` is for.
+**Remaining risk.** Low. One behaviour change worth stating, in the stable
+semantic form LOAD-004 settled on: **only explicitly deferred/lazy routes are
+preloadable.** Unmarked factories are treated as component factories and are
+invoked only during actual navigation. Such a route still works correctly; it
+simply gets no preload benefit. Wrapping the loader in `lazy()` restores that,
+which is what `lazy()` is for.
+
+No public contract depends on whether a function's source literally contains
+`import(`.
 
 ---
 
@@ -665,3 +673,82 @@ Suspense:   generation + tornDown   PASS
 Preload/navigation module-load dedupe is preserved: switching the classifier
 from source text to the `lazy()` brand did not touch `resolveModuleFactory()`,
 and the race test still shows one import and one instantiation.
+
+---
+
+## Documentation-consistency pass (post-LOAD-004)
+
+A documentation-only sweep after the LOAD-004 runtime fix. **No runtime
+behaviour changed** — the full suite reported an identical 4602 passed /
+1 skipped / 371 files before and after.
+
+### What was stale
+
+| Location | Stale claim | Action |
+|---|---|---|
+| `preloadPlan()` JSDoc | "a `deferred` plan whose load turns out to be a direct `AsyncComponent` … that instance is disposed and the plan stays deferred" | Rewritten: factory plan → no-op; deferred plan → resolve module, cache factory, no invocation |
+| `RoutePlan` type doc | "a `deferred` load has not yet been classified as lazy-module vs direct `AsyncComponent`" | Rewritten: the two kinds are structural — `deferred` means an explicitly branded `lazy()` loader |
+| `doLoadPlan()` JSDoc | "a syntactically-async component is *provisionally* `deferred` … the ambiguity is settled during real instantiation" | Rewritten: the brand decides; nothing is provisional |
+| `final-loader-findings.md`, LOAD-003 "Fix" | described the intermediate classifier (`LAZY_MARKER` **or** source `import(`) in a section reading as current | Banner added: *Intermediate state — superseded by LOAD-004*, with the removed half marked inline |
+| `final-loader-findings.md`, LOAD-003 "Remaining risk" | stated the behaviour change in implementation terms ("without a literal `import(`") | Restated semantically: only explicitly deferred/lazy routes are preloadable |
+| `Route()` error-node diagnostic | no comment distinguishing a diagnostic source read from preload authority | Comment added, matching the loading-spinner site |
+
+### What was already clean
+
+Re-checked by search rather than assumed. The CHANGELOG sentence about a direct
+`AsyncComponent` having "nothing to preload without instantiating", and the
+matching `router.md` paragraph, were both already removed — the first when
+LOAD-003 was fixed, the second in the LOAD-004 pass. `router.md` and
+`async-ownership.md` already carried the final contract.
+
+### Cosmetic `Function#toString()` reads — kept, by design
+
+Two remain in `Route()`, both now carrying an explicit comment:
+
+| Site | Purpose | Grants execution permission? |
+|---|---|---|
+| error node `data-component-source` | extracts an import path to display on a route error | **no** |
+| loading-spinner `isAsync` guess | decides whether to show a spinner while loading | **no** |
+
+The forbidden invariant is *source text → permission to execute a component
+during preload*, not *source text → cosmetic or debug hint*. Neither site is
+consulted by `isDeferredModule()`.
+
+### Documentation regression check — not added
+
+The repository has no test that reads `.md` files (`documented-limits.test.ts`
+pins behaviour against docs, but asserts on runtime, not text). Per the brief,
+a search-based assertion was only to be added if such checks already existed, so
+none was introduced.
+
+The invariant is pinned behaviourally instead, which is stronger than a text
+search: the LOAD-004 false-positive tests fail if source text ever regains
+preload authority.
+
+## Final documentation report
+
+```text
+RUNTIME
+
+Explicit lazy marker is sole preload authority:     YES
+Function#toString used for preload permission:      NO
+AsyncFunction used for preload permission:          NO
+Direct factories invoked during preload:            NO
+
+DOCUMENTATION
+
+preloadPlan JSDoc stale AsyncComponent wording:     REMOVED
+CHANGELOG stale AsyncComponent preload wording:     REMOVED (already, re-verified)
+router.md final preload contract:                   VERIFIED
+async-ownership final preload contract:             VERIFIED
+historical findings clearly past-tense:             VERIFIED
+source comments consistent with final architecture: VERIFIED
+```
+
+```text
+TypeScript source errors:  0
+TypeScript test errors:    0
+Lint:                      clean (574 files)
+Loader/preload tests:      147 passed, 5 files
+Full suite:                4602 passed, 1 skipped, 371 files (unchanged)
+```
