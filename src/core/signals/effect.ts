@@ -1,5 +1,6 @@
 import { cleanup as coreCleanup, retrack, untracked } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { reportError } from "../errors";
 import { isSSR } from "../ssr-context";
 
 /** Options for effect */
@@ -99,7 +100,11 @@ function flushUserCleanups(ctx: EffectCtx): void {
     try {
       list[i]();
     } catch (err) {
-      if (typeof console !== "undefined") console.warn("[SibuJS effect] onCleanup threw:", err);
+      // Per-cleanup containment is deliberate: one throwing teardown must not
+      // strand the cleanups registered beside it, or a single bad handler
+      // leaks every listener/timer the effect owned. Reported rather than
+      // warned so the failure is observable in production too.
+      reportError(err, { phase: "cleanup" });
     }
   }
 }
@@ -116,10 +121,13 @@ function drainReruns(ctx: EffectCtx): void {
   } while (ctx.rerunPending && ++reruns <= MAX_RERUNS);
   if (ctx.rerunPending) {
     ctx.rerunPending = false;
-    if (_g.__SIBU_DEV_WARN__ !== false && typeof console !== "undefined") {
-      console.error(
-        `[SibuJS] effect re-requested itself ${MAX_RERUNS}+ times — ` +
-          "likely a write-reads-self cycle. Breaking to prevent infinite loop.",
+    if (_g.__SIBU_DEV_WARN__ !== false) {
+      reportError(
+        new Error(
+          `effect re-requested itself ${MAX_RERUNS}+ times — ` +
+            "likely a write-reads-self cycle. Breaking to prevent infinite loop.",
+        ),
+        { phase: "effect" },
       );
     }
   }
@@ -255,6 +263,7 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
     depsTail: null;
     _epoch: number;
     _structDirty: boolean;
+    _hasComputedDep: boolean;
     _runEpoch: number;
     _runs: number;
     _dispose?: () => void;
@@ -263,6 +272,9 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
   sub.depsTail = null;
   sub._epoch = 0;
   sub._structDirty = false;
+  // Maintained by the reactive core; pre-declared so every effect subscriber
+  // shares one hidden class.
+  sub._hasComputedDep = false;
   sub._runEpoch = 0;
   sub._runs = 0;
   ctx.subscriber = sub;

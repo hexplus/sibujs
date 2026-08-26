@@ -1,6 +1,6 @@
 {
-  "recordedAt": "2026-08-26T01:13:46.520Z",
-  "commit": "4512527c268bec702daa87a413000fe5e771122e",
+  "recordedAt": "2026-08-26T00:00:00.000Z",
+  "commit": "40043d7 + uncommitted correctness/release-hardening pass",
   "node": "v24.19.0",
   "npm": "11.17.0",
   "os": "win32 10.0.26200 x64",
@@ -8,7 +8,12 @@
   "cpuCount": 16,
   "totalMemGB": 31.6,
   "jsdom": "26.1.0",
-  "benchmarkCount": 36,
+  "benchmarkCount": 41,
   "hostKind": "shared developer laptop (not a dedicated benchmark host)",
-  "gateStatus": "INFORMATIONAL ONLY — see docs/hardening/final-pre-rc-findings.md BENCH-001"
+  "gateStatus": "INFORMATIONAL ONLY — see docs/hardening/final-pre-rc-findings.md BENCH-001",
+  "notes": [
+    "Re-recorded after the computed-stabilization change. The previous baseline was recorded against an engine that notified downstream effects on every upstream write, so comparing the current engine against it reported differences that are the FIX, not a regression.",
+    "Section 11 (Computed Stabilization) is new. Its value is the reported downstream effect-run counts, not the timings: those counts went from ~60,000 to 0 on stabilizing workloads while the control stayed at 59,999.",
+    "Cross-run deltas on this host routinely reach +/-20% on benchmarks the change never touched, so a single run's Regression Check line is not evidence on its own. Interleaved same-window A/B medians put the cost of stabilization at roughly +16% on always-changing computed graphs (diamond, wide diamond) and slightly NEGATIVE on stabilizing graphs."
+  ]
 }

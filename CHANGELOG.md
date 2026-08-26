@@ -6,6 +6,91 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+A correctness and release-hardening pass over the reactive core, keyed lists,
+error reporting and packaging. No public API was removed or renamed; one new
+export and one additive field were added.
+
+### Fixed
+
+- **Derived values no longer notify downstream effects when the derived output
+  stayed equal.** Previously an effect whose only relevant dependency was a
+  `derived()` re-ran whenever an *upstream source* changed, even if the derived
+  recomputed to the same value — so `derived(() => value() % 2)` re-ran its
+  subscribers on every write. `equals` deduplicated notifications but never
+  actually stopped propagation. This applies to the default `Object.is`
+  comparator and to a custom `equals`, through multi-level chains, diamonds and
+  batches.
+- **Keyed `each()` rows no longer display stale data when an item is replaced
+  under the same key.** Replacing `{id: 1, name: "Alice"}` with
+  `{id: 1, name: "Bob"}` now updates the row's contents while keeping the same
+  DOM node. Each row owns reactive `item()` / `index()` cells that
+  reconciliation writes on reuse; `render` still runs exactly once per key, and
+  DOM identity across reorders is unchanged.
+- **`index()` inside a keyed row is now reactive**, so reordering a list updates
+  index-derived content without recreating rows.
+- **Application exceptions thrown from an effect or binding re-run are now
+  reported in production.** They were caught to protect the notification drain
+  and then discarded unless a development flag was set, making a thrown
+  exception indistinguishable from success. They are still contained — one
+  broken subscriber cannot freeze unrelated bindings — but they are no longer
+  silent.
+- **A runaway subscriber no longer discards unrelated pending work.** Tripping
+  the cycle guard now quarantines the offending subscriber for the rest of that
+  update while every other queued subscriber still runs; previously the entire
+  drain was aborted.
+- **Long but finite update cascades are no longer misreported as cycles.** A
+  legitimate cascade deeper than the old 50-run guard was aborted mid-flight,
+  leaving the un-drained tail of the graph holding wrong values. The guard is
+  now 1 000 runs, and `maxDrainIterations` remains the absolute backstop.
+- **`sanitizeUrl()` no longer rewrites legitimate URLs.** The aggressively
+  stripped copy used to detect obfuscated schemes (`java\tscript:`) was being
+  returned to the caller, so `mailto:a@b.com?subject=Hello World` came back as
+  `...HelloWorld`. Detection and output are now separate: dangerous schemes are
+  still rejected, and safe URLs keep their interior characters.
+- **`sanitizeSrcset()` now drops candidates with a malformed descriptor**,
+  closing a case where a whitespace-obfuscated scheme survived because the
+  candidate split left the dangerous half in the descriptor position.
+- **The README's CDN snippet pointed at a file the build does not emit**
+  (`dist/sibu.global.js`); the correct artifact is `dist/cdn.global.js`.
+
+### Added
+
+- **`asyncDerived()` now returns a `dispose()` method.** It previously created
+  an internal effect with no way to stop it, so it stayed subscribed to its
+  sources for the lifetime of the page. Disposal unsubscribes, aborts the
+  in-flight run, ignores any promise that settles afterwards, makes `refresh()`
+  a no-op, and is idempotent.
+- **`asyncDerived()` factories receive an `AbortSignal`.** Forward it to `fetch`
+  or any abortable API to cancel work that can no longer affect the result:
+  `asyncDerived(async ({ signal }) => (await fetch(url(), { signal })).json())`.
+  Superseded runs and disposal both abort. The run-id guard is retained because
+  not every async API honours `AbortSignal`. Existing zero-argument factories
+  continue to work unchanged.
+- **`setRuntimeErrorHandler(handler)`, `reportError()` and the
+  `RuntimeErrorPhase` / `RuntimeErrorContext` types**, exported from the package
+  root — one place to observe every error the runtime catches and contains
+  (`effect`, `binding`, `derived`, `cleanup`, `event`, `async`, `render`,
+  `scheduler`). Without a handler, errors go to `console.error`.
+- Browser tests (Playwright) now run in CI: Chromium on pull requests,
+  Chromium + Firefox + WebKit on `main`. They previously existed but ran only
+  when invoked manually, so a real-engine regression could ship with CI green.
+- Benchmarks for computed stabilization — workloads where an upstream write does
+  *not* change the downstream value — reporting downstream effect runs alongside
+  timings, so the run count cannot regress unnoticed.
+
+### Changed
+
+- Errors from a throwing `onCleanup` are now reported through the runtime error
+  pipeline (`console.error` by default) instead of `console.warn`. Behaviour is
+  otherwise unchanged: a throwing cleanup still does not prevent its siblings
+  from running.
+- `maxSubscriberRepeats` now defaults to 1 000 (was 50). Configurable via
+  `setMaxSubscriberRepeats()`.
+
+---
+
 ## [4.0.0-rc.1] — 2026-08-25
 
 First release candidate for 4.0. **The only breaking change is the Node.js

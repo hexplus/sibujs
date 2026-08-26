@@ -727,6 +727,135 @@ section("10. Deep Diamond Dependency Graph");
   cleanup2();
 }
 
+// ─── 11. Computed stabilization ──────────────────────────────────────────────
+//
+// WHY THIS SECTION EXISTS: every other reactive benchmark above is an
+// "everything changes" workload — each root write produces a genuinely new
+// value at every level, so a scheduler that simply re-runs everything downstream
+// scores well and a scheduler that checks whether values actually changed only
+// looks like overhead.
+//
+// Real applications are not shaped like that. Selectors, projections and
+// filters routinely map many distinct inputs onto the same output, and the
+// scheduler's job there is to STOP. Without these cases, benchmark-driven
+// tuning would keep optimizing for the one workload where stabilization has
+// nothing to skip. Each benchmark below reports downstream effect runs
+// alongside the timing, because the run count is the point — a faster number
+// with a higher run count is a regression, not a win.
+
+section("11. Computed Stabilization (invalidation != change)");
+
+{
+  // Stable parity: the source moves on every write, the derived never does.
+  const [getN, setN] = signal(0);
+  const parity = derived(() => getN() % 2);
+
+  let parityRuns = 0;
+  const stopParity = effect(() => {
+    parity();
+    parityRuns++;
+  });
+
+  parityRuns = 0;
+  results.push(
+    runBench("Stable parity: 10,000 source writes (+2 each)", () => {
+      let v = getN();
+      for (let i = 0; i < 10_000; i++) {
+        v += 2; // parity never changes
+        setN(v);
+      }
+    }, { iterations: 5, warmup: 1 })
+  );
+  printResult(results.at(-1));
+  console.log(`    ${DIM}(${fmt(parityRuns)} downstream effect runs — lower is better, 0 is ideal)${RESET}`);
+  stopParity();
+
+  // Structural equality: a fresh object every recompute, equal by comparator.
+  const [getUser, setUser] = signal({ id: 1, seen: 0 });
+  const projected = derived(() => ({ id: getUser().id }), { equals: (a, b) => a.id === b.id });
+
+  let projectedRuns = 0;
+  const stopProjected = effect(() => {
+    projected();
+    projectedRuns++;
+  });
+
+  projectedRuns = 0;
+  results.push(
+    runBench("Structural equality: 10,000 irrelevant field writes", () => {
+      for (let i = 0; i < 10_000; i++) setUser({ id: 1, seen: i });
+    }, { iterations: 5, warmup: 1 })
+  );
+  printResult(results.at(-1));
+  console.log(`    ${DIM}(${fmt(projectedRuns)} downstream effect runs — lower is better, 0 is ideal)${RESET}`);
+  stopProjected();
+
+  // Diamond whose sink is invariant: both branches move, the sink does not.
+  const [getRoot, setRoot] = signal(0);
+  const up = derived(() => getRoot() + 1);
+  const down = derived(() => -getRoot());
+  const invariant = derived(() => up() + down()); // always 1
+
+  let invariantRuns = 0;
+  const stopInvariant = effect(() => {
+    invariant();
+    invariantRuns++;
+  });
+
+  invariantRuns = 0;
+  results.push(
+    runBench("Diamond stabilization: 10,000 root writes, invariant sink", () => {
+      for (let i = 0; i < 10_000; i++) setRoot(i);
+    }, { iterations: 5, warmup: 1 })
+  );
+  printResult(results.at(-1));
+  console.log(`    ${DIM}(${fmt(invariantRuns)} downstream effect runs — lower is better, 0 is ideal)${RESET}`);
+  stopInvariant();
+
+  // Conditional graph: the dependency SET changes as the branch flips, and
+  // half the flips land on an equal value.
+  const [getToggle, setToggle] = signal(true);
+  const [getLeft] = signal(7);
+  const [getRight] = signal(7);
+  const picked = derived(() => (getToggle() ? getLeft() : getRight()));
+
+  let pickedRuns = 0;
+  const stopPicked = effect(() => {
+    picked();
+    pickedRuns++;
+  });
+
+  pickedRuns = 0;
+  results.push(
+    runBench("Conditional graph: 10,000 branch flips, equal values", () => {
+      for (let i = 0; i < 10_000; i++) setToggle(i % 2 === 0);
+    }, { iterations: 5, warmup: 1 })
+  );
+  printResult(results.at(-1));
+  console.log(`    ${DIM}(${fmt(pickedRuns)} downstream effect runs — lower is better, 0 is ideal)${RESET}`);
+  stopPicked();
+
+  // Control: same graph shape, but the value genuinely changes every write.
+  // Guards against "optimizing" stabilization by suppressing real updates.
+  const [getReal, setReal] = signal(0);
+  const doubled = derived(() => getReal() * 2);
+  let realRuns = 0;
+  const stopReal = effect(() => {
+    doubled();
+    realRuns++;
+  });
+
+  realRuns = 0;
+  results.push(
+    runBench("Control: 10,000 writes that DO change the derived", () => {
+      for (let i = 0; i < 10_000; i++) setReal(i);
+    }, { iterations: 5, warmup: 1 })
+  );
+  printResult(results.at(-1));
+  console.log(`    ${DIM}(${fmt(realRuns)} downstream effect runs — must stay ~50,000; suppression here is a BUG)${RESET}`);
+  stopReal();
+}
+
 // ─── Summary ─────────────────────────────────────────────────────────────────
 
 console.log(`\n${BOLD}${YELLOW}── Summary ${"─".repeat(54)}${RESET}`);

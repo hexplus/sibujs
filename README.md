@@ -188,7 +188,7 @@ Utilities for testing components and reactivity.
 Self-registering IIFE build exposing `window.Sibu`, for use without a bundler.
 
 ```html
-<script src="https://unpkg.com/sibujs@latest/dist/sibu.global.js"></script>
+<script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
 <script>
   const { signal, effect, div, mount } = window.Sibu;
 </script>

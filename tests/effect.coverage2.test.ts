@@ -92,8 +92,10 @@ describe("effect coverage2 — cleanup & reruns", () => {
     expect(() => dispose()).not.toThrow();
   });
 
-  it("onCleanup that throws is caught and warned", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("onCleanup that throws is contained and reported", () => {
+    // Asserts the contract, not the console channel: the throw is contained
+    // (the effect keeps working) and reported through the runtime pipeline.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const [count, setCount] = signal(0);
     effect((onCleanup) => {
       count();
@@ -102,8 +104,9 @@ describe("effect coverage2 — cleanup & reruns", () => {
       });
     });
     setCount(1); // triggers flushUserCleanups which catches
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(errSpy).toHaveBeenCalled();
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("cleanup fail");
+    errSpy.mockRestore();
   });
 
   it("effect that writes to its own dep mid-body drains reruns", () => {
@@ -164,15 +167,15 @@ describe("effect coverage2 — devtools hook & dispose error paths", () => {
   });
 
   it("catches onCleanup throwing during dispose", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const dispose = effect((onCleanup) => {
       onCleanup(() => {
         throw new Error("cleanup-on-dispose");
       });
     });
     expect(() => dispose()).not.toThrow();
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });
 

@@ -252,15 +252,16 @@ describe("array() non-reactive actions", () => {
 });
 
 describe("effect dispose error handling", () => {
-  it("swallows an onCleanup that throws during dispose", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("contains and reports an onCleanup that throws during dispose", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const stop = effect((onCleanup) => {
       onCleanup(() => {
         throw new Error("cleanup-boom");
       });
     });
     expect(() => stop()).not.toThrow();
-    expect(warn).toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
   });
 });
 

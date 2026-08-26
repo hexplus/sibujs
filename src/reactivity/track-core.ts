@@ -1,4 +1,4 @@
-import { devWarn, isDev } from "../core/dev";
+import { reportError } from "../core/errors";
 import type { ReactiveSignal } from "./signal";
 
 // ---------------------------------------------------------------------------
@@ -37,9 +37,6 @@ import type { ReactiveSignal } from "./signal";
 
 type Subscriber = () => void;
 
-// Cache dev mode at module load for zero-cost production checks
-const _isDev = isDev();
-
 // ---------- Subscription edge ---------------------------------------------
 
 interface SubNode {
@@ -49,6 +46,19 @@ interface SubNode {
   // Epoch stamp refreshed on every recordDependency() call. `retrack()` uses
   // this to detect deps that were present before the run but not re-read.
   epoch: number;
+  // The signal's `__v` at the moment this subscriber last OBSERVED it.
+  //
+  // WHY: invalidation is not notification. `propagateDirty` enqueues every
+  // downstream effect as soon as an upstream source dirties a computed —
+  // before the computed has recomputed and decided whether its own output
+  // actually changed. Comparing this stamp against the signal's current
+  // version just before the effect runs is what lets `derived({ equals })`
+  // stop propagation instead of merely deduplicating it.
+  //
+  // `NaN` means "unversioned source": NaN !== anything, so such a dependency
+  // always counts as changed. That is the safe default for any reactive token
+  // that does not maintain `__v` (see `depsChanged`).
+  depVersion: number;
   // Doubly-linked into signal.subsHead (most-recent-first insertion order).
   sigPrev: SubNode | null;
   sigNext: SubNode | null;
@@ -71,6 +81,16 @@ type SignalWithList = ReactiveSignal & {
   // "have I already recorded this signal for the current sub?" detection
   // without walking the subscriber's dep list.
   __activeNode?: SubNode | null;
+  // Monotonic version, bumped ONLY when the source's value actually changed.
+  // `signal()` bumps it on a non-equal write; `derived()` bumps it only when a
+  // recompute produced a value its comparator considers different. Absent on
+  // unversioned reactive tokens, which `depsChanged` treats as always-changed.
+  __v?: number;
+  // Set on computeds by `derived()`. `_d` is the dirty flag; `_validate`
+  // recomputes a dirty computed and refreshes `__v`. The drain calls it to
+  // settle a computed's value BEFORE deciding whether dependents must run.
+  _d?: boolean;
+  _validate?: () => void;
 };
 
 // ---------- Node pool -----------------------------------------------------
@@ -90,6 +110,7 @@ function createNode(): SubNode {
     sig: null,
     sub: null,
     epoch: 0,
+    depVersion: 0,
     sigPrev: null,
     sigNext: null,
     subPrev: null,
@@ -228,6 +249,16 @@ type SubWithList = Subscriber & {
   _c?: number;
   _sig?: ReactiveSignal;
   __name?: string;
+  // True when at least one dependency recorded during the most recent run was
+  // a COMPUTED. Rebuilt from scratch by every `retrack`.
+  //
+  // WHY: the stabilization check only has something to prove when a computed is
+  // involved. A subscriber is enqueued only by a source that actually changed
+  // value — plain `signal()` setters bump `__v` and notify solely on a non-equal
+  // write — so for a subscriber reading only plain signals the check can never
+  // suppress the run, and walking its dep list is pure overhead on the hottest
+  // path in the engine. Only a dirty computed can turn out to be unchanged.
+  _hasComputedDep?: boolean;
   // Cached disposer returned by track() — allocated once on first track(),
   // reused for the life of the subscriber. Avoids per-invocation closure
   // allocation in hot paths (Wide Graph sink: 10k+ calls, Memory benchmark:
@@ -241,8 +272,64 @@ function safeInvoke(sub: Subscriber): void {
   try {
     sub();
   } catch (err) {
-    if (_isDev) devWarn(`Subscriber threw during notification: ${err instanceof Error ? err.message : String(err)}`);
+    // Contain, but do not silence. Aborting the drain here would let one broken
+    // component freeze every unrelated binding on the page; swallowing it (the
+    // previous behaviour outside dev builds) made an application exception
+    // indistinguishable from success in production. See ../core/errors.ts.
+    reportError(err, { phase: "effect", name: (sub as SubWithList).__name });
   }
+}
+
+// ---------- Value-change validation --------------------------------------
+//
+// INVALIDATION IS NOT NOTIFICATION.
+//
+// `propagateDirty` runs at WRITE time and cannot know whether a computed's
+// output actually changed — deciding that would require recomputing every
+// computed eagerly, which is exactly the lazy-evaluation property the engine
+// is built around. So it over-approximates: it dirties computeds and enqueues
+// every downstream effect.
+//
+// This function is the compensating step, run at DRAIN time, immediately
+// before a subscriber would execute. It settles any dirty computed the
+// subscriber depends on (pull-based, so laziness is preserved: nothing is
+// recomputed unless an effect is actually about to observe it) and compares
+// each dependency's version against the version the subscriber last observed.
+// If no dependency's VALUE changed, the subscriber does not run — which is
+// what makes `derived({ equals })` stop propagation rather than merely
+// deduplicate it.
+//
+// Conservative in every uncertain case: no tracked deps, a freed edge, an
+// unversioned source (`__v === undefined` → stamped NaN → never equal), or a
+// computed whose recompute threw all report "changed" so the subscriber runs
+// and the error surfaces at its normal site.
+// ---------------------------------------------------------------------------
+function depsChanged(sub: SubWithList): boolean {
+  let node = sub.depsHead ?? null;
+  // A subscriber with no tracked dependencies cannot prove it is stable.
+  if (node === null) return true;
+
+  while (node !== null) {
+    const sig = node.sig as SignalWithList | null;
+    if (sig === null) return true;
+
+    // A dirty computed's version is meaningless until it has recomputed.
+    // Settling it here is what allows equality to stop propagation.
+    if (sig._d === true && sig._validate !== undefined) {
+      try {
+        sig._validate();
+      } catch {
+        // Let the subscriber run so the failure surfaces where the user
+        // expects it, rather than being attributed to the scheduler.
+        return true;
+      }
+    }
+
+    if (node.depVersion !== sig.__v) return true;
+    node = node.subNext;
+  }
+
+  return false;
 }
 
 // ---------- Tracking suspension -------------------------------------------
@@ -303,6 +390,11 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   const epoch = ++subscriberEpochCounter;
   sub._epoch = epoch;
   sub._structDirty = false;
+  // NOTE: `_hasComputedDep` is deliberately NOT cleared here. It is sticky, so
+  // that `recordDependency` only has to test for a computed when an edge is
+  // created rather than on every re-read of an existing one. A subscriber that
+  // stops depending on any computed keeps the flag and pays for one redundant
+  // (and still correct) validation walk per run — the safe direction.
 
   // Pre-walk: activate every existing dep on its signal so in-body
   // recordDependency hits can refresh the existing edge in O(1) via
@@ -444,6 +536,7 @@ export function reactiveBinding(commit: () => void): () => void {
   subscriber.depsTail = null;
   subscriber._epoch = 0;
   subscriber._structDirty = false;
+  subscriber._hasComputedDep = false;
   subscriber._runEpoch = 0;
   subscriber._runs = 0;
   subscriber._reentrant = false;
@@ -481,18 +574,38 @@ export function recordDependency(signal: ReactiveSignal) {
   const sig = signal as SignalWithList;
   const epoch = sub._epoch ?? 0;
 
+  // Stamp the version the subscriber is observing RIGHT NOW. `depsChanged`
+  // compares against this before re-running the subscriber, so it must be the
+  // version of the value actually being returned to the caller — `derived()`
+  // therefore settles its value and bumps `__v` BEFORE calling us.
+  // `?? Number.NaN` marks an unversioned source as permanently "changed".
   // O(1) dup check: if the signal's active edge already points at us,
-  // it's a re-read within this run. Refresh the epoch and we're done.
+  // it's a re-read within this run (or the first touch of an edge that
+  // survived from the previous run). Refresh the epoch and version stamp.
+  //
+  // This is the hottest branch in the engine — a wide fan-in re-reads hundreds
+  // of stable edges per run — so it does the minimum: no computed-detection
+  // check, which the new-edge path below handles instead.
   const active = sig.__activeNode ?? null;
   if (active !== null && active.sub === sub) {
     active.epoch = epoch;
+    active.depVersion = sig.__v ?? Number.NaN;
     return;
   }
+
+  // Only a computed can be dirty-but-unchanged, so only a computed makes the
+  // drain's stabilization check worth running for this subscriber. A computed
+  // dependency can only ENTER the dep set here, and the flag is sticky (a
+  // subscriber that later drops the computed merely pays for one redundant
+  // walk, which is safe), so the check belongs on this cold path rather than on
+  // every re-read above.
+  if (sig._validate !== undefined) sub._hasComputedDep = true;
 
   // New edge. Stash whatever `__activeNode` was (may be null, may be an
   // outer tracking context's node) into `prevActive` so the post-walk
   // restores it.
   const node = allocNode(signal, sub, epoch);
+  node.depVersion = sig.__v ?? Number.NaN;
   node.prevActive = active;
   sig.__activeNode = node;
   linkSub(sub, node);
@@ -532,9 +645,26 @@ export function cleanup(subscriber: Subscriber): void {
 // write-reads-self cycle — bail loudly instead of wasting cycles. Counts
 // live on the subscriber itself via an epoch to avoid end-of-drain walks.
 // ---------------------------------------------------------------------------
-let maxSubscriberRepeats = 50;
+// A subscriber that fires more than this many times in ONE drain is treated as
+// a write-reads-self cycle.
+//
+// WHY 1000 AND NOT A TIGHTER BOUND: this is a cycle heuristic, and the only
+// thing separating "cycle" from "legitimate deep cascade" is how many times a
+// subscriber legitimately re-runs. A fan-in subscriber observing an N-link
+// cascade re-runs N times — entirely finite and correct. The previous ceiling
+// of 50 misclassified such graphs as cycles and, worse, aborted the whole
+// drain, so a 60-link cascade terminated half-propagated with WRONG values in
+// the un-drained tail. A genuine infinite cycle still terminates here in
+// microseconds; a legitimate graph deeper than this is vanishingly rare, and
+// `maxDrainIterations` remains the absolute backstop.
+let maxSubscriberRepeats = 1000;
 let maxDrainIterations = 1_000_000;
 let drainEpoch = 0;
+
+// Subscribers that tripped the repeat ceiling during the CURRENT drain.
+// They are skipped for the remainder of the drain instead of aborting it —
+// see `drainQueue`. Cleared when the outermost drain completes.
+const quarantined = new Set<Subscriber>();
 
 export function setMaxSubscriberRepeats(n: number): number {
   const prev = maxSubscriberRepeats;
@@ -560,22 +690,25 @@ function tickRepeat(sub: Subscriber): boolean {
 }
 
 function cycleError(sub: Subscriber): void {
-  if (typeof console !== "undefined") {
-    const name = (sub as SubWithList).__name ?? "<unnamed>";
-    console.error(
-      `[SibuJS] subscriber "${name}" fired more than ${maxSubscriberRepeats} times — ` +
-        "likely a write-reads-self cycle between effects/signals. Breaking to prevent infinite loop.",
-    );
-  }
+  const name = (sub as SubWithList).__name ?? "<unnamed>";
+  reportError(
+    new Error(
+      `subscriber "${name}" fired more than ${maxSubscriberRepeats} times — ` +
+        "likely a write-reads-self cycle between effects/signals. This subscriber is " +
+        "quarantined for the rest of this update; other pending work still runs.",
+    ),
+    { phase: "scheduler", name },
+  );
 }
 
 function absoluteDrainError(): void {
-  if (typeof console !== "undefined") {
-    console.error(
-      `[SibuJS] Notification drain exceeded ${maxDrainIterations} iterations — ` +
+  reportError(
+    new Error(
+      `Notification drain exceeded ${maxDrainIterations} iterations — ` +
         "absolute safety net tripped. Breaking to prevent infinite loop.",
-    );
-  }
+    ),
+    { phase: "scheduler" },
+  );
 }
 
 // ---------- Drain ---------------------------------------------------------
@@ -588,14 +721,36 @@ function drainQueue(): void {
       break;
     }
     const sub = pendingQueue[i++];
-    if (tickRepeat(sub)) {
-      cycleError(sub);
-      break;
-    }
     // Remove from pendingSet BEFORE invoking so a cascading write during
     // this sub's execution can re-enqueue it. Enables sibling-effect
     // convergence; tickRepeat caps runaway loops.
     pendingSet.delete(sub);
+
+    // An offender identified earlier in THIS drain stays parked. Skipping only
+    // the offender is what breaks the cycle — a quarantined subscriber stops
+    // writing, so its partner stops being re-enqueued.
+    if (quarantined.size > 0 && quarantined.has(sub)) continue;
+
+    // Stabilization gate: an upstream source changing does not mean this
+    // subscriber's observable inputs changed. Checked BEFORE tickRepeat so a
+    // suppressed run never counts toward the cycle ceiling.
+    //
+    // Skipped entirely for subscribers with no computed dependency: they were
+    // enqueued by a source that provably changed value, so the walk could only
+    // ever return true. This keeps the plain-signal hot path allocation- and
+    // traversal-free, which is what the un-batched update workload exercises.
+    if ((sub as SubWithList)._hasComputedDep === true && !depsChanged(sub as SubWithList)) continue;
+
+    if (tickRepeat(sub)) {
+      cycleError(sub);
+      // Quarantine the offender and KEEP DRAINING. Aborting the whole queue
+      // here let one pathological subscriber discard unrelated, already-valid
+      // pending work — leaving legitimate effects un-run and application state
+      // half-updated. Containment must be scoped to the offender.
+      quarantined.add(sub);
+      continue;
+    }
+
     safeInvoke(sub);
   }
 }
@@ -611,6 +766,9 @@ export function drainNotificationQueue(): void {
     if (notifyDepth === 0) {
       pendingQueue.length = 0;
       pendingSet.clear();
+      // Quarantine is scoped to a single drain: a cycle broken here should not
+      // permanently disable the subscriber for later, unrelated transactions.
+      if (quarantined.size > 0) quarantined.clear();
     }
   }
 }
@@ -733,6 +891,9 @@ export function notifySubscribers(signal: ReactiveSignal) {
     if (notifyDepth === 0) {
       pendingQueue.length = 0;
       pendingSet.clear();
+      // Quarantine is scoped to a single drain: a cycle broken here should not
+      // permanently disable the subscriber for later, unrelated transactions.
+      if (quarantined.size > 0) quarantined.clear();
     }
   }
 }
