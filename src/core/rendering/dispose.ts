@@ -3,24 +3,25 @@ import { devWarn, isDev } from "../dev";
 const elementDisposers = new WeakMap<Node, Array<() => void>>();
 
 /**
- * Ceiling on how many teardowns a single drain may execute.
+ * Safety ceiling on the **total number of teardowns a single drain may execute**.
  *
  * A cleanup registering another cleanup is legitimate — a parent teardown
- * releasing a child, a lifecycle hook re-arming — so a drain must keep going
- * until the queue is stable, and a finite chain of any practical depth has to
- * complete. Only a cleanup that (transitively) registers *itself* fails to
- * terminate.
+ * releasing a child, a lifecycle hook re-arming — so a drain keeps going until
+ * the queue is stable, and ordinary finite chains of practical depth complete.
  *
- * The bound is therefore on **total work**, not on a number of passes. A pass
- * cap abandons finite work that merely happened to cross the boundary, which is
- * indistinguishable from a leak; a total-work cap only ever trips on genuine
- * runaway recursion. Hitting it is a bug in user cleanup code, and is reported
- * rather than silently swallowed — see {@link reportDrainRunaway}.
+ * The ceiling counts total teardown executions, not iterations over the queue.
+ * Capping iterations abandons finite work purely for crossing the boundary,
+ * which is indistinguishable from a leak. Capping total work instead protects
+ * against cleanup production that does not terminate: most often recursive
+ * self-registration, though any chain long enough to exceed the ceiling reaches
+ * it too. Either way the condition is reported rather than silently swallowed,
+ * so bounded protection never passes as completed cleanup — see
+ * {@link reportDrainRunaway}.
  */
 export const MAX_DRAIN_TEARDOWNS = 10_000;
 
 /**
- * Report a cleanup queue that would not stabilise.
+ * Report a cleanup queue that did not stabilise within {@link MAX_DRAIN_TEARDOWNS}.
  *
  * Uses the existing console-based lifecycle convention; deliberately not a new
  * public error API. Reported unconditionally (not dev-gated) because it means
@@ -30,7 +31,7 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
   if (typeof console === "undefined") return;
   console.error(
     `[SibuJS ${label}] runaway cleanup: stopped after running ${executed} teardowns with ${remaining} still queued. ` +
-      "A cleanup is registering another cleanup without terminating — the remaining work was NOT run.",
+      "Cleanup did not stop producing more cleanup within the safety ceiling — the remaining work was NOT run.",
     { executed, remaining },
   );
 }
@@ -106,8 +107,9 @@ export function dispose(node: Node): void {
       // Drain to stability. A disposer may register another on the same node
       // (a parent teardown releasing a child, a lifecycle hook re-arming), and
       // that follow-up work is owed the same guarantee as the first batch — so
-      // the loop runs until the queue is empty rather than for a fixed number
-      // of passes. Only genuine runaway self-registration stops it early.
+      // the loop runs until the queue is empty, bounded only by the safety
+      // ceiling on total teardown executions (MAX_DRAIN_TEARDOWNS), which stops
+      // cleanup production that does not terminate.
       let executed = 0;
       let runaway = false;
 

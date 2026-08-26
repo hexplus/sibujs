@@ -143,7 +143,7 @@ the `EnhanceContext`:
 SibuJS cannot generically reverse the right-hand column, and does not pretend
 to. A setup that must undo its own non-framework work should register that
 undo with `ctx.cleanup()` **as it goes** — registered cleanups run during
-rollback, in the same pass as the bindings.
+rollback, in the same drain as the bindings.
 
 ---
 
@@ -158,8 +158,8 @@ is a single teardown model rather than two incompatible ones.
   the convention `dispose()` already uses — and the remaining teardowns still
   run. No new public error API was introduced for this.
 - **Reentrancy.** `ctx.cleanup()` stays reachable from inside a teardown, so the
-  queue can grow while it is being drained. It is drained **until it is stable**,
-  not for a fixed number of passes — see the policy below.
+  queue can grow while it is being drained. It is drained **until it is stable
+  or the safety ceiling is reached** — see the policy below.
 - **The original error wins.** `enhance()` rethrows exactly what setup threw, by
   identity. A rollback failure never masks it, and neither does a runaway.
   `enhance()` never converts a failed setup into a success — isolating and
@@ -173,15 +173,19 @@ A cleanup registering another cleanup is legitimate — a parent teardown
 releasing a child, a hook re-arming — and that follow-up work is owed the same
 guarantee as the first batch. So:
 
-- **Finite chains always complete.** A chain of any practical depth drains
-  fully. Cleanup work is never dropped for having crossed an internal boundary.
-- **Only self-registration is bounded.** A cleanup that transitively re-registers
-  itself never terminates, so the drain is capped on **total work executed**
-  (`MAX_DRAIN_TEARDOWNS`, 10 000), not on a number of passes. A pass cap trips on
-  ordinary finite chains — a total-work cap only trips on genuine runaway.
-- **Hitting the cap is reported, never silent.** `console.error` names how many
-  teardowns ran and how many were still queued. A caller is never told cleanup
-  completed when queued work was dropped.
+- **Ordinary finite chains complete.** A chain of practical depth drains fully.
+  Cleanup work is never dropped for having crossed an internal boundary.
+- **The bound is a safety ceiling on total teardown executions**
+  (`MAX_DRAIN_TEARDOWNS`, 10 000) — not a limit on iterations over the queue.
+  Limiting iterations truncates ordinary finite chains; limiting total work does
+  not. What the ceiling stops is cleanup production that does not terminate.
+  Recursive self-registration is the usual cause, but it is a work ceiling, not
+  a recursion detector: **any** chain long enough to exceed 10 000 executions
+  reaches it, so finite chains are not guaranteed to complete regardless of
+  length — only ones of realistic depth.
+- **Reaching the ceiling is reported, never silent.** `console.error` names how
+  many teardowns ran and how many were still queued. A caller is never told
+  cleanup completed when queued work was dropped.
 - **Normal cost is unchanged.** Batch-splicing keeps the ordinary path
   O(number of teardowns); there is no per-entry `shift()`, and no recursion —
   the drain is iterative, so deep chains cannot overflow the stack.
