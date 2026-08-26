@@ -275,15 +275,60 @@ time ownership is checked.
 Teardown marks the outlet torn and advances the generation *before* releasing
 anything, so every pending continuation permanently loses ownership.
 
-#### Components are invoked twice on first load
+#### Loading and instantiating are separate
 
-The component loader validates a freshly-loaded component by invoking it once
-and checking it returns an `Element`. That probe node is discarded — and
-disposed — and the caller then invokes the component again for the node it
-actually mounts. This happens **once per route definition**, at cache-fill time;
-subsequent navigations reuse the cached component and do not re-probe.
+> Route component factories are invoked only when SibuJS creates an actual route
+> component instance. Loader and preload resolution never invoke them
+> speculatively.
 
-Keep component factories free of side effects that must happen exactly once.
+Three distinct concepts:
+
+```text
+route definition loading   →  resolve the plan: a factory, or a module to import
+component instantiation    →  invoke the factory exactly once, per instance
+mounted-instance ownership →  the Element belongs to the route generation
+```
+
+```text
+lazy module cache
+      ↓
+component factory
+      ↓
+the current route generation invokes it once
+      ↓
+Element instance belongs to that generation
+```
+
+The loader caches **plans** — factories and resolved modules — never Elements. A
+side effect inside a component factory therefore runs once per mounted instance,
+which is what you would expect.
+
+#### AsyncComponent ownership
+
+A direct `AsyncComponent` (`() => Promise<Element>`) is supported as a
+first-class route component.
+
+> A resolved Element from an `AsyncComponent` belongs to the route generation
+> that requested it. If that generation becomes stale before commit, SibuJS
+> disposes the Element. Resolved Elements are never cached as reusable route
+> factories.
+
+Each real instantiation invokes the `AsyncComponent` again and receives its own
+Element, so revisiting a route never remounts a previously disposed instance. If
+your `AsyncComponent` deliberately returns the same Element every time, that is
+your choice — the router does not introduce reuse on its own.
+
+Caching policy:
+
+| Thing | Cached by the loader? |
+|---|---|
+| lazy imported module / its default factory | yes |
+| synchronous `Component` factory | yes |
+| Element resolved by a direct `AsyncComponent` | **no** |
+
+The loader cache and the [KeepAlive](#the-keepalive-outlet) instance cache are
+different things: KeepAlive deliberately caches *mounted instances* and owns
+their lifecycle; the loader caches only how to *produce* an instance.
 
 ## The KeepAlive outlet
 
@@ -400,6 +445,24 @@ if (!result.success && result.reason === "guard") {
 
 `reason` is additive: `type` values are unchanged, so existing code branching on
 `type` is unaffected.
+
+## Preloading
+
+`preloadRoute(target)` resolves a route's module and factory ahead of time.
+
+> Preloading may resolve route modules/factories but does not instantiate route
+> component DOM.
+
+For a lazy route this performs the dynamic import and caches the resulting
+factory, so the later navigation mounts without a network round trip — and the
+component factory itself is not called, so no DOM and no lifecycle state is
+created. For a synchronous component there is nothing to fetch and preloading is
+a no-op.
+
+The one exception is a direct `AsyncComponent`: resolving it *is* creating its
+Element, so there is nothing to preload without instantiating. SibuJS disposes
+that Element and leaves the route unresolved; the next real navigation invokes
+the component normally.
 
 ## Navigation target policy
 

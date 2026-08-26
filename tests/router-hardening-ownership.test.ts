@@ -14,18 +14,11 @@ const settle = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
 
-/** A route component that records its own disposal, once mounted. */
+/** A route component that records its own disposal. */
 const tracked = (name: string, log: string[]) => () => {
   const d = document.createElement("div");
   d.textContent = name;
-  registerDisposer(d, () => {
-    // The component loader validates a freshly-loaded component by invoking it
-    // once and discarding the resulting node. That probe node is now disposed
-    // rather than leaked (OUT-004), but it was never mounted, so it is not a
-    // route replacement and must not be counted as one. Disposal always runs
-    // before detachment, so a genuinely mounted node still has a parent here.
-    if (d.parentNode) log.push(name);
-  });
+  registerDisposer(d, () => log.push(name));
   return d;
 };
 

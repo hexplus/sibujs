@@ -743,11 +743,24 @@ class GuardManager {
 /**
  * Component loader with caching and error recovery
  */
+/**
+ * How the router will produce an instance of a route's component.
+ *
+ * Deliberately never holds an `Element`: an instance produced by one invocation
+ * must never become a reusable factory. A `factory` is safe to invoke once per
+ * instance; a `deferred` load has not yet been classified as lazy-module vs
+ * direct `AsyncComponent`, which is settled at real instantiation. (LOAD-002)
+ */
+type RoutePlan = { kind: "factory"; component: Component } | { kind: "deferred"; load: AsyncComponent | LazyComponent };
+
 class ComponentLoader {
   private static readonly MAX_ERROR_ENTRIES = 256;
-  private componentCache: LRUCache<string, Component>;
+  private planCache: LRUCache<string, RoutePlan>;
   private errorCache = new Map<string, { timestamp: number; count: number }>();
-  private loadingPromises = new Map<string, Promise<Component>>();
+  private loadingPromises = new Map<string, Promise<RoutePlan>>();
+  // In-flight *module* resolutions for deferred plans, so concurrent first
+  // mounts of a lazy route do not each run the loader arrow.
+  private moduleLoads = new Map<string, Promise<unknown>>();
   private retryDelay: number;
   // Stable per-route-definition id. Caching by the RESOLVED path (e.g.
   // /users/123) gave the cache one entry per visited URL, so parameterized
@@ -757,7 +770,7 @@ class ComponentLoader {
   private keyCounter = 0;
 
   constructor(cacheSize = 50, retryDelay = 1000) {
-    this.componentCache = new LRUCache(cacheSize);
+    this.planCache = new LRUCache(cacheSize);
     this.retryDelay = retryDelay;
   }
 
@@ -770,7 +783,16 @@ class ComponentLoader {
     return key;
   }
 
-  async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
+  /**
+   * Resolve the route's **plan** — how to produce an instance — without ever
+   * instantiating a component to inspect it.
+   *
+   * Loading a route component and instantiating one are separate operations.
+   * The loader never invokes a user component factory merely to validate its
+   * return type; validation happens on the instance that will actually be
+   * mounted. (LOAD-001)
+   */
+  async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
     if (!("component" in route)) {
       throw new Error(`Route ${routePath} does not have a component`);
     }
@@ -778,92 +800,194 @@ class ComponentLoader {
     const comp = route.component;
     const cacheKey = this.keyFor(route);
 
-    // Return cached component
-    const cached = this.componentCache.get(cacheKey);
+    const cached = this.planCache.get(cacheKey);
     if (cached) return cached;
 
-    // Check if there's already a loading promise
     const existingPromise = this.loadingPromises.get(cacheKey);
     if (existingPromise) return existingPromise;
 
-    // Check error cache
-    const errorInfo = this.errorCache.get(cacheKey);
-    if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
-      throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
-    }
+    this.assertNotHot(cacheKey);
 
-    // Create loading promise
-    const loadingPromise = this.doLoadComponent(comp, routePath);
+    const loadingPromise = this.doLoadPlan(comp, routePath);
     this.loadingPromises.set(cacheKey, loadingPromise);
 
     try {
-      const component = await loadingPromise;
-      this.componentCache.set(cacheKey, component);
+      const plan = await loadingPromise;
+      this.planCache.set(cacheKey, plan);
       this.errorCache.delete(cacheKey); // Clear error on success
-      return component;
+      return plan;
     } catch (error) {
-      // Keyed by route-definition id, so the error map is bounded by the number
-      // of route definitions; still cap defensively and evict the oldest.
-      const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
-      if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
-        const oldest = this.errorCache.keys().next().value;
-        if (oldest !== undefined) this.errorCache.delete(oldest);
-      }
-      this.errorCache.set(cacheKey, {
-        timestamp: Date.now(),
-        count: currentError.count + 1,
-      });
+      this.noteError(cacheKey);
       throw error;
     } finally {
       this.loadingPromises.delete(cacheKey);
     }
   }
 
-  private async doLoadComponent(
-    comp: Component | AsyncComponent | LazyComponent,
-    routePath: string,
-  ): Promise<Component> {
-    // Synchronous component
+  /** Reject early while a recent load failure for this route is still hot. */
+  private assertNotHot(cacheKey: string): void {
+    const errorInfo = this.errorCache.get(cacheKey);
+    if (errorInfo && Date.now() - errorInfo.timestamp < this.retryDelay) {
+      throw new Error(`Component loading failed recently, retry in ${this.retryDelay}ms`);
+    }
+  }
+
+  /**
+   * Record a load failure. Keyed by route-definition id, so the map is bounded
+   * by the number of route definitions; still capped defensively, evicting the
+   * oldest.
+   */
+  private noteError(cacheKey: string): void {
+    const currentError = this.errorCache.get(cacheKey) || { timestamp: 0, count: 0 };
+    if (!this.errorCache.has(cacheKey) && this.errorCache.size >= ComponentLoader.MAX_ERROR_ENTRIES) {
+      const oldest = this.errorCache.keys().next().value;
+      if (oldest !== undefined) this.errorCache.delete(oldest);
+    }
+    this.errorCache.set(cacheKey, { timestamp: Date.now(), count: currentError.count + 1 });
+  }
+
+  /**
+   * Classify without instantiating.
+   *
+   * A syntactically-async component is *provisionally* `deferred`: whether it
+   * is a `LazyComponent` (resolving to a module) or a direct `AsyncComponent`
+   * (resolving to an Element) cannot be known without calling it, and calling
+   * it speculatively is exactly what this pass removes. The ambiguity is
+   * settled during real instantiation, where the produced value is used rather
+   * than discarded — and a module resolution upgrades the cached plan so later
+   * mounts skip the import.
+   */
+  private async doLoadPlan(comp: Component | AsyncComponent | LazyComponent, routePath: string): Promise<RoutePlan> {
+    if (typeof comp !== "function") {
+      throw new Error(`Component for route "${routePath}" must be a function, got ${typeof comp}`);
+    }
+    // `isAsyncComponent` classifies syntactically, so a plain arrow returning a
+    // promise (`() => fetchThing().then(...)`) lands in the factory branch —
+    // still a valid AsyncComponent per the exported type. Runtime thenable
+    // detection at instantiation handles it, applied to the real invocation
+    // rather than to a probe. (RC-003)
     if (!this.isAsyncComponent(comp)) {
-      const result = (comp as Component)();
+      return { kind: "factory", component: comp as Component };
+    }
+    return { kind: "deferred", load: comp as AsyncComponent | LazyComponent };
+  }
 
-      // `isAsyncComponent` classifies SYNTACTICALLY — the `lazy()` marker, a
-      // genuine `async function`, or an `import(` in the source. A plain arrow
-      // that returns a promise (`() => fetchThing().then(...)`) matches none of
-      // those, yet it is a perfectly valid `AsyncComponent` per the exported
-      // type. Adopt the promise rather than dropping it: dropping produced a
-      // misleading "must return Element, got object" AND left the promise with
-      // no handler, so a later rejection escaped as an unhandled rejection —
-      // fatal to a Node process, and noise in every browser error reporter.
-      // (RC-003)
-      // `result` is statically `Element` (the `Component` signature), so the
-      // widening has to go through `unknown` — the whole point is that the
-      // static type is what turned out to be wrong at runtime.
-      if (this.isThenable(result)) {
-        return this.awaitComponent(result as unknown as Promise<Element>, routePath);
-      }
-
-      if (!this.isElement(result)) {
-        throw new Error(`Component for route "${routePath}" must return Element, got ${typeof result}`);
-      }
-
-      // The call above is a *validation probe*: it exists only to prove the
-      // component returns an Element. The node it produced is discarded — the
-      // caller invokes `comp` again to get the node it will actually mount.
-      //
-      // Discarding it without disposing leaked every effect, listener and
-      // registered disposer the probe created, once per route definition. Worse
-      // for nested routes: a probe node containing an `Outlet()` left that
-      // outlet live and *undisposable* — its anchor is not in any tree the
-      // caller can reach, so no `dispose()` ever finds it, and its update pass
-      // kept invoking child component factories long after the real outlet was
-      // torn down. (OUT-004)
-      dispose(result as unknown as Node);
-      return comp as Component;
+  /**
+   * Create **one** real route component instance, validating what will actually
+   * be mounted.
+   *
+   * `route` is used only to upgrade a `deferred` plan once a lazy module has
+   * resolved, so the import happens once and later mounts call the module's
+   * factory directly.
+   */
+  async instantiate(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
+    if (plan.kind === "factory") {
+      return this.instantiateFactory(plan.component, routePath);
     }
 
-    // Async component
-    return this.awaitComponent((comp as AsyncComponent | LazyComponent)(), routePath);
+    const cacheKey = this.keyFor(route);
+    this.assertNotHot(cacheKey);
+
+    // Share the in-flight module resolution so concurrent first mounts of a
+    // lazy route run the loader arrow once.
+    let pending = this.moduleLoads.get(cacheKey);
+    const owner = pending === undefined;
+    if (pending === undefined) {
+      pending = plan.load();
+      this.moduleLoads.set(cacheKey, pending);
+    }
+
+    let resolved: unknown;
+    try {
+      resolved = await pending;
+    } catch (error) {
+      this.noteError(cacheKey);
+      throw error;
+    } finally {
+      if (owner) this.moduleLoads.delete(cacheKey);
+    }
+
+    if (this.isElement(resolved)) {
+      // Direct AsyncComponent. This Element *is* the instance for this
+      // invocation: it belongs to the route generation that requested it, is
+      // never disposed before mount, and is never cached as a reusable
+      // factory. (LOAD-002)
+      //
+      // An Element must never be shared between callers, so a caller that
+      // merely piggy-backed on someone else's in-flight load makes its own.
+      if (owner) return resolved;
+      const own = await plan.load();
+      if (this.isElement(own)) return own;
+      resolved = own;
+    }
+
+    const factory = this.extractFactory(resolved, routePath);
+    // Lazy module: cache the real factory so the import happens once.
+    this.planCache.set(cacheKey, { kind: "factory", component: factory });
+    return this.instantiateFactory(factory, routePath);
+  }
+
+  /** Invoke a factory exactly once and validate the instance it produced. */
+  private async instantiateFactory(component: Component, routePath: string): Promise<Element> {
+    const result = component();
+
+    // Runtime thenable detection on the *real* invocation — never a second,
+    // speculative call made only to classify. (RC-003)
+    const value = this.isThenable(result) ? await (result as unknown as Promise<Element>) : result;
+
+    if (!this.isElement(value)) {
+      throw new Error(`Component for route "${routePath}" must return Element, got ${typeof value}`);
+    }
+    return value;
+  }
+
+  /**
+   * Pull a factory out of a resolved lazy module **without calling it**. Only
+   * what can be checked without running user code is checked here: that a
+   * default export exists and is callable.
+   */
+  private extractFactory(result: unknown, routePath: string): Component {
+    if (typeof result === "function") return result as Component;
+    if (
+      typeof result === "object" &&
+      result !== null &&
+      typeof (result as { default?: unknown }).default === "function"
+    ) {
+      return (result as { default: Component }).default;
+    }
+    throw new Error(`Invalid component module for route "${routePath}"`);
+  }
+
+  /**
+   * Resolve a route's module/factory ahead of time without creating any
+   * component instance or DOM.
+   *
+   * A `deferred` plan whose load turns out to be a direct `AsyncComponent`
+   * cannot be preloaded without producing an instance — resolving it *is*
+   * creating it — so that instance is disposed and the plan stays deferred.
+   * Lazy modules and synchronous factories preload with no instantiation.
+   */
+  async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
+    const plan = await this.loadPlan(route, routePath);
+    if (plan.kind === "factory") return;
+
+    const cacheKey = this.keyFor(route);
+    this.assertNotHot(cacheKey);
+
+    let resolved: unknown;
+    try {
+      resolved = await plan.load();
+    } catch (error) {
+      this.noteError(cacheKey);
+      throw error;
+    }
+
+    if (this.isElement(resolved)) {
+      dispose(resolved as unknown as Node);
+      return;
+    }
+    const factory = this.extractFactory(resolved, routePath);
+    this.planCache.set(cacheKey, { kind: "factory", component: factory });
   }
 
   private isThenable(value: unknown): boolean {
@@ -872,34 +996,6 @@ class ComponentLoader {
       value !== null &&
       typeof (value as { then?: unknown }).then === "function"
     );
-  }
-
-  /** Resolve an in-flight component promise and validate what it produced. */
-  private async awaitComponent(
-    pending: Promise<Element | { default: Component } | Component>,
-    routePath: string,
-  ): Promise<Component> {
-    try {
-      const result = await pending;
-      const component = this.extractComponent(result, routePath);
-
-      // Validate component. Like the synchronous path, this is a *probe*: the
-      // node exists only to prove the component returns an Element and is then
-      // discarded, so it must be disposed rather than dropped. (OUT-004)
-      const testElement = component();
-      if (!this.isElement(testElement)) {
-        throw new Error(`Component for route "${routePath}" must return Element, got ${typeof testElement}`);
-      }
-      dispose(testElement as unknown as Node);
-
-      return component;
-    } catch (error) {
-      const wrapped = new Error(
-        `Failed to load component for route "${routePath}": ${error instanceof Error ? error.message : String(error)}`,
-      );
-      wrapped.cause = error;
-      throw wrapped;
-    }
   }
 
   private isAsyncComponent(comp: Component | AsyncComponent | LazyComponent): boolean {
@@ -919,30 +1015,15 @@ class ComponentLoader {
     return value instanceof Element;
   }
 
-  private extractComponent(result: Element | { default: Component } | Component, routePath: string): Component {
-    if ("default" in result && typeof result.default === "function") {
-      return result.default;
-    }
-
-    if (typeof result === "function") {
-      return result;
-    }
-
-    if (this.isElement(result)) {
-      return () => result;
-    }
-
-    throw new Error(`Invalid component module for route "${routePath}"`);
-  }
-
   clearErrors(): void {
     this.errorCache.clear();
   }
 
   clearCache(): void {
-    this.componentCache.clear();
+    this.planCache.clear();
     this.errorCache.clear();
     this.loadingPromises.clear();
+    this.moduleLoads.clear();
   }
 }
 
@@ -1472,8 +1553,22 @@ export class SibuRouter {
   }
 
   // Component loading
-  async loadComponent(route: RouteDef, routePath: string): Promise<Component> {
-    return this.loader.loadComponent(route, routePath);
+  /**
+   * Resolve how this route's component will be produced, without instantiating
+   * anything. Pair with {@link instantiateComponent} at the commit boundary.
+   */
+  async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
+    return this.loader.loadPlan(route, routePath);
+  }
+
+  /** Create exactly one real instance from an already-resolved plan. */
+  async instantiateComponent(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
+    return this.loader.instantiate(plan, route, routePath);
+  }
+
+  /** Resolve a route's module/factory without creating any component instance. */
+  async preloadPlan(route: RouteDef, routePath: string): Promise<void> {
+    return this.loader.preloadPlan(route, routePath);
   }
 
   // Guards API
@@ -1970,18 +2065,22 @@ export function Route(): Node {
             showLoading();
           }
 
-          const component = await _routerRef.current.loadComponent(routeDef, route.path);
+          // Resolve *how* to build the component. This never invokes a user
+          // component factory — loading and instantiating are separate
+          // operations. (LOAD-001)
+          const plan = await _routerRef.current.loadPlan(routeDef, route.path);
 
           // A newer navigation superseded us while loading, or the outlet was
           // disposed — drop this result. The newer update() owns the DOM and
-          // will (or already did) render. Checked *before* `component()` so
+          // will (or already did) render. Checked *before* instantiation so
           // stale work never invokes user code at all. (OUT-003)
           if (!commitTarget(seq)) return;
 
-          // Arbitrary user code. It may synchronously navigate, dispose this
-          // outlet's owner, or otherwise invalidate the generation — an `await`
-          // is not the only way ownership moves.
-          const node = component();
+          // Create exactly one instance. This runs arbitrary user code, which
+          // may synchronously navigate, dispose this outlet's owner, or
+          // otherwise invalidate the generation — and for a direct
+          // AsyncComponent it also awaits, so ownership can move either way.
+          const node = await _routerRef.current.instantiateComponent(plan, routeDef, route.path);
 
           // Second ownership check, immediately before the synchronous commit,
           // re-reading the parent rather than trusting one captured earlier.
@@ -2193,14 +2292,15 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       fromCache = true;
     } else {
       try {
-        const component = await router.loadComponent(routeDef, route.path);
+        // Resolving the plan never invokes the component factory. (LOAD-001)
+        const plan = await router.loadPlan(routeDef, route.path);
 
         // Ownership check BEFORE building anything. A superseded generation
         // must not even *create* the node: creation runs user code that
         // registers effects and listeners, and none of it would ever be owned.
         if (kaTorn || seq !== updateSeq) return;
 
-        node = component();
+        node = await router.instantiateComponent(plan, routeDef, route.path);
       } catch (error) {
         if (kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
@@ -2661,7 +2761,7 @@ export async function preloadRoute(to: NavigationTarget): Promise<void> {
 
   if (match && "component" in match.route) {
     try {
-      await _routerRef.current.loadComponent(match.route, path);
+      await _routerRef.current.preloadPlan(match.route, path);
     } catch (error) {
       console.warn("[Router] Preload failed:", error);
     }
@@ -2829,17 +2929,18 @@ export function Outlet(): Node {
     try {
       // Use a composite cache key so parent and child don't collide
       const cacheKey = `${route.path}\0${childRoute.path}`;
-      const component = await _routerRef.current.loadComponent(childRoute, cacheKey);
+      // Resolving the plan never invokes the component factory. (LOAD-001)
+      const plan = await _routerRef.current.loadPlan(childRoute, cacheKey);
 
       // First ownership check: a newer navigation superseded us while loading,
-      // or the outlet was disposed. Deliberately *before* `component()` so
+      // or the outlet was disposed. Deliberately *before* instantiation so
       // stale work never invokes user code at all. (OUT-002)
       if (!commitTarget(seq)) return;
 
-      // Arbitrary user code. It may synchronously navigate, dispose this
-      // outlet's owner, or otherwise invalidate the generation — an `await` is
-      // not the only way ownership moves.
-      const node = component();
+      // Create exactly one instance. Arbitrary user code: it may synchronously
+      // navigate, dispose this outlet's owner, or otherwise invalidate the
+      // generation — an `await` is not the only way ownership moves.
+      const node = await _routerRef.current.instantiateComponent(plan, childRoute, cacheKey);
 
       // Second ownership check, immediately before the synchronous commit, and
       // re-reading the parent rather than trusting one captured earlier. The

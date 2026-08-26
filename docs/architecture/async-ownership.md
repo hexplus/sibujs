@@ -135,6 +135,41 @@ Where the check runs before user code as well as after, stale work never invokes
 user code at all — the strongest form, because a component factory may have side
 effects of its own.
 
+### Load-vs-instantiate invariant
+
+> Resolving *how* to build something is not building it.
+
+A loader may fetch a module, resolve a factory, and cache both. It must never
+invoke user code merely to inspect what that code returns: a speculative call
+runs side effects the framework cannot undo, and its result is either leaked or
+disposed — and if the result happens to be the very instance that will later be
+mounted, disposing it corrupts the mount.
+
+```text
+LOAD DEFINITION
+      ↓
+no user component execution
+      ↓
+a generation needs an instance
+      ↓
+INVOKE ONCE  →  Element | Promise<Element>
+      ↓
+ownership check
+      ↓
+COMMIT or DISPOSE
+```
+
+Two shapes to avoid:
+
+```text
+invoke for validation → discard/dispose → invoke again for real
+AsyncComponent resolves E → cache `() => E` → dispose E → mount E again
+```
+
+Classification must never require duplicate user-code execution: detect a
+thenable on the *real* invocation instead of calling once to decide and again to
+use.
+
 ### Stale-result disposal
 
 > Discarding a stale async result is not the same as dropping it.

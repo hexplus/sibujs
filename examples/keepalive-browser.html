@@ -41,19 +41,17 @@
       /**
        * Builds a component factory that stamps each instance with a unique id.
        *
-       * The first invocation is the loader's Element validation — it creates a
-       * node that is discarded and never attached, so it is not counted.
+       * Every invocation is a real instantiation: the loader resolves a route's
+       * plan without ever calling the factory, and calls it exactly once when
+       * an instance is actually needed. (LOAD-001)
        */
       const instanced = (label) => {
         let n = 0;
         return () => {
-          const validation = n++ === 0;
+          const id = `${label}-${++n}`;
           const d = document.createElement("div");
-          if (!validation) {
-            const id = `${label}-${n}`;
-            d.dataset.instance = id;
-            d.textContent = id;
-          }
+          d.dataset.instance = id;
+          d.textContent = id;
           return d;
         };
       };
