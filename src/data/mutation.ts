@@ -1,13 +1,30 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 
+/**
+ * Lifecycle callbacks follow the shared data-layer contract: an exception
+ * thrown by `onSuccess`, `onError`, or `onSettled` never changes the status of
+ * the mutation itself — a mutation that succeeded stays `success` and
+ * `mutateAsync` still resolves — and is reported separately via
+ * `console.error`. See `QueryOptions` for the full statement.
+ *
+ * `onMutate` is the deliberate exception; see its own note below.
+ */
 export interface MutationOptions<TData, TVariables, TContext = unknown> {
   /** Retry options for failed mutations */
   retry?: RetryOptions;
-  /** Called before mutation — return context for rollback in onError */
+  /**
+   * Called before the mutation — return context for rollback in `onError`.
+   *
+   * Unlike the notification callbacks, `onMutate` is a **step of** the
+   * mutation: it produces the rollback context everything downstream depends
+   * on. If it throws, the mutation fails — there is no context, and the
+   * optimistic update it was meant to apply never happened.
+   */
   onMutate?: (variables: TVariables) => TContext | Promise<TContext>;
   /** Called on successful mutation */
   onSuccess?: (data: TData, variables: TVariables, context: TContext) => void;
@@ -72,6 +89,11 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     });
 
     try {
+      // `onMutate` is deliberately NOT isolated. Unlike the notification
+      // callbacks below, it is a step *of* the operation: it produces the
+      // rollback context the rest of the mutation depends on. If it throws
+      // there is no context, the optimistic update it was meant to apply did
+      // not happen, and treating that as a mutation failure is correct.
       if (options.onMutate) {
         context = await options.onMutate(variables);
       }
@@ -89,8 +111,15 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
         setStatus("success");
       });
 
-      options.onSuccess?.(result, variables, context as TContext);
-      options.onSettled?.(result, undefined, variables, context);
+      // Isolated. The mutation itself succeeded — that is what decides the
+      // status. Previously a throwing onSuccess fell into the catch below,
+      // which flipped the already-committed "success" state to "error", called
+      // onError with the callback's error, and rejected mutateAsync.
+      //
+      // Order is pinned: state commit → onSuccess → onSettled. onSettled runs
+      // even when onSuccess throws.
+      runCallback("mutation onSuccess", () => options.onSuccess?.(result, variables, context as TContext));
+      runCallback("mutation onSettled", () => options.onSettled?.(result, undefined, variables, context));
 
       return result;
     } catch (err) {
@@ -109,8 +138,11 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
         setStatus("error");
       });
 
-      options.onError?.(errorObj, variables, context);
-      options.onSettled?.(undefined, errorObj, variables, context);
+      // Isolated. The failure that gets reported and rethrown is the
+      // mutation's own — a throwing onError must not replace it, nor skip
+      // onSettled. Order is pinned: state commit → onError → onSettled.
+      runCallback("mutation onError", () => options.onError?.(errorObj, variables, context));
+      runCallback("mutation onSettled", () => options.onSettled?.(undefined, errorObj, variables, context));
 
       throw errorObj;
     }

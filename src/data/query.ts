@@ -4,9 +4,48 @@ import { signal } from "../core/signals/signal";
 import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import { globalSingleton } from "../utils/globalSingleton";
+import { notifyListeners, runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 
+/**
+ * ## Callback semantics
+ *
+ * These rules are shared by `query()`, `resource()`, `infiniteQuery()`, and
+ * `mutation()`.
+ *
+ * **A callback exception is not an operation failure.** Exceptions thrown by
+ * lifecycle callbacks (`onSuccess`, `onError`, `onSettled`, `onStart`) and by
+ * `select` do not retroactively change the success/failure state of the
+ * underlying request. A fetch that succeeded stays successful, its data stays
+ * available, and the shared cache keeps the value it committed:
+ *
+ * ```text
+ * network success → cache commit → onSuccess throws → still a success
+ * ```
+ *
+ * **Callback errors are surfaced separately.** They are reported via
+ * `console.error` (prefixed `[SibuJS data]`), never silently swallowed, and
+ * never routed into the operation's own error channel — a throwing `onSuccess`
+ * does not trigger `onError`, and does not populate `error()`.
+ *
+ * **Observers are isolated from each other.** Multiple observers sharing one
+ * cache key are notified independently: one observer's `select` throwing cannot
+ * prevent the others from receiving the shared result, and cannot poison the
+ * shared cache entry.
+ *
+ * **A throwing `select` keeps the previous data.** `select` is the observer's
+ * own transform, not part of the request. If it throws, this observer retains
+ * whatever data it already had rather than committing a value that was never
+ * produced; the request is still recorded as successful.
+ *
+ * **Ordering is guaranteed.** State is committed first, then `onSuccess` /
+ * `onError`, then `onSettled`. `onSettled` runs even when the callback before
+ * it threw.
+ *
+ * The one exception is `mutation()`'s `onMutate`, which is a step *of* the
+ * mutation rather than a notification — see `MutationOptions.onMutate`.
+ */
 export interface QueryOptions<T> {
   /** Time in ms before cached data is considered stale. Default: 0 (always stale) */
   staleTime?: number;
@@ -290,9 +329,19 @@ export function query<T>(
         // it must run BEFORE the callbacks so they observe fresh state.
         if (!disposed && currentKey === key) {
           onCacheUpdate();
-          if (entry.error) onError?.(entry.error);
-          else if (entry.data !== undefined) onSuccess?.(entry.data as T);
-          onSettled?.();
+          // Isolated: this whole block sits in a `finally`, so an exception
+          // here would escape doFetch() entirely — and doFetch() is called
+          // unawaited from an effect, a timer, and window listeners, so it
+          // would surface as an unhandled rejection rather than as anything a
+          // caller could catch.
+          if (entry.error) {
+            const settledError = entry.error;
+            runCallback("query onError", () => onError?.(settledError));
+          } else if (entry.data !== undefined) {
+            const settledData = entry.data as T;
+            runCallback("query onSuccess", () => onSuccess?.(settledData));
+          }
+          runCallback("query onSettled", () => onSettled?.());
         }
       }
       return;
@@ -315,8 +364,8 @@ export function query<T>(
       setIsFetching(false);
       const errorObj = err instanceof Error ? err : new Error(String(err));
       entry.error = errorObj;
-      onError?.(errorObj);
-      onSettled?.();
+      runCallback("query onError", () => onError?.(errorObj));
+      runCallback("query onSettled", () => onSettled?.());
       return;
     }
     entry.promise = promise as Promise<T>;
@@ -340,20 +389,26 @@ export function query<T>(
       entry.dataUpdatedAt = Date.now();
       entry.error = undefined;
 
-      // Notify every observer of the entry, including this one.
-      for (const listener of entry.listeners) listener();
+      // Notify every observer of the entry, including this one. Each is
+      // isolated: one observer's `select` throwing must not stop the rest of
+      // the observers from receiving a result the request genuinely produced.
+      notifyListeners(entry.listeners, "query cache listener");
 
       // ── Local commit ───────────────────────────────────────────────────
       // Only if this observer still cares about this key.
       if (disposed || currentKey !== key) return;
 
-      const selected = select ? select(result as T) : (result as T);
+      // `select` is this observer's own transform, not part of the request. If
+      // it throws, the request is still a success — keep the previously held
+      // data rather than committing a value that was never produced, and still
+      // leave the fetching state.
+      const selected = runSelect("query select", () => (select ? select(result as T) : (result as T)));
       batch(() => {
-        setData(selected);
+        if (selected.ok) setData(selected.value);
         setIsFetching(false);
         setError(undefined);
       });
-      onSuccess?.(result as T);
+      runCallback("query onSuccess", () => onSuccess?.(result as T));
     } catch (err) {
       if (entry.generation !== generation) return;
       entry.promise = null;
@@ -362,7 +417,7 @@ export function query<T>(
       if (isAbortError(err)) {
         // An abort is not an application error, but every observer still has
         // to leave the fetching state or it spins forever.
-        for (const listener of entry.listeners) listener();
+        notifyListeners(entry.listeners, "query cache listener");
         if (!disposed && currentKey === key) setIsFetching(false);
         return;
       }
@@ -371,7 +426,7 @@ export function query<T>(
       entry.error = errorObj;
 
       // Cache-level notification first — waiters depend on it.
-      for (const listener of entry.listeners) listener();
+      notifyListeners(entry.listeners, "query cache listener");
 
       if (disposed || currentKey !== key) return;
 
@@ -379,12 +434,18 @@ export function query<T>(
         setError(errorObj);
         setIsFetching(false);
       });
-      onError?.(errorObj);
+      runCallback("query onError", () => onError?.(errorObj));
     } finally {
       // Settlement is reported by the generation that owns the entry. A
       // superseded run must not tell this observer the work is done while a
       // newer request for the same key is still in flight.
-      if (!disposed && currentKey === key && entry.generation === generation) onSettled?.();
+      //
+      // Isolated for the same reason as the dedup path above: this is a
+      // `finally`, so an escaping exception would leave doFetch() rejected with
+      // no awaiter.
+      if (!disposed && currentKey === key && entry.generation === generation) {
+        runCallback("query onSettled", () => onSettled?.());
+      }
     }
   }
 
@@ -400,9 +461,13 @@ export function query<T>(
       return;
     }
     const raw = entry.data as T | undefined;
-    const selected = raw !== undefined && select ? select(raw) : raw;
+    // A throwing `select` must not abort this listener — `notifyListeners`
+    // already isolates observers from each other, and here it must additionally
+    // not block this observer's own error/fetching bookkeeping.
+    const selected =
+      raw !== undefined && select ? runSelect("query select", () => select(raw)) : { ok: true as const, value: raw };
     batch(() => {
-      setData(selected);
+      if (selected.ok) setData(selected.value);
       setError(entry.error);
       if (!entry.promise) setIsFetching(false);
     });
@@ -421,9 +486,9 @@ export function query<T>(
 
     if (entry.data !== undefined) {
       const raw = entry.data as T;
-      const selected = select ? select(raw) : raw;
+      const selected = runSelect("query select", () => (select ? select(raw) : raw));
       batch(() => {
-        setData(selected);
+        if (selected.ok) setData(selected.value);
         setError(entry.error);
       });
     }
@@ -523,7 +588,10 @@ export function setQueryData<T>(key: string, data: T | ((prev: T | undefined) =>
   const newData = typeof data === "function" ? (data as (prev: T | undefined) => T)(entry.data as T | undefined) : data;
   entry.data = newData;
   entry.dataUpdatedAt = Date.now();
-  for (const listener of entry.listeners) listener();
+  // Isolated: a caller pushing data into the cache must reach every observer,
+  // and must not have setQueryData() throw at them because some unrelated
+  // observer's `select` rejects the new value.
+  notifyListeners(entry.listeners, "query cache listener");
 }
 
 /** Clear the entire query cache */
@@ -542,7 +610,7 @@ export function clearQueryCache(): void {
     abandonEntry(entry);
   }
   activeCache.clear();
-  for (const listener of activeListeners) listener();
+  notifyListeners(activeListeners, "query cache listener");
   for (const refetcher of activeRefetchers) {
     refetcher().catch((err) => {
       if (typeof console !== "undefined") {

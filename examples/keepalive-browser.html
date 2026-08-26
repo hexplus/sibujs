@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS KeepAliveRoute — browser test fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      #log { white-space: pre-wrap; font-family: monospace; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="outlet"></div>
+    </main>
+
+    <div id="log"></div>
+
+    <script type="module">
+      import { createRouter, KeepAliveRoute, navigate } from "../dist/plugins.js";
+
+      const HOME = "/examples/keepalive-browser.html";
+
+      // Every element the outlet ever attaches, in order. This is the actual
+      // invariant under test: a superseded generation must never appear here.
+      const attached = [];
+      const log = (msg) => {
+        document.getElementById("log").textContent += `${msg}\n`;
+      };
+
+      /** A promise whose resolution the test controls from Playwright. */
+      const deferred = () => {
+        let resolve;
+        const promise = new Promise((r) => {
+          resolve = r;
+        });
+        return { promise, resolve };
+      };
+
+      const gates = { search: deferred(), a: deferred(), b: deferred() };
+
+      /**
+       * Builds a component factory that stamps each instance with a unique id.
+       *
+       * The first invocation is the loader's Element validation — it creates a
+       * node that is discarded and never attached, so it is not counted.
+       */
+      const instanced = (label) => {
+        let n = 0;
+        return () => {
+          const validation = n++ === 0;
+          const d = document.createElement("div");
+          if (!validation) {
+            const id = `${label}-${n}`;
+            d.dataset.instance = id;
+            d.textContent = id;
+          }
+          return d;
+        };
+      };
+
+      // The home route is deliberately NOT stamped with `data-instance`: it is
+      // scenery, and counting it would put a permanent extra entry at the head
+      // of every attachment log.
+      const home = () => {
+        const d = document.createElement("div");
+        d.textContent = "home";
+        return d;
+      };
+
+      createRouter(
+        [
+          { path: HOME, component: home },
+          { path: "/search", name: "search", component: async () => gates.search.promise },
+          { path: "/a", name: "a", component: async () => gates.a.promise },
+          { path: "/b", name: "b", component: async () => gates.b.promise },
+        ],
+        { mode: "history", keepAlive: 10 },
+      );
+
+      const outlet = document.getElementById("outlet");
+      outlet.appendChild(KeepAliveRoute());
+
+      // Record every element the outlet actually attaches.
+      new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (node.nodeType === 1 && node.dataset && node.dataset.instance) {
+              attached.push(node.dataset.instance);
+              log(`attach ${node.dataset.instance}`);
+            }
+          }
+        }
+      }).observe(outlet, { childList: true });
+
+      window.__ka = {
+        navigate: (to) => navigate(to),
+        /** Resolve one route's pending lazy chunk. */
+        resolve: (name) => gates[name].resolve({ default: instanced(name) }),
+        attached: () => attached.slice(),
+        /** Instance ids currently mounted in the outlet. */
+        mounted: () =>
+          Array.from(outlet.querySelectorAll("[data-instance]")).map((el) => el.dataset.instance),
+        path: () => window.location.pathname + window.location.search,
+      };
+
+      window.__ready = true;
+    </script>
+  </body>
+</html>

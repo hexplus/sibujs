@@ -122,6 +122,48 @@ isolation never actually worked there under ESM — see below.
   position. A single check at the commit boundary closes it, with two further
   checks so stale navigations stop early rather than merely failing late.
 - **A navigation pending at `destroyRouter()` no longer commits afterwards.**
+- **`KeepAliveRoute()` async stale-load protection.** The keep-alive outlet was
+  the last place still deciding commit permission from a route *value*: after
+  awaiting a lazy component it compared `route.path` against the current path.
+  `route.path` strips query and hash, so `/search?q=a` and `/search?q=b` compared
+  equal and a superseded load committed anyway — mounting and caching a view for
+  a location the user had already left. Its `isUpdating`/`pendingUpdate` pair
+  made this worse by deferring rather than superseding: an in-flight lazy load
+  held the outlet for its whole duration, so intermediate navigations never
+  rendered and the *first* generation committed at the end. It now uses the same
+  monotonic generation as `Route()`, and cache identity (path + query + hash) is
+  kept strictly separate from commit permission.
+- **`KeepAliveRoute()` no longer resurrects a disposed outlet.** A lazy load
+  resolving after the outlet was torn down inserted into the DOM and wrote back
+  into the cache that had just been disposed and cleared — unreachable nodes that
+  nothing could ever dispose. Teardown is now checked at the commit boundary and
+  also advances the generation.
+- **`KeepAliveRoute()` disposes nodes it builds but cannot commit.** The
+  component was created *before* the staleness check, and a losing generation
+  returned without disposing it, leaking every effect, listener, and disposer it
+  had registered. Ownership is now checked before creation, and again at the
+  commit boundary where the node is disposed rather than dropped.
+- **`scrollBehavior` no longer fails navigations in DOM-less runtimes.**
+  `handleScrollBehavior()` called `requestAnimationFrame` and `window.scrollTo`
+  unguarded, while the history write beside it was already guarded. Because it
+  runs *after* the route is committed, the `ReferenceError` propagated out and
+  reported `success: false` on a navigation that had in fact succeeded — route
+  state and the reported result disagreed. Both primitives are now probed
+  independently (they can be missing separately), and the browser-only side
+  effect is skipped while the route still commits.
+- **`scrollBehavior` is not invoked when the runtime cannot scroll.** The
+  environment guard now runs *before* the user callback rather than after it. A
+  scroll hook is browser code — `() => ({ x: 0, y: window.scrollY })` is entirely
+  ordinary — and running it server-side threw on the missing global before any
+  guard was reached. Where SibuJS knows it cannot scroll, the hook is skipped
+  entirely instead of being called for a result that would be discarded.
+- **A failing scroll callback cannot revoke a committed navigation.**
+  `scrollBehavior` is an optional, fallible **post-commit** side effect: once the
+  route and history are committed they are authoritative. An exception from the
+  callback — or from `window.scrollTo` on the scheduled frame, which runs outside
+  the navigation promise and previously had no catcher at all — is now reported
+  via `console.error` and leaves `NavigationResult.success` and `currentRoute` in
+  agreement. Navigation correctness is not scrolling correctness.
 - **`RouterLink` respects `event.defaultPrevented`.** It correctly declined
   modifier clicks, non-primary buttons, and `target`-bearing links, but never
   checked whether something had already cancelled the click — so a link the
@@ -221,6 +263,34 @@ isolation never actually worked there under ESM — see below.
   returned before clearing the flags it had raised, so the query reported
   `fetching: true` permanently with no request in flight. Abort detection also no
   longer depends on `DOMException`, which is unavailable in some runtimes.
+- **Data observer callbacks are isolated from each other.** Cache notification
+  iterated listeners unguarded, so one observer whose `select` threw aborted the
+  loop and starved every observer registered after it — on a request that had
+  succeeded. Because that loop sat inside the request's own `try`, the selector's
+  error was then written to the *shared* cache entry as the request's error and
+  broadcast to everyone, and the re-notification threw again from inside the
+  `catch` and escaped as an unhandled rejection. Listeners are now invoked
+  individually over a snapshot of the set.
+- **A callback exception is no longer treated as an operation failure.**
+  `select`, `onSuccess`, `onError`, `onSettled`, and `onStart` all ran inside the
+  `try` that decides the operation's outcome, across `query()`, `resource()`,
+  `infiniteQuery()`, and `mutation()`. A throwing `onSuccess` was therefore
+  caught by the catch meant for the fetch: the success state was overwritten with
+  the callback's error, `onError` was invoked with it, and — for `mutation()` —
+  an already-committed `success` status flipped to `error` and `mutateAsync`
+  rejected. Throwing `onError`/`onSettled` escaped entirely as unhandled
+  rejections from the fire-and-forget paths (effects, timers, `mutate()`), and
+  skipped `onSettled`.
+
+  The status of an operation is now decided by the operation itself. Callback
+  exceptions are reported separately via `console.error` — never swallowed, and
+  never routed into the operation's error channel. Callback order is pinned:
+  state commit → `onSuccess`/`onError` → `onSettled`, with `onSettled` running
+  even when the callback before it threw.
+
+  `mutation()`'s `onMutate` is deliberately exempt: it is a step *of* the
+  mutation that produces the rollback context, not a notification, so its failure
+  remains a mutation failure. Optimistic rollback behaviour is unchanged.
 
 #### Node compatibility
 

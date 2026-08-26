@@ -697,9 +697,21 @@ export async function collectStream(stream: AsyncGenerator<string> | AsyncIterab
 // ─── ReadableStream Adapter ──────────────────────────────────────────────────
 
 /**
- * Renders a component tree to a Web ReadableStream<string>.
- * Compatible with Node 18+, Deno, and edge runtimes.
+ * Renders a component tree to a Web `ReadableStream<string>`.
+ *
  * Uses pull-based backpressure — chunks are produced on demand.
+ *
+ * **Environment.** Supported on SibuJS's declared Node runtime (`>=22.3.0`) and
+ * on any other environment providing both the Web Streams API *and* a DOM
+ * implementation. Streaming SSR requires the same server DOM as every other
+ * SibuJS SSR API: this function takes real `Node` objects and walks them, so a
+ * DOM-less runtime cannot produce the input, let alone render it. Do not read
+ * "returns a Web stream" as "runs anywhere Web streams exist".
+ *
+ * **Semantics.** Suspense boundaries encountered during the walk are resolved
+ * as a batch before the affected chunk is emitted — the shell is not flushed
+ * ahead of individually-completing boundaries. See
+ * `docs/architecture/ssr.md` for the precise streaming and failure semantics.
  */
 export function renderToReadableStream(element: HTMLElement | DocumentFragment | Node): ReadableStream<string> {
   const generator = renderToStream(element);

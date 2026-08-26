@@ -2,9 +2,17 @@ import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 
+/**
+ * Lifecycle callbacks follow the shared data-layer contract: an exception
+ * thrown by `onSuccess` or `onError` never changes the success/failure state of
+ * the page fetch itself — a page that was appended stays appended — and is
+ * reported separately via `console.error`. See `QueryOptions` for the full
+ * statement.
+ */
 export interface InfiniteQueryOptions<TData, TPageParam = number> {
   /** Get the param for the next page. Return undefined to signal end. */
   getNextPageParam: (lastPage: TData, allPages: TData[]) => TPageParam | undefined;
@@ -152,7 +160,11 @@ export function infiniteQuery<TData, TPageParam = number>(
           setIsFetchingPrev(false);
         });
 
-        onSuccess?.(newPages);
+        // Isolated: the page is already appended and the flags are already
+        // down. A throwing onSuccess used to fall into the catch below, which
+        // then set an error state and called onError with the callback's own
+        // error, on a page fetch that genuinely succeeded.
+        runCallback("infiniteQuery onSuccess", () => onSuccess?.(newPages));
       } catch (err) {
         // A stale run owns nothing — a newer run's flags are not its to touch.
         if (disposed || myRun !== runId) return;
@@ -176,7 +188,10 @@ export function infiniteQuery<TData, TPageParam = number>(
           setIsFetchingNext(false);
           setIsFetchingPrev(false);
         });
-        onError?.(errorObj);
+        // Isolated: an escaping exception here would reject `promise`, which is
+        // both returned to an unawaiting effect and `void promise.finally(...)`-ed
+        // — two unhandled rejections from one throwing callback.
+        runCallback("infiniteQuery onError", () => onError?.(errorObj));
       }
     })();
 
