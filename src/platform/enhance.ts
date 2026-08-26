@@ -14,7 +14,12 @@
 // ---------------------------------------------------------------------------
 
 import { isDev } from "../core/dev";
-import { registerDisposer, unregisterDisposer } from "../core/rendering/dispose";
+import {
+  MAX_DRAIN_TEARDOWNS,
+  registerDisposer,
+  reportDrainRunaway,
+  unregisterDisposer,
+} from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 
 /** Attribute marking a root that *currently* owns an active enhancement.
@@ -35,17 +40,35 @@ const enhancementOwner = new WeakMap<HTMLElement, symbol>();
  * Drain a teardown list exactly once per entry, isolating failures.
  *
  * A broken teardown must never abort the rest of the unwind, and a teardown may
- * legitimately register another (`ctx.cleanup` stays reachable from inside one),
- * so the list is drained in passes — bounded like `dispose()` so runaway
- * re-entry cannot spin forever. Splicing before running is what makes it
- * idempotent and reentrancy-safe: an entry is off the list before it executes.
+ * legitimately register another (`ctx.cleanup` stays reachable from inside one).
+ * The list is therefore drained **until it is stable**, not for a fixed number
+ * of passes: a finite chain of any practical depth completes, because work that
+ * merely crossed an internal boundary must never be abandoned. Splicing before
+ * running is what makes it idempotent and reentrancy-safe — an entry is off the
+ * list before it executes, so it runs at most once.
+ *
+ * Only a cleanup that (transitively) re-registers itself fails to terminate.
+ * That is bounded by total work and **reported**: this queue is local to one
+ * enhancement, so anything still on it once this returns is unreachable
+ * forever — it is cleared deliberately and loudly rather than left to vanish.
+ *
+ * Batch-splicing keeps the normal case O(number of teardowns); no per-entry
+ * `shift()`.
  */
 function drainTeardowns(teardowns: Array<() => void>, label: string): void {
-  let passes = 0;
-  while (teardowns.length > 0 && passes++ < 8) {
-    for (const fn of teardowns.splice(0)) {
+  let executed = 0;
+  while (teardowns.length > 0) {
+    const batch = teardowns.splice(0);
+    for (let i = 0; i < batch.length; i++) {
+      if (executed >= MAX_DRAIN_TEARDOWNS) {
+        const remaining = batch.length - i + teardowns.length;
+        teardowns.length = 0;
+        reportDrainRunaway(label, executed, remaining);
+        return;
+      }
+      executed++;
       try {
-        fn();
+        batch[i]();
       } catch (err) {
         if (typeof console !== "undefined") console.error(`[SibuJS ${label}] teardown error:`, err);
       }

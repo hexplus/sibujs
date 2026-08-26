@@ -2,6 +2,39 @@ import { devWarn, isDev } from "../dev";
 
 const elementDisposers = new WeakMap<Node, Array<() => void>>();
 
+/**
+ * Ceiling on how many teardowns a single drain may execute.
+ *
+ * A cleanup registering another cleanup is legitimate — a parent teardown
+ * releasing a child, a lifecycle hook re-arming — so a drain must keep going
+ * until the queue is stable, and a finite chain of any practical depth has to
+ * complete. Only a cleanup that (transitively) registers *itself* fails to
+ * terminate.
+ *
+ * The bound is therefore on **total work**, not on a number of passes. A pass
+ * cap abandons finite work that merely happened to cross the boundary, which is
+ * indistinguishable from a leak; a total-work cap only ever trips on genuine
+ * runaway recursion. Hitting it is a bug in user cleanup code, and is reported
+ * rather than silently swallowed — see {@link reportDrainRunaway}.
+ */
+export const MAX_DRAIN_TEARDOWNS = 10_000;
+
+/**
+ * Report a cleanup queue that would not stabilise.
+ *
+ * Uses the existing console-based lifecycle convention; deliberately not a new
+ * public error API. Reported unconditionally (not dev-gated) because it means
+ * the framework stopped doing teardown work it was asked to do.
+ */
+export function reportDrainRunaway(label: string, executed: number, remaining: number): void {
+  if (typeof console === "undefined") return;
+  console.error(
+    `[SibuJS ${label}] runaway cleanup: stopped after running ${executed} teardowns with ${remaining} still queued. ` +
+      "A cleanup is registering another cleanup without terminating — the remaining work was NOT run.",
+    { executed, remaining },
+  );
+}
+
 // Dev-mode only: track active bindings to detect orphans.
 // In production, _isDev is false and the counter is never touched.
 const _isDev = isDev();
@@ -69,36 +102,44 @@ export function dispose(node: Node): void {
 
   for (let i = order.length - 1; i >= 0; i--) {
     const current = order[i];
-    const disposers = elementDisposers.get(current);
-    if (disposers) {
-      // Snapshot + delete BEFORE running so re-entrant dispose() on the
-      // same node (e.g. parent disposer triggering child cleanup) doesn't
-      // re-run these or land in an infinite cycle. Disposers may also push
-      // new entries during execution; drain those after the snapshot.
-      const snapshot = disposers.slice();
-      elementDisposers.delete(current);
-      if (_isDev) activeBindingCount -= snapshot.length;
-      for (const d of snapshot) {
-        try {
-          d();
-        } catch (err) {
-          if (_isDev && typeof console !== "undefined") {
-            console.warn("[SibuJS] Disposer threw during cleanup:", err);
-          }
-        }
-      }
-      // Drain any disposers added during execution above. Bounded by a
-      // pass cap to prevent runaway re-entry.
-      let extraPasses = 0;
-      while (extraPasses++ < 8) {
-        const added = elementDisposers.get(current);
-        if (!added || added.length === 0) break;
-        const moreSnapshot = added.slice();
+    if (elementDisposers.has(current)) {
+      // Drain to stability. A disposer may register another on the same node
+      // (a parent teardown releasing a child, a lifecycle hook re-arming), and
+      // that follow-up work is owed the same guarantee as the first batch — so
+      // the loop runs until the queue is empty rather than for a fixed number
+      // of passes. Only genuine runaway self-registration stops it early.
+      let executed = 0;
+      let runaway = false;
+
+      while (!runaway) {
+        const pending = elementDisposers.get(current);
+        if (!pending || pending.length === 0) break;
+
+        // Snapshot + delete BEFORE running so re-entrant dispose() on the
+        // same node (e.g. parent disposer triggering child cleanup) doesn't
+        // re-run these or land in an infinite cycle.
+        const snapshot = pending.slice();
         elementDisposers.delete(current);
-        if (_isDev) activeBindingCount -= moreSnapshot.length;
-        for (const d of moreSnapshot) {
+        if (_isDev) activeBindingCount -= snapshot.length;
+
+        for (let i = 0; i < snapshot.length; i++) {
+          if (executed >= MAX_DRAIN_TEARDOWNS) {
+            // Put the untouched remainder back rather than dropping it: unlike
+            // an enhancement's local queue, this one is node-keyed, so restored
+            // entries stay reachable through a later dispose(node) and stay
+            // visible to checkLeaks(). The runaway is still reported — bounded
+            // protection must never look like completed cleanup.
+            const rest = snapshot.slice(i);
+            const added = elementDisposers.get(current);
+            elementDisposers.set(current, added ? rest.concat(added) : rest);
+            if (_isDev) activeBindingCount += rest.length;
+            reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
+            runaway = true;
+            break;
+          }
+          executed++;
           try {
-            d();
+            snapshot[i]();
           } catch (err) {
             if (_isDev && typeof console !== "undefined") {
               console.warn("[SibuJS] Disposer threw during cleanup:", err);

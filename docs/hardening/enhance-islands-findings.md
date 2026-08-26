@@ -328,6 +328,103 @@ Verified non-vacuous by reverting the guard: the test fails with
 
 ---
 
+## ENH-004 — bounded drain silently abandoned reentrant cleanups
+
+| | |
+|---|---|
+| **Severity** | P2 |
+| **Subsystem** | enhancement teardown reentrancy |
+| **Status** | Fixed |
+| **Class** | CONFIRMED BUG |
+
+### Description
+
+`drainTeardowns()` — used by **both** rollback and normal disposal — stopped
+after eight reentrant passes. Because a teardown may register another through
+`ctx.cleanup()`, a chain longer than eight left its tail on the queue. That
+queue is an array local to the enhancement, so once the disposer returned the
+remaining entries were **unreachable forever**: registered cleanup work that
+simply vanished, while the caller was told the enhancement had been fully rolled
+back or disposed.
+
+The pre-existing test only covered a one-level chain (A registers B), which the
+eight-pass cap comfortably absorbed — so the boundary was never exercised.
+
+### Reproducer
+
+```ts
+const calls: number[] = [];
+enhance(root, (ctx) => {
+  const link = (at: number) =>
+    ctx.cleanup(() => { calls.push(at); if (at < 12) link(at + 1); });
+  link(1);
+  throw new Error("setup failed");
+});
+
+expect(calls).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+// FAILED at baseline: [1..8] — links 9–12 silently dropped
+```
+
+Reproduced identically on the normal disposal path.
+
+### Root cause
+
+The cap counted **passes**, not work. A pass cap cannot distinguish "a finite
+chain twelve links long" from "a cleanup registering itself forever", so it
+truncates the former to protect against the latter.
+
+### Fix
+
+Drain **until the queue is stable**, and bound **total work executed**
+(`MAX_DRAIN_TEARDOWNS = 10 000`) instead of passes. A finite chain of any
+practical depth now completes; only genuine self-registration trips the cap, and
+tripping it is reported through the existing console convention naming how many
+teardowns ran and how many were still queued. Raising `8` to a larger magic
+number was explicitly rejected — it only moves the boundary.
+
+The drain is iterative (no recursion, so deep chains cannot overflow the stack)
+and batch-spliced (no per-entry `shift()`), so the ordinary path stays
+O(number of teardowns).
+
+The original setup error remains authoritative: a runaway during rollback is
+reported independently and never replaces it.
+
+---
+
+## ENH-004b — the same boundary in core `dispose()`
+
+| | |
+|---|---|
+| **Severity** | P3 |
+| **Subsystem** | `dispose()` node disposer drain |
+| **Status** | Fixed |
+| **Class** | CONFIRMED BUG (lesser severity — work was deferred, not lost) |
+
+The narrow audit of `dispose()` **did** reproduce the analogous boundary, at a
+different offset — one initial batch plus eight extra passes, so a twelve-link
+chain ran `[1..9]` and stopped.
+
+The severity is lower, and this was measured rather than assumed. Probing the
+baseline showed the leftover entry stays in `elementDisposers`:
+
+```
+first dispose ran:  [1,2,3,4,5,6,7,8,9]
+after second dispose: [1,2,3,4,5,6,7,8,9,10,11,12]
+activeBindingCount delta after 2nd: -1
+```
+
+So the abandoned work was **deferred and still observable** — reachable through
+a later `dispose(node)`, and still counted by `checkLeaks()` — not lost the way
+an enhancement's local array loses it. The two were therefore *not* classified
+identically.
+
+Both now share one policy, with the difference preserved where it matters: on
+runaway, `enhance()` clears its unreachable queue and reports, while `dispose()`
+**restores** the untouched remainder to the map (keeping it reachable and
+counted) and reports. Restoring is the stronger option wherever it is available.
+
+---
+
 ## Island marker semantics: `data-sibu-hydrated` — investigated, deliberately unchanged
 
 `data-sibu-hydrated` was assessed against the same ownership question and
@@ -406,12 +503,16 @@ covering them stayed green.
 
 | Gate | Baseline | After |
 |---|---|---|
-| Full suite | 371 files / 4602 passed / 1 skipped | 373 files / 4639 passed / 1 skipped |
-| Soak | 21 passed / 1 skipped | 23 passed / 1 skipped |
+| Full suite | 371 files / 4602 passed / 1 skipped | 374 files / 4651 passed / 1 skipped |
+| Soak | 21 passed / 1 skipped | 25 passed / 1 skipped |
 | `tsc` source | 0 errors | 0 errors |
 | `tsc` tests | 0 errors | 0 errors |
 | `biome check` | clean | clean |
 
 Findings: **ENH-001** (P1), **ENH-002** (P2), **ENH-003** (P2), **ISL-001**
-(P2, inherited), **ISL-002** (P2) — all confirmed by failing reproducer and
-fixed.
+(P2, inherited), **ISL-002** (P2), **ENH-004** (P2), **ENH-004b** (P3) — all
+confirmed by failing reproducer and fixed.
+
+The invariant the last two enforce:
+
+> **BOUNDED REENTRANCY PROTECTION ≠ SILENTLY ABANDON REGISTERED CLEANUP**

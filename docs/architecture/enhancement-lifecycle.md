@@ -158,11 +158,48 @@ is a single teardown model rather than two incompatible ones.
   the convention `dispose()` already uses — and the remaining teardowns still
   run. No new public error API was introduced for this.
 - **Reentrancy.** `ctx.cleanup()` stays reachable from inside a teardown, so the
-  list is drained in bounded follow-up passes, mirroring `dispose()`.
+  queue can grow while it is being drained. It is drained **until it is stable**,
+  not for a fixed number of passes — see the policy below.
 - **The original error wins.** `enhance()` rethrows exactly what setup threw, by
-  identity. A rollback failure never masks it. `enhance()` never converts a
-  failed setup into a success — isolating and reporting is the caller's job, and
-  `mountIslands()` does exactly that.
+  identity. A rollback failure never masks it, and neither does a runaway.
+  `enhance()` never converts a failed setup into a success — isolating and
+  reporting is the caller's job, and `mountIslands()` does exactly that.
+
+### Reentrancy policy
+
+> **Bounded runaway protection is not permission to abandon registered cleanup.**
+
+A cleanup registering another cleanup is legitimate — a parent teardown
+releasing a child, a hook re-arming — and that follow-up work is owed the same
+guarantee as the first batch. So:
+
+- **Finite chains always complete.** A chain of any practical depth drains
+  fully. Cleanup work is never dropped for having crossed an internal boundary.
+- **Only self-registration is bounded.** A cleanup that transitively re-registers
+  itself never terminates, so the drain is capped on **total work executed**
+  (`MAX_DRAIN_TEARDOWNS`, 10 000), not on a number of passes. A pass cap trips on
+  ordinary finite chains — a total-work cap only trips on genuine runaway.
+- **Hitting the cap is reported, never silent.** `console.error` names how many
+  teardowns ran and how many were still queued. A caller is never told cleanup
+  completed when queued work was dropped.
+- **Normal cost is unchanged.** Batch-splicing keeps the ordinary path
+  O(number of teardowns); there is no per-entry `shift()`, and no recursion —
+  the drain is iterative, so deep chains cannot overflow the stack.
+
+### Where the two queues differ
+
+`enhance()` and `dispose()` share the policy but not the consequences, because
+their queues have different reachability:
+
+| | `enhance()` teardowns | `dispose()` node disposers |
+|---|---|---|
+| Storage | array local to one enhancement | `WeakMap` keyed by node |
+| Reachable after the drain returns? | **No** — unreachable forever | **Yes** — a later `dispose(node)` drains it, and `checkLeaks()` still counts it |
+| On runaway | queue cleared, runaway reported | untouched remainder **restored to the map**, runaway reported |
+
+So an enhancement's abandoned work is genuinely lost and must be reported
+loudly; a node's is deferred and still observable. Restoring rather than
+clearing is the stronger option wherever it is available.
 
 ### Disposal reaching the root during setup
 

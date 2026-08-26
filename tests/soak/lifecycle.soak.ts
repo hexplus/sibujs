@@ -644,6 +644,81 @@ describe("enhancement lifecycle soak", () => {
   });
 });
 
+describe("reentrant teardown soak", () => {
+  it("1 000 cycles of a 12-level cleanup chain drain completely", () => {
+    const container = document.createElement("div");
+    container.innerHTML = `<div><b data-ref="n">0</b></div>`;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const [n, setN] = signal(0);
+
+    const baseline = checkLeaks();
+    let cleanups = 0;
+
+    for (let i = 0; i < 1_000; i++) {
+      const stop = enhance(root, (ctx) => {
+        ctx.text("@n", () => n());
+        // Each cleanup registers the next link *during* teardown.
+        const link = (at: number): void => {
+          ctx.cleanup(() => {
+            cleanups++;
+            if (at < 12) link(at + 1);
+          });
+        };
+        link(1);
+      });
+      setN(i);
+      stop();
+    }
+
+    // 12 links per cycle, none abandoned at any internal boundary.
+    expect(cleanups, "reentrant cleanups were dropped").toBe(12_000);
+    expect(checkLeaks(), "bindings leaked across 1 000 reentrant teardown cycles").toBe(baseline);
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
+
+    // Still re-enhanceable afterwards.
+    const stop = enhance(root, (ctx) => ctx.text("@n", () => n()));
+    setN(4242);
+    expect(root.querySelector('[data-ref="n"]')?.textContent).toBe("4242");
+    stop();
+  });
+
+  it("1 000 rollback cycles with a 12-level chain drain completely", () => {
+    const container = document.createElement("div");
+    container.innerHTML = `<div><b data-ref="n">0</b></div>`;
+    host.appendChild(container);
+    const root = container.firstElementChild as HTMLElement;
+    const [n] = signal(0);
+
+    const baseline = checkLeaks();
+    let cleanups = 0;
+    let failures = 0;
+
+    for (let i = 0; i < 1_000; i++) {
+      try {
+        enhance(root, (ctx) => {
+          ctx.text("@n", () => n());
+          const link = (at: number): void => {
+            ctx.cleanup(() => {
+              cleanups++;
+              if (at < 12) link(at + 1);
+            });
+          };
+          link(1);
+          throw new Error("setup failed");
+        });
+      } catch {
+        failures++;
+      }
+    }
+
+    expect(failures, "setup did not actually fail — the soak proves nothing").toBe(1_000);
+    expect(cleanups, "reentrant cleanups were dropped during rollback").toBe(12_000);
+    expect(checkLeaks(), "bindings leaked across 1 000 reentrant rollbacks").toBe(baseline);
+    expect(root.hasAttribute("data-sibu-enhanced")).toBe(false);
+  });
+});
+
 describe("heap corroboration (requires --expose-gc)", () => {
   it.skipIf(!gc)("retained heap is bounded across repeated soak rounds", async () => {
     const round = async () => {

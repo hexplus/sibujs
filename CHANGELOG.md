@@ -211,6 +211,26 @@ disposal ends ownership, and a retry or remount starts clean. Full detail in
   single set of bindings. Mounting twice *without* cleanup still skips islands
   that are already active. `data-sibu-hydrated` is unchanged — it is hydration
   provenance rather than ownership, and gates nothing.
+- **Cleanups registered during teardown are no longer silently dropped.** Both
+  rollback and disposal drained the teardown queue for at most eight reentrant
+  passes. Since `ctx.cleanup()` stays reachable *from inside* a cleanup, a chain
+  longer than eight left its tail on a queue local to the enhancement — and
+  therefore unreachable the moment the disposer returned, while the caller was
+  told everything had been torn down. The queue is now drained until stable, so
+  a finite chain of any practical depth completes. Runaway self-registration is
+  still bounded, but on **total work executed** rather than a pass count (a pass
+  cap cannot tell a twelve-link chain from infinite recursion), and hitting the
+  bound is reported with the number of teardowns run and still queued instead of
+  passing as completed cleanup. The drain is iterative and batch-spliced, so deep
+  chains cannot overflow the stack and ordinary cleanup keeps its previous cost.
+- **`dispose()` shares that policy.** The node-level disposer drain had the same
+  boundary one offset further out (an initial batch plus eight extra passes).
+  Its consequence was milder and is documented as such: leftovers stayed in the
+  `WeakMap`, so they remained reachable through a later `dispose(node)` and were
+  still counted by `checkLeaks()` — deferred rather than lost. Both now drain to
+  stability; on runaway, `dispose()` restores the untouched remainder to the map
+  (keeping it reachable and counted) while an enhancement clears its unreachable
+  queue, and both report.
 - **Repeated enhance/dispose cycles no longer accumulate node disposers.**
   Reachable only now that roots are re-enhanceable: each `enhance()` registered a
   node-level disposer that only `dispose(node)` ever cleared, so a long-lived
@@ -522,9 +542,11 @@ Behaviours that are deliberate but were easy to misread. Full detail lives in
 
 ### Testing
 
-The suite grew from 3 998 to 4 373 tests, plus 150 real-browser tests across
-**Chromium, Firefox, and WebKit** (there were none for routing, hydration, or
-SSR Suspense before). Beyond per-bug regressions, the new coverage includes
+The suite expanded substantially across the 4.0 hardening cycle — from 3 998
+tests at the start of it to 4 651 at the time of tagging `4.0.0-rc.1` — plus
+real-browser coverage across **Chromium, Firefox, and WebKit** (there was none
+for routing, hydration, or SSR Suspense before). Beyond per-bug regressions, the
+new coverage includes
 seeded differential testing of keyed reconciliation against an external
 reference model, a reactive-runtime torture suite, leak detection that asserts
 live-binding counts return to baseline without relying on garbage collection,
