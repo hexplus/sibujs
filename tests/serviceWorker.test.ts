@@ -56,7 +56,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   // Remove the stubbed property so other suites see a clean navigator.
   try {
-    delete (navigator as Record<string, unknown>).serviceWorker;
+    delete (navigator as unknown as Record<string, unknown>).serviceWorker;
   } catch {
     Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true });
   }
@@ -66,7 +66,7 @@ describe("serviceWorker", () => {
   it("does nothing when serviceWorker is unsupported", () => {
     // Ensure the property is absent.
     Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true });
-    delete (navigator as Record<string, unknown>).serviceWorker;
+    delete (navigator as unknown as Record<string, unknown>).serviceWorker;
     const sw = serviceWorker("/sw.js");
     expect(sw.registration()).toBeNull();
     expect(sw.isReady()).toBe(false);
@@ -168,7 +168,7 @@ describe("serviceWorker", () => {
 
   it("update() is a no-op without a registration", async () => {
     Object.defineProperty(navigator, "serviceWorker", { value: undefined, configurable: true });
-    delete (navigator as Record<string, unknown>).serviceWorker;
+    delete (navigator as unknown as Record<string, unknown>).serviceWorker;
     const sw = serviceWorker("/sw.js");
     await expect(sw.update()).resolves.toBeUndefined();
   });

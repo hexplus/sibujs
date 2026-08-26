@@ -76,10 +76,12 @@ describe("contracts validators", () => {
 
     const isDate = validators.instanceOf(Date);
     expect(isDate(new Date(), "d")).toBe(true);
+    // @ts-expect-error deliberately invalid input — the validator must reject a non-Date
     expect(isDate({}, "d")).toContain("must be an instance of Date");
 
     const nums = validators.arrayOf(validators.number);
     expect(nums([1, 2, 3], "a")).toBe(true);
+    // @ts-expect-error deliberately invalid input — the validator must reject a non-array
     expect(nums("x", "a")).toContain("must be an array");
   });
 });

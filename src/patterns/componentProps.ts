@@ -55,7 +55,7 @@ type WithNodes<Props> = Props & { nodes?: Node | Node[] };
  * // Usage: Button({ label: 'Click me' }) — TypeScript infers props
  * ```
  */
-export function defineComponent<Props extends Record<string, unknown>>(config: {
+export function defineComponent<Props extends object>(config: {
   defaults?: Partial<Props>;
   setup: (props: Props) => HTMLElement;
 }): (props: Props) => HTMLElement {
@@ -99,7 +99,7 @@ export function defineComponent<Props extends Record<string, unknown>>(config: {
  * // Usage: Card({ title: 'Hello', nodes: p('World') })
  * ```
  */
-export function defineSlottedComponent<Props extends Record<string, unknown>>(config: {
+export function defineSlottedComponent<Props extends object>(config: {
   defaults?: Partial<Props>;
   setup: (props: WithNodes<Props>) => HTMLElement;
 }): (props: WithNodes<Props>) => HTMLElement {
@@ -141,7 +141,7 @@ export function defineSlottedComponent<Props extends Record<string, unknown>>(co
  * // Usage: SmallIconButton({ icon: 'star', label: 'Favorite' })
  * ```
  */
-export function withProps<OuterProps extends Record<string, unknown>, InnerProps extends Record<string, unknown>>(
+export function withProps<OuterProps extends object, InnerProps extends object>(
   component: (props: InnerProps) => HTMLElement,
   mapProps: (outer: OuterProps) => InnerProps,
 ): (props: OuterProps) => HTMLElement {

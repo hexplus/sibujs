@@ -14,8 +14,14 @@ function createMockReduxStore(initialState: TestState) {
   return {
     getState: () => state,
     dispatch: vi.fn((action: { type: string; payload: unknown }) => {
-      if (action.type === "SET_COUNT") state = { ...state, count: action.payload };
-      if (action.type === "SET_NAME") state = { ...state, name: action.payload };
+      // A Redux action payload is `unknown` by construction; narrow it the way a
+      // real reducer must rather than assuming the dispatcher was well-behaved.
+      if (action.type === "SET_COUNT" && typeof action.payload === "number") {
+        state = { ...state, count: action.payload };
+      }
+      if (action.type === "SET_NAME" && typeof action.payload === "string") {
+        state = { ...state, name: action.payload };
+      }
       for (const l of listeners) l();
       return action;
     }),

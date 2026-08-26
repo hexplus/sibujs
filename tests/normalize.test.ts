@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { denormalize, type NormalizedSchema, normalize, normalizedStore } from "../src/performance/normalize";
+import {
+  denormalize,
+  type NormalizedEntities,
+  type NormalizedSchema,
+  normalize,
+  normalizedStore,
+} from "../src/performance/normalize";
+
+// `NormalizedEntities` is `Record<string, Record<string, unknown>>`, so a table
+// lookup yields `unknown`. Narrow once through a typed accessor instead of
+// casting at each property read.
+const entityIn = (entities: NormalizedEntities, table: string, id: string): Record<string, unknown> =>
+  entities[table][id] as Record<string, unknown>;
 
 // ============================================================================
 // normalizedStore
@@ -187,8 +199,8 @@ describe("normalize", () => {
 
     expect(result).toBe("p1");
     // The author field on the post should be replaced with the id reference
-    expect(entities.post["p1"].author).toBe("u1");
-    expect(entities.post["p1"].title).toBe("Hello");
+    expect(entityIn(entities, "post", "p1").author).toBe("u1");
+    expect(entityIn(entities, "post", "p1").title).toBe("Hello");
     // The user entity should be extracted into its own table
     expect(entities.user["u1"]).toEqual({ id: "u1", name: "Alice" });
   });
@@ -211,7 +223,7 @@ describe("normalize", () => {
     const { result, entities } = normalize(data, schema);
 
     expect(result).toBe("p1");
-    expect(entities.post["p1"].comments).toEqual(["c1", "c2"]);
+    expect(entityIn(entities, "post", "p1").comments).toEqual(["c1", "c2"]);
     expect(entities.comment["c1"]).toEqual({ id: "c1", text: "Great!" });
     expect(entities.comment["c2"]).toEqual({ id: "c2", text: "Thanks" });
   });
@@ -235,8 +247,8 @@ describe("normalize", () => {
     const { result, entities } = normalize(data, schema);
 
     expect(result).toBe("p1");
-    expect(entities.post["p1"].author).toBe("u1");
-    expect(entities.post["p1"].comments).toEqual(["c1", "c2"]);
+    expect(entityIn(entities, "post", "p1").author).toBe("u1");
+    expect(entityIn(entities, "post", "p1").comments).toEqual(["c1", "c2"]);
     expect(entities.user["u1"]).toEqual({ id: "u1", name: "Alice" });
     expect(entities.comment["c1"]).toEqual({ id: "c1", text: "Great!" });
     expect(entities.comment["c2"]).toEqual({ id: "c2", text: "Thanks" });
@@ -253,7 +265,7 @@ describe("normalize", () => {
     const { result, entities } = normalize(data, schema);
 
     expect(result).toBe("p1");
-    expect(entities.post["p1"].author).toBeNull();
+    expect(entityIn(entities, "post", "p1").author).toBeNull();
     expect(entities.user).toBeUndefined();
   });
 

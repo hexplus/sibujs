@@ -185,7 +185,13 @@ describe("copyOnClick", () => {
   it("copies the element's textContent on click by default", () => {
     const el = document.createElement("div");
     el.textContent = "copy me";
-    action(el, copyOnClick);
+    // `copyOnClick` is `ActionFn<(() => string) | undefined>` — its text getter
+    // is optional — but the two-argument `action()` overload requires
+    // `ActionFn<void>`, so an action with an OPTIONAL param cannot be applied
+    // without one. Passing `undefined` explicitly selects the three-argument
+    // overload and is what the runtime does anyway. The missing overload is
+    // recorded as TYPE-009 rather than added during the freeze.
+    action(el, copyOnClick, undefined);
 
     el.dispatchEvent(new Event("click"));
     expect(writeText).toHaveBeenCalledWith("copy me");
@@ -203,7 +209,7 @@ describe("copyOnClick", () => {
   it("removes the click listener on dispose", () => {
     const el = document.createElement("div");
     el.textContent = "x";
-    action(el, copyOnClick);
+    action(el, copyOnClick, undefined);
     dispose(el);
 
     el.dispatchEvent(new Event("click"));

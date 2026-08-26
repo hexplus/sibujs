@@ -29,7 +29,10 @@ describe("routeMiddleware", () => {
   it("composeMiddleware passes context to all middleware", async () => {
     const receivedContexts: Array<{ path: string; params: Record<string, string> }> = [];
 
-    const mw = async (ctx: { path: string; params: Record<string, string> }, next: () => Promise<void>) => {
+    // `MiddlewareFn` hands `next` as `() => void | Promise<void>`; declaring it
+    // as `() => Promise<void>` is stricter than the contract and so is not
+    // assignable (parameter contravariance).
+    const mw = async (ctx: { path: string; params: Record<string, string> }, next: () => void | Promise<void>) => {
       receivedContexts.push(ctx);
       await next();
     };

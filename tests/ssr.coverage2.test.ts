@@ -31,6 +31,7 @@ import {
   suspenseSwapScript,
   trustHTML,
 } from "../src/platform/ssr";
+import { callbackSlot } from "./helpers/mocks";
 
 const el = (tag: string) => document.createElement(tag);
 
@@ -365,12 +366,12 @@ describe("ssr.ts coverage2 — islands", () => {
 
   it("hydrateProgressively observes islands and hydrates on intersection", () => {
     const observed: Element[] = [];
-    let triggerIntersect: ((entries: unknown[]) => void) | null = null;
+    const triggerIntersect = callbackSlot<(entries: Array<{ isIntersecting: boolean }>) => void>("triggerIntersect");
     class FakeIO {
       cb: (entries: unknown[]) => void;
       constructor(cb: (entries: unknown[]) => void) {
         this.cb = cb;
-        triggerIntersect = cb;
+        triggerIntersect.set(cb);
       }
       observe(target: Element) {
         observed.push(target);
@@ -403,7 +404,7 @@ describe("ssr.ts coverage2 — islands", () => {
       expect(observed.length).toBe(1);
 
       // Simulate the island scrolling into view.
-      triggerIntersect?.([{ isIntersecting: true }]);
+      triggerIntersect.invoke([{ isIntersecting: true }]);
       const hydratedEl = container.querySelector('[data-sibu-island="lazy"]');
       expect(hydratedEl?.tagName.toLowerCase()).toBe("aside");
       expect(hydratedEl?.getAttribute("data-sibu-hydrated")).toBe("true");

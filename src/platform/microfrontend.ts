@@ -28,7 +28,7 @@ export interface MicroApp {
   element: HTMLElement;
 }
 
-export interface SharedScope<T extends Record<string, unknown>> {
+export interface SharedScope<T extends object> {
   /** Get the current value for a key */
   get<K extends keyof T>(key: K): T[K];
   /** Set a value for a key, notifying all subscribers */
@@ -257,7 +257,7 @@ export function defineRemoteComponent(name: string, loader: RemoteLoader): Compo
  * unsub();
  * ```
  */
-export function createSharedScope<T extends Record<string, unknown>>(initialState: T): SharedScope<T> {
+export function createSharedScope<T extends object>(initialState: T): SharedScope<T> {
   // Store a reactive signal per key
   const signals = new Map<keyof T, { get: () => T[keyof T]; set: (v: T[keyof T]) => void }>();
 

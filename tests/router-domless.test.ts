@@ -1,0 +1,143 @@
+// @vitest-environment node
+//
+// Router construction in a genuinely DOM-less runtime.
+//
+// The rest of the router suite runs under jsdom, where `window` always exists —
+// which is precisely why RC-001 survived every prior router hardening pass. This
+// file deliberately opts into the `node` environment so `window` is truly
+// undefined, matching bare Node / an SSR request / a DOM-less edge runtime.
+//
+// RC-001: `SibuRouter.initialize()` guards its event-listener registration with
+// `typeof window !== "undefined"` (explicitly so SSR construction is safe), but
+// the `queueMicrotask` bootstrap immediately below it was unguarded. It called
+// `getCurrentPath()`, which read `window.location` bare. The constructor returned
+// normally and then the process died from a microtask — an *uncatchable*
+// ReferenceError that no `try`/`catch` around the call site could defend against.
+// `createMemoryRouter`, documented for "testing/SSR", was affected in hash mode.
+import { describe, expect, it } from "vitest";
+import { createMemoryRouter, createRouter, destroyRouter } from "../src/plugins/router";
+
+const flushBootstrap = () => new Promise((r) => setTimeout(r, 0));
+
+describe("router construction without a DOM", () => {
+  it("has no window in this environment (guards the test's own premise)", () => {
+    expect(typeof window).toBe("undefined");
+  });
+
+  it("createRouter does not crash the process from its microtask bootstrap", async () => {
+    const router = createRouter([{ path: "/", component: () => null as never }]);
+    // Before the fix this rejected the whole file with an uncaught
+    // `ReferenceError: window is not defined` thrown from queueMicrotask.
+    await flushBootstrap();
+    expect(router).toBeTruthy();
+    destroyRouter();
+  });
+
+  it("createMemoryRouter (documented for testing/SSR) survives bootstrap", async () => {
+    const { router, currentPath } = createMemoryRouter([{ path: "/", component: () => null as never }], "/");
+    await flushBootstrap();
+    expect(router).toBeTruthy();
+    expect(currentPath()).toBe("/");
+    destroyRouter();
+  });
+
+  it("resolves the DOM-less location to the root path and becomes ready", async () => {
+    const router = createRouter([
+      { path: "/", component: () => null as never },
+      { path: "/other", component: () => null as never },
+    ]);
+    await flushBootstrap();
+    expect(router.currentRoute.path).toBe("/");
+    expect(router.isReady).toBe(true);
+    destroyRouter();
+  });
+
+  it("registers no window listeners when there is no window to register on", async () => {
+    // The listener guard was already correct; this pins it so a future refactor
+    // of `initialize()` cannot regress it alongside the bootstrap fix.
+    const router = createRouter([{ path: "/", component: () => null as never }], { mode: "history" });
+    await flushBootstrap();
+    expect(() => destroyRouter()).not.toThrow();
+    expect(router).toBeTruthy();
+  });
+});
+
+describe("router navigation without a DOM", () => {
+  // NODE-001. RC-001 made *construction* safe in a DOM-less runtime, but every
+  // navigation still threw: `updateHistory()` referenced the bare `history`
+  // global rather than a guarded one, so `push()`/`replace()` failed with
+  // `ReferenceError: history is not defined`.
+  //
+  // This made `createMemoryRouter` — whose own doc comment says it "creates a
+  // router that doesn't interact with browser history", and which the codebase
+  // advertises for testing/SSR — unusable for its stated purpose: it could be
+  // constructed and then never navigated.
+  //
+  // Found by the Node support-matrix pass, not by the jsdom suite: vitest's
+  // jsdom environment installs `history` as a real global, so the bare
+  // reference resolves there. A consumer wiring up jsdom by hand (the
+  // documented way to run SibuJS outside a browser) copies `window` and
+  // friends but has no reason to copy `history`, and hits this immediately.
+
+  it("createMemoryRouter can actually navigate", async () => {
+    const { router, currentPath, push } = createMemoryRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/about", component: () => null as never },
+      ],
+      "/",
+    );
+    await flushBootstrap();
+    expect(currentPath()).toBe("/");
+
+    const result = await push("/about");
+    await flushBootstrap();
+
+    expect(result.success, `navigation failed: ${JSON.stringify(result)}`).toBe(true);
+    expect(currentPath()).toBe("/about");
+    expect(router.currentRoute.path).toBe("/about");
+    destroyRouter();
+  });
+
+  it("push and replace both commit without a history global", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/a", component: () => null as never },
+        { path: "/b", component: () => null as never },
+      ],
+      { mode: "history" },
+    );
+    await flushBootstrap();
+
+    const pushed = await router.push("/a");
+    await flushBootstrap();
+    expect(pushed.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/a");
+
+    const replaced = await router.replace("/b");
+    await flushBootstrap();
+    expect(replaced.success).toBe(true);
+    expect(router.currentRoute.path).toBe("/b");
+
+    destroyRouter();
+  });
+
+  it("a redirect route resolves without a history global", async () => {
+    const router = createRouter(
+      [
+        { path: "/", component: () => null as never },
+        { path: "/target", component: () => null as never },
+        { path: "/old", redirect: "/target" },
+      ],
+      { mode: "history" },
+    );
+    await flushBootstrap();
+
+    await router.push("/old").catch(() => {});
+    await flushBootstrap();
+
+    expect(router.currentRoute.path).toBe("/target");
+    destroyRouter();
+  });
+});

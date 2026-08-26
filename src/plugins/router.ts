@@ -743,6 +743,23 @@ class ComponentLoader {
     // Synchronous component
     if (!this.isAsyncComponent(comp)) {
       const result = (comp as Component)();
+
+      // `isAsyncComponent` classifies SYNTACTICALLY — the `lazy()` marker, a
+      // genuine `async function`, or an `import(` in the source. A plain arrow
+      // that returns a promise (`() => fetchThing().then(...)`) matches none of
+      // those, yet it is a perfectly valid `AsyncComponent` per the exported
+      // type. Adopt the promise rather than dropping it: dropping produced a
+      // misleading "must return Element, got object" AND left the promise with
+      // no handler, so a later rejection escaped as an unhandled rejection —
+      // fatal to a Node process, and noise in every browser error reporter.
+      // (RC-003)
+      // `result` is statically `Element` (the `Component` signature), so the
+      // widening has to go through `unknown` — the whole point is that the
+      // static type is what turned out to be wrong at runtime.
+      if (this.isThenable(result)) {
+        return this.awaitComponent(result as unknown as Promise<Element>, routePath);
+      }
+
       if (!this.isElement(result)) {
         throw new Error(`Component for route "${routePath}" must return Element, got ${typeof result}`);
       }
@@ -750,8 +767,24 @@ class ComponentLoader {
     }
 
     // Async component
+    return this.awaitComponent((comp as AsyncComponent | LazyComponent)(), routePath);
+  }
+
+  private isThenable(value: unknown): boolean {
+    return (
+      (typeof value === "object" || typeof value === "function") &&
+      value !== null &&
+      typeof (value as { then?: unknown }).then === "function"
+    );
+  }
+
+  /** Resolve an in-flight component promise and validate what it produced. */
+  private async awaitComponent(
+    pending: Promise<Element | { default: Component } | Component>,
+    routePath: string,
+  ): Promise<Component> {
     try {
-      const result = await (comp as AsyncComponent | LazyComponent)();
+      const result = await pending;
       const component = this.extractComponent(result, routePath);
 
       // Validate component
@@ -927,6 +960,15 @@ export class SibuRouter {
 
   private getCurrentPath(): string {
     const { mode, base } = this.options;
+
+    // No DOM: there is no live location to read. `initialize()` already guards
+    // listener registration for this case, but its `queueMicrotask` bootstrap
+    // still calls through to here — and a throw from a microtask is an
+    // *uncatchable* process-level error, not something the caller can defend
+    // against with try/catch. Resolve to the root path instead, matching the
+    // route `createInitialRoute()` already seeded. Server-side callers that need
+    // a specific path navigate explicitly. (RC-001)
+    if (typeof window === "undefined") return "/";
 
     if (mode === "hash") {
       return window.location.hash.slice(1) || "/";
@@ -1233,10 +1275,27 @@ export class SibuRouter {
       (Object.keys(to.query).length ? `?${new URLSearchParams(to.query).toString()}` : "") +
       (to.hash ? `#${to.hash}` : "");
 
+    // No browser history to write to. Reached whenever the router runs outside
+    // a browser: bare Node, an SSR request, a hand-wired jsdom test harness, or
+    // `createMemoryRouter` — which documents itself as a router that "doesn't
+    // interact with browser history" yet reaches this same code path on every
+    // push/replace.
+    //
+    // A bare `history` reference threw `ReferenceError: history is not defined`
+    // and failed the navigation, so the memory router could be constructed and
+    // then never navigated. The route itself still commits; only the address-bar
+    // side effect is skipped, which is exactly the intended memory-router
+    // semantics. (NODE-001)
+    //
+    // Checked via `globalThis` rather than a bare `typeof history` so this is
+    // unambiguous about which binding is being probed.
+    const h = (globalThis as { history?: History }).history;
+    if (!h) return;
+
     if (options.replace) {
-      history.replaceState(options.state || {}, "", fullPath);
+      h.replaceState(options.state || {}, "", fullPath);
     } else {
-      history.pushState(options.state || {}, "", fullPath);
+      h.pushState(options.state || {}, "", fullPath);
     }
   }
 
@@ -1996,7 +2055,12 @@ export function RouterLink(
     [key: string]: unknown;
   },
   children?: string | Node | (string | Node)[],
-): HTMLElement {
+  // Returns the concrete anchor type. `RouterLink` always builds an `<a>`, so
+  // declaring `HTMLElement` was needlessly lossy: reading back the very props
+  // this function sets (`.href`, `.target`, `.rel`) did not type-check for
+  // consumers or for the router's own tests. Widening a return type is
+  // backwards-compatible. (TYPE-003)
+): HTMLAnchorElement {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const { to, replace = false, activeClass, exactActiveClass, nodes, target, rel, class: classAttr, ...attrs } = props;

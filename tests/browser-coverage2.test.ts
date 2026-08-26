@@ -8,6 +8,7 @@ import { scroll } from "../src/browser/scroll";
 import { title } from "../src/browser/title";
 import { wakeLock } from "../src/browser/wakeLock";
 import { signal } from "../src/core/signals/signal";
+import { callbackSlot } from "./helpers/mocks";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -115,17 +116,17 @@ describe("resize", () => {
 
 describe("animationFrame loop", () => {
   it("runs the rAF step loop, emits delta/elapsed, and pauses", () => {
-    let cb: ((t: number) => void) | null = null;
+    const cb = callbackSlot<(t: number) => void>("cb");
     let raf = 1;
     vi.stubGlobal("requestAnimationFrame", (fn: (t: number) => void) => {
-      cb = fn;
+      cb.set(fn);
       return raf++;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
     const f = animationFrame({ fpsLimit: 60 });
     expect(f.running()).toBe(true);
-    cb?.(0); // first tick
-    cb?.(100); // second tick → delta accrues
+    cb.invoke(0); // first tick
+    cb.invoke(100); // second tick → delta accrues
     expect(f.elapsed()).toBeGreaterThanOrEqual(0);
     f.pause();
     expect(f.running()).toBe(false);
@@ -193,9 +194,9 @@ describe("gamepad", () => {
   }
 
   it("polls connected pads and stops when all disconnect", () => {
-    let cb: ((t: number) => void) | null = null;
+    const cb = callbackSlot<(t: number) => void>("cb");
     vi.stubGlobal("requestAnimationFrame", (fn: (t: number) => void) => {
-      cb = fn;
+      cb.set(fn);
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
@@ -204,7 +205,7 @@ describe("gamepad", () => {
 
     const gp = gamepad();
     // Initial connected pad → polling started; run a couple of poll frames.
-    cb?.(0);
+    cb.invoke(0);
     expect(gp.pads().length).toBe(1);
     // Connect event keeps polling; disconnect with a remaining pad keeps polling.
     window.dispatchEvent(new Event("gamepadconnected"));
@@ -225,7 +226,7 @@ describe("gamepad", () => {
 
 describe("wakeLock", () => {
   it("requests, releases, and re-acquires on visibility return", async () => {
-    let releaseHandler: (() => void) | null = null;
+    const releaseHandler = callbackSlot<() => void>("releaseHandler");
     const sentinel = {
       released: false,
       type: "screen" as const,
@@ -234,7 +235,7 @@ describe("wakeLock", () => {
         return Promise.resolve();
       }),
       addEventListener: (_e: string, h: () => void) => {
-        releaseHandler = h;
+        releaseHandler.set(h);
       },
       removeEventListener: vi.fn(),
     };
@@ -244,7 +245,7 @@ describe("wakeLock", () => {
     const lock = wakeLock();
     await lock.request();
     expect(lock.active()).toBe(true);
-    releaseHandler?.(); // sentinel released event
+    releaseHandler.invoke(); // sentinel released event
     expect(lock.active()).toBe(false);
 
     // Simulate auto-release then visibility return → re-acquire.

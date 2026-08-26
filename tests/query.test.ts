@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { signal } from "../src/core/signals/signal";
 import { clearQueryCache, getQueryData, invalidateQueries, query, setQueryData } from "../src/data/query";
+import { createDeferred } from "./helpers/mocks";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -237,19 +238,13 @@ describe("query", () => {
 
   describe("dispose", () => {
     it("prevents updates after disposal", async () => {
-      let resolve: (v: string) => void;
-      const q = query(
-        "dispose",
-        () =>
-          new Promise<string>((r) => {
-            resolve = r;
-          }),
-      );
+      const deferred = createDeferred<string>();
+      const q = query("dispose", () => deferred.promise);
 
       expect(q.fetching()).toBe(true);
       q.dispose();
 
-      resolve?.("data");
+      deferred.resolve("data");
       await tick();
 
       expect(q.data()).toBe(undefined);

@@ -38,6 +38,9 @@ describe("Router: initial match on '/'", () => {
     const current = route();
     expect(current.path).toBe("/");
     expect(current.matched.length).toBeGreaterThan(0);
-    expect(current.matched[current.matched.length - 1].component).toBe(Landing);
+    // `RouteDef` is a union (component / async / redirect / lazy); `component`
+    // exists only on the arms that have one, so narrow before reading it.
+    const last = current.matched[current.matched.length - 1];
+    expect("component" in last && last.component).toBe(Landing);
   });
 });

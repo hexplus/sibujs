@@ -183,11 +183,13 @@ describe("State serialization for client handoff", () => {
     // Extract the JSON from the script tag and eval it
     const match = script.match(/window\.__SIBU_SSR_DATA__=(.+)<\/script>/);
     expect(match).toBeTruthy();
-    const json = match?.[1]
+    // Narrow for real; `match?.[1]` typed as `string | undefined`.
+    if (!match) throw new Error("serialized state did not match the expected shape");
+    const json = match[1]
       .replace(/\\u003c/g, "<")
       .replace(/\\u003e/g, ">")
       .replace(/\\u0026/g, "&");
-    (window as any).__SIBU_SSR_DATA__ = JSON.parse(json);
+    (window as unknown as Record<string, unknown>).__SIBU_SSR_DATA__ = JSON.parse(json);
 
     const result = deserializeState<{ count: number; items: string[] }>();
     expect(result).toEqual(state);

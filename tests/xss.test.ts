@@ -213,7 +213,7 @@ describe("html tagged template XSS prevention", () => {
     }}>click</button>`;
     // The event should be a function, not a string — no eval risk
     expect(el.hasAttribute("onclick")).toBe(false);
-    el.click();
+    (el as HTMLElement).click();
     expect(called).toBe(true);
   });
 

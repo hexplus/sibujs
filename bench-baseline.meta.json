@@ -1,0 +1,14 @@
+{
+  "recordedAt": "2026-08-26T01:13:46.520Z",
+  "commit": "4512527c268bec702daa87a413000fe5e771122e",
+  "node": "v24.19.0",
+  "npm": "11.17.0",
+  "os": "win32 10.0.26200 x64",
+  "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
+  "cpuCount": 16,
+  "totalMemGB": 31.6,
+  "jsdom": "26.1.0",
+  "benchmarkCount": 36,
+  "hostKind": "shared developer laptop (not a dedicated benchmark host)",
+  "gateStatus": "INFORMATIONAL ONLY — see docs/hardening/final-pre-rc-findings.md BENCH-001"
+}

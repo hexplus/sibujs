@@ -14,7 +14,7 @@ export interface FieldConfig<T = unknown> {
   validators?: ValidatorFn<T>[];
 }
 
-export type FormConfig<T extends Record<string, unknown>> = {
+export type FormConfig<T extends object> = {
   [K in keyof T]: FieldConfig<T[K]>;
 };
 
@@ -27,7 +27,7 @@ export interface FormField<T = unknown> {
   reset: () => void;
 }
 
-export interface FormReturn<T extends Record<string, unknown>> {
+export interface FormReturn<T extends object> {
   fields: { [K in keyof T]: FormField<T[K]> };
   errors: () => Partial<Record<keyof T, string | null>>;
   isValid: () => boolean;
@@ -118,8 +118,18 @@ export function custom<T>(fn: (value: T) => boolean, message: string): Validator
 /**
  * Props returned by bindField, ready to spread into an input tag factory.
  */
-export interface BoundFieldProps {
-  value: () => unknown;
+/**
+ * Props produced by {@link bindField}, ready to spread onto a tag factory.
+ *
+ * Generic over the field's value type. `value: () => unknown` forced every
+ * consumer to cast, because `unknown` does not satisfy the typed tag factories'
+ * `reactive<string>` — so the declaration contradicted this helper's own
+ * documented purpose ("props object ready to pass directly to a tag factory").
+ * The parameter defaults to `unknown`, so existing annotations of the bare
+ * `BoundFieldProps` keep compiling. (TYPE-010)
+ */
+export interface BoundFieldProps<T = unknown> {
+  value: () => T;
   on: { input: (e: Event) => void; change: (e: Event) => void; blur: () => void };
   [attr: string]: unknown;
 }
@@ -144,7 +154,7 @@ export interface BoundFieldProps {
  * input(bindField(f.fields.email, { type: "email", placeholder: "Email" }))
  * ```
  */
-export function bindField<T>(field: FormField<T>, extras?: Record<string, unknown>): BoundFieldProps {
+export function bindField<T>(field: FormField<T>, extras?: Record<string, unknown>): BoundFieldProps<T> {
   // Read the right value off a form control: a checkbox → its `checked` flag, a
   // `<select multiple>` → the array of selected option values, otherwise the
   // control's `value`. Shared by the input and change handlers so both events
@@ -200,8 +210,10 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
   };
 
   return {
-    value: field.value as () => unknown,
-    on: mergedOn as BoundFieldProps["on"],
+    // The field's own getter, no longer widened to `unknown` — that widening is
+    // what forced every consumer to cast. (TYPE-010)
+    value: field.value,
+    on: mergedOn as BoundFieldProps<T>["on"],
     onElement,
     ...restExtras,
   };
@@ -211,7 +223,7 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
 // form HOOK
 // ============================================================================
 
-export function form<T extends Record<string, unknown>>(config: FormConfig<T>): FormReturn<T> {
+export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
   const fieldEntries = Object.entries(config) as [keyof T, FieldConfig][];
   const fieldMap = {} as { [K in keyof T]: FormField<T[K]> };
   const [manualErrors, setManualErrors] = signal<Record<string, string | null>>({});

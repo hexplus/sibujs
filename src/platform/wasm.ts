@@ -9,7 +9,7 @@ import { globalSingleton } from "../utils/globalSingleton";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export interface WasmModuleState<T extends Record<string, unknown> = Record<string, unknown>> {
+export interface WasmModuleState<T extends object = Record<string, unknown>> {
   /** The instantiated WASM module exports, null until loaded */
   instance: T | null;
   /** Loading state */
@@ -55,7 +55,7 @@ const instanceCache = globalSingleton(
  * }
  * ```
  */
-export function wasm<T extends Record<string, unknown> = Record<string, unknown>>(
+export function wasm<T extends object = Record<string, unknown>>(
   source: string | ArrayBuffer | Uint8Array,
   config: WasmConfig = {},
 ): {
@@ -251,7 +251,7 @@ export async function preloadWasm(
  * Create a type-safe bridge to a WASM module with automatic memory management.
  * Provides helpers for passing strings and arrays between JS and WASM.
  */
-export function createWasmBridge<T extends Record<string, unknown>>(
+export function createWasmBridge<T extends object>(
   instance: WebAssembly.Instance,
 ): {
   exports: T;

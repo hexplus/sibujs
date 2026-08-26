@@ -39,12 +39,13 @@ describe("withDefaults", () => {
 
 describe("compose", () => {
   it("should compose multiple wrappers", () => {
-    const addA = (comp: (props: Record<string, unknown>) => HTMLElement) => (props: Record<string, unknown>) => {
+    // `compose` is typed over `Component<unknown>` = `(props: unknown) => HTMLElement`.
+    const addA = (comp: (props: unknown) => HTMLElement) => (props: unknown) => {
       const el = comp(props);
       el.classList.add("a");
       return el;
     };
-    const addB = (comp: (props: Record<string, unknown>) => HTMLElement) => (props: Record<string, unknown>) => {
+    const addB = (comp: (props: unknown) => HTMLElement) => (props: unknown) => {
       const el = comp(props);
       el.classList.add("b");
       return el;

@@ -2,8 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ErrorBoundary } from "../src/components/ErrorBoundary";
 import { signal } from "../src/core/signals/signal";
 
-// Helper to mount and extract container
-function mountComponent(component: () => HTMLElement) {
+// Helper to mount and extract container.
+//
+// Takes `() => Element`, matching what `ErrorBoundary` actually returns. The
+// narrower `() => HTMLElement` was wrong in both directions: it rejected valid
+// boundaries, and `appendChild` accepts any `Node` anyway, so the helper never
+// needed the stronger type. (TYPE-005)
+function mountComponent(component: () => Element) {
   const container = document.createElement("div");
   const el = component();
   container.appendChild(el);
@@ -112,7 +117,10 @@ describe("ErrorBoundary Working Features", () => {
     });
 
     it("should handle initialization errors", async () => {
-      function FailingComponent() {
+      // Annotated `Element` even though it only throws: it stands in for a
+      // component, and TypeScript infers `void` for a body that always throws,
+      // which would not be assignable to the boundary's children parameter.
+      function FailingComponent(): Element {
         throw new Error("Initialization failed");
       }
 
@@ -248,7 +256,7 @@ describe("ErrorBoundary Working Features", () => {
 
   describe("Error Type Handling", () => {
     it("should handle string errors", async () => {
-      function StringErrorComponent() {
+      function StringErrorComponent(): Element {
         throw "String error message";
       }
 
@@ -270,7 +278,7 @@ describe("ErrorBoundary Working Features", () => {
     });
 
     it("should handle Error objects", async () => {
-      function ErrorObjectComponent() {
+      function ErrorObjectComponent(): Element {
         throw new Error("Error object message");
       }
 

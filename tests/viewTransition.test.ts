@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { viewTransition } from "../src/ui/viewTransition";
+import { createDeferred } from "./helpers/mocks";
 
 const _tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -21,15 +22,12 @@ describe("viewTransition", () => {
 
   it("uses document.startViewTransition when available", async () => {
     const callback = vi.fn();
-    let resolveFinished: () => void;
-    const finished = new Promise<void>((r) => {
-      resolveFinished = r;
-    });
+    const finished = createDeferred<void>();
 
     vi.stubGlobal("document", {
       startViewTransition: vi.fn((cb: () => void) => {
         cb();
-        return { finished };
+        return { finished: finished.promise };
       }),
     });
 
@@ -37,7 +35,7 @@ describe("viewTransition", () => {
     const startPromise = start();
     expect(isTransitioning()).toBe(true);
 
-    resolveFinished?.();
+    finished.resolve();
     await startPromise;
     expect(isTransitioning()).toBe(false);
     expect(callback).toHaveBeenCalledOnce();

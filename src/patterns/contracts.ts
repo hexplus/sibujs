@@ -94,10 +94,7 @@ export type PropSchema<Props> = {
  * In production mode (process.env.NODE_ENV === 'production'), validation is skipped
  * and only defaults are applied for performance.
  */
-export function validateProps<Props extends Record<string, unknown>>(
-  props: Partial<Props>,
-  schema: PropSchema<Props>,
-): Props {
+export function validateProps<Props extends object>(props: Partial<Props>, schema: PropSchema<Props>): Props {
   const result = { ...props } as Record<string, unknown>;
   const errors: string[] = [];
   const isDev = typeof process === "undefined" || process?.env?.NODE_ENV !== "production";
@@ -146,7 +143,7 @@ export function validateProps<Props extends Record<string, unknown>>(
  * Define a component with runtime prop validation.
  * Validates props in development mode, applies defaults, then calls setup.
  */
-export function defineStrictComponent<Props extends Record<string, unknown>>(config: {
+export function defineStrictComponent<Props extends object>(config: {
   name: string;
   props: PropSchema<Props>;
   setup: (props: Props) => HTMLElement;

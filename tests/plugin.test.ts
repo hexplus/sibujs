@@ -46,7 +46,10 @@ describe("Plugin architecture", () => {
 
   it("should pass options to plugin", () => {
     const p = createPlugin("opts", (ctx, options) => {
-      ctx.provide("setting", options.value);
+      // `options` reaches the plugin as `unknown` — plugins receive arbitrary
+      // caller-supplied config, so reading a field means narrowing first.
+      const { value } = (options ?? {}) as { value?: unknown };
+      ctx.provide("setting", value);
     });
 
     plugin(p, { value: 42 });

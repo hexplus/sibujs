@@ -12,6 +12,10 @@ describe("onMount (no element)", () => {
     const order: string[] = [];
     onMount(() => {
       order.push("mount");
+      // `onMount` expects `CleanupFn | undefined`; `Array.prototype.push`
+      // returns a number, so the arrow body has to be a statement block that
+      // returns nothing.
+      return undefined;
     });
     order.push("sync");
     expect(order).toEqual(["sync"]);

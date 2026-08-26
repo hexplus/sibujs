@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { option, select } from "../src/core/rendering/html";
+import type { SelectProps } from "../src/core/rendering/tagPropTypes";
 import { signal } from "../src/core/signals/signal";
 import { initDevTools } from "../src/devtools/devtools";
 import { captureSignalGraph } from "../src/devtools/signalGraph";
@@ -67,7 +68,13 @@ describe("inputMask — caret restoration for '*' masks with literals (D8)", () 
 describe("bindField — <select multiple> reactive write-back (D1)", () => {
   it("reflects the field's array onto option.selected, initially and on change", () => {
     const f = form({ tags: { initial: ["a", "c"] as string[] } });
-    const el = select(bindField(f.fields.tags, { multiple: true }), [
+    // `bindField` is generic over the field's value type as of TYPE-010, so a
+    // single-value field now spreads onto a tag factory with no cast at all.
+    // A `<select multiple>` is the residual case: its bound value is `string[]`
+    // while `SelectProps.value` is `reactive<string>`, so the two still do not
+    // line up. Widening the tag-factory prop types to model multi-select is a
+    // separate, wider change — deferred, and the cast is scoped to that case.
+    const el = select(bindField(f.fields.tags, { multiple: true }) as unknown as SelectProps, [
       option({ value: "a" }, "A"),
       option({ value: "b" }, "B"),
       option({ value: "c" }, "C"),

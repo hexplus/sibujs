@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { clearHMRState, createHMRBoundary, hmrState, isHMRAvailable, registerHMR } from "../src/devtools/hmr";
+import { callbackSlot } from "./helpers/mocks";
 
 describe("hmrState", () => {
   afterEach(() => {
@@ -197,9 +198,9 @@ describe("createHMRBoundary", () => {
     let disposeCalled = false;
 
     // Simulate bundler HMR API
-    let storedHandler: (() => void) | null = null;
+    const storedHandler = callbackSlot<() => void>("storedHandler");
     (globalThis as unknown as Record<string, unknown>).__SIBU_HMR_ACCEPT__ = (_id: string, handler: () => void) => {
-      storedHandler = handler;
+      storedHandler.set(handler);
     };
 
     try {
@@ -219,7 +220,7 @@ describe("createHMRBoundary", () => {
       });
 
       // Simulate a hot update
-      if (storedHandler) storedHandler();
+      if (storedHandler.captured()) storedHandler.invoke();
 
       expect(disposeCalled).toBe(true);
       expect(acceptCalled).toBe(true);

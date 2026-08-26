@@ -345,14 +345,32 @@ function MyComponent() {
 
 // ─── generateEslintConfig ────────────────────────────────────────────────────
 
+// `generateEslintConfig()` is declared as `Record<string, unknown>`, so every
+// property read off it is `unknown` and nothing about the config's shape is
+// checked. Rather than sprinkle casts at each access, describe the shape the
+// tests actually assert against and narrow once, at the boundary.
+//
+// The better fix is a precise return type on `generateEslintConfig` itself —
+// that lives in `src/build/`, so it is recorded as a recommendation in
+// stable-preflight-findings.md (TYPE-006) rather than changed here.
+interface EslintConfigShape {
+  plugins: string[];
+  rules: Record<string, string>;
+  overrides: Array<{ files: string[]; rules: Record<string, string> }>;
+  settings: { sibujs: { version: string } };
+}
+
+const eslintConfig = (options?: { severity?: "error" | "warning" }): EslintConfigShape =>
+  generateEslintConfig(options) as unknown as EslintConfigShape;
+
 describe("generateEslintConfig", () => {
   it("returns a config object with the sibujs plugin", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     expect(config.plugins).toContain("sibujs");
   });
 
   it("includes rules with sibujs/ prefix", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     const ruleKeys = Object.keys(config.rules);
     expect(ruleKeys.length).toBeGreaterThan(0);
     ruleKeys.forEach((key) => {
@@ -361,7 +379,7 @@ describe("generateEslintConfig", () => {
   });
 
   it("has all 5 lint rules configured", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     const ruleKeys = Object.keys(config.rules);
     expect(ruleKeys).toContain("sibujs/no-signals-in-conditionals");
     expect(ruleKeys).toContain("sibujs/effect-cleanup");
@@ -371,21 +389,21 @@ describe("generateEslintConfig", () => {
   });
 
   it("uses warning severity by default", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     Object.values(config.rules).forEach((severity) => {
       expect(severity).toBe("warning");
     });
   });
 
   it("supports custom severity option", () => {
-    const config = generateEslintConfig({ severity: "error" });
+    const config = eslintConfig({ severity: "error" });
     Object.values(config.rules).forEach((severity) => {
       expect(severity).toBe("error");
     });
   });
 
   it("includes overrides for TS/JS file extensions", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     expect(config.overrides).toBeDefined();
     expect(Array.isArray(config.overrides)).toBe(true);
     expect(config.overrides.length).toBeGreaterThan(0);
@@ -397,13 +415,13 @@ describe("generateEslintConfig", () => {
   });
 
   it("includes settings with sibujs version detect", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     expect(config.settings).toBeDefined();
     expect(config.settings.sibujs.version).toBe("detect");
   });
 
   it("overrides contain the same rules as the top-level", () => {
-    const config = generateEslintConfig();
+    const config = eslintConfig();
     expect(config.overrides[0].rules).toEqual(config.rules);
   });
 });

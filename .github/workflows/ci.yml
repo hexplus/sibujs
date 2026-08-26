@@ -1,17 +1,95 @@
 # .github/workflows/ci.yml
+#
+# Two layers, deliberately separated so a pull request is not held up by work
+# that only needs to run once per merge.
+#
+#   fast        source typecheck -> test typecheck -> lint -> unit suite
+#   node-matrix every Node line `package.json.engines` claims
+#
+# The matrix exists because `engines` is a promise. Before it, `engines` said
+# ">=18" while CI ran Node 20 only, and Node 18/20 users were the compatibility
+# testers — which is how NODE-002 (SSR request isolation silently unavailable
+# below Node 22.3) went unnoticed.
+#
+# It runs the declared MINIMUM exactly, plus the current release lines. CI cannot
+# prove every patch release in the range, and the support docs do not claim it
+# does — but a floor nobody executes is not a supported floor.
+name: CI
+
 on:
     pull_request:
+    push:
+        branches: [main]
     workflow_dispatch:
 
 jobs:
-    ci:
+    fast:
+        name: fast (typecheck · lint · unit)
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
               with:
-                  node-version: 20
-            - run: npm install
-            - run: npm run lint
+                  node-version: 22
+                  cache: npm
+
+            # `npm ci`, not `npm install`: CI installs exactly what the committed
+            # lockfile pins and fails rather than silently resolving something
+            # newer. Without a lockfile, certification would be testing a
+            # dependency set nobody chose. (LOCK-001)
+            - run: npm ci --no-audit --no-fund
+
+            # Build FIRST. `tests/consumption.test.ts` reads real files out of
+            # `dist/` — it is the suite's own packaging check — so the unit suite
+            # is not hermetic without it (rc-findings TEST-007). Running the suite
+            # against an absent `dist/` reports 31 failures that say nothing about
+            # the source.
             - run: npm run build
-            - run: npm run test
+
+            # Source declarations, then tests. Both are gates: before this pass
+            # CI ran no typecheck at all, which is how 130 test type errors — and
+            # five real declaration bugs behind them — accumulated unseen.
+            - run: npm run typecheck
+            - run: npm run typecheck:tests
+
+            - run: npm run lint
+            - run: npx vitest run --reporter=dot
+
+    node-matrix:
+        name: node ${{ matrix.node }}
+        runs-on: ubuntu-latest
+        strategy:
+            # Report every version's real result rather than cancelling siblings
+            # on the first failure — a partial matrix cannot tell you which lines
+            # are actually supported.
+            fail-fast: false
+            matrix:
+                # Must stay in lockstep with `package.json.engines.node`.
+                #
+                # `22.3.0` is the DECLARED MINIMUM and is pinned exactly — testing
+                # "22 latest" does not verify the floor, and an unverified floor is
+                # the gap this matrix exists to close. `22` and `24` track the
+                # current release lines.
+                node: ["22.3.0", 22, 24]
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ matrix.node }}
+                  cache: npm
+
+            - run: npm ci --no-audit --no-fund
+            - run: npm run build
+            - run: npm run typecheck
+            - run: npm run typecheck:tests
+            - run: npx vitest run --reporter=dot
+
+            # Packed-package gates: install the real tarball into a throwaway
+            # consumer and exercise every declared subpath, plus the three RC
+            # regressions that are Node-specific (DOM-less router construction,
+            # query-cache clean exit, promise-returning route components) and the
+            # SSR request-isolation contract.
+            #
+            # `--versions` is pinned to this job's Node so the runner tests the
+            # version it was given rather than searching for others.
+            - run: node scripts/certify/node-matrix.mjs --versions=${{ matrix.node }}
