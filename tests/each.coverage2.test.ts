@@ -120,8 +120,11 @@ describe("each coverage2 — duplicate keys warning", () => {
 });
 
 describe("each coverage2 — render throws", () => {
-  it("renders a placeholder comment and warns when render throws", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("renders a placeholder comment and reports when render throws", async () => {
+    // With no ErrorBoundary above the list, the render failure resolves through
+    // the central pipeline to console.error — not a dev-only console.warn, so
+    // it stays observable in a production build.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const [items] = signal([{ id: 1 }]);
     const anchor = each(
       () => items(),
@@ -131,12 +134,13 @@ describe("each coverage2 — render throws", () => {
       { key: (i) => i.id },
     );
     const host = await mount(anchor);
-    expect(warnSpy).toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalled();
+    expect(errSpy.mock.calls.map((c) => String(c[0])).join("\n")).toContain("render boom");
     const hasErrorComment = Array.from(host.childNodes).some(
       (n) => n.nodeType === 8 && String(n.textContent).includes("each:error"),
     );
     expect(hasErrorComment).toBe(true);
-    warnSpy.mockRestore();
+    errSpy.mockRestore();
   });
 
   it("dispatches sibu:error-propagate on the parent element", async () => {

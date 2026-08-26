@@ -23,14 +23,18 @@ describe("onMount (no element)", () => {
     expect(order).toEqual(["sync", "mount"]);
   });
 
-  it("swallows callback errors without throwing", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("contains callback errors without throwing, and reports them", async () => {
+    // A lifecycle callback is user code: contained so one bad hook cannot abort
+    // the rest, but reported through the central pipeline so it stays visible
+    // in production rather than only under a dev flag.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     onMount(() => {
       throw new Error("mount boom");
     });
     await Promise.resolve();
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    expect(err).toHaveBeenCalled();
+    expect(err.mock.calls.map((c) => String(c[0])).join(" ")).toContain("mount boom");
+    err.mockRestore();
   });
 });
 

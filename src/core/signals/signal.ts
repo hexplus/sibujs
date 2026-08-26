@@ -57,6 +57,12 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
   //   subsHead/Tail  — doubly-linked subscriber list
   //   __activeNode   — back-pointer for O(1) dup dep detection during tracking
   //   __name         — optional debug label
+  //   _d / _validate — declared but never set on a plain signal. The reactive
+  //                    core tests both when deciding whether a dependency needs
+  //                    settling before its version can be trusted; declaring
+  //                    them here means those reads hit a real slot on this
+  //                    shape instead of missing through the prototype chain on
+  //                    the hottest paths (recordDependency, depsChanged).
   const state: {
     value: T;
     __v: number;
@@ -65,6 +71,8 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
     subsTail: unknown;
     __activeNode: unknown;
     __name?: string;
+    _d: boolean;
+    _validate: undefined;
   } = {
     value: initial,
     __v: 0,
@@ -73,6 +81,8 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
     subsTail: null,
     __activeNode: null,
     __name: undefined,
+    _d: false,
+    _validate: undefined,
   };
   const debugName = _isDev ? options?.name : undefined;
   const equalsFn = options?.equals;

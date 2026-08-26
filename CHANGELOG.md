@@ -6,6 +6,163 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+A correctness and release-hardening pass over the reactive core, keyed lists,
+error reporting and packaging. No public API was removed or renamed; one new
+export and one additive field were added.
+
+### Fixed
+
+- **Derived values no longer notify downstream effects when the derived output
+  stayed equal.** Previously an effect whose only relevant dependency was a
+  `derived()` re-ran whenever an *upstream source* changed, even if the derived
+  recomputed to the same value — so `derived(() => value() % 2)` re-ran its
+  subscribers on every write. `equals` deduplicated notifications but never
+  actually stopped propagation. This applies to the default `Object.is`
+  comparator and to a custom `equals`, through multi-level chains, diamonds and
+  batches.
+- **Keyed `each()` rows no longer display stale data when an item is replaced
+  under the same key.** Replacing `{id: 1, name: "Alice"}` with
+  `{id: 1, name: "Bob"}` now updates the row's contents while keeping the same
+  DOM node. Each row owns reactive `item()` / `index()` cells that
+  reconciliation writes on reuse; `render` still runs exactly once per key, and
+  DOM identity across reorders is unchanged.
+- **`index()` inside a keyed row is now reactive**, so reordering a list updates
+  index-derived content without recreating rows.
+- **Application exceptions thrown from an effect or binding re-run are now
+  reported in production.** They were caught to protect the notification drain
+  and then discarded unless a development flag was set, making a thrown
+  exception indistinguishable from success. They are still contained — one
+  broken subscriber cannot freeze unrelated bindings — but they are no longer
+  silent.
+- **A runaway subscriber no longer discards unrelated pending work.** Tripping
+  the cycle guard now quarantines the offending subscriber for the rest of that
+  update while every other queued subscriber still runs; previously the entire
+  drain was aborted.
+- **Long but finite update cascades are no longer misreported as cycles.** A
+  legitimate cascade deeper than the old 50-run guard was aborted mid-flight,
+  leaving the un-drained tail of the graph holding wrong values. The guard is
+  now 1 000 runs, and `maxDrainIterations` remains the absolute backstop.
+- **`sanitizeUrl()` no longer rewrites legitimate URLs.** The aggressively
+  stripped copy used to detect obfuscated schemes (`java\tscript:`) was being
+  returned to the caller, so `mailto:a@b.com?subject=Hello World` came back as
+  `...HelloWorld`. Detection and output are now separate: dangerous schemes are
+  still rejected, and safe URLs keep their interior characters.
+- **`sanitizeSrcset()` now drops candidates with a malformed descriptor**,
+  closing a case where a whitespace-obfuscated scheme survived because the
+  candidate split left the dangerous half in the descriptor position.
+- **The README's CDN snippet pointed at a file the build does not emit**
+  (`dist/sibu.global.js`); the correct artifact is `dist/cdn.global.js`.
+- **Runtime errors associated with a DOM node were treated as handled merely
+  because an `ErrorBoundary` event had been dispatched.** If no boundary was
+  mounted above the node, the event went nowhere and reporting stopped anyway —
+  so the configured runtime error handler and the `console.error` fallback were
+  both skipped and the failure disappeared. A boundary must now explicitly claim
+  an error (the event is cancelable; claiming means `preventDefault()`), and an
+  unclaimed error falls through to the handler or the console.
+- **Keyed-list render failures bypassed the central runtime error pipeline.**
+  `each()` dispatched its own boundary event and otherwise warned only in
+  development, so a row that failed to render in production with no boundary
+  mounted was silent. The same applied to `Portal`, `lazy()`/`Suspense`,
+  reactive bindings (`bindChildNode`, `bindTextNode`, `bindAttribute`,
+  `bindDynamic`), lifecycle hooks (`onMount`/`onUnmount`) and node disposers —
+  all of which now report through the one pipeline.
+- **Runtime error handlers are now shared between compatible duplicate SibuJS
+  runtime instances.** The handler was module-local, so when a bundler
+  materialized SibuJS twice, a handler installed through one copy was invisible
+  to the shared reactive engine owned by the other, and application telemetry
+  silently never fired.
+- **Reactive-binding failures were reported as phase `"effect"`.** The scheduler
+  invokes effects and DOM bindings through the same call and had no way to tell
+  them apart; bindings now report phase `"binding"` and carry the node they own,
+  which is also what lets an `ErrorBoundary` catch a binding that throws on a
+  later update rather than only during the initial render.
+- **An effect that hit its rerun safety ceiling was not reported when
+  `__SIBU_DEV_WARN__` was `false`.** That flag controls optional developer
+  diagnostics; reaching a safety ceiling means the framework forcibly stopped
+  the user's work, which stays observable regardless.
+- **`ErrorBoundary` fallback state was shared between independent boundaries.**
+  Fallbacks were memoized in a module-global cache keyed by the fallback
+  function plus `error.message`, and the cached entry closed over one specific
+  boundary's `Error` and `retry`. Two boundaries sharing a fallback function —
+  the idiomatic way to use one — whose errors carried the same message therefore
+  aliased each other: a boundary could render another boundary's Error and be
+  handed another boundary's `retry`, and retrying one wiped the other's state.
+  The cache is removed; each boundary owns its error, its retry and its rendered
+  fallback. Sharing one fallback function across an application is safe.
+  (The cache also never memoized any rendering — it cached a closure that was
+  invoked on every call — so nothing observable is lost.)
+- **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
+  runtime error pipeline.** They previously went to `console.warn` only, which
+  no configured runtime error handler could observe.
+- **`ErrorBoundary` `resetKeys` now compare selected VALUES, not dependency
+  invalidation.** A getter is a selector, and re-running because its source was
+  replaced is not a change. `resetKeys: [() => route().pathname]` no longer
+  recovers a failed boundary when an unrelated field of the route object is
+  written; values are compared with `Object.is` against the values captured
+  when the error was caught.
+- **A reset-key change that causes an error no longer immediately resets the
+  newly-failed boundary.** Reset keys are now watched only while the boundary is
+  failed, with the values at the moment of failure as the baseline — so a single
+  update that both moves a reset key and makes the children throw leaves the
+  boundary failed. Only changes observed after the failure trigger recovery.
+  Because the getters are evaluated only during a failed episode, a getter that
+  throws is now reported when the boundary fails rather than at construction.
+- **`ErrorBoundary` `resetKeys` watchers no longer subscribe to the boundary's
+  own error state.** Once a reset key had changed while the boundary was
+  healthy, the watcher became a subscriber of that boundary's error signal, so a
+  later unrelated failure re-ran the watcher and immediately reset itself — the
+  fallback appeared and vanished without any reset key changing. Reset keys are
+  triggers; the current error is only inspected when a trigger fires.
+- **Reporting an error no longer runs inside the failing subscriber's tracking
+  context.** An `ErrorBoundary` listener (or an application handler) that reads
+  a signal while deciding what to do would otherwise have that read attributed
+  to the throwing subscriber — which subscribed the failing binding to the
+  boundary's own error signal, re-ran it, and reported the same failure twice.
+
+### Added
+
+- **`asyncDerived()` now returns a `dispose()` method.** It previously created
+  an internal effect with no way to stop it, so it stayed subscribed to its
+  sources for the lifetime of the page. Disposal unsubscribes, aborts the
+  in-flight run, ignores any promise that settles afterwards, makes `refresh()`
+  a no-op, and is idempotent.
+- **`asyncDerived()` factories receive an `AbortSignal`.** Forward it to `fetch`
+  or any abortable API to cancel work that can no longer affect the result:
+  `asyncDerived(async ({ signal }) => (await fetch(url(), { signal })).json())`.
+  Superseded runs and disposal both abort. The run-id guard is retained because
+  not every async API honours `AbortSignal`. Existing zero-argument factories
+  continue to work unchanged.
+- **The runtime error handling API**, exported from the package root — one place
+  to observe every error the runtime catches and contains:
+  `setRuntimeErrorHandler()`, `getRuntimeErrorHandler()`, `reportError()`, and
+  the `RuntimeErrorHandler`, `RuntimeErrorContext` and `RuntimeErrorPhase`
+  types. A handler receives the original error plus a context naming the phase
+  (`effect`, `binding`, `derived`, `cleanup`, `event`, `async`, `render`,
+  `scheduler`), the failing subscriber's debug name, and the associated node
+  where one exists. Without a handler, errors go to `console.error`.
+  `reportError()` is intended for plugin/integration code that catches an
+  application exception on SibuJS's behalf; ordinary application code should use
+  `ErrorBoundary` or `setRuntimeErrorHandler()`.
+- Browser tests (Playwright) now run in CI: Chromium on pull requests,
+  Chromium + Firefox + WebKit on `main`. They previously existed but ran only
+  when invoked manually, so a real-engine regression could ship with CI green.
+- Benchmarks for computed stabilization — workloads where an upstream write does
+  *not* change the downstream value — reporting downstream effect runs alongside
+  timings, so the run count cannot regress unnoticed.
+
+### Changed
+
+- Errors from a throwing `onCleanup` are now reported through the runtime error
+  pipeline (`console.error` by default) instead of `console.warn`. Behaviour is
+  otherwise unchanged: a throwing cleanup still does not prevent its siblings
+  from running.
+- `maxSubscriberRepeats` now defaults to 1 000 (was 50). Configurable via
+  `setMaxSubscriberRepeats()`.
+
+---
+
 ## [4.0.0-rc.1] — 2026-08-25
 
 First release candidate for 4.0. **The only breaking change is the Node.js
@@ -23,10 +180,13 @@ queries, hydration bootstrap, island activation, and SSR Suspense boundaries now
 answer that with monotonic generations rather than by comparing keys, URLs, or
 values — because returning to the same key or URL is *not* the same generation.
 
-Beyond the engine floor there are no breaking changes: one new public export,
-one additive field on an existing result type, several type declarations that
-became *more* permissive, and no change to any existing signature or behaviour
-that was already correct.
+Beyond the engine floor there are no breaking changes. Everything else is
+additive: new public exports, additive fields on existing result types, and
+several type declarations that became *more* permissive. No existing signature
+was removed or narrowed, and no behaviour that was already correct changed.
+(See each release entry's **Added** section for the exact surface — a running
+count is not maintained here, because it goes stale the moment anything is
+added.)
 
 ### Migration to 4.0
 

@@ -73,6 +73,50 @@ primitive that registers only its `untrack` teardown is **broken** — the rows
 stay on screen and every row binding leaks. That was a real defect, fixed in
 this hardening pass and pinned by `tests/hardening-disposal.test.ts`.
 
+### Keyed rows: identity is not value freshness
+
+A keyed `each()` row is reconciled as a small record, not just a DOM node:
+
+```text
+row
+ ├── key            stable identity
+ ├── item cell      reactive; written when reconciliation reuses the row
+ ├── index cell     reactive; written when the row's position changes
+ └── DOM range      created ONCE by render()
+```
+
+When reconciliation encounters a key it already has, it keeps the DOM range and
+the renderer's output and **writes the row's cells** instead. `render` therefore
+runs exactly once per key, while anything inside the row that reads `item()` or
+`index()` re-runs through the normal reactive path.
+
+That separation is the point. Keeping a row's DOM node is about *identity*;
+keeping its contents correct is about *freshness*. Conflating them gives you one
+of two bugs — recreate the row on every update and you lose focus, animation and
+scroll state; reuse it without refreshing the cells and the row silently
+displays the previous item's data. Replacing `{id: 1, name: "Alice"}` with
+`{id: 1, name: "Bob"}` must keep the same element **and** show `Bob`.
+
+Reading `item()` subscribes to that row's cell, not to the whole-array signal,
+so mutating one row never re-runs another's bindings. Cells use signal equality:
+a row whose item and index are both unchanged writes nothing and re-runs
+nothing.
+
+Effects created inside `render` are **not** owned automatically — SibuJS has no
+implicit owner tree. Bind them to the row explicitly:
+
+```ts
+each(items, (item) => {
+  const el = div();
+  const stop = effect(() => { el.textContent = item().name; });
+  registerDisposer(el, stop);       // now the row owns the effect
+  return el;
+}, { key: (i) => i.id });
+```
+
+Row disposal runs that disposer exactly once when the key leaves the list, and
+again never.
+
 ### Component ownership
 
 A component is a plain function returning a node. It owns whatever it creates.

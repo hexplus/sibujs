@@ -49,6 +49,52 @@ track(() => {
 recomputes only when read after an upstream change. A derivation that nobody
 reads costs nothing to update.
 
+### Stabilization — invalidation is not notification
+
+A dirty derivation does **not** imply a changed value.
+
+Propagation runs at write time and cannot know whether a derivation's output
+actually moved — establishing that would mean recomputing every derivation
+eagerly, destroying the laziness above. So propagation deliberately
+over-approximates: it marks derivations dirty and queues their downstream
+subscribers.
+
+The compensating step happens at **drain time**, immediately before a subscriber
+would run. Any dirty derivation the subscriber depends on is settled first
+(still pull-based — nothing recomputes unless an effect is about to observe it),
+and each dependency's version is compared against the version that subscriber
+last observed. A derivation bumps its version **only** when a recompute produces
+a value its comparator considers different. If nothing the subscriber observes
+changed, the subscriber does not run.
+
+This is what makes `equals` *stop* propagation rather than merely deduplicate
+it:
+
+```ts
+const [value, setValue] = signal(1);
+const parity = derived(() => value() % 2);
+
+effect(() => { parity(); console.log("ran"); });  // logs once
+
+setValue(3);   // source 1 -> 3, parity 1 -> 1 — effect does NOT re-run
+setValue(2);   // parity 1 -> 0 — effect re-runs
+```
+
+The same holds for a custom comparator, through multi-level chains, across
+diamonds, and inside batches.
+
+Two properties are worth stating precisely:
+
+- **Intermediate derivations still recompute.** Settling is lazy, so a
+  derivation must run its body once to discover its own value is unchanged.
+  Derivation bodies are required to be pure, so this is not observable work —
+  but it is real, and each link revalidates at most once per update, never once
+  per path through a diamond.
+- **A signal written and then written *back* inside one batch counts as
+  changed.** Versions are monotonic, not value-compared, so subscribers re-run
+  even though the net value is identical. This is a conservative
+  over-approximation — an extra run, never a missed one.
+
 ### Scheduling
 
 Writes notify synchronously by default. `batch(fn)` defers notification until
@@ -57,8 +103,128 @@ nest; only the outermost one flushes. If a batch body throws, the scheduler
 state is restored before the exception propagates, so a thrown batch never
 wedges the runtime into a permanently-batching state.
 
-The notification drain is iterative and capped. A subscriber that keeps
-re-invalidating itself trips a repeat guard rather than recursing without bound.
+The notification drain is iterative and capped. A subscriber that fires more
+than `maxSubscriberRepeats` times in one drain is treated as a write-reads-self
+cycle: it is reported through the runtime error pipeline and **quarantined for
+the remainder of that drain**, while every other queued subscriber still runs.
+
+Containment is scoped to the offender on purpose. Aborting the whole queue —
+the previous behaviour — meant one pathological subscriber discarded unrelated,
+already-valid pending work, leaving legitimate effects un-run and application
+state half-updated. The ceiling is also generous (1 000) because the only thing
+separating "cycle" from "legitimate deep cascade" is how many times a subscriber
+re-runs, and a fan-in subscriber observing an N-link cascade legitimately
+re-runs N times. `maxDrainIterations` remains the absolute backstop that aborts
+the entire transaction.
+
+Both ceilings are configurable via `setMaxSubscriberRepeats()` and
+`setMaxDrainIterations()`.
+
+### Errors
+
+Every **user/application exception** the reactive, render and lifecycle runtime
+catches and contains — from an effect, a binding, a renderer, a cleanup, a
+lifecycle hook, an `ErrorBoundary` reset key, or the scheduler itself — is
+routed through one pipeline, and **exactly one** of these three runs for a given
+failure:
+
+1. the nearest `ErrorBoundary`, but only if it **explicitly claims** the error;
+2. the handler installed with `setRuntimeErrorHandler()`;
+3. `console.error`.
+
+```text
+                    runtime catches error
+                            |
+                            v
+                       reportError
+                            |
+             +--------------+--------------+
+             |                             |
+     node associated?                     no
+             |                             |
+            yes                            |
+             v                             |
+      offer to boundary                    |
+             |                             |
+    explicitly claimed?                    |
+        /          \                       |
+      yes           no --------------------+
+       |                                   |
+       v                                   v
+     STOP                     configured runtime handler?
+                                    /            \
+                                  yes            no
+                                   |              |
+                                   v              v
+                                handler      console.error
+```
+
+**A dispatched event is not a handled error.** The boundary event is
+`cancelable`; a boundary that takes responsibility calls `preventDefault()`, and
+`dispatchEvent()` returning `false` is the acknowledgement the pipeline reads.
+Anything less — a node that simply exists, an event that bubbles past listeners
+that ignore it — leaves the error unclaimed and it continues to the handler or
+the console. A boundary already showing a fallback deliberately *declines*, so
+the error keeps bubbling to an outer boundary that can still render.
+
+The default reporting is **not** gated on development mode, and neither is any
+safety ceiling. Containment keeps a broken subscriber from freezing unrelated
+bindings; it must not make an application exception indistinguishable from
+success in production. `__SIBU_DEV_WARN__` silences optional diagnostics only —
+never a contained failure.
+
+Reporting runs outside any tracking context, so a boundary listener or handler
+that reads signals cannot accidentally subscribe the failing subscriber to them.
+
+An error thrown on an effect's **initial** run additionally propagates to the
+caller of `effect()`, because there is a caller to receive it — failing fast at
+setup. A rerun has no such caller, so it is reported and contained. Supplying
+`effect(fn, { onError })` routes both phases to `onError` instead.
+
+Phases are accurate rather than approximate: `effect` for a user effect,
+`binding` for a reactive DOM binding, `render` for a renderer, `cleanup` for
+teardown, `scheduler` for a safety-ceiling activation. A cleanup often runs after
+its node is already detached, so cleanup errors normally resolve to the handler
+or console rather than to a boundary — no stale DOM parent is invented to reach
+one.
+
+The handler is process-global, not request-scoped: under SSR it is shared by
+every concurrent request, so install it once at startup. It is also shared
+across duplicate SibuJS copies through the same `globalThis` registry the
+reactive engine uses, so a handler installed through either copy sees errors
+contained by the shared engine.
+
+The `sibu:error-propagate` event is an internal implementation detail of
+boundary routing, not a supported extension point — use `ErrorBoundary` or
+`setRuntimeErrorHandler()`.
+
+**Deliberate exceptions**, so the rule above is precise rather than absolute:
+
+- `asyncDerived()` exposes a rejection through its own `error()` accessor. That
+  is its documented contract, so it is *not* also sent to the runtime handler —
+  one failure, one application-facing channel. Stale and post-disposal
+  rejections stay ignored.
+- Peripheral subsystems (router preload, query background refetch, ISR,
+  offline storage, wake lock, devtools, `strict()`) log recoverable
+  *operational* conditions with `console.warn`. These are not contained
+  application exceptions from the render/reactive path and are already visible
+  in production.
+- A binding whose getter throws while its element is still being constructed
+  has no parent yet, and boundary lookup walks `parentNode` — so it resolves to
+  the handler or console rather than to an enclosing boundary. A component that
+  throws directly out of `children()` is still caught by the boundary normally.
+
+### Boundary ownership
+
+`ErrorBoundary` state is per-instance and never global. A `fallback` function is
+*configuration* and is meant to be shared across an application; the `Error`
+object, the `retry` callback and the rendered fallback are *failure state* and
+belong to exactly one boundary. Two boundaries sharing a fallback function
+cannot observe each other, even when their errors carry identical messages —
+two errors with the same message are not the same failure.
+
+There is no fallback memoization: the fallback is re-invoked whenever the
+boundary re-renders its error state, and returns a fresh element each time.
 
 ## Invariants
 
@@ -71,6 +237,11 @@ re-invalidating itself trips a repeat guard rather than recursing without bound.
 - **A batch restores scheduler state on both normal and exceptional exit.**
 - **One logical invalidation cycle must not cause uncontrolled recursive
   execution.** Cycle guards bound re-entrant updates.
+- **A derivation causes downstream observable work only when its value changes
+  under its own equality policy.** Invalidation is not notification.
+- **One pathological subscriber may not discard unrelated queued work.** The
+  repeat guard quarantines the offender, not the drain.
+- **A contained exception is always reported.** Containment is not silence.
 
 Each of these has direct coverage in `tests/hardening-reactivity.test.ts`.
 

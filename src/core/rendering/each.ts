@@ -1,5 +1,8 @@
-import { track, untracked } from "../../reactivity/track";
+import { batch } from "../../reactivity/batch";
+import { track } from "../../reactivity/track";
 import { devAssert, devWarn, isDev } from "../dev";
+import { reportError } from "../errors";
+import { signal } from "../signals/signal";
 import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
 
@@ -72,6 +75,21 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
 }
 
 /**
+ * One reconciled keyed row.
+ *
+ * The renderer runs once, when the key first appears. Reconciliation keeps the
+ * row's DOM range and writes its cells instead, so descendants that read
+ * `item()` / `index()` update through the normal reactive path.
+ */
+interface Row<T> {
+  node: Node;
+  item: () => T;
+  setItem: (next: T) => void;
+  index: () => number;
+  setIndex: (next: number) => void;
+}
+
+/**
  * Renders a list of nodes efficiently with key-based diffing and
  * LIS-based move minimization.
  *
@@ -86,9 +104,19 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
  *    skipping DOM operations for nodes that are part of the LIS.
  *
  * The render callback receives reactive getters `() => T` and `() => number`
- * instead of plain values. This ensures the callback always reads fresh data
- * when a keyed item's data changes but its key stays the same, since the DOM
- * is reused without re-calling render.
+ * instead of plain values. Each keyed row owns its own item and index cells,
+ * written by reconciliation when the row is reused. `render` therefore runs
+ * exactly ONCE per key — identity is preserved across updates — while anything
+ * inside the row that reads `item()` or `index()` re-runs when reconciliation
+ * assigns that row a new item or position.
+ *
+ * Identity is not value freshness: a row keeps its DOM node when its key is
+ * unchanged, and still updates its contents when the item behind that key is
+ * replaced.
+ *
+ * Reading `item()` subscribes to the ROW's cell, not to the whole-array signal,
+ * so a row only re-renders when its own item/index actually changes — mutating
+ * an unrelated row does not disturb it.
  *
  * @param getArray A reactive getter returning an array.
  * @param render A function that receives reactive item and index getters and returns a NodeChild.
@@ -117,9 +145,19 @@ export function each<T>(
   const oldKeysBufB: (string | number)[] = [];
   let oldKeys = oldKeysBufA;
   let oldLen = 0;
-  // Double-buffer maps: swap instead of allocate
-  let nodeMap = new Map<string | number, Node>();
-  let workMap = new Map<string | number, Node>();
+  // Double-buffer maps: swap instead of allocate.
+  //
+  // A row is the unit of reuse: its DOM node plus the reactive cells that make
+  // `item()` / `index()` fresh without re-running `render`.
+  let nodeMap = new Map<string | number, Row<T>>();
+  let workMap = new Map<string | number, Row<T>>();
+  // Rows reused this pass, with the item/index they must now report. Applied in
+  // ONE batch after reconciliation so row content updates observe the final DOM
+  // order and cost a single drain rather than one per row.
+  const pendingRows: Row<T>[] = [];
+  const pendingItems: T[] = [];
+  const pendingIndices: number[] = [];
+  let pendingCount = 0;
   // Reusable arrays — grow as needed, never shrink
   let newNodes: Node[] = [];
   let newKeysBuf: (string | number)[] = [];
@@ -186,68 +224,63 @@ export function each<T>(
       keyIndexMap.set(newKeys[i], i);
     }
 
+    pendingCount = 0;
     for (let i = 0; i < newLen; i++) {
       const key = newKeys[i];
       const existing = nodeMap.get(key);
-      let node: Node;
+      let row: Row<T>;
       if (existing !== undefined) {
-        node = existing;
+        // Same key → keep the DOM range and the renderer's output; refresh the
+        // row's reactive cells instead. Queued rather than written now so every
+        // row updates in one batch once the DOM is in its final order.
+        row = existing;
+        pendingRows[pendingCount] = row;
+        pendingItems[pendingCount] = arr[i];
+        pendingIndices[pendingCount] = i;
+        pendingCount++;
       } else {
-        // Create stable getters that close over the key and always read the
-        // CURRENT item/index from the latest array via keyIndexMap. They return
-        // fresh data each time they are evaluated, but — by design — reading
-        // them does NOT itself subscribe to the array signal (see untracked
-        // below), so a row's content does not auto-re-render when the array is
-        // replaced/reordered. For reactive per-row content, drive it from a
-        // per-item signal/store rather than relying on item() to trigger
-        // updates (the fine-grained list model).
-        const itemKey = key;
-        // Read getArray() inside untracked() so consumers reading item()
-        // inside derived/effect do NOT subscribe to the whole-array signal —
-        // re-runs would otherwise fire on any unrelated row mutation.
-        const itemGetter = () => untracked(() => getArray()[keyIndexMap.get(itemKey)!]);
-        const indexGetter = () => keyIndexMap.get(itemKey)!;
+        // New key → row-local cells seeded with the current item/index, then
+        // ONE render pass. Reading these subscribes to the row, not to the
+        // whole-array signal, so unrelated row mutations never disturb it.
+        const [itemGetter, setItem] = signal<T>(arr[i]);
+        const [indexGetter, setIndex] = signal<number>(i);
+        let node: Node;
         try {
           node = resolveNodeChild(render(itemGetter, indexGetter));
         } catch (err) {
-          if (_isDev) {
-            devWarn(
-              `each: render threw for item at index ${i} (key="${newKeys[i]}"): ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
+          // The row is replaced by an inert placeholder so reconciliation can
+          // continue; the failure itself goes through the CENTRAL pipeline.
+          //
+          // It previously dispatched the boundary event directly, which meant a
+          // render failure in production with no ErrorBoundary mounted was
+          // silent — exactly the second, parallel error system ../errors.ts
+          // exists to remove.
+          const key = newKeys[i];
           node = document.createComment(`each:error:${i}`);
-          // Comment nodes don't bubble events to ancestor Elements. Defer
-          // and dispatch on the anchor's Element parent so an enclosing
-          // ErrorBoundary can catch it. Skip if anchor is still detached.
-          const errorObj = err instanceof Error ? err : new Error(String(err));
+          // Deferred by one microtask because the placeholder is not linked to
+          // its parent yet, and boundary lookup walks the parentNode chain.
+          // `reportError` retargets a Comment to its nearest Element ancestor,
+          // so the anchor's parent no longer has to be resolved here.
           queueMicrotask(() => {
-            try {
-              const target = anchor.parentNode as Element | null;
-              if (target?.dispatchEvent) {
-                target.dispatchEvent(
-                  new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error: errorObj } }),
-                );
-              } else if (_isDev) {
-                devWarn(`each: error not surfaced — anchor detached: ${errorObj.message}`);
-              }
-              // Defensive: dispatchEvent does not throw on a connected target.
-              /* v8 ignore next 3 */
-            } catch {
-              /* ignore */
-            }
+            reportError(err, {
+              phase: "render",
+              name: `each row (key="${String(key)}")`,
+              node: anchor.parentNode ? anchor : undefined,
+            });
           });
         }
+        row = { node, item: itemGetter, setItem, index: indexGetter, setIndex };
       }
-      workMap.set(key, node);
-      newNodes[i] = node;
+      workMap.set(key, row);
+      newNodes[i] = row.node;
     }
 
-    // --- Phase 2: Remove old nodes not present in new keys ---
-    for (const [key, node] of nodeMap) {
+    // --- Phase 2: Remove old rows not present in new keys ---
+    for (const [key, row] of nodeMap) {
       if (!workMap.has(key)) {
-        dispose(node);
-        if (node.parentNode) {
-          parent.removeChild(node);
+        dispose(row.node);
+        if (row.node.parentNode) {
+          parent.removeChild(row.node);
         }
       }
     }
@@ -258,6 +291,10 @@ export function each<T>(
       const tmp = nodeMap;
       nodeMap = workMap;
       workMap = tmp;
+      initialized = true;
+      // No rows remain, so there is nothing queued — but keep the buffer clean
+      // rather than leaving a stale count for the next pass.
+      pendingCount = 0;
       return;
     }
 
@@ -325,7 +362,35 @@ export function each<T>(
     nodeMap = workMap;
     workMap = tmp;
     initialized = true;
+
+    flushRowCells();
   };
+
+  /**
+   * Publish the item/index each reused row must now report.
+   *
+   * Deferred to the end of reconciliation so row content re-renders against the
+   * final DOM order, and batched so N reused rows cost ONE drain instead of N.
+   * Cells use signal equality, so a row whose item and position are both
+   * unchanged writes nothing and re-runs nothing — the common case for a list
+   * update that only touched a few rows.
+   */
+  function flushRowCells(): void {
+    if (pendingCount === 0) return;
+    const count = pendingCount;
+    pendingCount = 0;
+    batch(() => {
+      for (let i = 0; i < count; i++) {
+        const row = pendingRows[i];
+        row.setItem(pendingItems[i]);
+        row.setIndex(pendingIndices[i]);
+        // Drop the strong reference so a removed item is not retained by the
+        // scratch buffer until the next reconciliation overwrites the slot.
+        pendingRows[i] = undefined as unknown as Row<T>;
+        pendingItems[i] = undefined as unknown as T;
+      }
+    });
+  }
 
   // Track synchronously — dependencies are registered even if anchor
   // has no parent yet (getArray() runs before the parent check).
@@ -348,9 +413,9 @@ export function each<T>(
     rangeDisposed = true;
     untrack();
 
-    for (const node of nodeMap.values()) {
-      dispose(node);
-      node.parentNode?.removeChild(node);
+    for (const row of nodeMap.values()) {
+      dispose(row.node);
+      row.node.parentNode?.removeChild(row.node);
     }
 
     if (end.parentNode) end.parentNode.removeChild(end);
@@ -361,6 +426,11 @@ export function each<T>(
     keyIndexMap.clear();
     oldKeyIndex.clear();
     oldLen = 0;
+    // Release queued rows so a teardown mid-reconciliation cannot retain them.
+    pendingRows.length = 0;
+    pendingItems.length = 0;
+    pendingIndices.length = 0;
+    pendingCount = 0;
   };
   registerDisposer(anchor, disposeRange);
 

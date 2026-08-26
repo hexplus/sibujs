@@ -88,14 +88,18 @@ describe("mount", () => {
 });
 
 describe("bindTextNode error path", () => {
-  it("swallows a throwing getter and keeps prior text", () => {
+  it("contains a throwing getter, keeps prior text, and reports it", () => {
     const node = document.createTextNode("start");
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // The getter is user code: containment keeps the last good text, but the
+    // failure now goes through the central pipeline (console.error) instead of
+    // a dev-only warning that vanished in production builds.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     bindTextNode(node, () => {
       throw new Error("boom");
     });
     expect(node.textContent).toBe("start"); // unchanged
-    expect(warn).toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+    expect(err.mock.calls.map((c) => String(c[0])).join("\n")).toContain("boom");
   });
 });
 
@@ -182,7 +186,7 @@ describe("dispose re-entrant drain", () => {
 
   it("swallows a throw from a disposer added during disposal (drain catch)", () => {
     const node = document.createElement("div");
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     let drained = false;
     registerDisposer(node, () => {
       registerDisposer(node, () => {
@@ -192,7 +196,7 @@ describe("dispose re-entrant drain", () => {
     });
     expect(() => dispose(node)).not.toThrow();
     expect(drained).toBe(true);
-    expect(warn).toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
   });
 });
 
@@ -252,15 +256,16 @@ describe("array() non-reactive actions", () => {
 });
 
 describe("effect dispose error handling", () => {
-  it("swallows an onCleanup that throws during dispose", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("contains and reports an onCleanup that throws during dispose", () => {
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const stop = effect((onCleanup) => {
       onCleanup(() => {
         throw new Error("cleanup-boom");
       });
     });
     expect(() => stop()).not.toThrow();
-    expect(warn).toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
+    err.mockRestore();
   });
 });
 
@@ -268,7 +273,10 @@ describe("each render-throws path", () => {
   it("renders an error comment and does not crash when render throws", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    // A render failure is a contained application error, so it goes through the
+    // central pipeline and reaches console.error even in production — it is no
+    // longer a dev-only console.warn.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const [items, setItems] = signal([1, 2]);
     const anchor = each(
       items,
@@ -284,7 +292,7 @@ describe("each render-throws path", () => {
     setItems([1, 2]); // force render
     await Promise.resolve();
     expect(root.querySelector("span")?.textContent).toBe("1");
-    expect(warn).toHaveBeenCalled();
+    expect(err).toHaveBeenCalled();
   });
 });
 
@@ -321,14 +329,16 @@ describe("lazy load-failure propagation", () => {
     root.addEventListener("sibu:error-propagate", (e) => {
       propagated = (e as CustomEvent).detail.error;
     });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const Lazy = lazy(() => Promise.reject(new Error("net-down")));
     const el = Lazy();
     root.appendChild(el);
     await new Promise((r) => setTimeout(r, 0));
     expect(el.querySelector(".sibu-lazy-error")).toBeTruthy();
     expect(propagated).toBeInstanceOf(Error);
-    expect(warn).toHaveBeenCalled();
+    // The listener observes but does not claim the error, so it still falls
+    // through to the console fallback exactly as an unclaimed error should.
+    expect(err).toHaveBeenCalled();
   });
 });
 

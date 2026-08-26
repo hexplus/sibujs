@@ -39,21 +39,49 @@ export function sanitize(value: unknown): string {
 const SAFE_URL_PROTOCOLS = ["http:", "https:", "mailto:", "tel:", "ftp:"];
 
 /**
+ * Leading/trailing C0-C1 control characters and ASCII whitespace. Browsers
+ * discard these when parsing a URL, so removing them changes nothing
+ * semantically — unlike the INTERIOR characters `stripControlChars` removes.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — these chars are ignored by browsers during parsing
+const OUTER_TRIM = /^[\x00-\x20\x7f-\x9f]+|[\x00-\x20\x7f-\x9f]+$/g;
+
+/**
  * Sanitizes a URL using a protocol allowlist. Accepts http:, https:,
  * mailto:, tel:, ftp:, and relative URLs. All other protocols are rejected.
+ *
+ * Security normalization and output normalization are deliberately separate.
+ * The scheme check runs against an aggressively stripped PROBE copy so
+ * obfuscated schemes (`java\tscript:`, a leading `\x01`) cannot slip past it,
+ * but that probe is never returned: it is a detection artefact, not the user's
+ * URL. Returning it corrupted legitimate values — `mailto:a@b.com?subject=Hello
+ * World` came back as `...HelloWorld`, silently changing what the link does.
+ *
+ * The returned value is the input with only leading/trailing control
+ * characters and whitespace removed, which browsers ignore anyway. Interior
+ * characters are preserved verbatim: spaces get percent-encoded by the URL
+ * parser, and interior tabs/newlines are dropped by it — either way the
+ * meaning the author wrote is what survives.
+ *
+ * Security takes precedence over preservation: anything the probe identifies as
+ * a disallowed scheme is rejected outright, even if the raw input would have
+ * parsed differently.
  *
  * @param url URL string to sanitize
  * @returns The URL if safe, or empty string if dangerous
  */
 export function sanitizeUrl(url: string): string {
-  // Strip control chars/whitespace browsers ignore (e.g. "java\tscript:") so
-  // they can't bypass the protocol check, then trim.
-  const trimmed = stripControlChars(url).trim();
-  if (!trimmed) return "";
+  // PROBE: the most aggressive reading a browser could take — every character
+  // it would ignore removed. Used ONLY to decide safe/unsafe.
+  const probe = stripControlChars(url).trim();
+  if (!probe) return "";
+
+  // OUTPUT: the caller's value, minus only the outer padding.
+  const output = url.replace(OUTER_TRIM, "");
 
   // Detect an explicit scheme: the first ":" before any "/", "?", or "#".
   // If there's no scheme, treat as relative URL (safe).
-  const lower = trimmed.toLowerCase();
+  const lower = probe.toLowerCase();
   let schemeEnd = -1;
   for (let i = 0; i < lower.length; i++) {
     const ch = lower.charCodeAt(i);
@@ -65,16 +93,29 @@ export function sanitizeUrl(url: string): string {
     if (ch === 47 /* / */ || ch === 63 /* ? */ || ch === 35 /* # */) break;
   }
 
-  if (schemeEnd === -1) return trimmed; // relative URL
+  if (schemeEnd === -1) return output; // relative URL
 
   const scheme = lower.slice(0, schemeEnd + 1);
   // Only chars [a-z0-9+.-] are valid scheme characters; anything else means
   // the ":" is part of a path/fragment, not a scheme.
-  if (!/^[a-z][a-z0-9+.-]*:$/.test(scheme)) return trimmed;
+  if (!/^[a-z][a-z0-9+.-]*:$/.test(scheme)) return output;
 
   if (SAFE_URL_PROTOCOLS.indexOf(scheme) === -1) return "";
-  return trimmed;
+  return output;
 }
+
+/**
+ * The only descriptors a srcset candidate may carry: a width (`640w`) or a
+ * pixel density (`2x`, `1.5x`). Anything else means the candidate is malformed.
+ *
+ * WHY THIS IS VALIDATED: candidates are split on the first whitespace run, and
+ * whitespace is exactly what an obfuscated scheme hides behind. Given
+ * `java\tscript:alert(1) 1x`, the URL half is just `java` — which passes the
+ * allowlist as a relative URL — and the dangerous remainder rides along in the
+ * descriptor half. Requiring a well-formed descriptor drops such candidates
+ * instead of reassembling them.
+ */
+const SRCSET_DESCRIPTOR = /^\s+\d+(\.\d+)?[wx]$/;
 
 /**
  * Sanitizes a srcset attribute value by splitting on commas, running each
@@ -89,6 +130,9 @@ export function sanitizeSrcset(value: string): string {
     // Candidate = URL [descriptor]. Split on first whitespace run.
     const m = part.match(/^(\S+)(\s+.+)?$/);
     if (!m) continue;
+    // A descriptor that is not a valid width/density means this candidate was
+    // never a well-formed candidate — drop it rather than re-emitting it.
+    if (m[2] !== undefined && !SRCSET_DESCRIPTOR.test(m[2])) continue;
     const safe = sanitizeUrl(m[1]);
     if (!safe) continue;
     out.push(m[2] ? `${safe}${m[2]}` : safe);

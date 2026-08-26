@@ -3,7 +3,7 @@
 // Self-registering build for <script> tag usage without a bundler.
 //
 // Usage:
-//   <script src="https://unpkg.com/sibujs@latest/dist/sibu.global.js"></script>
+//   <script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
 //   <script>
 //     const { signal, effect, div, mount } = window.Sibu;
 //   </script>

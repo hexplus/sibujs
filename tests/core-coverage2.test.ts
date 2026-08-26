@@ -113,8 +113,12 @@ describe("bindChildNode edge branches", () => {
 });
 
 describe("each detached-anchor error path", () => {
-  it("warns (does not throw) when render throws after the anchor is detached", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("reports (does not throw) when render throws after the anchor is detached", async () => {
+    // Detached before the deferred report runs, so there is no boundary to
+    // reach. The error must still surface — through the runtime handler or the
+    // console — rather than being dropped or having a stale parent invented
+    // for it.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const root = document.createElement("div");
     document.body.appendChild(root);
     const [items, setItems] = signal([1]);
@@ -134,7 +138,8 @@ describe("each detached-anchor error path", () => {
     root.removeChild(anchor); // detach BEFORE the microtask runs
     await Promise.resolve();
     await Promise.resolve();
-    expect(warn).toHaveBeenCalled(); // surfaced via devWarn, no crash
+    expect(err).toHaveBeenCalled(); // surfaced through the pipeline, no crash
+    expect(err.mock.calls.map((c) => String(c[0])).join("\n")).toContain("boom");
   });
 });
 

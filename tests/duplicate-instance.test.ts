@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { build } from "esbuild";
-import { beforeAll, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, describe, expect, test } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Duplicate-module-instance resilience.
@@ -20,17 +20,23 @@ import { beforeAll, describe, expect, test } from "vitest";
 // it, these tests fail.
 // ---------------------------------------------------------------------------
 
+type ErrorHandler = (error: unknown, context: { phase: string; name?: string }) => void;
+
 interface Instance {
   signal: <T>(v: T) => [() => T, (n: T | ((p: T) => T)) => void];
-  reactiveBinding: (commit: () => void) => () => void;
+  reactiveBinding: (commit: () => void, ownerNode?: unknown) => () => void;
   batch: <T>(fn: () => T) => T;
   createId: (prefix?: string) => string;
   enableSSR: () => void;
   disableSSR: () => void;
   isSSR: () => boolean;
+  setRuntimeErrorHandler: (handler: ErrorHandler | null) => ErrorHandler | null;
+  getRuntimeErrorHandler: () => ErrorHandler | null;
+  reportError: (error: unknown, context: { phase: string; name?: string }) => void;
 }
 
 const REGISTRY_KEY = Symbol.for("sibujs.reactive.v1");
+const ERROR_STATE_KEY = Symbol.for("sibujs.runtime-errors.v1");
 
 let bundleCode = "";
 
@@ -51,6 +57,7 @@ beforeAll(async () => {
         export { batch } from "./src/reactivity/batch";
         export { createId } from "./src/core/rendering/createId";
         export { enableSSR, disableSSR, isSSR } from "./src/core/ssr-context";
+        export { setRuntimeErrorHandler, getRuntimeErrorHandler, reportError } from "./src/core/errors";
       `,
       resolveDir: process.cwd(),
       loader: "ts",
@@ -139,6 +146,106 @@ describe("duplicate reactive runtime instances", () => {
 
     const dupWarnings = warnings.filter((w) => w.includes("Multiple instances of the reactive runtime"));
     expect(dupWarnings).toHaveLength(1);
+  });
+});
+
+describe("duplicate instance — runtime error handler", () => {
+  // The handler lives in shared `globalThis` state, so it must be cleared or it
+  // leaks into every later test in this file.
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[ERROR_STATE_KEY];
+  });
+
+  test("a handler installed through instance B receives an error contained by the shared engine", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    const received: Array<{ error: unknown; phase: string }> = [];
+    // Configured through B...
+    b.setRuntimeErrorHandler((error, context) => {
+      received.push({ error, phase: context.phase });
+    });
+
+    // ...while the failing subscriber is created and driven through A. Only one
+    // copy owns the shared reactive engine, so with module-local handler state
+    // the drain would look up a null handler and the application's telemetry
+    // would never fire.
+    const [s, setS] = a.signal("ok");
+    let runs = 0;
+    const dispose = a.reactiveBinding(() => {
+      const value = s();
+      runs++;
+      if (value === "bad") throw new Error("cross-instance boom");
+    });
+    expect(runs).toBe(1);
+
+    setS("bad");
+
+    expect(received).toHaveLength(1);
+    expect((received[0].error as Error).message).toBe("cross-instance boom");
+    expect(received[0].phase).toBe("binding");
+    dispose();
+  });
+
+  test("works in the reverse direction — handler on A, failure driven through B", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    const received: unknown[] = [];
+    a.setRuntimeErrorHandler((error) => received.push(error));
+
+    const [s, setS] = b.signal("ok");
+    const dispose = b.reactiveBinding(() => {
+      if (s() === "bad") throw new Error("reverse boom");
+    });
+    setS("bad");
+
+    expect(received).toHaveLength(1);
+    expect((received[0] as Error).message).toBe("reverse boom");
+    dispose();
+  });
+
+  test("both instances observe the same handler state", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    const handler: ErrorHandler = () => {};
+    a.setRuntimeErrorHandler(handler);
+    expect(b.getRuntimeErrorHandler()).toBe(handler);
+    expect(a.getRuntimeErrorHandler()).toBe(handler);
+
+    // Clearing through the OTHER copy must clear it for both.
+    b.setRuntimeErrorHandler(null);
+    expect(a.getRuntimeErrorHandler()).toBeNull();
+    expect(b.getRuntimeErrorHandler()).toBeNull();
+  });
+
+  test("setRuntimeErrorHandler returns the previous handler across instances", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    const first: ErrorHandler = () => {};
+    const second: ErrorHandler = () => {};
+
+    expect(a.setRuntimeErrorHandler(first)).toBeNull();
+    // B replaces A's handler and is handed A's back.
+    expect(b.setRuntimeErrorHandler(second)).toBe(first);
+    expect(a.getRuntimeErrorHandler()).toBe(second);
+  });
+
+  test("only the most recently installed handler receives errors", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    const firstCalls: unknown[] = [];
+    const secondCalls: unknown[] = [];
+    a.setRuntimeErrorHandler((e) => firstCalls.push(e));
+    b.setRuntimeErrorHandler((e) => secondCalls.push(e));
+
+    a.reportError(new Error("only-latest"), { phase: "effect" });
+
+    expect(firstCalls).toHaveLength(0);
+    expect(secondCalls).toHaveLength(1);
   });
 });
 

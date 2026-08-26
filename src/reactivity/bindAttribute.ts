@@ -1,4 +1,5 @@
 import { devWarn, isDev } from "../core/dev";
+import { reportError } from "../core/errors";
 // `isEventHandlerAttr` is the single shared `on*` guard — event-handler
 // attributes evaluate their value as JS via setAttribute, so the framework
 // refuses to bind them (use `on: { click: fn }`, which uses addEventListener).
@@ -40,8 +41,9 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
     try {
       value = getter();
     } catch (err) {
-      if (_isDev)
-        devWarn(`bindAttribute: getter for "${attr}" threw: ${err instanceof Error ? err.message : String(err)}`);
+      // User getter threw: keep the attribute at its last value, but report
+      // centrally so the failure is observable in production too.
+      reportError(err, { phase: "binding", name: `bindAttribute("${attr}")`, node: el });
       return;
     }
 
@@ -73,7 +75,7 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
 
   // Initial run + reactive updates. Re-tracks deps every run so a signal first
   // read on a later run is subscribed (per-run dependency tracking).
-  return reactiveBinding(commit);
+  return reactiveBinding(commit, el);
 }
 
 /**
@@ -98,7 +100,7 @@ export function bindDynamic(
     try {
       name = typeof nameGetter === "function" ? nameGetter() : nameGetter;
     } catch (err) {
-      if (_isDev) devWarn(`bindDynamic: name getter threw: ${err instanceof Error ? err.message : String(err)}`);
+      reportError(err, { phase: "binding", name: "bindDynamic (name getter)", node: el });
       return;
     }
 
@@ -107,7 +109,7 @@ export function bindDynamic(
     try {
       value = typeof valueGetter === "function" ? valueGetter() : valueGetter;
     } catch (err) {
-      if (_isDev) devWarn(`bindDynamic: value getter threw: ${err instanceof Error ? err.message : String(err)}`);
+      reportError(err, { phase: "binding", name: "bindDynamic (value getter)", node: el });
       return;
     }
 
@@ -134,7 +136,7 @@ export function bindDynamic(
 
   // Initial run + reactive updates. Re-tracks deps every run so a signal first
   // read on a later run is subscribed (per-run dependency tracking).
-  const teardown = reactiveBinding(commit);
+  const teardown = reactiveBinding(commit, el);
 
   // Return a combined teardown: stop tracking and clean up the current attribute
   return () => {

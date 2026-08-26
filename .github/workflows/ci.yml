@@ -4,6 +4,7 @@
 # that only needs to run once per merge.
 #
 #   fast        source typecheck -> test typecheck -> lint -> unit suite
+#   browser     Playwright specs in a real engine
 #   node-matrix every Node line `package.json.engines` claims
 #
 # The matrix exists because `engines` is a promise. Before it, `engines` said
@@ -54,6 +55,53 @@ jobs:
 
             - run: npm run lint
             - run: npx vitest run --reporter=dot
+
+    # The island/hydration/router specs exercise exactly what jsdom cannot:
+    # IntersectionObserver, requestIdleCallback, matchMedia, real event timing
+    # and genuine ES-module `import()`. They existed but ran only when someone
+    # remembered to type `npm run test:browser` locally, so a real-engine
+    # regression could reach a release with CI fully green.
+    #
+    # Pull requests run Chromium — the cheapest engine that still exercises
+    # every one of those paths. Pushes to main and manual runs additionally run
+    # Firefox and WebKit, where engine-specific behaviour actually differs.
+    # Both are required checks, so a browser failure blocks a stable release.
+    browser:
+        name: browser (${{ matrix.browser }})
+        runs-on: ubuntu-latest
+        strategy:
+            fail-fast: false
+            matrix:
+                # Chromium always; the other engines only off the PR path.
+                browser: ${{ github.event_name == 'pull_request' && fromJSON('["chromium"]') || fromJSON('["chromium","firefox","webkit"]') }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: npm
+
+            - run: npm ci --no-audit --no-fund
+
+            # Install ONLY the engine this job runs, with its system
+            # dependencies. Installing all three on every job would roughly
+            # triple the download for no coverage gain.
+            - run: npx playwright install --with-deps ${{ matrix.browser }}
+
+            # `test:browser` builds first; the specs load examples/*.html which
+            # reference the built bundle.
+            - run: npm run build
+            - run: npx playwright test --project=${{ matrix.browser }}
+
+            - name: Upload Playwright report on failure
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: playwright-report-${{ matrix.browser }}
+                  path: |
+                      playwright-report/
+                      test-results/
+                  retention-days: 7
 
     node-matrix:
         name: node ${{ matrix.node }}

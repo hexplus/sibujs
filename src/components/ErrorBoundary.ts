@@ -1,3 +1,4 @@
+import { normalizeError, reportError } from "../core/errors";
 import { dispose, registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span, style } from "../core/rendering/html";
 import { takePendingError } from "../core/rendering/lazy";
@@ -8,8 +9,12 @@ import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryOptions {
   /**
-   * Fallback renderer given an Error and retry callback.
-   * Memoized internally — only re-created when the error changes.
+   * Fallback renderer, called with this boundary's Error and its own `retry`.
+   *
+   * Safe to share one fallback function across many boundaries: the Error and
+   * the retry callback always belong to the boundary that invoked it, even when
+   * two boundaries fail with identical messages. It is re-invoked whenever the
+   * boundary re-renders its error state; do not rely on it running only once.
    */
   fallback?: (error: Error, retry: () => void) => Element;
   /**
@@ -17,11 +22,27 @@ export interface ErrorBoundaryOptions {
    */
   onError?: (error: Error) => void;
   /**
-   * A list of reactive getters. Whenever any of these values change
-   * after an error has been caught, the boundary automatically resets
-   * (clears the error and re-renders). Useful for recovering from a
-   * failed render after the user navigates, changes filters, or
-   * otherwise picks a new input that might not fail this time.
+   * A list of reactive getters. Whenever any of these VALUES changes AFTER an
+   * error has been caught, the boundary automatically resets (clears the error
+   * and re-renders). Useful for recovering from a failed render after the user
+   * navigates, changes filters, or otherwise picks a new input that might not
+   * fail this time.
+   *
+   * Getters are selectors, compared by `Object.is` against the values captured
+   * when the error was caught. Replacing the source object without changing the
+   * selected result does not reset the boundary:
+   *
+   * ```ts
+   * resetKeys: [() => route().pathname]   // only the pathname matters
+   * ```
+   *
+   * "After" is literal: a key change that is itself the reason the children
+   * threw belongs to that failure and will not undo it. Only a change observed
+   * once the boundary is already showing its fallback triggers recovery.
+   *
+   * The getters are evaluated only while the boundary is failed, so a getter
+   * that throws is reported through the runtime error pipeline at that point
+   * rather than at construction.
    *
    * @example
    * ```ts
@@ -195,6 +216,15 @@ const errorBoundaryStyles = `
   }
 `;
 
+/**
+ * Stable marker for "this reset-key getter threw on this run".
+ *
+ * Module-level and reused so repeated failures of the same getter compare
+ * EQUAL. A per-run object would look like a new value each time and would
+ * recover a failed boundary simply because one of its keys was still broken.
+ */
+const RESET_KEY_THREW = Symbol("sibujs.ErrorBoundary.resetKeyThrew");
+
 // Inject styles only once
 let stylesInjected = false;
 function injectStyles() {
@@ -205,42 +235,32 @@ function injectStyles() {
   }
 }
 
-// Memoization cache for fallback renderers keyed by error message.
-// We cache a *factory* (bound to the error) rather than a live Element to
-// avoid re-inserting the same DOM node into multiple parents and to bound
-// memory growth. Each fallback function gets its own LRU Map capped at
-// FALLBACK_CACHE_MAX entries — oldest key evicted when full.
-const FALLBACK_CACHE_MAX = 50;
-const fallbackCache = new WeakMap<(...args: never[]) => unknown, Map<string, () => Element>>();
-
-function getMemoizedFallback(
-  fallbackFn: (error: Error, retry: () => void) => Element,
-  error: Error,
-  retry: () => void,
-): Element {
-  let cache = fallbackCache.get(fallbackFn);
-  if (!cache) {
-    cache = new Map();
-    fallbackCache.set(fallbackFn, cache);
-  }
-  const key = error.message;
-  let factory = cache.get(key);
-  if (factory) {
-    // LRU touch: move to most-recently-used end
-    cache.delete(key);
-    cache.set(key, factory);
-  } else {
-    factory = () => fallbackFn(error, retry);
-    cache.set(key, factory);
-    // Evict oldest if over limit
-    if (cache.size > FALLBACK_CACHE_MAX) {
-      const oldestKey = cache.keys().next().value;
-      if (oldestKey !== undefined) cache.delete(oldestKey);
-    }
-  }
-  // Always return a *fresh* Element so the same node is never inserted twice
-  return factory();
-}
+// ---------------------------------------------------------------------------
+// There is deliberately NO fallback cache.
+//
+// A previous revision memoized fallbacks in a module-global
+// `WeakMap<fallbackFn, Map<error.message, factory>>`. That modelled ownership
+// wrongly in two ways at once:
+//
+//   1. The cached factory closed over a SPECIFIC Error and a SPECIFIC
+//      boundary's `retry`, but the cache was shared by every boundary using
+//      that fallback function. Sharing one `AppErrorFallback` across an app is
+//      the idiomatic use, so two sibling boundaries whose errors happened to
+//      carry the same message aliased each other: B's fallback was handed A's
+//      Error and A's retry callback. `retry()` compounded it by deleting the
+//      shared entry by message, wiping the OTHER boundary's state.
+//   2. It never actually memoized any rendering. The cached value was a
+//      closure that was invoked on every call, so the fallback element was
+//      rebuilt each time regardless — the cache bought a skipped closure
+//      allocation on an ERROR path, in exchange for a correctness bug.
+//
+// Elaborating the key (message + stack + name + …) would not have fixed it:
+// boundary-specific state simply does not belong in global storage.
+// Configuration may be shared; failure state may not.
+//
+// The boundary's own reactive `error` signal already governs when the fallback
+// re-renders, so no additional memoization layer is needed.
+// ---------------------------------------------------------------------------
 
 // Stack parsing is now handled by ErrorDisplay. The helper used to
 // live here but was removed along with the inline legacy renderer.
@@ -256,7 +276,8 @@ function getMemoizedFallback(
  *   `unhandledrejection` events instead.
  * - Supports nested ErrorBoundaries (inner catches first, outer catches propagation)
  * - Retry functionality to clear error and re-render children
- * - Memoized fallback to avoid re-creating fallback UI on every render
+ * - Fallback state is per-boundary: a shared fallback function never leaks one
+ *   boundary's Error or retry callback into another
  * - onError callback for logging/telemetry
  * - Improved CSS styling
  */
@@ -275,56 +296,124 @@ export function ErrorBoundary(
 
   const [error, setError] = signal<Error | null>(null);
 
+  // Closes over THIS boundary's error signal and nothing else, so a fallback
+  // can never be handed another boundary's retry.
+  //
+  // The episode watcher is disposed BEFORE the error clears: it belongs to the
+  // failed episode, and leaving it alive through recovery would let it observe
+  // healthy-state key changes that are none of its business.
   const retry = () => {
-    // Drop only the cached factory bound to the current error message, so
-    // memoized fallbacks for OTHER errors (e.g. unrelated boundary instances
-    // sharing the same fallback fn) survive.
-    if (fallback) {
-      const cur = error();
-      const inner = fallbackCache.get(fallback);
-      if (cur && inner) inner.delete(cur.message);
-    }
+    stopResetKeysWatcher();
     setError(null);
   };
 
-  // Wire `resetKeys` — when any listed getter changes after an error has
-  // been caught, clear the error and re-render. Skip the first run so we
-  // do not retry before an error has even occurred.
-  // Capture the effect teardown so it can be disposed with the boundary.
+  // ---------------------------------------------------------------------
+  // `resetKeys` — "whenever any of these VALUES change AFTER an error has
+  // been caught". Both capitalised words are load-bearing.
+  //
+  // VALUES: a getter is a selector. `() => route().pathname` re-runs whenever
+  // the whole route object is replaced, but the boundary must only react when
+  // the selected result actually differs — otherwise every unrelated field
+  // write recovers a boundary that was never meant to recover. So the getter
+  // results are kept and compared with `Object.is`, rather than being invoked
+  // purely to register a dependency and discarded.
+  //
+  // AFTER: the watcher exists ONLY while the boundary is failed. It is created
+  // by `handleError` once the error state is set, its first run establishes the
+  // baseline for that episode, and `retry()` disposes it before clearing the
+  // error. That makes the temporal rule structural rather than something the
+  // watcher has to reason about: a key write that is itself the reason the
+  // children threw is captured as part of the baseline and cannot undo the
+  // failure it just caused. Sibling subscriber order is LIFO, so a child
+  // binding on the same source can run before a permanently-installed watcher
+  // would have — correctness must not depend on that ordering.
+  //
+  // Because the watcher only lives during a failed episode, it needs no read of
+  // `error()` at all, which structurally rules out ever subscribing itself to
+  // the boundary's own error signal.
+  // ---------------------------------------------------------------------
   let resetKeysTeardown: (() => void) | null = null;
-  if (resetKeys && resetKeys.length > 0) {
-    let initialized = false;
+
+  const stopResetKeysWatcher = (): void => {
+    if (!resetKeysTeardown) return;
+    const teardown = resetKeysTeardown;
+    resetKeysTeardown = null;
+    teardown();
+  };
+
+  /** Evaluate every key, reporting (not swallowing) a getter that throws. */
+  const readResetKeyValues = (keys: Array<() => unknown>): unknown[] => {
+    const values: unknown[] = new Array(keys.length);
+    for (let i = 0; i < keys.length; i++) {
+      try {
+        values[i] = keys[i]();
+      } catch (err) {
+        // The getter is APPLICATION code, so its exception goes through the
+        // central pipeline rather than a bare console.warn no handler could
+        // observe. Deliberately NO node: this happens while the boundary is
+        // evaluating its own reset conditions, and offering it to this very
+        // boundary would let it catch its own internal bookkeeping error.
+        reportError(err, { phase: "effect", name: "ErrorBoundary.resetKeys" });
+        // ONE shared sentinel, not a fresh object per run: a per-run value
+        // would compare unequal every time and spuriously recover the boundary
+        // while the getter is simply still broken. With a stable sentinel the
+        // transitions read naturally — valid→thrown and thrown→valid are
+        // changes, thrown→thrown is not.
+        values[i] = RESET_KEY_THREW;
+      }
+    }
+    return values;
+  };
+
+  /** Begin watching reset keys for the error episode that just started. */
+  const startResetKeysWatcher = (): void => {
+    const keys = resetKeys;
+    if (!keys || keys.length === 0) return;
+    // One watcher per episode; a re-entered error state re-baselines.
+    stopResetKeysWatcher();
+
+    let baseline: unknown[] | null = null;
     resetKeysTeardown = effect(() => {
-      // Read every key so each one is tracked as a dependency
-      for (const k of resetKeys) {
-        try {
-          k();
-        } catch (err) {
-          // A key getter that throws is still a valid dependency — we
-          // just ignore the value. Do not let it crash the effect.
-          if (typeof console !== "undefined") {
-            console.warn("[SibuJS ErrorBoundary] resetKeys getter threw:", err);
+      // Read inside the effect so every key is tracked for this episode.
+      const current = readResetKeyValues(keys);
+
+      if (baseline === null) {
+        baseline = current;
+        return;
+      }
+
+      let changed = current.length !== baseline.length;
+      if (!changed) {
+        for (let i = 0; i < current.length; i++) {
+          if (!Object.is(current[i], baseline[i])) {
+            changed = true;
+            break;
           }
         }
       }
-      if (!initialized) {
-        initialized = true;
-        return;
-      }
-      if (error() !== null) retry();
+      baseline = current;
+
+      if (changed) retry();
     });
-  }
+  };
 
   const handleError = (e: unknown): Error => {
-    const errorObj = e instanceof Error ? e : new Error(String(e));
+    // Shared normalization: an existing Error passes through by reference
+    // (stack/cause/instanceof preserved) and a non-Error throw keeps its
+    // original value as `cause` rather than being flattened to a string.
+    const errorObj = normalizeError(e);
     setError(errorObj);
+    // The episode has begun: baseline the reset keys from here. Anything that
+    // contributed to THIS failure is part of the baseline, not a recovery.
+    startResetKeysWatcher();
     if (onError) {
       try {
         onError(errorObj);
       } catch (cbErr) {
-        if (typeof console !== "undefined") {
-          console.error("[SibuJS ErrorBoundary] onError callback threw:", cbErr);
-        }
+        // The user's own onError callback failed. Route it through the central
+        // pipeline instead of only logging, and WITHOUT a node: this boundary
+        // is mid-handling and must not be offered its own callback's failure.
+        reportError(cbErr, { phase: "render", name: "ErrorBoundary onError callback" });
       }
     }
     return errorObj;
@@ -340,23 +429,26 @@ export function ErrorBoundary(
   const tryRenderFallback = (err: Error): Element => {
     const fn = fallback || defaultFallback;
     try {
-      return getMemoizedFallback(fn, err, retry);
+      // `err` and `retry` both belong to THIS boundary instance.
+      return fn(err, retry);
     } catch (fallbackError) {
-      // Fallback itself failed — propagate to parent ErrorBoundary via DOM event
-      // Defer dispatch so the container is connected to the DOM tree first
-      const propagateError = fallbackError instanceof Error ? fallbackError : new Error(String(fallbackError));
+      // The fallback renderer itself failed. This second error must not vanish:
+      // route it through the central pipeline so an OUTER boundary can claim it
+      // and, failing that, the runtime handler or console still sees it.
+      //
+      // Dispatching from `container` is safe against self-capture: by now
+      // `error()` is set, so this boundary's own listener declines and lets the
+      // event bubble past itself rather than re-entering its broken fallback.
+      //
+      // Deferred by one microtask so `container` is attached to its parent
+      // first — bubbling walks parentNode chains, and a boundary mounted above
+      // us cannot be found before we are linked to it.
       queueMicrotask(() => {
-        // CustomEvent bubbling traverses parentNode chains even on detached
-        // subtrees; require parentNode (not isConnected) so nested boundaries
-        // work in tests and pre-mount setup.
-        if (container.parentNode) {
-          container.dispatchEvent(
-            new CustomEvent("sibu:error-propagate", {
-              bubbles: true,
-              detail: { error: propagateError },
-            }),
-          );
-        }
+        reportError(fallbackError, {
+          phase: "render",
+          name: "ErrorBoundary fallback",
+          node: container.parentNode ? container : undefined,
+        });
       });
       return document.createComment("error-boundary-failed") as unknown as Element;
     }
@@ -421,14 +513,24 @@ export function ErrorBoundary(
   // Store the handler so it can be removed via registerDisposer to avoid
   // leaking the listener when the boundary itself is disposed.
   const propagateListener = (e: Event) => {
-    // If this boundary is already in error state, let the event bubble to parent
+    // DECLINE, do not claim: a boundary already showing a fallback cannot show
+    // another one, so the event must stay un-cancelled and keep bubbling to an
+    // outer boundary. Calling preventDefault() before establishing that this
+    // boundary can actually handle the error would strand it here.
     if (error()) return;
-    e.stopPropagation();
+
     const customEvent = e as CustomEvent;
     const propagatedError = customEvent.detail?.error;
-    if (propagatedError) {
-      handleError(propagatedError);
-    }
+    // Nothing to handle — leave the event alone so it is reported normally.
+    if (!propagatedError) return;
+
+    // CLAIM. `preventDefault()` is the acknowledgement `reportError()` reads:
+    // it means this boundary took responsibility, so the global handler and the
+    // console fallback must not also fire. `stopPropagation()` additionally
+    // keeps outer boundaries from double-handling the same error.
+    e.preventDefault();
+    e.stopPropagation();
+    handleError(propagatedError);
   };
   container.addEventListener("sibu:error-propagate", propagateListener);
 
@@ -464,7 +566,7 @@ export function ErrorBoundary(
   // Tear down resetKeys effect + remove the propagation listener when the
   // boundary root is disposed (via when/match/each/dispose).
   registerDisposer(container, () => {
-    if (resetKeysTeardown) resetKeysTeardown();
+    stopResetKeysWatcher();
     container.removeEventListener("sibu:error-propagate", propagateListener);
   });
 

@@ -55,6 +55,16 @@ export type {
 } from "./src/core/rendering/tagPropTypes";
 // Rendering types
 export type { Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
+// Runtime error pipeline — one place to observe errors the runtime caught
+// and contained (effects, bindings, cleanups, the scheduler).
+export {
+  getRuntimeErrorHandler,
+  type RuntimeErrorContext,
+  type RuntimeErrorHandler,
+  type RuntimeErrorPhase,
+  reportError,
+  setRuntimeErrorHandler,
+} from "./src/core/errors";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/asyncDerived";
 export * from "./src/core/signals/deepSignal";

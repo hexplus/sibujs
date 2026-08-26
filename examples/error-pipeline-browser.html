@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS Error Pipeline — browser test fixture</title>
+  </head>
+  <body>
+    <!-- Error routing depends on real DOM CustomEvent semantics: a cancelable
+         event, preventDefault() from a boundary listener, and the boolean
+         dispatchEvent() returns. jsdom implements those, but this primitive is
+         load-bearing enough to pin against a real engine too. -->
+
+    <section id="unclaimed"></section>
+    <section id="claimed"></section>
+    <section id="boundary-each"></section>
+    <section id="boundary-binding"></section>
+    <section id="siblings"></section>
+    <section id="resetkeys"></section>
+    <section id="rk-selector"></section>
+
+    <script type="module">
+      import {
+        div,
+        signal,
+        setRuntimeErrorHandler,
+        reportError,
+        each,
+        ErrorBoundary,
+      } from "../dist/index.js";
+
+      const reports = [];
+      setRuntimeErrorHandler((error, context) => {
+        reports.push({ message: String(error && error.message), phase: context.phase });
+      });
+
+      const api = {
+        reports: () => reports,
+        reset: () => {
+          reports.length = 0;
+        },
+
+        // A node with a listener that observes but never claims the error: the
+        // fallback chain must still run.
+        dispatchUnclaimed() {
+          const host = document.getElementById("unclaimed");
+          let sawEvent = false;
+          const onEvent = () => {
+            sawEvent = true;
+          };
+          host.addEventListener("sibu:error-propagate", onEvent);
+          reportError(new Error("unclaimed-error"), { phase: "render", node: host });
+          host.removeEventListener("sibu:error-propagate", onEvent);
+          return sawEvent;
+        },
+
+        // A listener that calls preventDefault() claims the error, so the
+        // handler must NOT run. This is the acknowledgement contract.
+        dispatchClaimed() {
+          const host = document.getElementById("claimed");
+          let returned = null;
+          const onEvent = (e) => {
+            e.preventDefault();
+          };
+          host.addEventListener("sibu:error-propagate", onEvent);
+          const probe = new CustomEvent("sibu:error-propagate", { bubbles: true, cancelable: true, detail: {} });
+          returned = host.dispatchEvent(probe);
+          reportError(new Error("claimed-error"), { phase: "render", node: host });
+          host.removeEventListener("sibu:error-propagate", onEvent);
+          // false == preventDefault() was honoured by this engine.
+          return returned;
+        },
+
+        // Real ErrorBoundary claiming a keyed-row render failure.
+        mountEachBoundary() {
+          const host = document.getElementById("boundary-each");
+          const [items] = signal([{ id: 1 }]);
+          const tree = ErrorBoundary({ fallback: () => div({ class: "fb-each" }, "each recovered") }, () =>
+            each(
+              () => items(),
+              () => {
+                throw new Error("row-exploded");
+              },
+              { key: (i) => i.id },
+            ),
+          );
+          host.appendChild(tree);
+        },
+
+        // Real ErrorBoundary claiming a binding that throws on a later update.
+        mountBindingBoundary() {
+          const host = document.getElementById("boundary-binding");
+          const [value, setValue] = signal("ok");
+          const tree = ErrorBoundary({ fallback: () => div({ class: "fb-binding" }, "binding recovered") }, () =>
+            div({
+              nodes: () => {
+                if (value() === "bad") throw new Error("binding-exploded");
+                return value();
+              },
+            }),
+          );
+          host.appendChild(tree);
+          api.breakBinding = () => setValue("bad");
+        },
+
+        // Two sibling boundaries sharing ONE fallback function, failing with
+        // errors that carry the SAME message. Each must render its own error
+        // identity and own its own retry control.
+        mountSiblings() {
+          const host = document.getElementById("siblings");
+          const sharedFallback = (error, retry) => {
+            const wrap = div({ class: "sib-fb" });
+            wrap.setAttribute("data-error-id", String(error.errorId ?? "?"));
+            const btn = document.createElement("button");
+            btn.className = "sib-retry";
+            btn.setAttribute("data-retry-for", String(error.errorId ?? "?"));
+            btn.textContent = "retry";
+            btn.addEventListener("click", retry);
+            wrap.appendChild(btn);
+            return wrap;
+          };
+
+          const make = (id) => {
+            const err = Object.assign(new Error("Load failed"), { errorId: id });
+            const [fail, setFail] = signal(false);
+            const node = ErrorBoundary({ fallback: sharedFallback }, () =>
+              div({
+                class: `sib-ok sib-ok-${id}`,
+                nodes: () => {
+                  if (fail()) throw err;
+                  return `ok-${id}`;
+                },
+              }),
+            );
+            return { node, break: () => setFail(true), heal: () => setFail(false) };
+          };
+
+          const a = make("A");
+          const b = make("B");
+          host.appendChild(a.node);
+          host.appendChild(b.node);
+          api.breakSiblings = () => {
+            a.break();
+            b.break();
+          };
+          api.healB = () => b.heal();
+        },
+
+        // resetKeys must be TRIGGERS, never subscriptions. Changing a key
+        // while healthy must not arm the boundary to auto-clear a later,
+        // unrelated failure.
+        mountResetKeys() {
+          const host = document.getElementById("resetkeys");
+          const [route, setRoute] = signal("a");
+          const [fail, setFail] = signal(false);
+
+          const tree = ErrorBoundary(
+            {
+              resetKeys: [route],
+              fallback: () => div({ class: "rk-fallback" }, "failed"),
+            },
+            () =>
+              div({
+                class: "rk-content",
+                nodes: () => {
+                  if (fail()) throw new Error("rk-boom");
+                  return "ok";
+                },
+              }),
+          );
+          host.appendChild(tree);
+          api.rkChangeKey = (v) => setRoute(v);
+          api.rkFail = () => setFail(true);
+          api.rkHeal = () => setFail(false);
+        },
+
+        // A selector reset key over a larger object: replacing the object must
+        // not recover the boundary unless the SELECTED value actually differs.
+        mountSelectorResetKey() {
+          const host = document.getElementById("rk-selector");
+          const [route, setRoute] = signal({ pathname: "/a", nonce: 1 });
+          const [fail, setFail] = signal(false);
+
+          const tree = ErrorBoundary(
+            {
+              resetKeys: [() => route().pathname],
+              fallback: () => div({ class: "sel-fallback" }, "failed"),
+            },
+            () =>
+              div({
+                class: "sel-content",
+                nodes: () => {
+                  if (fail()) throw new Error("sel-boom");
+                  return "ok";
+                },
+              }),
+          );
+          host.appendChild(tree);
+          api.selFail = () => setFail(true);
+          api.selHeal = () => setFail(false);
+          api.selReplaceSamePath = () => setRoute({ pathname: "/a", nonce: 2 });
+          api.selChangePath = () => setRoute({ pathname: "/b", nonce: 3 });
+        },
+      };
+
+      window.__t = api;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

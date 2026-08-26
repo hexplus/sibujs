@@ -1,4 +1,5 @@
 import { devWarn, isDev } from "../dev";
+import { reportError } from "../errors";
 
 const elementDisposers = new WeakMap<Node, Array<() => void>>();
 
@@ -148,9 +149,10 @@ export function dispose(node: Node): void {
           try {
             snapshot[i]();
           } catch (err) {
-            if (_isDev && typeof console !== "undefined") {
-              console.warn("[SibuJS] Disposer threw during cleanup:", err);
-            }
+            // A disposer is user teardown. Containment is deliberate — the
+            // remaining disposers must still run — but gating the report on dev
+            // mode meant a leaking teardown was invisible in production.
+            reportError(err, { phase: "cleanup", name: "disposer" });
           }
         }
       }

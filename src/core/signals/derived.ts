@@ -14,13 +14,23 @@ import type { Accessor } from "./signal";
  *   derived-of-derived chains propagate correctly without paying the full
  *   Set-delete + re-add cost of track()'s cleanup phase.
  *
- * NOTE: a previous revision experimented with three-color (CLEAN/CHECK/DIRTY)
- * state for read-side value-change short-circuiting. It regressed every
- * benchmark except Memory (Deep Chain +122%, Component Tree +20%) because
- * the workloads always produce a new downstream value and CHECK had no
- * work to skip — only overhead to add. Keeping the simpler boolean flag
- * here; revisit CHECK propagation when we have benchmarks that exercise
- * stabilisation on diamond / conditional-branch patterns.
+ * STABILIZATION — why a dirty flag is enough:
+ *
+ * A dirty computed does NOT imply a changed value. Downstream effects are
+ * enqueued by `propagateDirty` at write time, before this computed has had a
+ * chance to recompute and compare. Rather than adding a three-color
+ * (CLEAN/CHECK/DIRTY) propagation pass — which an earlier revision measured as
+ * a regression on every benchmark, because the extra state has nothing to skip
+ * when values genuinely change — the engine settles the question lazily at
+ * DRAIN time: `cs._validate` recomputes a dirty computed and `cs.__v` is bumped
+ * ONLY when the new value differs under this computed's comparator. The
+ * scheduler compares that version against what each subscriber last observed
+ * and suppresses the run when nothing changed (see `depsChanged` in
+ * ../../reactivity/track-core.ts).
+ *
+ * That keeps the cheap boolean dirty flag AND makes `equals` actually stop
+ * propagation, with recomputation still fully lazy: `_validate` only ever runs
+ * when an effect is genuinely about to observe the value.
  */
 export function derived<T>(
   getter: () => T,
@@ -93,6 +103,30 @@ export function derived<T>(
 
   let evaluating = false;
 
+  // Settle a dirty computed: recompute, then bump `__v` ONLY if the result
+  // differs from the previous value. `recompute` already applies the custom
+  // comparator by keeping the OLD reference when `equals` says they match, so
+  // the `Object.is` here covers both the default and custom-`equals` cases.
+  //
+  // Published on the state object because the scheduler needs to settle a
+  // computed's value before deciding whether dependents must run — it holds a
+  // reference to `cs`, not to this getter. See `depsChanged` in track-core.
+  const validate = (): void => {
+    if (!cs._d) return;
+    const oldValue = cs._v;
+    evaluating = true;
+    try {
+      retrack(recompute, markDirty);
+      if (!Object.is(oldValue, cs._v)) cs.__v++;
+    } finally {
+      evaluating = false;
+    }
+    if (hook && !Object.is(oldValue, cs._v)) {
+      hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
+    }
+  };
+  cs._validate = validate;
+
   function computedGetter(): T {
     if (evaluating) {
       throw new Error(
@@ -101,39 +135,23 @@ export function derived<T>(
       );
     }
 
+    // The dirty test is inlined at both call sites rather than living inside
+    // `validate()`. Reading a CLEAN computed is the hottest operation in the
+    // engine — a diamond or wide fan-in reads its computeds many times per
+    // update — and folding the check into the callee turned every one of those
+    // reads into a function call that immediately returned. Inline, the clean
+    // path is a single boolean load again.
     if (isTrackingSuspended()) {
-      if (cs._d) {
-        const prev = cs._v;
-        evaluating = true;
-        try {
-          retrack(recompute, markDirty);
-          if (!Object.is(prev, cs._v)) cs.__v++;
-        } finally {
-          evaluating = false;
-        }
-      }
+      if (cs._d) validate();
       return cs._v;
     }
 
-    // Record that the caller depends on this derived
+    // Settle BEFORE recording the edge. `recordDependency` stamps the edge with
+    // `cs.__v`, and that stamp must describe the value we are about to return —
+    // stamping a pre-recompute version would make the reader look permanently
+    // stale and re-run it on every unrelated upstream write.
+    if (cs._d) validate();
     recordDependency(cs as ReactiveSignal);
-
-    if (cs._d) {
-      const oldValue = cs._v;
-
-      evaluating = true;
-      try {
-        retrack(recompute, markDirty);
-        if (!Object.is(oldValue, cs._v)) cs.__v++;
-      } finally {
-        evaluating = false;
-      }
-
-      // DevTools: emit computed recomputation
-      if (hook && oldValue !== cs._v) {
-        hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
-      }
-    }
     return cs._v;
   }
 

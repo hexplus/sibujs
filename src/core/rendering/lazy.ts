@@ -1,30 +1,41 @@
-import { devWarn } from "../dev";
+import { reportError } from "../errors";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
-// that was never mounted in time to dispatch via CustomEvent bubbling.
+// that was never mounted in time to be offered to a boundary.
 const PENDING_ERROR = "__sibuPendingError";
 
+/**
+ * Surface a lazy-loading failure.
+ *
+ * Once the node is attached this goes through the CENTRAL pipeline, so an
+ * enclosing `ErrorBoundary` gets first refusal and — crucially — an error no
+ * boundary claims still reaches the runtime handler or the console instead of
+ * disappearing because a dispatch happened.
+ *
+ * The stash is the one deliberate exception to "always report immediately": a
+ * lazy import can reject BEFORE its container is linked to any parent, and
+ * boundary lookup walks the parentNode chain. Reporting straight to the console
+ * at that point would defeat a boundary that is about to mount above it, so the
+ * error is parked on the node and `ErrorBoundary` collects it during its own
+ * mount scan (see `takePendingError`).
+ *
+ * Known limitation: a container that is never attached keeps its stashed error
+ * unreported. That subtree was never rendered, so there is no boundary and no
+ * DOM position to attribute it to.
+ */
 function dispatchPropagate(node: Element, error: Error): void {
-  const fire = () => {
-    try {
-      if (!node.parentNode) return false;
-      node.dispatchEvent(new CustomEvent("sibu:error-propagate", { bubbles: true, detail: { error } }));
-      return true;
-      // Defensive: dispatchEvent on a connected node does not throw.
-      /* v8 ignore next 3 */
-    } catch {
-      return false;
-    }
+  const report = (): boolean => {
+    if (!node.parentNode) return false;
+    reportError(error, { phase: "render", name: "lazy", node });
+    return true;
   };
   // Synchronous attempt for the common already-mounted case.
-  if (node.parentNode && fire()) return;
+  if (report()) return;
   // Defer one microtask in case a fast rejection beat the mount.
   queueMicrotask(() => {
-    if (fire()) return;
-    // Last-resort: stash the error on the node so a delayed mount can
-    // re-dispatch it. ErrorBoundary scans for this on its own connect.
+    if (report()) return;
     (node as unknown as Record<string, unknown>)[PENDING_ERROR] = error;
   });
 }
@@ -86,7 +97,6 @@ export function lazy(importFn: LazyImport): Component {
       .catch((err) => {
         if (disposed) return;
         const errorObj = err instanceof Error ? err : new Error(String(err));
-        devWarn(`[SibuJS] lazy() failed to load component: ${errorObj.message}`);
         replaceChildrenSafely(
           container,
           div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`),
@@ -183,7 +193,6 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));
-      devWarn(`[SibuJS] Suspense nodes() threw: ${errorObj.message}`);
       dispatchPropagate(container, errorObj);
     }
   });

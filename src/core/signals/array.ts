@@ -171,8 +171,15 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
   // Cached frozen snapshot; invalidated on mutation
   let snapshot: readonly T[] | null = null;
 
-  // Dependency-tracking token (acts as a ReactiveSignal)
-  const signal: ReactiveSignal = {};
+  // Dependency-tracking token (acts as a ReactiveSignal).
+  //
+  // `__v` is REQUIRED, not decorative: the scheduler suppresses a subscriber
+  // whose dependency versions are all unchanged. A reactive source that
+  // notifies without bumping `__v` would have its updates silently dropped.
+  // (The core defends against this by treating a missing `__v` as
+  // always-changed, but that forfeits stabilization for every reader of this
+  // array — so maintain the counter properly here.)
+  const signal: ReactiveSignal & { __v: number } = { __v: 0 };
 
   /**
    * Invalidate the cached snapshot and notify the reactivity system.
@@ -180,6 +187,7 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
    */
   function notify(): void {
     snapshot = null;
+    signal.__v++;
     if (!enqueueBatchedSignal(signal)) {
       notifySubscribers(signal);
     }

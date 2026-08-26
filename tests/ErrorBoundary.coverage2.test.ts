@@ -95,30 +95,37 @@ describe("ErrorBoundary coverage", () => {
     expect(boundary.textContent).toBe("recovered");
   });
 
-  it("memoizes the fallback factory per error message (LRU touch)", async () => {
+  it("re-invokes the fallback on re-render and always renders the current error", async () => {
+    // There is deliberately no fallback memoization. The previous global cache
+    // did not memoize any rendering (it cached a closure it then invoked every
+    // time) and it aliased boundary-specific state across boundaries. What IS
+    // guaranteed: the fallback is called with this boundary's current error and
+    // produces a fresh element each time, so no node is ever inserted twice.
     let calls = 0;
+    const rendered: Element[] = [];
     const fallback = (err: Error) => {
       calls++;
       const el = document.createElement("div");
       el.textContent = err.message;
+      rendered.push(el);
       return el;
     };
     const [n, setN] = signal(0);
     const boundary = ErrorBoundary({ fallback }, () => {
-      // Always throws the SAME message regardless of n so the cache key repeats.
       n();
       throw new Error("same-key");
     });
     document.body.appendChild(boundary);
     await flush();
     const firstCalls = calls;
+    expect(firstCalls).toBeGreaterThan(0);
 
-    // Force a re-render via signal change; the boundary re-runs nodes,
-    // catches again with same message, and should reuse the cached factory.
     setN(1);
     await flush();
-    expect(calls).toBeGreaterThanOrEqual(firstCalls);
+
     expect(boundary.textContent).toBe("same-key");
+    // Every invocation returns a distinct element — never a recycled node.
+    expect(new Set(rendered).size).toBe(rendered.length);
   });
 
   it("resets automatically when a resetKey changes after an error", async () => {
@@ -151,20 +158,30 @@ describe("ErrorBoundary coverage", () => {
     expect(boundary.textContent).toBe("ok-content");
   });
 
-  it("does not crash when a resetKey getter throws", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("does not crash when a resetKey getter throws, and reports it centrally", async () => {
+    // A resetKeys getter is application code, so its exception now goes through
+    // the runtime error pipeline (console.error by default) rather than a bare
+    // console.warn that no configured handler could observe.
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const throwingKey = () => {
       throw new Error("key getter threw");
     };
+    const [fail, setFail] = signal(false);
     const boundary = ErrorBoundary({ resetKeys: [throwingKey] }, () => {
       const el = document.createElement("div");
+      if (fail()) throw new Error("child broke");
       el.textContent = "alive";
       return el;
     });
     document.body.appendChild(boundary);
     await flush();
     expect(boundary.textContent).toBe("alive");
-    expect(warn).toHaveBeenCalled();
+
+    // Reset keys are consulted only during a failed episode, so open one.
+    setFail(true);
+    await flush();
+    expect(err).toHaveBeenCalled();
+    expect(err.mock.calls.map((c) => String(c[0])).join(" ")).toContain("key getter threw");
   });
 
   it("renders loading then content for async (Promise) children", async () => {
