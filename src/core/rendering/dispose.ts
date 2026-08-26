@@ -11,12 +11,15 @@ const elementDisposers = new WeakMap<Node, Array<() => void>>();
  *
  * The ceiling counts total teardown executions, not iterations over the queue.
  * Capping iterations abandons finite work purely for crossing the boundary,
- * which is indistinguishable from a leak. Capping total work instead protects
- * against cleanup production that does not terminate: most often recursive
- * self-registration, though any chain long enough to exceed the ceiling reaches
- * it too. Either way the condition is reported rather than silently swallowed,
- * so bounded protection never passes as completed cleanup — see
- * {@link reportDrainRunaway}.
+ * which is indistinguishable from a leak; capping total work distinguishes
+ * ordinary reentrant chains from typical runaway behaviour far better.
+ *
+ * It is nonetheless an **absolute work bound**, not a recursion detector. It
+ * primarily protects against cleanup production that does not terminate — most
+ * often recursive self-registration — but an exceptionally large *finite* chain
+ * needing more than this many executions reaches it just the same. Either way
+ * the condition is reported rather than silently swallowed, so bounded
+ * protection never passes as completed cleanup — see {@link reportDrainRunaway}.
  */
 export const MAX_DRAIN_TEARDOWNS = 10_000;
 
@@ -31,7 +34,7 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
   if (typeof console === "undefined") return;
   console.error(
     `[SibuJS ${label}] runaway cleanup: stopped after running ${executed} teardowns with ${remaining} still queued. ` +
-      "Cleanup did not stop producing more cleanup within the safety ceiling — the remaining work was NOT run.",
+      "Cleanup production did not stabilize before the teardown safety ceiling was reached — the remaining work was NOT run.",
     { executed, remaining },
   );
 }
@@ -108,8 +111,10 @@ export function dispose(node: Node): void {
       // (a parent teardown releasing a child, a lifecycle hook re-arming), and
       // that follow-up work is owed the same guarantee as the first batch — so
       // the loop runs until the queue is empty, bounded only by the safety
-      // ceiling on total teardown executions (MAX_DRAIN_TEARDOWNS), which stops
-      // cleanup production that does not terminate.
+      // ceiling on total teardown executions (MAX_DRAIN_TEARDOWNS). That ceiling
+      // is an absolute work bound: it primarily catches cleanup production that
+      // does not terminate, but an exceptionally large finite chain reaches it
+      // too, and either case is reported rather than silently dropped.
       let executed = 0;
       let runaway = false;
 

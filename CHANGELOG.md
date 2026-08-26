@@ -217,13 +217,14 @@ disposal ends ownership, and a retry or remount starts clean. Full detail in
   longer than eight left its tail on a queue local to the enhancement — and
   therefore unreachable the moment the disposer returned, while the caller was
   told everything had been torn down. The queue is now drained until stable, so
-  ordinary finite chains of practical depth complete. Non-terminating cleanup
-  production is still bounded, but by a **safety ceiling on total teardown
-  executions** rather than a pass count (a pass count cannot tell a twelve-link
-  chain from infinite recursion). Recursive self-registration is the usual way
-  to reach that ceiling, though any chain long enough will; either way it is
-  reported with the number of teardowns run and still queued, instead of passing
-  as completed cleanup. The drain is iterative and batch-spliced, so deep chains
+  finite chains of ordinary practical depth complete. Runaway or excessively
+  large teardown production is bounded by **total work executed** rather than by
+  pass count (a pass count cannot tell a twelve-link chain from infinite
+  recursion). That ceiling is an absolute work bound rather than a recursion
+  detector — recursive self-registration is the usual way to reach it, but an
+  exceptionally large finite chain reaches it too — and either case is reported
+  with the number of teardowns run and still queued, instead of passing as
+  completed cleanup. The drain is iterative and batch-spliced, so deep chains
   cannot overflow the stack and ordinary cleanup keeps its previous cost.
 - **`dispose()` shares that policy.** The node-level disposer drain had the same
   boundary one offset further out (an initial batch plus eight extra passes).

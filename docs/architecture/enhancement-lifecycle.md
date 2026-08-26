@@ -173,17 +173,19 @@ A cleanup registering another cleanup is legitimate — a parent teardown
 releasing a child, a hook re-arming — and that follow-up work is owed the same
 guarantee as the first batch. So:
 
-- **Finite cleanup chains of ordinary depth drain completely.** The drain
-  continues until the queue stabilises **or** the total-work safety ceiling is
-  reached — cleanup is never dropped merely for crossing an internal boundary.
-- **The bound is a safety ceiling on total teardown executions**
-  (`MAX_DRAIN_TEARDOWNS`, 10 000) — not a limit on iterations over the queue.
-  Limiting iterations truncates ordinary finite chains; limiting total work does
-  not. What the ceiling stops is cleanup production that does not terminate.
-  Recursive self-registration is the usual cause, but it is a work ceiling, not
-  a recursion detector: **any** chain long enough to exceed 10 000 executions
-  reaches it, so finite chains are not guaranteed to complete regardless of
-  length — only ones of realistic depth.
+- **Finite cleanup chains of ordinary practical depth drain completely.**
+  Draining continues until the queue stabilises **or** the total-work safety
+  ceiling is reached — cleanup is never dropped merely for crossing an internal
+  boundary.
+- **Non-terminating or excessively large cleanup production is bounded by the
+  total-work safety ceiling** (`MAX_DRAIN_TEARDOWNS`, 10 000 teardown
+  executions) — not by a limit on iterations over the queue. A total-work cap
+  distinguishes ordinary reentrant chains from typical runaway behaviour far
+  better than a pass cap, while still imposing an **absolute upper bound**: it
+  is a work ceiling, not a recursion detector, so a finite chain needing more
+  than 10 000 executions reaches it just as an infinite producer does. Finite
+  chains are therefore not guaranteed to complete regardless of length — only
+  ones of realistic depth.
 - **Reaching the ceiling is reported, never silent.** `console.error` names how
   many teardowns ran and how many were still queued. A caller is never told
   cleanup completed when queued work was dropped.

@@ -41,19 +41,22 @@ const enhancementOwner = new WeakMap<HTMLElement, symbol>();
  *
  * A broken teardown must never abort the rest of the unwind, and a teardown may
  * legitimately register another (`ctx.cleanup` stays reachable from inside one).
- * The list is therefore drained **until it is stable**, bounded only by
- * {@link MAX_DRAIN_TEARDOWNS} — a safety ceiling on total teardown executions,
- * not on iterations over the list. Ordinary finite chains of practical depth
- * complete; work is never abandoned merely for crossing an internal boundary.
- * Splicing before running is what makes it idempotent and reentrancy-safe — an
- * entry is off the list before it executes, so it runs at most once.
+ * The list is therefore drained **until it is stable, or until
+ * {@link MAX_DRAIN_TEARDOWNS} is reached** — a safety ceiling on total teardown
+ * executions, not on iterations over the list. Finite chains of ordinary
+ * practical depth complete; work is never abandoned merely for crossing an
+ * internal boundary. Splicing before running is what makes it idempotent and
+ * reentrancy-safe — an entry is off the list before it executes, so it runs at
+ * most once.
  *
- * Reaching the ceiling means cleanup did not stop producing more cleanup (most
- * often recursive self-registration, but any chain that long reaches it). That
- * is **reported**: this queue is local to one enhancement, so anything still on
- * it once this returns is unreachable forever — it is cleared deliberately and
- * loudly rather than left to vanish. `dispose()` differs deliberately, restoring
- * its remainder because a node-keyed queue stays reachable.
+ * The ceiling is an **absolute work bound**, not a recursion detector: it
+ * primarily catches cleanup production that does not terminate, but an
+ * exceptionally large finite chain reaches it too. Either way it is
+ * **reported** — this queue is local to one enhancement, so anything still on
+ * it once this returns is unreachable forever; the remainder is reported and
+ * then cleared deliberately rather than left to vanish. `dispose()` differs
+ * deliberately, restoring its remainder because a node-keyed queue stays
+ * reachable through a later `dispose(node)`.
  *
  * Batch-splicing keeps the normal case O(number of teardowns); no per-entry
  * `shift()`.
