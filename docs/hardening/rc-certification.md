@@ -52,6 +52,14 @@ loads, and one SSR isolation test checked for cross-request data bleed where
 > to `>=22.3.0`. See
 > [`stable-preflight-findings.md`](stable-preflight-findings.md) and
 > [`test-type-errors.md`](test-type-errors.md).
+>
+> **Update — final pre-RC.** The declared minimum is now executed *exactly*
+> (Node 22.3.0, 15/15 gates) and the 22.2.0/22.3.0 boundary is measured rather
+> than inferred. `@types/node` is aligned to the runtime floor, the lockfile is
+> committed so CI runs `npm ci`, and the four open declaration gaps were
+> reviewed in the major-version window — three fixed, one deferred. The next
+> release is **4.0.0**, entering validation as **4.0.0-rc.1**. See
+> [`final-pre-rc-findings.md`](final-pre-rc-findings.md).
 
 ---
 
@@ -62,9 +70,11 @@ Full detail in [`../support-matrix.md`](../support-matrix.md).
 | Environment | Status |
 |---|---|
 | Chromium / Firefox / WebKit (latest) | **Verified** — 150/150 |
-| Node 22.14.0 | **Verified** — 13/13 gates |
-| Node 24.19.0 | **Verified** — 13/13 gates |
-| Node 18 / 20 | **Not supported** — below the raised `engines` floor (NODE-002) |
+| Node 22.3.0 | **Verified** — 15/15 gates, the declared minimum |
+| Node 22.14.0 | **Verified** — 15/15 gates |
+| Node 24.19.0 | **Verified** — 15/15 gates |
+| Node <= 22.2 | **Not supported** — boundary measured against 22.2.0 |
+| Node 18 / 20 | **Not supported** — below the floor, both EOL |
 | Bun / Deno | **Not tested** — not installed on the host |
 | Cloudflare Workers / DOM-less edge | **Supported only with a DOM implementation** |
 | Vite 7 / Rollup 4 / esbuild 0.25 / Webpack 5 | **Verified** |
@@ -485,9 +495,10 @@ Non-blocking, recommended before a *stable* release (not before an RC):
    executed and found two P1s. `engines.node` is now `>=22.3.0`, and CI runs
    every version in that range. See
    [`stable-preflight-findings.md`](stable-preflight-findings.md).
-2. **Re-record `bench-baseline.json`** on a controlled host so
-   `npm run bench:check` becomes a usable gate instead of reporting 21 false
-   regressions on an untouched tree. **Still open.**
+2. **Benchmark gate.** The baseline has been re-recorded with full environment
+   metadata, but three consecutive runs against it flagged 1–2 *different*
+   benchmarks each — noise, not regression. The gate is **INFORMATIONAL ONLY**
+   until it is re-recorded on the host that will enforce it. See BENCH-001.
 3. ~~**Burn down the 130 test type errors** (TEST-004).~~ **Done.** 0 errors;
    the burn-down found five framework declaration bugs and one vacuous test.
    See [`test-type-errors.md`](test-type-errors.md).
@@ -536,9 +547,10 @@ Benchmark regression:              NOT USABLE — stale baseline; differential
 
 TypeScript (tests + entries):      PASS   0 errors (was 130)
 
-Node 22:                           PASS   13/13 gates
-Node 24:                           PASS   13/13 gates
-Node 18 / 20:                      NOT SUPPORTED (below engines floor)
+Node 22.3.0 (exact floor):         PASS   15/15 gates
+Node 22 latest:                    PASS   15/15 gates
+Node 24 latest:                    PASS   15/15 gates
+Node <= 22.2 / 20 / 18:            NOT SUPPORTED (boundary measured)
 Bun / Deno / DOM-less edge:        NOT TESTED / NOT SUPPORTED
 Minimum browser versions:          NOT TESTED
 ```

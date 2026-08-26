@@ -40,10 +40,7 @@ export function withWrapper<P>(
  * Button("Click"); // type="button", disabled=false automatically
  * ```
  */
-export function withDefaults<P extends Record<string, unknown>>(
-  component: Component<P>,
-  defaults: Partial<P>,
-): Component<Partial<P>> {
+export function withDefaults<P extends object>(component: Component<P>, defaults: Partial<P>): Component<Partial<P>> {
   return (props: Partial<P>) => component({ ...defaults, ...props } as P);
 }
 

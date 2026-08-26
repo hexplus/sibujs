@@ -33,9 +33,23 @@ const PROBES = join(HERE, "node-probes");
 
 const argv = process.argv.slice(2);
 const versionArg = argv.find((a) => a.startsWith("--versions="))?.split("=")[1];
-// Defaults to the declared support range. Pass --versions=18,20,22,24 to
-// re-measure the versions that were dropped in the 3.5 engine bump.
-const WANT = (versionArg ?? "22,24").split(",").map((s) => s.trim());
+
+// Two kinds of target, and the difference matters for the support claim:
+//
+//   "22"      -> the newest 22.x available: proves the current release LINE works
+//   "22.3.0"  -> that exact build: proves the DECLARED MINIMUM works
+//
+// `engines.node` is ">=22.3.0", and testing "22 latest" does not verify 22.3.0 —
+// a floor nobody has executed is exactly the gap this tooling exists to close.
+// The default therefore pins the exact floor alongside the two current lines.
+const WANT = (versionArg ?? "22.3.0,22,24").split(",").map((s) => s.trim());
+
+// Extra interpreter roots, e.g. hand-extracted official builds for a version no
+// local version manager has. Colon/semicolon separated, matching PATH.
+const EXTRA_ROOTS = (process.env.SIBUJS_NODE_ROOTS ?? "")
+  .split(process.platform === "win32" ? ";" : ":")
+  .map((r) => r.trim())
+  .filter(Boolean);
 
 const ALL_GATES = [
   "install",
@@ -46,24 +60,43 @@ const ALL_GATES = [
   "npm pack",
   "ESM import",
   "CJS require",
-  "DOM-less router (RC-001)",
+  "DOM-less router construct (RC-001)",
+  "DOM-less memory-router navigate (NODE-001)",
   "query clean exit (RC-002)",
   "SSR request context",
   "SSR isolation (CJS)",
+  "SSR streaming smoke",
   "runtime compat (RC-003)",
 ];
 
 // ---------------------------------------------------------------------------
-// Locate an interpreter per major version. nvm-windows and nvm/asdf on POSIX
-// keep versioned install roots; fall back to the running interpreter when its
-// major matches, so this still works on a plain CI runner where
-// actions/setup-node has provided exactly one version.
+// Interpreter discovery
 // ---------------------------------------------------------------------------
-function discover(major) {
-  const runningMajor = process.versions.node.split(".")[0];
+/** Pull a semver-ish version out of a directory name, e.g. `node-v22.3.0-win-x64`. */
+function versionOf(entry) {
+  const m = entry.match(/v(\d+\.\d+\.\d+)/);
+  return m ? m[1] : null;
+}
+
+/**
+ * Locate an interpreter for `target`, which is either a major line ("22") or an
+ * exact version ("22.3.0").
+ *
+ * Version managers keep versioned install roots (`v22.14.0/`); hand-extracted
+ * official archives keep `node-v22.3.0-win-x64/`. Both shapes are matched, and
+ * `SIBUJS_NODE_ROOTS` adds arbitrary extra roots so an exact floor can be tested
+ * without a version manager or elevated install rights.
+ *
+ * Falls back to the running interpreter when it satisfies the target, so this
+ * still works on a CI runner where actions/setup-node provided exactly one.
+ */
+function discover(target) {
+  const exact = /^\d+\.\d+\.\d+$/.test(target);
+  const major = target.split(".")[0];
   const candidates = [];
 
   const roots = [
+    ...EXTRA_ROOTS,
     process.env.NVM_HOME,
     process.env.NVM_DIR && join(process.env.NVM_DIR, "versions", "node"),
     process.env.APPDATA && join(process.env.APPDATA, "nvm"),
@@ -73,19 +106,25 @@ function discover(major) {
   for (const root of roots) {
     if (!existsSync(root)) continue;
     for (const entry of readdirSync(root)) {
-      if (!entry.startsWith(`v${major}.`)) continue;
+      const version = versionOf(entry);
+      if (!version) continue;
+      if (exact ? version !== target : version.split(".")[0] !== major) continue;
       for (const rel of ["node.exe", "node", join("bin", "node")]) {
         const bin = join(root, entry, rel);
-        if (existsSync(bin)) candidates.push({ bin, label: entry });
+        if (existsSync(bin)) candidates.push({ bin, label: `v${version}` });
       }
     }
   }
 
   if (candidates.length) {
+    // Highest patch wins for a line target; for an exact target they are equal.
     candidates.sort((a, b) => b.label.localeCompare(a.label, undefined, { numeric: true }));
     return candidates[0];
   }
-  if (runningMajor === String(major)) return { bin: process.execPath, label: `v${process.versions.node}` };
+
+  const running = process.versions.node;
+  const satisfies = exact ? running === target : running.split(".")[0] === major;
+  if (satisfies) return { bin: process.execPath, label: `v${running}` };
   return null;
 }
 
@@ -117,24 +156,24 @@ const stripAnsi = (s) => String(s).replace(ANSI, "");
 // ---------------------------------------------------------------------------
 const report = [];
 
-for (const major of WANT) {
-  const found = discover(major);
+for (const target of WANT) {
+  const found = discover(target);
   const gates = [];
   const add = (name, status, detail = "") => gates.push({ name, status, detail });
 
   if (!found) {
-    console.log(`\n=== Node ${major}: interpreter NOT FOUND — every gate NOT TESTED ===`);
+    console.log(`\n=== Node ${target}: interpreter NOT FOUND — every gate NOT TESTED ===`);
     for (const g of ALL_GATES) add(g, "NOT TESTED", "no interpreter available");
-    report.push({ major, label: null, npm: null, gates });
+    report.push({ target, label: null, npm: null, gates });
     continue;
   }
 
   const NODE = found.bin;
   const NPM = npmFor(NODE);
   const npmVersion = NPM ? run(NPM, ["-v"]).stdout?.trim() : "(bundled npm not found)";
-  console.log(`\n=== Node ${major} (${found.label}, npm ${npmVersion}) ===`);
+  console.log(`\n=== Node ${target} (${found.label}, npm ${npmVersion}) ===`);
 
-  const work = mkdtempSync(join(tmpdir(), `sibujs-node${major}-`));
+  const work = mkdtempSync(join(tmpdir(), `sibujs-node${target.replace(/\./g, "_")}-`));
   const nodeDir = dirname(NODE);
   // Put this interpreter first on PATH so any tool that shells out to `node`
   // (tsup, vitest workers) uses the version under test, not the ambient one.
@@ -149,6 +188,7 @@ for (const major of WANT) {
     const ok = r.status === 0;
     const detail = extract ? extract(out) : "";
     add(name, ok ? "PASS" : "FAIL", detail);
+    gates[gates.length - 1].raw = out;
     console.log(ok ? `PASS ${detail}` : `FAIL ${detail}`);
     if (!ok) console.log(out.trim().split("\n").slice(-10).join("\n").replace(/^/gm, "      | "));
     return ok;
@@ -182,10 +222,21 @@ for (const major of WANT) {
     mkdirSync(consumer, { recursive: true });
     writeFileSync(
       join(consumer, "package.json"),
-      JSON.stringify({ name: `n${major}-consumer`, version: "1.0.0", type: "module", private: true }, null, 2),
+      JSON.stringify({ name: `n${target.replace(/\./g, "-")}-consumer`, version: "1.0.0", type: "module", private: true }, null, 2),
     );
-    // jsdom is required because SSR rendering takes real DOM nodes.
-    const inst = run(NPM, ["install", join(work, tgz), "jsdom", "--no-audit", "--no-fund"], { cwd: consumer, env });
+    // jsdom is required because SSR rendering takes real DOM nodes. Pin it to
+    // the version this repository itself develops against, rather than letting
+    // the probe float to `jsdom@latest`: a floating install resolved a
+    // transitive `html-encoding-sniffer` that `require()`s an ES module, which
+    // needs Node >= 22.12, and the probe then failed on Node 22.3.0 — reporting
+    // the framework as broken at its own declared floor when the incompatibility
+    // was entirely in the test harness's DOM. A tooling dependency must never
+    // dictate the published runtime floor.
+    const jsdomSpec = `jsdom@${JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).devDependencies.jsdom}`;
+    const inst = run(NPM, ["install", join(work, tgz), jsdomSpec, "--no-audit", "--no-fund"], {
+      cwd: consumer,
+      env,
+    });
     if (inst.status !== 0) {
       console.log(`  consumer install ... FAIL`);
       console.log(stripAnsi(`${inst.stderr}`).trim().split("\n").slice(-6).join("\n").replace(/^/gm, "      | "));
@@ -197,10 +248,12 @@ for (const major of WANT) {
     for (const g of [
       "ESM import",
       "CJS require",
-      "DOM-less router (RC-001)",
+      "DOM-less router construct (RC-001)",
+      "DOM-less memory-router navigate (NODE-001)",
       "query clean exit (RC-002)",
       "SSR request context",
       "SSR isolation (CJS)",
+      "SSR streaming smoke",
       "runtime compat (RC-003)",
     ])
       add(g, "NOT TESTED", "no consumer project");
@@ -259,7 +312,7 @@ for (const major of WANT) {
     // so isolation has to be proved separately in each format — NODE-002 was
     // invisible in one of them.
     for (const [name, file] of [
-      ["DOM-less router (RC-001)", "domless-router.mjs"],
+      ["DOM-less router construct (RC-001)", "domless-router.mjs"],
       ["SSR isolation (CJS)", "als-isolation.cjs"],
       ["runtime compat (RC-003)", "runtime-compat.mjs"],
     ]) {
@@ -286,13 +339,42 @@ for (const major of WANT) {
       console.log(ok ? `PASS exited in ${elapsed}ms` : `FAIL ${timedOut ? "event loop pinned" : `status ${r.status}`}`);
     }
 
-    // The SSR request-context gate is asserted inside runtime-compat; surface it
-    // as its own row so a partially-run version is never summarised as PASS.
+    // Several gates are asserted INSIDE a probe. Surface each as its own row so
+    // a partially-run version can never be summarised as PASS (§2), and derive
+    // the status from the probe's own per-check output rather than from the
+    // process exit code alone.
     const rc = gates.find((g) => g.name === "runtime compat (RC-003)");
-    add("SSR request context", rc?.status ?? "NOT TESTED", "asserted by the runtime-compat probe");
+    const rcOut = rc?.raw ?? "";
+    const checkStatus = (needle) => {
+      if (!rcOut) return rc?.status ?? "NOT TESTED";
+      if (rcOut.includes(`FAIL ${needle}`)) return "FAIL";
+      if (rcOut.includes(`ok   ${needle}`)) return "PASS";
+      return "NOT TESTED";
+    };
+    add("SSR request context", checkStatus("SSR request isolation"), "asserted by the runtime-compat probe");
+    add(
+      "SSR streaming smoke",
+      checkStatus("renderToStream + collectStream") === "PASS" && checkStatus("renderToReadableStream") === "PASS"
+        ? "PASS"
+        : "FAIL",
+      "renderToStream + renderToReadableStream",
+    );
+
+    // Memory-router navigation is asserted by the DOM-less probe (NODE-001).
+    const dr = gates.find((g) => g.name === "DOM-less router construct (RC-001)");
+    const drOut = dr?.raw ?? "";
+    add(
+      "DOM-less memory-router navigate (NODE-001)",
+      drOut.includes("navigate=true") && drOut.includes("replace=true")
+        ? "PASS"
+        : drOut
+          ? "FAIL"
+          : (dr?.status ?? "NOT TESTED"),
+      drOut.match(/navigate=\w+ replace=\w+/)?.[0] ?? "",
+    );
   }
 
-  report.push({ major, label: found.label, npm: npmVersion, gates });
+  report.push({ target, label: found.label, npm: npmVersion, gates });
 }
 
 // ---------------------------------------------------------------------------
@@ -302,13 +384,19 @@ for (const v of report) {
   const fails = v.gates.filter((g) => g.status === "FAIL");
   const untested = v.gates.filter((g) => g.status === "NOT TESTED");
   const verdict = fails.length ? "FAIL" : untested.length ? "INCOMPLETE" : "PASS";
-  console.log(`\nNode ${v.major} ${v.label ? `(${v.label}, npm ${v.npm})` : "(not installed)"} — ${verdict}`);
-  for (const g of v.gates) console.log(`  ${pad(g.status, 12)}${pad(g.name, 30)}${g.detail}`);
+  console.log(`\nNode ${v.target} ${v.label ? `(${v.label}, npm ${v.npm})` : "(not installed)"} — ${verdict}`);
+  for (const g of v.gates) console.log(`  ${pad(g.status, 12)}${pad(g.name, 44)}${g.detail}`);
 }
 
 const anyFail = report.some((v) => v.gates.some((g) => g.status === "FAIL"));
 const anyUntested = report.some((v) => v.gates.some((g) => g.status === "NOT TESTED"));
 console.log(`\n${"=".repeat(100)}`);
 console.log(anyFail ? "RESULT: FAIL" : anyUntested ? "RESULT: INCOMPLETE (unverified gates remain)" : "RESULT: PASS");
-writeFileSync(join(REPO, "docs/hardening/node-matrix-report.json"), JSON.stringify(report, null, 2));
+// Drop the captured probe output before serialising — it is only needed to
+// derive the individual gate rows above, and would bloat the report by megabytes.
+const serialisable = report.map((v) => ({
+  ...v,
+  gates: v.gates.map(({ raw: _raw, ...g }) => g),
+}));
+writeFileSync(join(REPO, "docs/hardening/node-matrix-report.json"), JSON.stringify(serialisable, null, 2));
 process.exit(anyFail ? 1 : 0);

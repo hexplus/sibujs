@@ -209,7 +209,7 @@ if (SKIP_PACKAGE) {
   process.stdout.write("→ Node support matrix ... ");
   const r = run("node", [join(HERE, "node-matrix.mjs")]);
   const out = stripAnsi(`${r.stdout ?? ""}${r.stderr ?? ""}`);
-  const versions = [...out.matchAll(/^Node (\d+) .*— (PASS|FAIL|INCOMPLETE)$/gm)].map(
+  const versions = [...out.matchAll(/^Node (\S+) .*— (PASS|FAIL|INCOMPLETE)$/gm)].map(
     (m) => `${m[1]}:${m[2]}`,
   );
   const incomplete = out.includes("INCOMPLETE");
@@ -217,7 +217,7 @@ if (SKIP_PACKAGE) {
   record("Node support matrix", status, versions.join(" "), true);
   console.log(`${status} ${versions.join(" ")}`);
   if (status !== "PASS") {
-    console.log(out.trim().split(String.fromCharCode(10)).slice(-15).join(String.fromCharCode(10)).replace(/^/gm, "    | "));
+    console.log(out.trim().split(String.fromCharCode(10)).slice(-60).join(String.fromCharCode(10)).replace(/^/gm, "    | "));
   }
 }
 

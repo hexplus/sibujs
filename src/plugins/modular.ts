@@ -115,7 +115,7 @@ export function createModuleRegistry() {
  * Each key maps to a factory function that is invoked lazily on first access.
  * Returns an object with only the requested exports.
  */
-export function createBundle<T extends Record<string, unknown>>(modules: Record<string, () => unknown>): T {
+export function createBundle<T extends object>(modules: Record<string, () => unknown>): T {
   const cache = new Map<string, unknown>();
   const bundle = {} as Record<string, unknown>;
 

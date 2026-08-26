@@ -62,6 +62,14 @@ export function getAction<T = unknown>(name: string): ActionFn<T> | undefined {
  * ```
  */
 export function action<T>(element: HTMLElement, action: ActionFn<T> | string, param: T): void;
+// An action whose parameter is OPTIONAL may be applied without one. Without this
+// overload the two-argument form demanded `ActionFn<void>`, so a first-party
+// directive like `copyOnClick` — typed `ActionFn<(() => string) | undefined>`
+// because its text getter is optional — could not be written as
+// `action(el, copyOnClick)` even though that is its documented usage and exactly
+// what the runtime does. Additive: it only widens what already compiled.
+// (TYPE-009)
+export function action<T>(element: HTMLElement, action: ActionFn<T | undefined> | string): void;
 export function action(element: HTMLElement, action: ActionFn<void> | string): void;
 export function action<T>(element: HTMLElement, action: ActionFn<T> | string, param?: T): void {
   const actionFn = typeof action === "string" ? getAction<T>(action) : action;

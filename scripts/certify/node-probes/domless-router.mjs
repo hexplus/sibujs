@@ -21,19 +21,45 @@ if (typeof globalThis.window !== "undefined") {
 }
 
 const r1 = createRouter([{ path: "/", component: () => null }]);
-const r2Path = (() => {
-  const { currentPath } = createMemoryRouter([{ path: "/", component: () => null }], "/");
-  return currentPath();
-})();
 
-// Wait well past the queueMicrotask bootstrap AND a macrotask turn.
-setTimeout(() => {
+// Wait past the queueMicrotask bootstrap AND a macrotask turn (RC-001), then
+// exercise NAVIGATION, not just construction (NODE-001). Construction alone was
+// green while every push/replace still failed with "history is not defined", so
+// a probe that stops at the constructor proves nothing about usability.
+setTimeout(async () => {
+  const construction = !uncaught && r1.isReady === true && r1.currentRoute.path === "/";
+  destroyRouter();
+
+  const { router, currentPath, push } = createMemoryRouter(
+    [
+      { path: "/", component: () => null },
+      { path: "/about", component: () => null },
+    ],
+    "/",
+  );
+  await new Promise((r) => setTimeout(r, 50));
+  const startPath = currentPath();
+
+  const pushed = await push("/about").catch((e) => ({ success: false, error: e }));
+  await new Promise((r) => setTimeout(r, 20));
+  const navigated = pushed?.success === true && currentPath() === "/about" && router.currentRoute.path === "/about";
+
+  const replaced = await router.replace("/").catch(() => ({ success: false }));
+  await new Promise((r) => setTimeout(r, 20));
+  const replacedOk = replaced?.success === true && currentPath() === "/";
+
+  destroyRouter();
+
   if (uncaught) {
     console.log(`DOMLESS_ROUTER_PROBE FAIL: ${uncaught.name}: ${uncaught.message}`);
     process.exit(1);
   }
-  const ok = r1.isReady === true && r1.currentRoute.path === "/" && r2Path === "/";
-  console.log(`DOMLESS_ROUTER_PROBE ${ok ? "PASS" : "FAIL"} ready=${r1.isReady} path=${r1.currentRoute.path} memory=${r2Path}`);
-  destroyRouter();
+
+  const ok = construction && startPath === "/" && navigated && replacedOk;
+  console.log(
+    `DOMLESS_ROUTER_PROBE ${ok ? "PASS" : "FAIL"} ` +
+      `construction=${construction} navigate=${navigated} replace=${replacedOk} ` +
+      `path=${currentPath()}${pushed?.error ? ` err=${pushed.error.message}` : ""}`,
+  );
   process.exit(ok ? 0 : 1);
 }, 150);

@@ -242,11 +242,14 @@ describe("each large list stress tests", () => {
     return { getItems, setItems, container };
   }
 
+  // Large-list cases assert CORRECTNESS, not throughput, so a default 5 s budget
+  // just makes them fail on a loaded machine. A sibling below already uses
+  // 15_000; the whole block is given the same headroom. (FLAKE-001)
   it("renders 10,000 items", () => {
     const { container } = setupList(10_000);
     expect(container.querySelectorAll("li").length).toBe(10_000);
     document.body.removeChild(container);
-  });
+  }, 15_000);
 
   it("appends 5,000 items to 5,000-item list", () => {
     const { setItems, container } = setupList(5_000);
@@ -255,7 +258,7 @@ describe("each large list stress tests", () => {
 
     expect(container.querySelectorAll("li").length).toBe(10_000);
     document.body.removeChild(container);
-  });
+  }, 15_000);
 
   it("removes all items from 10,000-item list", () => {
     const { setItems, container } = setupList(10_000);
@@ -263,7 +266,7 @@ describe("each large list stress tests", () => {
     setItems([]);
     expect(container.querySelectorAll("li").length).toBe(0);
     document.body.removeChild(container);
-  });
+  }, 15_000);
 
   it("reverses 10,000-item list", () => {
     const { setItems, container } = setupList(10_000);

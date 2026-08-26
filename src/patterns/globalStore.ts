@@ -66,7 +66,7 @@ export type Selector<S, R> = (state: S) => R;
  */
 export type StoreActionMap<S> = Record<string, (state: S, ...args: never[]) => Partial<S>>;
 
-export interface GlobalStore<S extends Record<string, unknown>, A extends StoreActionMap<S>> {
+export interface GlobalStore<S extends object, A extends StoreActionMap<S>> {
   getState: () => S;
   select: <R>(selector: Selector<S, R>) => () => R;
   dispatch: <K extends keyof A>(action: K, payload?: Parameters<A[K]>[1]) => void;
@@ -78,7 +78,7 @@ export interface GlobalStore<S extends Record<string, unknown>, A extends StoreA
  * globalStore creates a centralized state management store
  * with actions, selectors, and middleware support.
  */
-export function globalStore<S extends Record<string, unknown>, A extends StoreActionMap<S>>(config: {
+export function globalStore<S extends object, A extends StoreActionMap<S>>(config: {
   state: S;
   actions: A;
   middleware?: Middleware<S>[];

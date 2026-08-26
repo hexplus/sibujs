@@ -1,6 +1,9 @@
 # Node.js
 node_modules/
-package-lock.json
+# package-lock.json is COMMITTED on purpose. A library's lockfile does not
+# affect consumers' dependency resolution, but it makes this repository's own
+# certification reproducible: without it, CI silently re-resolves transitive
+# dev dependencies on every run and cannot use `npm ci`. See LOCK-001.
 .npm/
 
 # Build output

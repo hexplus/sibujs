@@ -9,8 +9,11 @@
 # The matrix exists because `engines` is a promise. Before it, `engines` said
 # ">=18" while CI ran Node 20 only, and Node 18/20 users were the compatibility
 # testers — which is how NODE-002 (SSR request isolation silently unavailable
-# below Node 22.3) went unnoticed. Every version named in `engines` is executed
-# here; if the range widens, add it to `node-version` in the same commit.
+# below Node 22.3) went unnoticed.
+#
+# It runs the declared MINIMUM exactly, plus the current release lines. CI cannot
+# prove every patch release in the range, and the support docs do not claim it
+# does — but a floor nobody executes is not a supported floor.
 name: CI
 
 on:
@@ -28,17 +31,13 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   node-version: 22
+                  cache: npm
 
-            # `npm install`, not `npm ci`: `package-lock.json` is gitignored in
-            # this repo, so there is no lockfile in a fresh checkout for `npm ci`
-            # to install from — and `actions/setup-node`'s npm cache needs one for
-            # its cache key, so that is off too.
-            #
-            # Committing the lockfile would make CI reproducible and let both come
-            # back. That is a repository-policy decision, recorded as a
-            # recommendation in docs/hardening/stable-preflight-findings.md rather
-            # than changed here.
-            - run: npm install --no-audit --no-fund
+            # `npm ci`, not `npm install`: CI installs exactly what the committed
+            # lockfile pins and fails rather than silently resolving something
+            # newer. Without a lockfile, certification would be testing a
+            # dependency set nobody chose. (LOCK-001)
+            - run: npm ci --no-audit --no-fund
 
             # Build FIRST. `tests/consumption.test.ts` reads real files out of
             # `dist/` — it is the suite's own packaging check — so the unit suite
@@ -66,16 +65,20 @@ jobs:
             fail-fast: false
             matrix:
                 # Must stay in lockstep with `package.json.engines.node`.
-                node: [22, 24]
+                #
+                # `22.3.0` is the DECLARED MINIMUM and is pinned exactly — testing
+                # "22 latest" does not verify the floor, and an unverified floor is
+                # the gap this matrix exists to close. `22` and `24` track the
+                # current release lines.
+                node: ["22.3.0", 22, 24]
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
               with:
                   node-version: ${{ matrix.node }}
+                  cache: npm
 
-            # See the note in the `fast` job: no committed lockfile, so no
-            # `npm ci` and no setup-node cache.
-            - run: npm install --no-audit --no-fund
+            - run: npm ci --no-audit --no-fund
             - run: npm run build
             - run: npm run typecheck
             - run: npm run typecheck:tests

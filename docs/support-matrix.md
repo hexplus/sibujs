@@ -29,54 +29,82 @@ the floor as a build-target declaration, not a verified claim.
 
 ## Node.js
 
+SibuJS requires **Node >= 22.3.0**. The declared minimum and the current Node 22
+and 24 release lines are executed in CI. CI cannot prove every patch release in
+the range, and nothing here claims it does.
+
 | Environment | Status | Evidence |
 |---|---|---|
-| Node 22 (v22.14.0, npm 11.12.0) | **Verified** | 13/13 gates |
-| Node 24 (v24.19.0, npm 11.17.0) | **Verified** | 13/13 gates |
-| Node 18 / 20 | **Not supported** | below the declared floor — see below |
+| Node 22.3.0 | **Verified** — minimum supported runtime | 15/15 gates, exact build |
+| Node 22 (latest tested: 22.14.0) | **Verified** | 15/15 gates |
+| Node 24 (latest tested: 24.19.0) | **Verified** | 15/15 gates |
+| Node <= 22.2 | **Not supported** | boundary proved — see below |
+| Node 20 | **Not supported** | below the floor; EOL April 2026 |
+| Node 18 | **Not supported** | below the floor; EOL April 2025 |
 
-`package.json` declares `engines.node: ">=22.3.0"`, and **every version in that
-range is executed by CI** (`.github/workflows/ci.yml`, `node-matrix` job) via
-`node scripts/certify/node-matrix.mjs`. Per-version gates:
+Per-version gates, each reported individually — a version with any gate unrun is
+reported INCOMPLETE, never summarised as PASS:
 
-| Gate | Node 22 | Node 24 |
+| Gate | 22.3.0 | 22.14.0 | 24.19.0 |
+|---|---|---|---|
+| `npm install` · `npm run build` | PASS | PASS | PASS |
+| Source typecheck · test typecheck | PASS | PASS | PASS |
+| Unit/integration suite | PASS | PASS | PASS |
+| `npm pack` | PASS | PASS | PASS |
+| ESM import — all 15 subpaths | PASS | PASS | PASS |
+| CJS require — all 15 subpaths | PASS | PASS | PASS |
+| DOM-less router construction (RC-001) | PASS | PASS | PASS |
+| DOM-less memory-router navigation (NODE-001) | PASS | PASS | PASS |
+| Query clean exit (RC-002) | PASS | PASS | PASS |
+| SSR request isolation — ESM (NODE-002) | PASS | PASS | PASS |
+| SSR request isolation — CJS (NODE-002) | PASS | PASS | PASS |
+| SSR streaming smoke | PASS | PASS | PASS |
+| Promise-returning route component (RC-003) | PASS | PASS | PASS |
+
+### Why the floor is exactly 22.3.0
+
+Not an arbitrary version. SSR request isolation is built on
+`AsyncLocalStorage`, and under ESM the only synchronous way to load a builtin
+module is `process.getBuiltinModule` — **added in Node 22.3.0**. The pre-22.3
+fallback never worked in either module format: it looked for `require` in global
+scope, where it does not exist. Below 22.3 the ESM build cannot obtain ALS at
+all, so concurrent requests share one store — cross-request data bleed.
+
+The boundary was measured directly on official builds rather than inferred:
+
+| Node | `process.getBuiltinModule` | Request isolation |
 |---|---|---|
-| `npm install` | PASS | PASS |
-| `npm run build` | PASS | PASS |
-| Source typecheck | PASS | PASS |
-| Test typecheck | PASS (0 errors) | PASS (0 errors) |
-| Unit suite | PASS (4 383 tests) | PASS (4 383 tests) |
-| `npm pack` | PASS | PASS |
-| ESM import — all 15 subpaths | PASS | PASS |
-| CJS require — all 15 subpaths | PASS | PASS |
-| DOM-less router (RC-001, NODE-001) | PASS | PASS |
-| Query clean exit (RC-002) | PASS (141 ms) | PASS (132 ms) |
-| SSR isolation, CJS (NODE-002) | PASS | PASS |
-| SSR isolation, ESM (NODE-002) | PASS | PASS |
-| Promise-returning route component (RC-003) | PASS | PASS |
+| 22.2.0 | `undefined` | **UNSUPPORTED** — scopes shared |
+| 22.3.0 | `function` | **SUPPORTED** — scopes distinct |
 
-### Why the floor is 22.3.0
+Both probes genuinely interleaved two requests (`A:start B:start B:done
+A:resume`) before asserting, so the isolation result is a measurement rather
+than a vacuous pass. Reproduce with
+`node scripts/certify/node-probes/engine-floor.mjs` on any build;
+`tests/engine-floor.test.ts` pins the same capability in the normal suite.
 
-It was `>=18.0.0` and CI ran Node 20 only. Executing the full range for the
-first time found **NODE-002**: SSR request isolation depends on
-`AsyncLocalStorage`, which the runtime loads through
-`process.getBuiltinModule` — **added in Node 22.3**. The pre-22.3 fallback was
-broken (it looked for `require` in global scope, where it does not exist in
-either module format), so below 22.3 concurrent requests silently shared one
-store: cross-request data bleed.
+Nothing in the framework branches on a version string — detection is by
+capability. The version floor lives in package metadata and CI, not in runtime
+code.
 
-The CommonJS half is fixed and now isolates correctly on Node 18 through 24.
-The ESM half cannot be fixed in place — there is no synchronous way to load a
-builtin from ESM before `getBuiltinModule` existed, and a static
-`import "node:async_hooks"` would break every browser bundle.
+### Development environment
 
-Node 18 (EOL April 2025) and Node 20 (EOL April 2026) are both end-of-life and
-were the only versions failing any gate, so the floor was raised to the version
-that actually provides the mechanism. **This is a breaking change** for anyone
-on EOL Node.
+The framework runtime floor and the contributor toolchain are separate concerns.
+Certification scripts under `scripts/certify/**` are run with whatever Node the
+contributor or CI runner has and do **not** constrain the published runtime.
 
-On any runtime that reaches the fallback, `runInSSRContext` now emits a one-time
-warning rather than degrading silently.
+| Concern | Requirement |
+|---|---|
+| Framework runtime (published package) | Node >= 22.3.0 |
+| `@types/node` used to type-check source | `^22.20.1` — aligned to the runtime floor |
+| Development / certification environment | Any Node >= 22.3.0; matrix tooling additionally discovers other installed builds |
+
+`@types/node` is deliberately pinned to the 22 line rather than the newest
+available. Typing against Node 25 while claiming Node 22.3 lets TypeScript
+silently accept an API the minimum runtime does not have. The source uses a
+small Node surface — `node:async_hooks`, `node:fs`, `node:path`, and
+`process.env` / `versions` / `getBuiltinModule` / `cwd` — and compiles clean
+against Node 22 definitions.
 
 ## Server runtimes
 

@@ -13,12 +13,21 @@
 // Negative cases use `@ts-expect-error`, which fails the build if the error
 // STOPS occurring — so a constraint that is later relaxed cannot silently drift.
 import { describe, expect, it } from "vitest";
+import { action, copyOnClick } from "../../src/core/rendering/action";
+import { input } from "../../src/core/rendering/html";
 import { mutation } from "../../src/data/mutation";
 import { query } from "../../src/data/query";
+import type { defineComponent } from "../../src/patterns/componentProps";
+import type { validateProps } from "../../src/patterns/contracts";
+import type { withDefaults } from "../../src/patterns/hoc";
+import type { machine } from "../../src/patterns/machine";
 import { normalize, normalizedStore } from "../../src/performance/normalize";
+import type { createSharedScope } from "../../src/platform/microfrontend";
+import type { wasm } from "../../src/platform/wasm";
 import type { AsyncComponent, Component, LazyComponent, RouteDef } from "../../src/plugins/router";
 import { createMemoryRouter, createRouter } from "../../src/plugins/router";
 import { eventBus } from "../../src/ui/eventBus";
+import { bindField, form } from "../../src/ui/form";
 
 /** Compile-time assertion helper — no runtime cost, no new dependency. */
 const expectType = <T>(_value: T): void => undefined;
@@ -170,5 +179,82 @@ describe("public API type contracts", () => {
     void bad;
 
     router.destroy?.();
+  });
+  it("4.0 widened generics accept an interface (TYPE-002)", () => {
+    // Every one of these rejected an `interface` before 4.0, because the
+    // constraint was `Record<string, unknown>` and an interface has no implicit
+    // index signature. The runtime always accepted them. Widening to
+    // `T extends object` is backwards-compatible: it accepts strictly more, so
+    // nothing that compiled against 3.x stops compiling.
+    interface Ctx extends Record<string, unknown> {
+      count: number;
+    }
+    interface PlainCtx {
+      count: number;
+    }
+    interface Props {
+      title: string;
+    }
+    interface Shared {
+      user: string;
+    }
+    interface WasmExports {
+      add: (a: number, b: number) => number;
+    }
+
+    // The OLD style (an interface that explicitly extends the index signature)
+    // must keep working — this is the migration-compatibility half.
+    type StillWorks = typeof machine<"idle" | "busy", "go", Ctx>;
+    // The NEW style — a plain interface — is what used to fail.
+    type NowWorks = typeof machine<"idle" | "busy", "go", PlainCtx>;
+    type Components = typeof defineComponent<Props>;
+    type Scope = typeof createSharedScope<Shared>;
+    type Wasm = typeof wasm<WasmExports>;
+    type Defaults = typeof withDefaults<Props>;
+    type Contracts = typeof validateProps<Props>;
+
+    expectType<StillWorks | undefined>(undefined);
+    expectType<NowWorks | undefined>(undefined);
+    expectType<Components | undefined>(undefined);
+    expectType<Scope | undefined>(undefined);
+    expectType<Wasm | undefined>(undefined);
+    expectType<Defaults | undefined>(undefined);
+    expectType<Contracts | undefined>(undefined);
+    expect(true).toBe(true);
+  });
+
+  it("an action with an optional param can be applied without one (TYPE-009)", () => {
+    const el = document.createElement("div");
+
+    // `copyOnClick` is `ActionFn<(() => string) | undefined>` — its text getter
+    // is optional. Before 4.0 the two-argument overload demanded
+    // `ActionFn<void>`, so this did not compile despite being the documented
+    // usage and exactly what the runtime does.
+    action(el, copyOnClick);
+
+    // The explicit three-argument form keeps working — the overload is additive.
+    action(el, copyOnClick, undefined);
+    action(el, copyOnClick, () => "custom");
+
+    expect(el).toBeTruthy();
+  });
+
+  it("bindField preserves the field's value type (TYPE-010)", () => {
+    const f = form({ name: { initial: "ada" } });
+    const bound = bindField(f.fields.name);
+
+    // Was `() => unknown`, which forced a cast at every call site even though
+    // the helper documents itself as returning props ready for a tag factory.
+    expectType<() => string>(bound.value);
+
+    // And it now spreads onto a typed tag factory with no cast at all.
+    const el = input(bindField(f.fields.name));
+    expect(el.tagName).toBe("INPUT");
+
+    // Residual, deliberately not fixed: a `<select multiple>` binds `string[]`
+    // while `SelectProps.value` is `reactive<string>`. Modelling multi-select in
+    // the tag-factory prop types is a wider change. See final-pre-rc-findings.
+    const multi = form({ tags: { initial: ["a"] as string[] } });
+    expectType<() => string[]>(bindField(multi.fields.tags).value);
   });
 });

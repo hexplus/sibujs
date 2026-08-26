@@ -235,9 +235,7 @@ function idbPutMany<T>(db: IDBDatabase, store: string, items: T[]): Promise<void
  * store.data(); // [{ id: "1", text: "Buy milk", done: false }]
  * ```
  */
-export async function offlineStore<T extends Record<string, unknown>>(
-  options: OfflineStoreOptions<T>,
-): Promise<OfflineStore<T>> {
+export async function offlineStore<T extends object>(options: OfflineStoreOptions<T>): Promise<OfflineStore<T>> {
   const { name, version = 1, keyPath = "id", autoSync = true } = options;
 
   const db = await openDB(name, version, keyPath);

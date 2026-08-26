@@ -5,11 +5,7 @@ import { stripUnsafeKeys } from "../utils/guards";
 // STATE MACHINE
 // ============================================================================
 
-export interface MachineConfig<
-  S extends string,
-  E extends string,
-  C extends Record<string, unknown> = Record<string, unknown>,
-> {
+export interface MachineConfig<S extends string, E extends string, C extends object = Record<string, unknown>> {
   initial: S;
   context?: C;
   states: {
@@ -29,7 +25,7 @@ export interface MachineConfig<
   };
 }
 
-export interface MachineReturn<S extends string, E extends string, C extends Record<string, unknown>> {
+export interface MachineReturn<S extends string, E extends string, C extends object> {
   state: () => S;
   context: () => C;
   send: (event: E) => void;
@@ -40,11 +36,9 @@ export interface MachineReturn<S extends string, E extends string, C extends Rec
 /**
  * machine creates a finite state machine with states, events, guards, and actions.
  */
-export function machine<
-  S extends string,
-  E extends string,
-  C extends Record<string, unknown> = Record<string, unknown>,
->(config: MachineConfig<S, E, C>): MachineReturn<S, E, C> {
+export function machine<S extends string, E extends string, C extends object = Record<string, unknown>>(
+  config: MachineConfig<S, E, C>,
+): MachineReturn<S, E, C> {
   const [state, setState] = signal<S>(config.initial);
   const [context, setContext] = signal<C>((config.context || {}) as C);
 

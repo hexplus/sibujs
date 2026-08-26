@@ -77,7 +77,7 @@ export function normalizedStore<T extends object>(schema: NormalizedSchema): Nor
   });
 
   // `idKey` is a runtime string, so reading it off `T` is unchecked either way —
-  // the previous `T extends Record<string, unknown>` constraint did not make it
+  // the previous `T extends object` constraint did not make it
   // sound, it only excluded entities declared as interfaces. The cast is local
   // and honest about that; the constraint now matches what callers may pass.
   const idOf = (entity: T): string => String((entity as Record<string, unknown>)[idKey]);

@@ -186,7 +186,7 @@ export function mockRouter(initialPath = "/"): {
 /**
  * Creates a mock store for testing.
  */
-export function mockStore<T extends Record<string, unknown>>(
+export function mockStore<T extends object>(
   initialState: T,
 ): {
   getState: () => T;

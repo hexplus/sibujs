@@ -6,7 +6,28 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [Unreleased] — targeting 4.0.0
+
+> **This release requires a major version bump.** The supported Node range moves
+> from `>=18.0.0` to `>=22.3.0`, which is a breaking compatibility change under
+> Semantic Versioning regardless of the source-level changes. Plan it as
+> **4.0.0**, entering real-world validation as **4.0.0-rc.1**. The version in
+> `package.json` is deliberately left at its current value — this repository
+> versions at release time, not in feature commits.
+
+### Migration to 4.0
+
+**Upgrade Node before upgrading SibuJS.** Node 18 and Node 20 are not supported
+by 4.0 and are both already end-of-life (April 2025 and April 2026). Run Node
+22.3.0 or newer.
+
+Nothing else in your application needs to change: no public API was removed or
+renamed, and no existing signature or behaviour that was already correct was
+altered. Four type declarations became *more* permissive (see Fixed below), so
+code that compiled against 3.x still compiles.
+
+If you cannot move off Node 18/20 yet, stay on 3.4.x. Note that SSR request
+isolation never actually worked there under ESM — see below.
 
 ### Breaking
 
@@ -59,6 +80,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 - The test suite and all 16 subpath entry files are now type-checked
   (`npm run typecheck:tests`), and both typechecks are CI gates. This went from
   130 errors to 0; the burn-down is what surfaced the four type fixes above.
+- `@types/node` aligned to `^22.20.1` (was `^25.5.0`) so the type definitions
+  match the supported runtime floor. Typing against Node 25 while claiming Node
+  22.3 lets TypeScript quietly accept an API the minimum runtime does not have.
+  The source uses a small Node surface (`node:async_hooks`, `node:fs`,
+  `node:path`, and four `process` members) and compiles clean against Node 22
+  definitions. Development tooling is unaffected — it runs on whatever Node the
+  contributor has.
 
 ---
 
