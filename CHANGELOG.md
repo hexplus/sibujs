@@ -160,6 +160,64 @@ discarded probe, so classification never costs a duplicate call.
   already been torn down. It renders once, then silently stops responding.
   Incoming nodes are now detached before the outgoing roots are disposed.
 
+#### Progressive enhancement and islands
+
+Setup is now a **transaction over framework-owned resources**: success commits
+lifecycle ownership, failure rolls back everything accumulated before the throw,
+disposal ends ownership, and a retry or remount starts clean. Full detail in
+`docs/architecture/enhancement-lifecycle.md` and
+`docs/hardening/enhance-islands-findings.md`.
+
+- **A throwing `enhance()` setup no longer leaves its bindings alive.** Teardowns
+  accumulated as the setup called `ctx.text`/`ctx.attr`/`ctx.on`/`ctx.model`, but
+  only became reachable through the disposer built *after* setup returned. An
+  exception therefore escaped with every effect still subscribed and every
+  listener still attached, and no disposer in existence anywhere that could stop
+  them — a permanent zombie driving the DOM on behalf of an enhancement that
+  failed. Setup now runs inside a transaction: accumulated resources are torn
+  down and the original error is rethrown unchanged. Rollback covers what is
+  registered through the context; work done outside it (`innerHTML` writes,
+  requests, global mutation) cannot be reversed generically, so register its undo
+  with `ctx.cleanup()`.
+- **Disposal restores the root to an enhanceable state.** `dispose()` released
+  every binding but left `data-sibu-enhanced="true"` behind, and `enhance()`
+  refuses any root carrying it — so a disposed element could never be enhanced
+  again. The marker now tracks *current ownership* rather than history: added on
+  commit, removed on disposal, never added for a failed setup. Removal is
+  ownership-checked, so a stale disposer replayed after the root has been
+  enhanced again cannot strip the newer generation's claim. Enhancing a root that
+  is **still active** remains refused, with the same dev warning.
+- **`enhanceAll()` rolls back earlier enhancements when a later setup fails.** It
+  mapped `enhance` over the matches, so a throw partway through escaped before
+  the aggregate disposer existed — leaving the caller with live enhancements and
+  no handle to release them. The collection is now one transaction, unwinding in
+  reverse creation order. A teardown that fails during rollback is reported and
+  skipped: it neither aborts the remaining rollback nor replaces the original
+  setup error.
+- **Island error isolation is now lifecycle isolation.** `mountIslands()` already
+  contained a failing island's *exception*; because of the bug above it did not
+  contain its *resources*. A failed island now leaves zero live bindings and zero
+  live listeners, is marked neither enhanced nor hydrated, and can be mounted
+  again once its setup is fixed. Siblings were, and remain, unaffected.
+- **An island torn down during its own setup is disposed instead of stranded.**
+  The asynchronous race (cleanup landing before a lazy chunk resolves) was
+  already guarded; the synchronous one was not. If a setup reached the mount
+  cleanup, the disposer list was drained before that island's disposer existed,
+  and it was then pushed onto the drained list — leaving the island fully active
+  and unreachable. Teardown is re-checked after `enhance()` returns.
+- **`mountIslands()` cleanup releases the markup for remounting.** The same
+  server HTML can be mounted again across the `load`, `idle`, `visible`,
+  `interaction` and `media` strategies, activating a fresh generation with a
+  single set of bindings. Mounting twice *without* cleanup still skips islands
+  that are already active. `data-sibu-hydrated` is unchanged — it is hydration
+  provenance rather than ownership, and gates nothing.
+- **Repeated enhance/dispose cycles no longer accumulate node disposers.**
+  Reachable only now that roots are re-enhanceable: each `enhance()` registered a
+  node-level disposer that only `dispose(node)` ever cleared, so a long-lived
+  root retained one dead closure per generation. An internal
+  `unregisterDisposer()` releases it; the soak asserts live-binding counts return
+  to baseline across 10 000 cycles.
+
 #### Client router
 
 - **A superseded navigation can no longer commit.** Each navigation already
@@ -450,6 +508,17 @@ Behaviours that are deliberate but were easy to misread. Full detail lives in
   legitimately reconciles its own DOM range. It now says there is no Virtual DOM
   and no component-tree reconciliation, and that keyed collections reconcile only
   the range they own.
+- **`enhance()` rollback covers framework-owned resources only.** A failed setup
+  releases what was registered through the context — `ctx.on`, `ctx.text`,
+  `ctx.attr`, `ctx.classed`, `ctx.show`, `ctx.model`, `ctx.cleanup`, and a
+  cleanup returned from setup. Direct `innerHTML` writes, application-object
+  mutation, in-flight requests and other side effects performed outside those
+  helpers are not reversed, because they cannot be generically; register their
+  undo with `ctx.cleanup()` as setup proceeds.
+- **`data-sibu-enhanced` means "currently owns an active enhancement"**, not
+  "has ever been enhanced", and is not public API. `data-sibu-hydrated` is a
+  different kind of marker — hydration provenance, gating nothing — and is
+  deliberately *not* cleared on disposal.
 
 ### Testing
 

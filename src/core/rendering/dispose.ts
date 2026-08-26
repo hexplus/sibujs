@@ -22,6 +22,26 @@ export function registerDisposer(node: Node, teardown: () => void): void {
 }
 
 /**
+ * Drop a previously registered teardown for a node without running it.
+ *
+ * For owners that can be released independently of their node — an enhancement
+ * disposed while its server markup stays on the page, and possibly re-enhanced
+ * afterwards — the node-level entry would otherwise accumulate one dead closure
+ * per generation, since `dispose()` is the only thing that clears the map.
+ * The teardown is assumed to have already run (or to be deliberately abandoned);
+ * this only releases the reference.
+ */
+export function unregisterDisposer(node: Node, teardown: () => void): void {
+  const disposers = elementDisposers.get(node);
+  if (!disposers) return;
+  const index = disposers.indexOf(teardown);
+  if (index === -1) return;
+  disposers.splice(index, 1);
+  if (_isDev) activeBindingCount--;
+  if (disposers.length === 0) elementDisposers.delete(node);
+}
+
+/**
  * Run all registered teardowns for a node and its descendants,
  * cleaning up reactive subscriptions to prevent memory leaks.
  * Call this when removing elements from the DOM.

@@ -116,7 +116,7 @@ describe("island runtime — registerIsland + mountIslands", () => {
     expect(err).toHaveBeenCalledWith(expect.stringContaining("failed to load"), expect.any(Error));
   });
 
-  it("cleanup disposes mounted islands; re-mount is idempotent", async () => {
+  it("cleanup disposes mounted islands and releases them for remount", async () => {
     document.body.innerHTML = `<div data-sibu-island="modc"><b data-ref="n">0</b></div>`;
     const node = document.querySelector('[data-ref="n"]') as HTMLElement;
     const [n, setN] = signal(0);
@@ -131,13 +131,43 @@ describe("island runtime — registerIsland + mountIslands", () => {
     setN(9);
     expect(node.textContent).toBe("3"); // disposed → effect stopped
 
-    // Already-enhanced markers are skipped on a second mount (no double-wire).
+    // The enhancement marker tracks *active* ownership, so disposal releases it.
     const marker = document.querySelector('[data-sibu-island="modc"]') as HTMLElement;
-    expect(marker.getAttribute("data-sibu-enhanced")).toBe("true");
+    expect(marker.hasAttribute("data-sibu-enhanced")).toBe(false);
+
+    // …and the same DOM can be mounted again, with exactly one live binding.
     const stop2 = mountIslands();
     await flush();
+    expect(marker.getAttribute("data-sibu-enhanced")).toBe("true");
     setN(4);
-    expect(node.textContent).toBe("3"); // still not re-bound
+    expect(node.textContent).toBe("4"); // re-bound
     stop2();
+    setN(5);
+    expect(node.textContent).toBe("4"); // and released again
+  });
+
+  it("mounting twice without cleanup does not double-wire an active island", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    document.body.innerHTML = `<div data-sibu-island="modc"><b data-ref="n">0</b></div>`;
+    const node = document.querySelector('[data-ref="n"]') as HTMLElement;
+    const [n, setN] = signal(0);
+    let setups = 0;
+    registerIsland("modc", (ctx) => {
+      setups++;
+      ctx.text("@n", () => n());
+    });
+
+    const stop = mountIslands();
+    await flush();
+    const stop2 = mountIslands(); // active → must be skipped
+    await flush();
+
+    expect(setups).toBe(1);
+    setN(2);
+    expect(node.textContent).toBe("2"); // single binding
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("already enhanced"), expect.anything());
+
+    stop2();
+    stop();
   });
 });
