@@ -30,17 +30,54 @@
 import { isDev } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
-import { isEventHandlerAttr, sanitizeSrcset, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import {
+  isEventHandlerAttr,
+  sanitizeSrcset,
+  sanitizeStyleAttribute,
+  sanitizeUrl,
+  stripControlChars,
+} from "../utils/sanitize";
 
 /**
- * Sanitize a URL-bearing attribute value for SSR emission. `srcset` is a
- * comma/space-separated candidate list, not a single URL — running it through
- * `sanitizeUrl` returns the whole string unchanged (its scheme scan fails on
- * the list), letting blocked schemes survive. Route it through the candidate
- * parser instead, matching the client-side `tagFactory` behaviour.
+ * Attribute names whose SSR value carries a security policy. Anything outside
+ * this set is emitted as-is (after HTML escaping).
  */
-function sanitizeUrlAttr(name: string, value: string): string {
-  return name === "srcset" ? sanitizeSrcset(value) : sanitizeUrl(value);
+function isPolicyAttr(lowerName: string): boolean {
+  return lowerName === "style" || URL_ATTRS.has(lowerName);
+}
+
+/**
+ * Sanitize ONE attribute value for SSR emission. Returns `""` when the
+ * attribute must be dropped entirely.
+ *
+ * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES. There are three
+ * attribute serializers — `renderToString`, the `renderToStream` generator, and
+ * `buildAttrString` (which feeds `renderToDocument`'s `<meta>`, `<link>`, and
+ * `<body>` attributes). Each previously carried its own inline rules, and each
+ * covered URLs only. `style` was therefore emitted verbatim by all three, while
+ * the client's `tagFactory` filtered it — so the identical component was safe
+ * in the browser and an exfiltration vector from the server, `<body style="…">`
+ * included. Rendering target is not a security boundary; the policy has to be
+ * one function that every serializer calls.
+ *
+ * `srcset` is a comma/space-separated candidate list, not a single URL — running
+ * it through `sanitizeUrl` returns the whole string unchanged (its scheme scan
+ * fails on the list), letting blocked schemes survive. It goes through the
+ * candidate parser instead, matching client-side behaviour.
+ *
+ * `style` is a declaration list, so `sanitizeStyleAttribute` filters it
+ * per-declaration: safe declarations survive, dangerous ones are dropped. When
+ * nothing survives the result is `""` and the caller drops the attribute rather
+ * than emitting a `style=""` that advertises styling the element no longer has.
+ *
+ * Called BEFORE `escapeAttr`: sanitization reads and re-serializes CSS, so
+ * escaping first would feed it `&quot;` entities and hand back text that has to
+ * be escaped again.
+ */
+function sanitizeSsrAttributeValue(lowerName: string, value: string): string {
+  if (lowerName === "style") return sanitizeStyleAttribute(value);
+  if (lowerName === "srcset") return sanitizeSrcset(value);
+  return sanitizeUrl(value);
 }
 
 const _isDev = isDev();
@@ -169,8 +206,8 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;
 
-    if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrlAttr(lowerName, value);
+    if (isPolicyAttr(lowerName)) {
+      value = sanitizeSsrAttributeValue(lowerName, value);
       if (!value) continue; // sanitizer returned empty — drop the attribute entirely
     }
 
@@ -474,8 +511,8 @@ function buildAttrString(
     if (!allowEventHandlers && isEventHandlerAttr(rawKey)) continue;
     const lowerKey = rawKey.toLowerCase();
     let value = String(attrs[rawKey]);
-    if (URL_ATTRS.has(lowerKey)) {
-      value = sanitizeUrlAttr(lowerKey, value);
+    if (isPolicyAttr(lowerKey)) {
+      value = sanitizeSsrAttributeValue(lowerKey, value);
       if (!value) continue;
     }
     out.push(`${rawKey}="${escapeAttr(value)}"`);
@@ -650,8 +687,8 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;
-    if (URL_ATTRS.has(lowerName)) {
-      value = sanitizeUrlAttr(lowerName, value);
+    if (isPolicyAttr(lowerName)) {
+      value = sanitizeSsrAttributeValue(lowerName, value);
       if (!value) continue;
     }
     openTag += ` ${rawName}="${escapeAttr(value)}"`;

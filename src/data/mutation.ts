@@ -124,11 +124,27 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
       return result;
     } catch (err) {
-      const errorObj = err instanceof Error ? err : new Error(String(err));
+      // CLASSIFY BEFORE NORMALIZING.
+      //
+      // Normalization is lossy: `new Error(String(err))` keeps a message and
+      // throws everything else away, `name` included. A cancellation carried on
+      // a non-Error — the plain `{ name: "AbortError" }` that `isAbortError`
+      // deliberately accepts, as produced by polyfills and by structured-cloned
+      // rejections — becomes `Error("[object Object]")` with `name === "Error"`.
+      // Classifying after that point can only ever see an ordinary failure, so
+      // the cancellation surfaced as a mutation error: `error()` set, `onError`
+      // fired, and a console warning from the fire-and-forget `mutate()` path.
+      //
+      // So the ORIGINAL thrown value is classified first, while its identity is
+      // still intact, and rethrown unchanged — an AbortError is already an
+      // Error-shaped rejection reason and wrapping it would destroy the very
+      // identity every downstream `isAbortError` check depends on.
+      //
+      // A mutation aborted by reset()/supersession is intentional, so it must
+      // not surface as an error state at all.
+      if (isAbortError(err)) throw err;
 
-      // A mutation aborted by reset()/supersession must not surface as an
-      // error state — it was intentionally cancelled.
-      if (isAbortError(errorObj)) throw errorObj;
+      const errorObj = err instanceof Error ? err : new Error(String(err));
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;

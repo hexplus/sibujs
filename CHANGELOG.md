@@ -18,12 +18,29 @@ This project follows [Semantic Versioning](https://semver.org/).
   event — so cancellation was delayed by the entire delay, up to `maxDelay`.
   This affected every primitive built on `withRetry()` (`resource`, `query`,
   `infiniteQuery`, `mutation` and data loaders).
+
+  Cancellation is now judged on both halves of the evidence: the signal, and the
+  rejected value. An operation cancelled by a signal `withRetry()` does not hold
+  — an inner `fetch` with its own controller, a timeout wrapper, a caller that
+  composed its own abort — rejects with an `AbortError` while our signal reads
+  as healthy, and was retried like any other failure. Such a rejection now
+  bypasses `shouldRetry`, `onRetry` and the backoff, and propagates unchanged so
+  the caller keeps their own error instance.
 - **Data primitives now share one `AbortError` classifier.** `resource` and
   `mutation` recognised only `DOMException`, while `query` and `infiniteQuery`
   accepted any object named `AbortError`. A fetcher rejecting with an ordinary
   `Error` named `AbortError` was therefore silently ignored by two primitives
   and stored as application error state by the other two. Classification is by
   `name`, never by message: `new Error("AbortError")` remains a real failure.
+
+  Classification also runs *before* normalization now. `mutation()` wrapped the
+  thrown value in `new Error(String(err))` first, which keeps a message and
+  discards everything else — `name` included. A cancellation carried on a plain
+  object became `Error("[object Object]")` named `"Error"`, so the abort
+  surfaced as a mutation failure: `error()` set, `onError` called, and a console
+  warning from the fire-and-forget `mutate()` path. `mutateAsync()` rejects with
+  the original `AbortError` value; ordinary failures are still normalized to an
+  `Error`.
 - **Progressive island hydration is idempotent.** `hydrateIslands()` and
   `hydrateProgressively()` selected candidates without consulting
   `data-sibu-hydrated`, and a hydrated island deliberately keeps its
@@ -47,6 +64,26 @@ This project follows [Semantic Versioning](https://semver.org/).
   Two observable consequences: a `url()` in a string style is now dropped, as it
   already was in the object form; and string styles are re-serialized
   canonically by the CSS parser, so `"width:10px"` reads back as `width: 10px`.
+- **The CSS sanitizer understands every escape form, not just hex.** Blocked
+  constructs are matched against literal spellings (`url(`, `expression(`,
+  `@import`), which is only sound once the value has been reduced to what the
+  CSS parser sees. Only hex escapes (`\75 rl(…)`) were decoded, so the other two
+  productions of the escape grammar carried a payload straight through: simple
+  escapes, where `\` before any non-hex character *is* that character
+  (`u\rl(https://…)`), and escaped newlines, where `\` and the newline both
+  vanish. Every browser resolves all three spellings identically; now so does
+  the sanitizer, for object, string and reactive styles alike. Decoding is used
+  only to inspect — the value written to CSS is still the author's original
+  text, so legitimate escapes such as `content: "\201C"` are unchanged.
+- **Server-rendered `style` attributes are sanitized.** `renderToString()`,
+  `renderToStream()` (and so `renderToReadableStream()` /
+  `renderToSuspenseStream()`) and `renderToDocument()` each carried their own
+  inline attribute rules covering URLs only, so `style` was emitted verbatim —
+  including into `<body style="…">` via `bodyAttrs`, and into `<meta>` / `<link>`
+  entries. The same component was filtered in the browser and an exfiltration
+  vector from the server. All three serializers now apply one shared policy,
+  before HTML escaping, and drop the attribute entirely when no declaration
+  survives rather than emitting an empty `style=""`.
 
 
 A correctness and release-hardening pass over the reactive core, keyed lists,

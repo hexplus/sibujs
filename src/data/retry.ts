@@ -1,4 +1,4 @@
-import { createAbortError } from "./abort";
+import { createAbortError, isAbortError } from "./abort";
 
 /**
  * Configurable retry strategies for async operations.
@@ -102,6 +102,24 @@ export async function withRetry<T>(
       // is what stops a cancelled request from reporting a retry it will never
       // perform, and from waiting out a backoff nobody is waiting for.
       if (signal?.aborted) throw createAbortError();
+
+      // THE SIGNAL IS ONLY HALF THE EVIDENCE.
+      //
+      // Cancellation reaches `withRetry` two ways, and the signal we were handed
+      // sees only one of them. An operation can be cancelled by a signal we do
+      // not hold — an inner `fetch` with its own controller, a timeout wrapper,
+      // a caller that composed its own abort — and the only trace that reaches
+      // us is the AbortError it rejected with. Judging cancellation solely by
+      // `signal?.aborted` therefore treats those as ordinary failures: it asks
+      // `shouldRetry`, fires `onRetry`, schedules a backoff, and re-attempts an
+      // operation whose caller already walked away.
+      //
+      // The rejected VALUE is the other half of the evidence, so it is consulted
+      // here — still ahead of `shouldRetry` and `onRetry`, so a cancelled
+      // operation reaches none of the retry machinery. The original value is
+      // rethrown rather than a fresh AbortError: it is already an AbortError,
+      // and the caller's own instance carries their context.
+      if (isAbortError(error)) throw error;
 
       if (attempt >= maxRetries || !shouldRetry(error, attempt)) throw error;
       const delay = calculateDelay(attempt, strategy, baseDelay, maxDelay, jitter);

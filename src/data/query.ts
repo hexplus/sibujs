@@ -354,6 +354,10 @@ export function query<T>(
     } catch (err) {
       // Synchronous throw from fetcher / withRetry — keep state consistent.
       setIsFetching(false);
+      // Classify before normalizing, like the async path below: normalization
+      // discards `name`, and a cancellation that loses its name is
+      // indistinguishable from an application failure.
+      if (isAbortError(err)) return;
       const errorObj = err instanceof Error ? err : new Error(String(err));
       entry.error = errorObj;
       runCallback("query onError", () => onError?.(errorObj));
