@@ -141,6 +141,92 @@ boundary, like `href="java${x}:…"`.
 developer typed literally into their own source is developer-controlled, at the
 same trust level as hand-written markup. Only expressions are runtime data.
 
+## `<meta http-equiv="refresh">` is parsed, not pattern-matched
+
+A refresh directive is a grammar, and the browser's parser accepts many
+spellings of it. The previous policy asked whether the lower-cased `content`
+*contained* `url=javascript:` (plus three sibling schemes), which recognises
+exactly one. Every one of these is a live redirect the substring never saw:
+
+```text
+0; url = javascript:alert(1)        whitespace around the separator and `=`
+0;URL=JAVASCRIPT:alert(1)           mixed-case key and scheme
+0;url='javascript:alert(1)'         quoted destination
+0;	url	=	javascript:alert(1)     tabs
+```
+
+Pattern-matching a grammar is a losing position — each new spelling needs a new
+pattern, and the attacker picks the spelling. So `utils/metaRefresh.ts` extracts
+the destination structurally and hands it to `sanitizeUrl()`, the same protocol
+authority every other URL sink uses. Adding a scheme to that allowlist now fixes
+this sink too, automatically.
+
+The grammar accepted (whitespace runs optional, `url` case-insensitive):
+
+```text
+content := WS* delay WS*
+         | WS* delay WS* ";" WS* "url" WS* "=" WS* dest WS*
+delay   := DIGIT+
+dest    := "'"…"'" | '"'…'"' | unquoted-run
+```
+
+**This is deliberately stricter than a browser, and does not claim parity with
+the WHATWG algorithm.** Real browsers recover aggressively from malformed
+directives and differ from one another at the edges; reproducing that would mean
+matching recovery behaviour we cannot verify across the whole support floor.
+Anything this parser cannot read *unambiguously* is refused instead — an
+unterminated quote, competing `url=` assignments, a non-numeric delay, trailing
+junk, an empty destination, a key that is not `url`. The cost is that a few
+odd-but-harmless directives are dropped; the benefit is that no unreadable
+directive is ever emitted on the strength of "no forbidden substring was found".
+
+The decision is a discriminated union — `not-refresh`, `delay-only`, `allowed`,
+`forbidden` — because callers act differently on each. A boolean forced
+"ignore me, I'm a description tag" and "drop this element" into one answer.
+
+### Duplicate case-insensitive names are rejected
+
+HTML attribute names are case-insensitive; JavaScript object keys are not, so
+this object is legal and was the bug:
+
+```ts
+{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", content: "0;url=javascript:…" }
+```
+
+A helper returning the *first* case-insensitive match validated `x-custom` while
+the DOM loop wrote both attributes and the later `HTTP-EQUIV` became effective.
+The verdict and the commit were about different entries.
+
+The rule is **rejection**, not precedence. Last-write-wins would also be sound if
+the validated value were provably the committed one, but rejection removes the
+class of bug rather than re-parameterising it — and duplicate casings in a meta
+entry are a mistake in every real case.
+
+### Reactive entries are committed as whole snapshots
+
+`Head()` used to create one effect per reactive *attribute*, so each write was
+judged alone. That lets the combination become dangerous while no individual
+write ever looks wrong:
+
+```ts
+{ "http-equiv": () => equiv(), content: "0;url=javascript:alert(1)" }
+```
+
+With `equiv()` initially `"x-custom"` the entry is not a refresh, so the static
+content is accepted. `setEquiv("refresh")` re-runs only the `http-equiv` effect —
+the content is never revalidated, and the element is now a live redirect nothing
+ever approved.
+
+Security decisions are properties of the whole entry, so the whole entry is the
+unit of work: one effect per entry resolves every attribute, folds duplicate
+casings, validates the assembled snapshot, and only then reconciles the element.
+A snapshot that fails validation **detaches** the element rather than blanking an
+attribute — a detached element must never be counted as an active directive, and
+a partially-cleared one is still live markup.
+
+Client, `renderToDocument`, and router SSR all call the same policy, so the same
+input receives the same verdict on both sides.
+
 ## Security is a postcondition, not a promise about this write
 
 The rule the primitive enforces is about the **attribute**, not about the call:

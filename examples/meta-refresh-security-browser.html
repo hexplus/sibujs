@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS meta-refresh security — browser fixture</title>
+  </head>
+  <body>
+    <!-- Only a real engine honours a refresh directive, so this is where
+         "the entry was removed before the browser could act" is actually
+         provable. jsdom never navigates.
+
+         Synchronization is deliberate, not a fixed delay:
+
+           - a BENIGN control performs a real same-origin refresh, and the test
+             waits on waitForURL(). That proves the probe works AND establishes
+             an upper bound on how long this engine takes to honour a directive.
+           - the dangerous target is same-origin and its request is counted by a
+             route interceptor in the test, so a navigation cannot pass silently.
+
+         The dangerous destination is a local path, never an external host. -->
+
+    <section id="log"></section>
+
+    <script type="module">
+      // `Head` ships from `sibujs/extras`; signals and dispose from the root.
+      import { signal, dispose } from "../dist/index.js";
+      import { Head } from "../dist/extras.js";
+
+      const params = new URLSearchParams(location.search);
+      window.__arrivedAt = params.get("arrived") || null;
+
+      let head = null;
+
+      const liveRefresh = () =>
+        Array.from(document.head.querySelectorAll("meta")).find(
+          (m) => (m.getAttribute("http-equiv") || "").trim().toLowerCase() === "refresh",
+        ) || null;
+
+      const snapshot = () => {
+        const el = liveRefresh();
+        return {
+          present: el !== null,
+          content: el ? el.getAttribute("content") : null,
+          url: location.pathname + location.search,
+        };
+      };
+
+      const api = {
+        /** Reactive http-equiv flipping onto STATIC dangerous content. */
+        dangerousTransition() {
+          const [equiv, setEquiv] = signal("x-custom");
+          head = Head({
+            meta: [{ "http-equiv": () => equiv(), content: "0;url=javascript:window.__XSS=1" }],
+          });
+          const before = snapshot();
+          // Synchronous effects: the transition completes before this returns.
+          setEquiv("refresh");
+          return { before, after: snapshot() };
+        },
+
+        /**
+         * A MALFORMED directive whose first assignment points at a protected
+         * local path.
+         *
+         * A relative path is a perfectly legal refresh destination, so this is
+         * not about protocol policy — it is about the conservative rule for
+         * ambiguous syntax. Two competing `url=` assignments have no single
+         * defensible reading, so the whole directive is dropped. A permissive
+         * implementation that took the first assignment would navigate, and the
+         * route interceptor in the test would see the request.
+         */
+        malformedNavigationTransition() {
+          const [equiv, setEquiv] = signal("x-custom");
+          head = Head({
+            meta: [
+              {
+                "http-equiv": () => equiv(),
+                content: "0;url=/examples/should-never-load.html;url=javascript:window.__XSS=1",
+              },
+            ],
+          });
+          setEquiv("refresh");
+          return snapshot();
+        },
+
+        /** A whitespace/quoted spelling the old substring check missed. */
+        obfuscatedTransition() {
+          const [content, setContent] = signal("5;url=/examples/meta-refresh-security-browser.html");
+          head = Head({ meta: [{ "http-equiv": "refresh", content: () => content() }] });
+          const before = snapshot();
+          setContent("0; URL = 'javascript:window.__XSS=1'");
+          return { before, after: snapshot() };
+        },
+
+        /** Benign control: a REAL same-origin refresh the browser must honour. */
+        benignRefresh() {
+          head = Head({
+            meta: [
+              {
+                "http-equiv": "refresh",
+                content: "0;url=/examples/meta-refresh-security-browser.html?arrived=1",
+              },
+            ],
+          });
+          return snapshot();
+        },
+
+        arrivedAt() {
+          return window.__arrivedAt;
+        },
+        xss() {
+          return window.__XSS === true;
+        },
+        cleanup() {
+          if (head) dispose(head);
+          head = null;
+          for (const m of Array.from(document.head.querySelectorAll("meta[http-equiv]"))) m.remove();
+          return true;
+        },
+      };
+
+      window.__XSS = false;
+      window.__t = api;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

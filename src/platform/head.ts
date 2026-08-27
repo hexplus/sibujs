@@ -1,7 +1,8 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
-import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import { normalizeMetaAttributes, resolveMetaRefreshPolicy } from "../utils/metaRefresh";
+import { isEventHandlerAttr, sanitizeUrl } from "../utils/sanitize";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
@@ -19,46 +20,12 @@ import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/san
 // it through `sanitizeUrl` would strip legitimate whitespace. The one
 // truly dangerous `content` form — `<meta http-equiv="refresh"
 // content="0;url=javascript:...">` — is filtered separately by
-// `isDangerousMetaRefresh()` at the meta-tag writing site.
+// `resolveMetaRefreshPolicy()` — the shared client/SSR policy — which parses
+// the directive structurally instead of substring-matching it.
 const HEAD_URL_ATTRS = new Set(["href", "src"]);
 function sanitizeHeadAttr(key: string, value: string): string {
   if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);
   return value;
-}
-
-/**
- * Detect `<meta http-equiv="refresh" content="0;url=javascript:...">`.
- * Returns true if the meta props describe a refresh directive whose URL
- * uses a dangerous protocol.
- */
-function isDangerousRefreshContent(content: string): boolean {
-  const normalized = stripControlChars(content).toLowerCase();
-  return (
-    normalized.includes("url=javascript:") ||
-    normalized.includes("url=data:") ||
-    normalized.includes("url=vbscript:") ||
-    normalized.includes("url=blob:")
-  );
-}
-
-/** Case-insensitive lookup of a meta attribute value (HTML attr names are CI). */
-function getMetaAttr(
-  metaProps: Record<string, string | (() => string)>,
-  name: string,
-): string | (() => string) | undefined {
-  for (const k in metaProps) {
-    if (k.toLowerCase() === name) return metaProps[k];
-  }
-  return undefined;
-}
-
-function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
-  const httpEquiv = getMetaAttr(metaProps, "http-equiv");
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = getMetaAttr(metaProps, "content");
-  if (typeof content !== "string") return false;
-  return isDangerousRefreshContent(content);
 }
 
 /** Strict attribute-name validation — blocks injection via crafted keys. */
@@ -84,6 +51,99 @@ function escapeScriptJsonLocal(json: string): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
+/**
+ * Render ONE meta entry, transactionally.
+ *
+ * WHY ONE EFFECT PER ENTRY
+ * ------------------------
+ * The previous implementation created one effect per reactive ATTRIBUTE, so
+ * every write was judged on its own. That lets the combination become dangerous
+ * while no individual write ever looks wrong:
+ *
+ *     { "http-equiv": () => equiv(), content: "0;url=javascript:alert(1)" }
+ *
+ * With `equiv()` initially `"x-custom"` the entry is not a refresh directive, so
+ * the static content is accepted. `setEquiv("refresh")` then re-runs only the
+ * `http-equiv` effect — the content is never revalidated, and the element is now
+ * a live redirect that nothing ever approved.
+ *
+ * Security decisions are properties of the WHOLE entry, so the whole entry is
+ * the unit of work: one effect resolves every attribute, validates the assembled
+ * snapshot, and only then reconciles the element. Nothing is committed on the
+ * strength of a verdict about a different snapshot.
+ *
+ * Returns a teardown that stops the effect and removes the element.
+ */
+function applyMetaEntry(
+  metaProps: Record<string, string | (() => string)>,
+  managedElements: HTMLElement[],
+): () => void {
+  const el = document.createElement("meta");
+  let attached = false;
+
+  const attach = (): void => {
+    if (attached) return;
+    document.head.appendChild(el);
+    managedElements.push(el);
+    attached = true;
+  };
+
+  const detach = (): void => {
+    if (!attached) return;
+    el.remove();
+    const index = managedElements.indexOf(el);
+    if (index !== -1) managedElements.splice(index, 1);
+    attached = false;
+  };
+
+  const stopEffect = effect(() => {
+    // 1. Resolve EVERY attribute — static and reactive — into one snapshot.
+    //    Reading all getters here is also what subscribes this single effect to
+    //    all of them, so any change re-runs the whole validation.
+    const resolved: Record<string, string> = {};
+    for (const [key, value] of Object.entries(metaProps)) {
+      if (!isSafeHeadAttr(key)) continue;
+      resolved[key] = typeof value === "function" ? String((value as () => string)()) : String(value);
+    }
+
+    // 2. Fold case-insensitive duplicates. `null` means the entry carries two
+    //    spellings of one attribute, where the value validated would not be the
+    //    value the browser honours — so the entry is refused outright.
+    const normalized = normalizeMetaAttributes(resolved);
+    if (normalized === null) {
+      detach();
+      return;
+    }
+
+    // 3. Judge the assembled snapshot, never a partial one.
+    if (resolveMetaRefreshPolicy(normalized).kind === "forbidden") {
+      // Detach rather than merely skipping the write: an element already in the
+      // head would otherwise stay live with its previous — now unapproved —
+      // attributes, and a detached element must not be counted as active.
+      detach();
+      return;
+    }
+
+    // 4. Reconcile from the validated snapshot: drop attributes that no longer
+    //    exist, then write the ones that do. Append-only `setAttribute` would
+    //    strand a removed attribute on the element.
+    for (const existing of Array.from(el.attributes)) {
+      if (!(existing.name in resolved)) el.removeAttribute(existing.name);
+    }
+    for (const [key, value] of Object.entries(resolved)) {
+      const safe = sanitizeHeadAttr(key, value);
+      if (el.getAttribute(key) !== safe) el.setAttribute(key, safe);
+    }
+
+    attach();
+  });
+
+  return () => {
+    stopEffect();
+    detach();
+  };
+}
+
 interface HeadProps {
   title?: string | (() => string);
   meta?: Record<string, string | (() => string)>[];
@@ -94,6 +154,14 @@ interface HeadProps {
 
 /**
  * Head() manages document <head> tags reactively.
+ *
+ * META SECURITY: each meta entry is committed TRANSACTIONALLY. All of its
+ * attributes — static and reactive — are resolved into one snapshot, duplicate
+ * case-insensitive names are rejected, and the assembled snapshot is validated
+ * against the shared meta-refresh policy before anything reaches the DOM. A
+ * snapshot that fails validation detaches the element entirely rather than
+ * blanking an attribute, so a dangerous `http-equiv`/`content` pair can never be
+ * live. See `utils/metaRefresh.ts`; the same policy governs SSR.
  * Supports dynamic title, meta tags, link tags, and structured data.
  * Each instance tracks its own elements and effects for independent cleanup.
  */
@@ -139,42 +207,11 @@ export function Head(props: HeadProps): Comment {
       }
     }
 
-    // Meta tags — keys validated, URL-bearing values sanitized, and
-    // dangerous `http-equiv="refresh"` directives dropped entirely.
+    // Meta tags — each entry is committed TRANSACTIONALLY. See `applyMetaEntry`.
     if (props.meta) {
       for (const metaProps of props.meta) {
-        if (isDangerousMetaRefresh(metaProps)) continue;
-        // A `http-equiv="refresh"` meta with a reactive (or function) content
-        // can carry a `javascript:`/`data:` redirect that the static guard
-        // above never saw. `http-equiv` itself may be reactive, so resolve it
-        // freshly each time `content` is written rather than caching a verdict
-        // that could desync if http-equiv later becomes "refresh".
-        const httpEquiv = getMetaAttr(metaProps, "http-equiv");
-        const isRefreshNow = (): boolean => {
-          const eq = typeof httpEquiv === "function" ? (httpEquiv as () => string)() : httpEquiv;
-          return typeof eq === "string" && eq.toLowerCase() === "refresh";
-        };
-        const el = document.createElement("meta");
-        for (const [key, value] of Object.entries(metaProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          const isContent = key.toLowerCase() === "content";
-          if (typeof value === "function") {
-            const cleanupFn = effect(() => {
-              const resolved = (value as () => string)();
-              if (isContent && isRefreshNow() && isDangerousRefreshContent(resolved)) {
-                el.removeAttribute(key);
-                return;
-              }
-              el.setAttribute(key, sanitizeHeadAttr(key, resolved));
-            });
-            effectCleanups.push(cleanupFn);
-          } else {
-            if (isContent && isRefreshNow() && isDangerousRefreshContent(value)) continue;
-            el.setAttribute(key, sanitizeHeadAttr(key, value));
-          }
-        }
-        document.head.appendChild(el);
-        managedElements.push(el);
+        const stop = applyMetaEntry(metaProps, managedElements);
+        effectCleanups.push(stop);
       }
     }
 

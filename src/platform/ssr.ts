@@ -30,13 +30,13 @@
 import { isDev } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
+import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import {
   isEventHandlerAttr,
   isHtmlContentAttribute,
   sanitizeSrcset,
   sanitizeStyleAttribute,
   sanitizeUrl,
-  stripControlChars,
 } from "../utils/sanitize";
 
 /**
@@ -542,32 +542,20 @@ function buildAttrString(
 }
 
 /**
- * Detect `<meta http-equiv="refresh" content="0;url=javascript:...">`.
- * Returns true if the props describe a refresh directive whose URL uses
- * a dangerous protocol — in which case the entire meta entry must be
- * dropped to avoid an XSS vector via the browser refresh mechanism.
+ * Should this meta entry be dropped entirely?
+ *
+ * Delegates to the SHARED meta-refresh policy. This used to be a private copy
+ * of four `includes()` checks that happened to match the client's private copy
+ * — two implementations of one rule, so a fix to either would silently diverge
+ * from the other. The exported name is kept for back-compat; the policy is no
+ * longer local.
+ *
+ * Returns true for a forbidden refresh directive AND for an entry carrying
+ * duplicate case-insensitive attribute names, since there the value validated
+ * would not be the value the browser ends up honouring.
  */
 export function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
-  // HTML attribute names are case-insensitive, so look up http-equiv/content
-  // case-insensitively — otherwise `HTTP-EQUIV`/`CONTENT` bypass the guard
-  // while the browser still honors the refresh directive.
-  let httpEquiv: string | undefined;
-  let content: string | undefined;
-  for (const k in metaProps) {
-    const lk = k.toLowerCase();
-    if (lk === "http-equiv") httpEquiv = metaProps[k];
-    else if (lk === "content") content = metaProps[k];
-  }
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  if (typeof content !== "string") return false;
-  const normalized = stripControlChars(content).toLowerCase();
-  return (
-    normalized.includes("url=javascript:") ||
-    normalized.includes("url=data:") ||
-    normalized.includes("url=vbscript:") ||
-    normalized.includes("url=blob:")
-  );
+  return isForbiddenMetaEntry(metaProps);
 }
 
 /**

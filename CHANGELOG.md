@@ -10,6 +10,39 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **Meta-refresh directives are structurally parsed, and client/SSR share one
+  policy.** Dangerous destinations were detected by asking whether the
+  lower-cased `content` contained `url=javascript:` (plus three sibling
+  schemes). That recognises one spelling of a grammar the browser accepts in
+  many: `0; url = javascript:…`, `0;URL=JAVASCRIPT:…`, `0;url='javascript:…'`,
+  and tab-separated forms all produced a live redirect the check never saw.
+
+  The destination is now extracted by a parser and handed to `sanitizeUrl()` —
+  the same protocol authority every other URL sink uses — instead of being
+  pattern-matched. Directives the parser cannot read unambiguously (unterminated
+  quotes, competing `url=` assignments, non-numeric delays, trailing junk, empty
+  destinations) are dropped rather than emitted on the basis that no forbidden
+  substring appeared. This is deliberately stricter than a browser and does not
+  claim parity with the WHATWG algorithm.
+
+  `head.ts` and `ssr.ts` previously carried separate copies of the rule, so a fix
+  to either would have diverged from the other; both now call
+  `utils/metaRefresh.ts`, as does router SSR.
+
+- **Reactive `Head()` meta entries are validated as complete snapshots.** One
+  effect per reactive *attribute* meant each write was judged alone, so a
+  reactive `http-equiv` flipping to `"refresh"` could activate static `content`
+  that had been accepted only because the entry was not a refresh at the time.
+  There is now one effect per entry: it resolves every attribute, validates the
+  assembled snapshot, and only then reconciles the element — and a snapshot that
+  fails validation detaches the element rather than blanking one attribute.
+
+- **Duplicate case-insensitive attribute names in a meta entry are rejected.**
+  `{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", … }` is legal
+  JavaScript; a first-match lookup validated one spelling while the DOM committed
+  the other. Rejection was chosen over last-write-wins because it removes the
+  class of bug rather than re-parameterising it.
+
 - **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
   The shared attribute policy classified attributes into event handlers, URLs,
   `srcset`, `style`, and "everything else, which `setAttribute` stores as inert

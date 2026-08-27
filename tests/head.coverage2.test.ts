@@ -82,17 +82,24 @@ describe("Head (coverage2)", () => {
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
-  it("removes reactive content when it becomes a dangerous refresh url", () => {
+  it("removes the whole entry when reactive content becomes a dangerous refresh url", () => {
     const [content, setContent] = signal("5;url=https://ok");
     Head({
       meta: [{ "http-equiv": "refresh", content: () => content() }],
     });
-    const meta = document.head.querySelector('meta[http-equiv="refresh"]');
-    expect(meta?.getAttribute("content")).toBe("5;url=https://ok");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')?.getAttribute("content")).toBe("5;url=https://ok");
 
-    // Now flip it to a dangerous value -> the effect removes the content attr
     setContent("0;url=javascript:alert(1)");
-    expect(meta?.getAttribute("content")).toBeNull();
+
+    // The entry is now DETACHED, not merely blanked. Blanking `content` while
+    // leaving `http-equiv="refresh"` in the head was the previous mitigation;
+    // entries are now committed and withdrawn as a whole, so a snapshot that
+    // fails validation leaves nothing live at all.
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
+
+    // …and it comes back when the value is safe again.
+    setContent("7;url=/next");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')?.getAttribute("content")).toBe("7;url=/next");
   });
 
   it("writes reactive non-refresh meta content normally", () => {
