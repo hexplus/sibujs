@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS srcdoc / dynamic-style security — browser fixture</title>
+  </head>
+  <body>
+    <!-- These two properties can only be proved by a real engine.
+
+         jsdom never PARSES a srcdoc value as a document and never executes the
+         scripts inside it, so "the attribute is absent" is the only thing it can
+         check. Here the payload actively tries to set a marker and postMessage
+         to the parent, so a pass means the document genuinely did not run.
+
+         Deliberately NO sandbox attribute: sandboxing would neutralise the
+         payload regardless of whether SibuJS removed the attribute, which is
+         exactly the evidence being sought. -->
+
+    <section id="frames"></section>
+    <section id="styles"></section>
+
+    <script type="module">
+      // Only genuinely PUBLIC writers, so this proves the shipped surface.
+      import { html, bindDynamic } from "../dist/index.js";
+      import { bindAttrs } from "../dist/extras.js";
+
+      window.__XSS = false;
+      window.__messages = [];
+      window.addEventListener("message", (e) => {
+        if (e.data && e.data.sibuXss) window.__messages.push(e.data);
+      });
+
+      // A payload that reports execution two independent ways.
+      const PAYLOAD =
+        "<script>" +
+        "parent.__XSS = true;" +
+        "parent.postMessage({ sibuXss: true }, '*');" +
+        "<\/script>";
+
+      const frames = document.getElementById("frames");
+      const styles = document.getElementById("styles");
+
+      const api = {
+        reset() {
+          window.__XSS = false;
+          window.__messages.length = 0;
+          frames.replaceChildren();
+          styles.replaceChildren();
+          return true;
+        },
+
+        /** Build an iframe through the html tagged template, then attach it. */
+        viaHtmlTemplate() {
+          const frame = html`<iframe title="probe" srcdoc=${PAYLOAD}></iframe>`;
+          frames.appendChild(frame);
+          return {
+            hasSrcdoc: frame.hasAttribute("srcdoc"),
+            title: frame.getAttribute("title"),
+          };
+        },
+
+        /** bindAttrs over pre-existing server markup, mixed-case name. */
+        viaBindAttrs() {
+          const frame = document.createElement("iframe");
+          // Server-rendered markup already carrying a live document.
+          frame.setAttribute("srcdoc", PAYLOAD);
+          bindAttrs(frame, { SRCDOC: PAYLOAD });
+          frames.appendChild(frame);
+          return { hasSrcdoc: frame.hasAttribute("srcdoc") };
+        },
+
+        /** And through a reactive dynamic-name binding. */
+        viaBindDynamic() {
+          const frame = document.createElement("iframe");
+          frame.setAttribute("srcdoc", PAYLOAD);
+          bindDynamic(frame, "srcdoc", () => PAYLOAD);
+          frames.appendChild(frame);
+          return { hasSrcdoc: frame.hasAttribute("srcdoc") };
+        },
+
+        /** Control: an iframe that IS allowed to run proves the probe works. */
+        controlThatShouldExecute() {
+          const frame = document.createElement("iframe");
+          frame.setAttribute("title", "control");
+          // Set natively, bypassing SibuJS entirely.
+          frame.srcdoc = PAYLOAD;
+          frames.appendChild(frame);
+          return { hasSrcdoc: frame.hasAttribute("srcdoc") };
+        },
+
+        observed() {
+          return { xss: window.__XSS === true, messages: window.__messages.length };
+        },
+
+        /** Dynamic style through the html template, with a remote url(). */
+        dynamicStyle() {
+          const node = html`<div
+            style=${"color: rgb(0, 128, 0); background: url(https://attacker.example/leak.png); font-weight: bold"}
+          >
+            styled
+          </div>`;
+          styles.appendChild(node);
+          const computed = getComputedStyle(node);
+          return {
+            attr: node.getAttribute("style") || "",
+            color: computed.color,
+            fontWeight: computed.fontWeight,
+            backgroundImage: computed.backgroundImage,
+          };
+        },
+
+        /** Same, assembled from a mixed static + expression attribute. */
+        dynamicStyleMixed() {
+          const node = html`<div style="color: rgb(0, 0, 255);${"background: url(https://attacker.example/x.png)"}">
+            styled
+          </div>`;
+          styles.appendChild(node);
+          const computed = getComputedStyle(node);
+          return {
+            attr: node.getAttribute("style") || "",
+            color: computed.color,
+            backgroundImage: computed.backgroundImage,
+          };
+        },
+      };
+
+      window.__t = api;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

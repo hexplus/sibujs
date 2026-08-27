@@ -26,7 +26,7 @@
  */
 
 import { devWarn, isDev } from "../core/dev";
-import { isEventHandlerAttr, sanitizeAttributeString } from "./sanitize";
+import { isEventHandlerAttr, isHtmlContentAttribute, sanitizeAttributeString } from "./sanitize";
 
 const _isDev = isDev();
 
@@ -114,7 +114,10 @@ function namespaceFor(el: Element, name: string): string | null {
  *   - `value`/`checked` strings — IDL property when `syncValueProperty`.
  *   - everything else — `sanitizeAttributeString`, which applies the URL
  *     allowlist, the per-candidate `srcset` split, and the `style`
- *     declaration-list policy, then passes inert values through.
+ *     declaration-list policy, then passes inert values through. "Inert" is a
+ *     claim about the attributes that reach this branch, not about
+ *     `setAttribute` in general — `srcdoc` is refused above precisely because
+ *     the browser parses it rather than storing it.
  */
 export function setSafeAttribute(
   el: Element,
@@ -148,6 +151,22 @@ export function setSafeAttribute(
     if (ns) el.removeAttributeNS(ns, localName);
     else el.removeAttribute(name);
     return true;
+  }
+
+  if (isHtmlContentAttribute(name)) {
+    if (_isDev) {
+      devWarn(
+        `${options.label ?? "setSafeAttribute"}: refusing to set "${name}". The browser parses this ` +
+          "attribute as a nested HTML document, so a generic string value cannot be made safe — " +
+          "attribute escaping is undone before the parse. Build the frame's content another way.",
+      );
+    }
+    // RECONCILE, exactly as for `on*`: taking this slot means governing it, so
+    // a pre-existing document (from server markup or a third party) is removed
+    // rather than left live.
+    if (ns) el.removeAttributeNS(ns, localName);
+    else el.removeAttribute(name);
+    return false;
   }
 
   // HTML attribute names are case-insensitive, so the IDL decisions below must
