@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { devWarn, isDev } from "../core/dev";
+import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { sanitizeUrl } from "../utils/sanitize";
 
 const _isDev = isDev();
@@ -54,8 +55,10 @@ export class DOMPool {
 
     if (pool.length >= this.maxSize) return;
 
-    // Clean the element for reuse
-    element.innerHTML = "";
+    // Clean the element for reuse. Children go through the disposal-aware
+    // path: a pooled element that still carried live bindings in its subtree
+    // would hand those bindings to whatever renders into it next.
+    replaceChildrenSafely(element);
     element.className = "";
     element.removeAttribute("style");
     element.removeAttribute("id");

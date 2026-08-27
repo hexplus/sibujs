@@ -242,14 +242,25 @@ describe("each large list stress tests", () => {
     return { getItems, setItems, container };
   }
 
-  // Large-list cases assert CORRECTNESS, not throughput, so a default 5 s budget
-  // just makes them fail on a loaded machine. A sibling below already uses
-  // 15_000; the whole block is given the same headroom. (FLAKE-001)
+  // Large-list cases assert CORRECTNESS, not throughput, so a tight budget just
+  // makes them fail on a loaded or cold machine. (FLAKE-001)
+  //
+  // 15 s was still not enough headroom. These reconcile 10 000-item lists, and
+  // the number that matters is the COLD one: `certify:rc`'s Node matrix runs
+  // `npm install` + `npm run build` immediately before the suite, which evicts
+  // the OS file cache and the transform cache. Measured on the certification
+  // host, "reverses 10,000-item list" takes ~4 s warm but 13-18 s cold — so a
+  // 15 s watchdog sat directly on the boundary and failed the whole gate
+  // roughly half the time, on unmodified HEAD as readily as on a change.
+  //
+  // 45 s is chosen to be far from that boundary while still bounding a genuine
+  // hang: nothing here should ever approach it, and an infinite loop still
+  // fails rather than running forever.
   it("renders 10,000 items", () => {
     const { container } = setupList(10_000);
     expect(container.querySelectorAll("li").length).toBe(10_000);
     document.body.removeChild(container);
-  }, 15_000);
+  }, 45_000);
 
   it("appends 5,000 items to 5,000-item list", () => {
     const { setItems, container } = setupList(5_000);
@@ -258,7 +269,7 @@ describe("each large list stress tests", () => {
 
     expect(container.querySelectorAll("li").length).toBe(10_000);
     document.body.removeChild(container);
-  }, 15_000);
+  }, 45_000);
 
   it("removes all items from 10,000-item list", () => {
     const { setItems, container } = setupList(10_000);
@@ -266,7 +277,7 @@ describe("each large list stress tests", () => {
     setItems([]);
     expect(container.querySelectorAll("li").length).toBe(0);
     document.body.removeChild(container);
-  }, 15_000);
+  }, 45_000);
 
   it("reverses 10,000-item list", () => {
     const { setItems, container } = setupList(10_000);
@@ -278,7 +289,7 @@ describe("each large list stress tests", () => {
     expect(items[0].textContent).toBe("item-9999");
     expect(items[9_999].textContent).toBe("item-0");
     document.body.removeChild(container);
-  }, 15_000);
+  }, 45_000);
 
   it("rapid add/remove cycles (100 iterations)", () => {
     const { setItems, container } = setupList(100);

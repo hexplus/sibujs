@@ -3,18 +3,11 @@ import { reportError } from "../core/errors";
 // `isEventHandlerAttr` is the single shared `on*` guard — event-handler
 // attributes evaluate their value as JS via setAttribute, so the framework
 // refuses to bind them (use `on: { click: fn }`, which uses addEventListener).
-import { isEventHandlerAttr, sanitizeAttributeString } from "../utils/sanitize";
+import { isEventHandlerAttr } from "../utils/sanitize";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 import { reactiveBinding } from "./track";
 
 const _isDev = isDev();
-
-/**
- * Typed property setter — local helper to avoid `@ts-expect-error` at call
- * sites when assigning to dynamic IDL properties (checked, value, etc.).
- */
-function setProp(el: Element, key: string, val: unknown): void {
-  (el as unknown as Record<string, unknown>)[key] = val;
-}
 
 /**
  * Bind a reactive getter to an element attribute.
@@ -47,30 +40,11 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
       return;
     }
 
-    // Boolean values toggle the attribute presence (HTML boolean attribute semantics)
-    if (typeof value === "boolean") {
-      // For IDL properties like checked/disabled/selected, set the DOM property
-      // directly — setAttribute only changes the default, not the current state.
-      if (attr in el && (attr === "checked" || attr === "disabled" || attr === "selected")) {
-        setProp(el, attr, value);
-      } else if (value) {
-        el.setAttribute(attr, "");
-      } else {
-        el.removeAttribute(attr);
-      }
-      return;
-    }
-
-    const str = String(value);
-
-    // If binding an input value or checked state, update the property
-    if ((attr === "value" || attr === "checked") && attr in el) {
-      setProp(el, attr, attr === "checked" ? Boolean(value) : str);
-    } else {
-      // srcset gets per-candidate validation, URL attributes get protocol
-      // sanitization, everything else is safe via setAttribute (shared policy).
-      el.setAttribute(attr, sanitizeAttributeString(attr, str));
-    }
+    // One shared commit primitive: boolean/IDL semantics, srcset per-candidate
+    // validation, URL protocol allowlist, and the style declaration-list policy
+    // all live in `setSafeAttribute`, so this path can never drift from the
+    // static tag-factory path or the `bindAttrs` path.
+    setSafeAttribute(el, attr, value, { label: `bindAttribute("${attr}")` });
   }
 
   // Initial run + reactive updates. Re-tracks deps every run so a signal first
@@ -113,23 +87,18 @@ export function bindDynamic(
       return;
     }
 
-    // Block event handler attributes (onclick, onload, …) to prevent XSS via
-    // dynamic attribute-name injection (shared guard).
-    if (isEventHandlerAttr(name)) return;
-
-    // If the attribute name changed, remove the old one
+    // If the attribute name changed, remove the old one. Done BEFORE the
+    // commit so a refused name still clears the attribute it replaced rather
+    // than leaving the previous value stranded on the element.
     if (prevName !== null && prevName !== name) {
       el.removeAttribute(prevName);
+      prevName = null;
     }
 
-    const str = String(value);
-
-    // If binding an input value or checked state, update the property
-    if ((name === "value" || name === "checked") && name in el) {
-      setProp(el, name, name === "checked" ? Boolean(value) : str);
-    } else {
-      el.setAttribute(name, sanitizeAttributeString(name, str));
-    }
+    // Event-handler attribute names (onclick, onload, …) are refused inside the
+    // shared primitive — dynamic attribute-name injection is exactly the case
+    // it exists for.
+    if (!setSafeAttribute(el, name, value, { label: "bindDynamic" })) return;
 
     prevName = name;
   }

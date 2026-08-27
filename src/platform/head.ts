@@ -1,5 +1,6 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
 import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 // ============================================================================
@@ -114,15 +115,27 @@ export function Head(props: HeadProps): Comment {
   const apply = () => {
     cleanup();
 
-    // Title
+    // Title — a GLOBAL singleton, leased from the shared owner stack rather
+    // than assigned. Assigning meant a Head never gave the title back on
+    // dispose (the page kept a title belonging to an unmounted component) and
+    // that overlapping Heads/`title()` calls silently overwrote each other.
     if (props.title) {
       if (typeof props.title === "function") {
-        const cleanupFn = effect(() => {
-          document.title = (props.title as () => string)();
+        const getter = props.title as () => string;
+        let lease: ResourceLease<string> | null = null;
+        const stopEffect = effect(() => {
+          const next = getter();
+          if (lease) lease.set(next);
+          else lease = acquireTitle(next);
         });
-        effectCleanups.push(cleanupFn);
+        effectCleanups.push(() => {
+          stopEffect();
+          lease?.release();
+          lease = null;
+        });
       } else {
-        document.title = props.title;
+        const lease = acquireTitle(props.title);
+        effectCleanups.push(() => lease.release());
       }
     }
 
@@ -196,17 +209,21 @@ export function Head(props: HeadProps): Comment {
     // Base tag — href is sanitized. An attacker-controlled base href
     // could otherwise rewrite every relative URL on the page into a
     // `javascript:` URI, so this fix closes a significant XSS vector.
+    //
+    // Leased, not created-and-deleted. HTML honours only one <base>, so this is
+    // a singleton resource: the previous code DELETED whatever base it found
+    // (typically the server-rendered one) and, on cleanup, removed its own
+    // without putting anything back — permanently changing how every relative
+    // URL on the page resolved, for the rest of the session.
     if (props.base) {
-      const existing = document.head.querySelector("base");
-      if (existing) existing.remove();
-      const el = document.createElement("base");
+      const spec: BaseSpec = {};
       if (props.base.href) {
         const safeHref = sanitizeUrl(props.base.href);
-        if (safeHref) el.href = safeHref;
+        if (safeHref) spec.href = safeHref;
       }
-      if (props.base.target) el.target = props.base.target;
-      document.head.appendChild(el);
-      managedElements.push(el);
+      if (props.base.target) spec.target = props.base.target;
+      const lease = acquireBase(spec);
+      effectCleanups.push(() => lease.release());
     }
   };
 

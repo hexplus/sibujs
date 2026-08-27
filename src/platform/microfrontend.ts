@@ -1,3 +1,4 @@
+import { registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span } from "../core/rendering/html";
 import { signal } from "../core/signals/signal";
 import { globalSingleton } from "../utils/globalSingleton";
@@ -84,17 +85,26 @@ export function createMicroApp(config: MicroAppConfig): MicroApp {
   let mounted = false;
 
   function mount(component: () => HTMLElement): void {
-    // Clear any previous content
-    root.replaceChildren();
-
+    // Build the incoming tree BEFORE tearing the old one down, so a component
+    // factory that throws leaves the previous mount intact rather than an
+    // emptied container.
     const el = component();
-    root.appendChild(el);
+
+    // Replace through the disposal-aware primitive. A bare `replaceChildren()`
+    // detaches the outgoing tree without running SibuJS teardown, so every
+    // effect, binding and listener inside it survived as an unreachable zombie
+    // firing against detached DOM — one leaked component tree per remount.
+    //
+    // `replaceChildrenSafely` also detaches the INCOMING node first, so
+    // re-mounting a node that is already inside the container keeps it alive
+    // instead of disposing the very tree being re-installed.
+    replaceChildrenSafely(root, el);
     mounted = true;
   }
 
   function unmount(): void {
     if (!mounted) return;
-    root.replaceChildren();
+    replaceChildrenSafely(root);
     mounted = false;
   }
 
@@ -111,9 +121,16 @@ export function createMicroApp(config: MicroAppConfig): MicroApp {
  * Modules are cached by URL so repeated calls with the same URL return the
  * same promise without issuing another network request.
  *
+ * An origin policy is REQUIRED: importing a remote module is remote code
+ * execution, so the call is refused unless you either restrict it with
+ * `allowedOrigins` or opt out deliberately with `unsafelyAllowAnyOrigin`
+ * (CWE-829).
+ *
  * @example
  * ```ts
- * const charts = await loadRemoteModule("https://cdn.example.com/charts.js");
+ * const charts = await loadRemoteModule("https://cdn.example.com/charts.js", {
+ *   allowedOrigins: ["https://cdn.example.com"],
+ * });
  * const el = charts.BarChart({ data: [1, 2, 3] });
  * ```
  */
@@ -181,11 +198,19 @@ type RemoteLoader = () => Promise<{ default: Component }>;
  * placeholder, fetches the remote module, then swaps in the real component.
  * Subsequent calls render instantly from the cached module.
  *
+ * The load is owner-scoped: if the container is disposed before the module
+ * arrives, the module is still cached (it is shared and expensive to fetch) but
+ * the component is NOT instantiated and nothing is written into the dead
+ * container.
+ *
  * @example
  * ```ts
  * const RemoteHeader = defineRemoteComponent(
  *   "remote-header",
- *   () => loadRemoteModule("https://cdn.example.com/header.js")
+ *   () =>
+ *     loadRemoteModule("https://cdn.example.com/header.js", {
+ *       allowedOrigins: ["https://cdn.example.com"],
+ *     })
  * );
  *
  * // Use it like any local component
@@ -207,21 +232,33 @@ export function defineRemoteComponent(name: string, loader: RemoteLoader): Compo
     }) as HTMLElement;
 
     // Show loading state
-    container.appendChild(span({ class: "sibu-remote-loading", nodes: "Loading..." }));
+    container.appendChild(span({ class: "sibu-remote-loading" }, "Loading..."));
+
+    // Owner liveness for this instance. The loader is an unbounded async gap:
+    // a route can change, a list row can be removed, a boundary can reset —
+    // all long before the module arrives. Instantiating the remote component
+    // then would build DOM (and register effects and disposers) inside a
+    // container nobody will ever dispose again, which is a guaranteed leak.
+    let disposed = false;
+    registerDisposer(container, () => {
+      disposed = true;
+    });
 
     loader()
       .then((mod) => {
+        // The MODULE is shared, immutable, and expensive to fetch, so caching
+        // it after disposal is correct and deliberate — the next instance
+        // renders instantly. Only the INSTANTIATION is owner-scoped.
         cached = mod.default;
-        const rendered = cached();
-        container.replaceChildren(rendered);
+        if (disposed) return;
+        replaceChildrenSafely(container, cached());
       })
       .catch((err) => {
+        if (disposed) return;
         const message = err instanceof Error ? err.message : String(err);
-        container.replaceChildren(
-          div({
-            class: "sibu-remote-error",
-            nodes: `Failed to load remote component "${name}": ${message}`,
-          }),
+        replaceChildrenSafely(
+          container,
+          div({ class: "sibu-remote-error" }, `Failed to load remote component "${name}": ${message}`),
         );
       });
 

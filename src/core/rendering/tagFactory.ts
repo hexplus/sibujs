@@ -2,12 +2,8 @@ import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { track } from "../../reactivity/track";
-import {
-  isEventHandlerAttr,
-  sanitizeAttributeString,
-  sanitizeCSSValue,
-  sanitizeStyleAttribute,
-} from "../../utils/sanitize";
+import { isEventHandlerAttr, sanitizeCSSValue, sanitizeStyleAttribute } from "../../utils/sanitize";
+import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
@@ -375,19 +371,17 @@ export const tagFactory = (tag: string, ns?: string) => {
           if (isEventHandlerAttr(key)) continue;
           if (typeof value === "function") {
             registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
-          } else if (typeof value === "boolean") {
-            // For IDL properties (checked, disabled, selected), set the DOM property directly
-            if (key in el && (key === "checked" || key === "disabled" || key === "selected")) {
-              setProp(el, key, value);
-            } else if (value) {
-              el.setAttribute(key, "");
-            } else {
-              el.removeAttribute(key);
-            }
           } else {
-            // Shared sink-specific sanitization (srcset split, URL allowlist,
-            // or pass-through) — same policy as the reactive bindAttribute path.
-            el.setAttribute(key, sanitizeAttributeString(key, String(value)));
+            // Shared commit primitive — same policy as the reactive
+            // bindAttribute path and as bindAttrs/svgElement.
+            //
+            // `syncValueProperty: false` preserves this path's deliberate
+            // difference from a live update: on FIRST render the content
+            // attribute is the correct sink for `value`, since it seeds the
+            // control's default and survives a form reset. A reactive update
+            // must use the IDL property instead, because after the user types
+            // the content attribute no longer reflects the current state.
+            setSafeAttribute(el, key, value, { syncValueProperty: false, label: "tagFactory" });
           }
         }
       }

@@ -1,10 +1,19 @@
 import { bindAttribute } from "../reactivity/bindAttribute";
 import { track } from "../reactivity/track";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /**
  * Bind multiple reactive attributes to an element.
  * Each attribute value can be a static value or a reactive getter.
  * Returns a single teardown function that stops all bindings.
+ *
+ * Static and reactive values share ONE security policy. They previously did
+ * not: a getter went through `bindAttribute` (which refuses `on*` and sanitizes
+ * URL/style/srcset), while a plain string went straight to `setAttribute`. So
+ * `bindAttrs(a, { href: "javascript:…" })` was live XSS while the identical
+ * `bindAttrs(a, { href: () => "javascript:…" })` was blocked — the same
+ * authoring intent with two different verdicts. Both now commit through
+ * `setSafeAttribute`.
  */
 export function bindAttrs(
   el: HTMLElement,
@@ -14,19 +23,14 @@ export function bindAttrs(
 
   for (const [attr, value] of Object.entries(attrs)) {
     if (typeof value === "function") {
-      // Reactive getter — delegate to bindAttribute for tracking
+      // Reactive getter — delegate to bindAttribute for tracking. It commits
+      // through the same primitive, so the verdict matches the static path.
       const teardown = bindAttribute(el, attr, value as () => unknown);
       teardowns.push(teardown);
-    } else if (typeof value === "boolean") {
-      // Static boolean — add or remove the attribute
-      if (value) {
-        el.setAttribute(attr, "");
-      } else {
-        el.removeAttribute(attr);
-      }
     } else {
-      // Static string or number — set once
-      el.setAttribute(attr, String(value));
+      // Static value — commit once, through the shared policy. Booleans keep
+      // HTML boolean-attribute semantics inside the primitive.
+      setSafeAttribute(el, attr, value, { label: "bindAttrs" });
     }
   }
 
@@ -43,15 +47,15 @@ export function bindAttrs(
  * When the value is truthy the attribute is present (set to ""),
  * when falsy the attribute is removed entirely.
  * Returns a teardown function to stop reactive tracking.
+ *
+ * The attribute NAME is policed too: `bindBoolAttr(el, "onclick", true)` would
+ * otherwise create a live `onclick=""` handler slot through a helper whose
+ * whole purpose is inert presence toggling.
  */
 export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | (() => boolean)): () => void {
   // Static boolean — apply once, no tracking needed
   if (typeof getter !== "function") {
-    if (getter) {
-      el.setAttribute(attr, "");
-    } else {
-      el.removeAttribute(attr);
-    }
+    setSafeAttribute(el, attr, getter, { label: "bindBoolAttr" });
     return () => {};
   }
 
@@ -66,11 +70,7 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
       return;
     }
 
-    if (value) {
-      el.setAttribute(attr, "");
-    } else {
-      el.removeAttribute(attr);
-    }
+    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr" });
   }
 
   const teardown = track(commit);
@@ -87,7 +87,7 @@ export function bindData(el: HTMLElement, key: string, getter: string | (() => s
 
   // Static value — set once, no tracking needed
   if (typeof getter !== "function") {
-    el.setAttribute(dataAttr, String(getter));
+    setSafeAttribute(el, dataAttr, String(getter), { label: "bindData" });
     return () => {};
   }
 

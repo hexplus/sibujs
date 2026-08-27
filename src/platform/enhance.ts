@@ -21,6 +21,7 @@ import {
   unregisterDisposer,
 } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /** Attribute marking a root that *currently* owns an active enhancement.
  *  Added on commit, removed on disposal — see the lifecycle notes on
@@ -290,7 +291,18 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
             if (next === null) {
               if (el.hasAttribute(name)) el.removeAttribute(name);
             } else if (el.getAttribute(name) !== next) {
-              el.setAttribute(name, next);
+              // Committed through the shared attribute primitive, like every
+              // other attribute writer. `attr()`'s VALUE is a runtime getter —
+              // the same trust level as a `bindAttribute` getter — so a raw
+              // `setAttribute` here made progressive enhancement the one public
+              // path where `javascript:` href/src, an unsafe `style`
+              // declaration list, or an `on*` handler string still reached the
+              // DOM.
+              //
+              // `syncValueProperty: false` keeps this an ATTRIBUTE writer, as
+              // its name and existing behaviour promise: `attr(el, "value", …)`
+              // must set the content attribute, not the IDL property.
+              setSafeAttribute(el, name, next, { syncValueProperty: false, label: "enhance attr()" });
             }
           }),
         );

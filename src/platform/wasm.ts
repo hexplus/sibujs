@@ -20,12 +20,18 @@ export interface WasmModuleState<T extends object = Record<string, unknown>> {
   ready: boolean;
 }
 
-export interface WasmConfig {
-  /** Import object passed to WebAssembly.instantiate */
-  imports?: WebAssembly.Imports;
-  /** Cache key for module caching (defaults to URL) */
-  cacheKey?: string;
-}
+/**
+ * Configuration for the `wasm()` reactive wrapper.
+ *
+ * Deliberately the SAME option bag as the underlying `loadWasmModule()`
+ * primitive rather than a hand-copied subset. The primitive REQUIRES an
+ * explicit origin policy for URL sources (`allowedOrigins`, or an explicit
+ * `unsafelyAllowAnyOrigin` opt-in), and the wrapper previously had no way to
+ * express one — so `wasm("/math.wasm")` could only ever reject, and the public
+ * convenience API was unusable for its documented primary use case. Extending
+ * the primitive's type keeps the two from drifting again.
+ */
+export interface WasmConfig extends LoadWasmOptions {}
 
 // ─── Module Cache ───────────────────────────────────────────────────────────
 
@@ -39,6 +45,18 @@ const instanceCache = globalSingleton(
   Symbol.for("sibujs.wasm.instanceCache.v1"),
   () => new Map<string, WebAssembly.Instance>(),
 );
+// In-flight loads, keyed the same way as `instanceCache`.
+//
+// A result-only cache cannot make a keyed load a singleton: two callers that
+// both miss the cache before either finishes each run a full instantiation, and
+// the "singleton instance" the API documents becomes two objects with two
+// separate linear memories. Whoever set the cache last wins, and the other
+// caller holds a detached instance whose mutations nobody else sees. Sharing
+// the in-flight promise closes the window.
+const inFlightCache = globalSingleton(
+  Symbol.for("sibujs.wasm.inFlightCache.v1"),
+  () => new Map<string, Promise<WebAssembly.Instance>>(),
+);
 
 // ─── wasm Hook ───────────────────────────────────────────────────────────
 
@@ -46,13 +64,27 @@ const instanceCache = globalSingleton(
  * Hook to load and use a WebAssembly module reactively.
  * Returns reactive state that updates when the module loads.
  *
+ * A URL source needs an explicit origin policy — WASM is compiled code with
+ * imports into JS memory, so fetching it from an unvetted URL is a supply-chain
+ * risk equivalent to importing a remote module (CWE-829). Pass `allowedOrigins`,
+ * or `unsafelyAllowAnyOrigin: true` to opt out deliberately. An `ArrayBuffer` /
+ * `Uint8Array` source needs neither: the bytes are already in hand.
+ *
  * @example
  * ```ts
- * const wasm = wasm<{ add: (a: number, b: number) => number }>('/math.wasm');
+ * const math = wasm<{ add: (a: number, b: number) => number }>(
+ *   'https://cdn.example.com/math.wasm',
+ *   { allowedOrigins: ['https://cdn.example.com'] },
+ * );
  * // In reactive context:
- * if (wasm.ready()) {
- *   const result = wasm.instance()!.add(1, 2);
+ * if (math.ready()) {
+ *   const result = math.instance()!.add(1, 2);
  * }
+ * ```
+ *
+ * @example Same-origin asset — still an explicit decision.
+ * ```ts
+ * const math = wasm('/math.wasm', { allowedOrigins: [location.origin] });
  * ```
  */
 export function wasm<T extends object = Record<string, unknown>>(
@@ -77,7 +109,12 @@ export function wasm<T extends object = Record<string, unknown>>(
     setInstance(null);
 
     try {
-      const wasmInstance = await loadWasmModule(source, config.imports, cacheKey);
+      // Forward the WHOLE config — including `allowedOrigins` /
+      // `unsafelyAllowAnyOrigin` — through the options-only entry point. The
+      // previous call passed `config.imports` positionally, so the security
+      // options the wrapper accepted were silently dropped and every URL source
+      // was refused by the primitive.
+      const wasmInstance = await loadWasmWithOptions(source, { ...config, cacheKey });
       setInstance(wasmInstance.exports as unknown as T);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -135,9 +172,30 @@ export async function loadWasmModule(
   const opts: LoadWasmOptions = isOptionsBag
     ? (imports as LoadWasmOptions)
     : { imports: imports as WebAssembly.Imports | undefined, cacheKey };
-  const wasmImports = opts.imports;
+  return loadWasmWithOptions(source, opts);
+}
+
+/**
+ * Unambiguous options-only entry point.
+ *
+ * `loadWasmModule`'s second parameter is overloaded (imports OR options) and
+ * disambiguated by looking for the security keys. That heuristic cannot see an
+ * option bag carrying only `imports`/`cacheKey` — it would read it as a WASM
+ * import namespace — so internal callers that already HAVE an options object
+ * (notably the `wasm()` wrapper) go through this instead of round-tripping
+ * their config through a guess.
+ *
+ * Not exported from the package: it exists to keep the wrapper honest, not to
+ * add a second public loader.
+ */
+async function loadWasmWithOptions(
+  source: string | ArrayBuffer | Uint8Array,
+  opts: LoadWasmOptions,
+): Promise<WebAssembly.Instance> {
   const key = opts.cacheKey || (typeof source === "string" ? source : undefined);
 
+  // Origin policy runs BEFORE any cache lookup: a refused origin must be
+  // refused even when some earlier, permitted call already populated the key.
   if (typeof source === "string") {
     const allowed = opts.allowedOrigins ?? [];
     if (allowed.length > 0) {
@@ -159,50 +217,66 @@ export async function loadWasmModule(
     }
   }
 
-  // Check instance cache
-  if (key) {
-    const cachedInstance = instanceCache.get(key);
-    if (cachedInstance) {
-      return cachedInstance;
-    }
-  }
+  // Unkeyed loads are documented to instantiate fresh every call — no sharing.
+  if (!key) return instantiateWasm(source, opts.imports, undefined);
 
-  let module: WebAssembly.Module;
+  const cachedInstance = instanceCache.get(key);
+  if (cachedInstance) return cachedInstance;
 
-  // Check module cache
+  const inFlight = inFlightCache.get(key);
+  if (inFlight) return inFlight;
+
+  const pending = instantiateWasm(source, opts.imports, key).then((instance) => {
+    instanceCache.set(key, instance);
+    return instance;
+  });
+  inFlightCache.set(key, pending);
+
+  // Evict on settle so a FAILED load does not poison the key forever — the
+  // next caller retries from scratch. Guarded by identity so a retry that has
+  // already registered its own promise is not evicted by the loser's cleanup.
+  // The `.catch` consumes the rejection on THIS derived chain only; `pending`
+  // itself still rejects for every real awaiter.
+  void pending
+    .catch(() => {})
+    .then(() => {
+      if (inFlightCache.get(key) === pending) inFlightCache.delete(key);
+    });
+
+  return pending;
+}
+
+/** Fetch/compile/instantiate. No caching decisions beyond the module cache. */
+async function instantiateWasm(
+  source: string | ArrayBuffer | Uint8Array,
+  wasmImports: WebAssembly.Imports | undefined,
+  key: string | undefined,
+): Promise<WebAssembly.Instance> {
   const cachedModule = key ? moduleCache.get(key) : undefined;
   if (cachedModule) {
-    module = cachedModule;
-  } else {
-    // Fetch and compile
-    let bytes: ArrayBuffer;
-    if (typeof source === "string") {
-      // URL - use streaming compilation if available
-      if (typeof WebAssembly.instantiateStreaming === "function") {
-        const response = fetch(source);
-        const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
-        if (key) {
-          moduleCache.set(key, result.module);
-          instanceCache.set(key, result.instance);
-        }
-        return result.instance;
-      }
-      const response = await fetch(source);
-      bytes = await response.arrayBuffer();
-    } else if (source instanceof Uint8Array) {
-      bytes = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer;
-    } else {
-      bytes = source;
-    }
-
-    module = await WebAssembly.compile(bytes);
-    if (key) moduleCache.set(key, module);
+    return WebAssembly.instantiate(cachedModule, wasmImports || {});
   }
 
-  // Instantiate
-  const instance = await WebAssembly.instantiate(module, wasmImports || {});
-  if (key) instanceCache.set(key, instance);
-  return instance;
+  let bytes: ArrayBuffer;
+  if (typeof source === "string") {
+    // URL - use streaming compilation if available
+    if (typeof WebAssembly.instantiateStreaming === "function") {
+      const response = fetch(source);
+      const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
+      if (key) moduleCache.set(key, result.module);
+      return result.instance;
+    }
+    const response = await fetch(source);
+    bytes = await response.arrayBuffer();
+  } else if (source instanceof Uint8Array) {
+    bytes = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer;
+  } else {
+    bytes = source;
+  }
+
+  const module = await WebAssembly.compile(bytes);
+  if (key) moduleCache.set(key, module);
+  return WebAssembly.instantiate(module, wasmImports || {});
 }
 
 // ─── preloadWasm ────────────────────────────────────────────────────────────
@@ -320,6 +394,10 @@ export function createWasmBridge<T extends object>(
 export function clearWasmCache(): void {
   moduleCache.clear();
   instanceCache.clear();
+  // Also drop in-flight entries: leaving them would let a load started before
+  // the clear repopulate `instanceCache` afterwards, so the cache would not
+  // actually be empty once the pending fetch settled.
+  inFlightCache.clear();
 }
 
 /**

@@ -8,7 +8,178 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Browser support floor raised to Chrome/Edge 93, Firefox 92, Safari 15.4.**
+  The declared floor was Chrome 80 / Firefox 78 / Safari 14, and nothing checked
+  it — so the source drifted above the promise and a consumer targeting the
+  declared minimum shipped a bundle that threw on first use. Three APIs are used
+  without a feature guard and are unavailable at the old floor: `Object.hasOwn()`
+  (Chrome 93), `ParentNode.replaceChildren()` (Chrome 86), and the `Error`
+  `cause` option (Chrome 93). `Object.hasOwn` sets the binding constraint and
+  sits inside the reactive core, so polyfilling `replaceChildren` alone would
+  have left the bundle equally broken on Chrome 80–92. The floor now states what
+  the source actually requires.
+
+  This is enforced rather than documented: a compatibility gate parses
+  `browserslist`, scans the source for each API in a baseline table, and fails
+  when an unguarded usage needs a newer engine than the floor declares. Adding
+  such an API now forces a deliberate choice — guard it, or raise the floor and
+  update the support matrix. Everything else modern in the source is already
+  feature-detected and does not constrain the floor.
+
+- **A reactive attribute value of `null`/`undefined` now removes the attribute**
+  instead of writing the literal text `"null"`. `bindAttribute`/`bindAttrs`
+  stringified the value before writing, so a getter returning null produced
+  `title="null"` — visible to users as a tooltip reading "null". Absence is the
+  only sensible reading, and it is what the tag factory and `enhance()`'s
+  `attr()` already did. A getter returning the *string* `"null"` still writes
+  `"null"`.
+
+### Removed
+
+- **`CustomElementOptions.extends`.** The option was public and read nowhere, so
+  it advertised customized built-in elements that were never implemented. Real
+  support needs the constructor to derive from the concrete element class,
+  `customElements.define(name, ctor, { extends })`, and `is=""` at every call
+  site — and Safari has never shipped them. Removed rather than faked.
+
+### Security
+
+- **Static and reactive attribute writes now share one security policy.** The
+  same value reached opposite verdicts depending only on the shape of the
+  expression: `bindAttrs(a, { href: url })` wrote `javascript:` straight to the
+  DOM, while the identical `bindAttrs(a, { href: () => url })` blocked it. The
+  divergence — not any single missing check — was the vulnerability, because a
+  routine refactor between the two forms silently changed an application's
+  security posture. The same gap ran between the HTML tag factory and
+  `svgElement()`, which turned an `onload` string into a live event handler that
+  the equivalent HTML call had always refused.
+
+  Every public attribute writer now commits through one primitive: the tag
+  factory, `bindAttribute`/`bindDynamic`, `bindAttrs`/`bindBoolAttr`/`bindData`,
+  `svgElement()`, and `enhance()`'s reactive `attr()`. `on*` strings are refused
+  everywhere, URL attributes go through the protocol allowlist, `srcset` is
+  validated per candidate, and `style` goes through the declaration-list
+  sanitizer. Function-valued `on*` props keep their existing meaning —
+  `addEventListener`, never an attribute. The policy itself is unchanged; what
+  changed is that no writer can skip it.
+- **`svgElement()` writes `xlink:href` in the xlink namespace.** A plain
+  `setAttribute` produced an attribute whose literal name contained a colon and
+  whose namespace was null, which SVG renderers ignore — so the reference
+  silently failed to resolve while also bypassing URL filtering.
+- **`enhance()`'s reactive `attr()` is no longer a raw sink.** Its value is a
+  runtime getter at the same trust level as any other reactive binding, but it
+  wrote through unfiltered, making progressive enhancement the one public path
+  where a `javascript:` URL, an unsafe `style` list, or an `on*` handler string
+  still reached the DOM.
+
 ### Fixed
+
+- **Removing an owned tree now disposes it.** `createMicroApp()` cleared its
+  container with a bare `replaceChildren()`, which detaches nodes without
+  running SibuJS teardown — so every effect, binding and listener inside the
+  outgoing tree survived as an unreachable zombie firing against detached DOM,
+  one leaked component tree per remount. Micro-app mount/unmount, remote
+  component swaps, custom-element teardown, `DynamicComponent`, `DOMPool` reuse
+  and the testing `render()` helpers all route through the disposal-aware
+  replacement primitive now. Re-mounting a node that is already in the container
+  keeps it alive rather than disposing the tree being reinstalled.
+- **A remote component no longer instantiates after its owner is gone.**
+  `defineRemoteComponent()`'s loader is an unbounded async gap — a route can
+  change or a list row can be removed long before the module arrives — and the
+  resolution built DOM and registered disposers inside a container nobody would
+  ever dispose again. The resolved module is still cached after disposal, which
+  is correct and deliberate: it is shared, immutable and expensive to fetch, so
+  the next instance renders instantly. Only the instantiation is owner-scoped.
+  The rejection path is guarded too: a disposed container no longer receives an
+  error fallback.
+- **`infiniteScroll()` no longer leaks an unhandled rejection.** The
+  `IntersectionObserver` callback started an async `loadMore()` and dropped the
+  promise, so a rejecting `onLoadMore` became an unhandled rejection — which
+  crashes a Node SSR process and fires `window.onunhandledrejection` in a
+  browser, for what is only a failed page of data. Failures are now contained
+  and reported through the central runtime error pipeline (phase `"async"`),
+  `loading` is always cleared, and a load settling after `dispose()` mutates
+  nothing. `dispose()` clears `loading` itself rather than leaving it to a
+  completion that is no longer permitted to write.
+- **`wasm(url)` can express the origin policy its loader requires.**
+  `loadWasmModule()` demands `allowedOrigins` or an explicit
+  `unsafelyAllowAnyOrigin` opt-in for URL sources, and the public `wasm()`
+  wrapper had no way to supply either — so every URL load was refused and the
+  convenience API was unusable for its primary documented use case. `WasmConfig`
+  now extends the loader's option type rather than copying a subset, so the two
+  cannot drift again.
+- **A keyed WASM load is genuinely one instance.** The cache stored only
+  results, so two callers that both missed it before either finished each ran a
+  full instantiation — and the documented singleton became two objects with two
+  separate linear memories, one of them detached from every other holder.
+  Concurrent loads now share an in-flight promise per key, and a failed load no
+  longer poisons the key against a later retry.
+- **`offlineStore` conflict strategies actually differ.** `conflictStrategy` was
+  part of the exported adapter type and read nowhere; every adapter silently got
+  client-wins. `client-wins` (still the default) discards a pulled record for any
+  key with an unpushed local edit; `server-wins` lets the remote value win while
+  *retaining* the queued change, since dropping it would turn a display-precedence
+  choice into silent data loss; `manual` defers to a new `resolveConflict`
+  resolver, and without one degrades to client-wins with a warning rather than
+  guessing with unsynced data.
+- **One `offlineStore` sync uses one adapter.** `attach()` landing mid-sync
+  could split a single transaction across two backends — pushing through the old
+  adapter and pulling through the new one, with the new one's conflict strategy
+  applied to the old one's push results. The adapter is snapshotted for the whole
+  operation; the next sync picks up the new one.
+- **`serviceWorker()` no longer throws under SSR.** `"serviceWorker" in
+  navigator` is a `TypeError` where `navigator` does not exist. The helper now
+  reports an inert unsupported state instead.
+- **A failed `unregister()` no longer detaches the service-worker wrapper.**
+  `registration.unregister()` returns `false` when the browser declines — the
+  worker is still installed and still controlling pages — but that was treated
+  as teardown, permanently blinding the wrapper to a live worker: no update
+  tracking, no registration, no way back. A failed unregister now changes
+  nothing.
+- **`unregister()` before the registration resolves no longer orphans it.** The
+  call saw a null registration, reported "nothing to do", and the worker that
+  landed a moment later stayed registered in the browser while SibuJS reported
+  nothing at all. The request is now remembered and applied to the arriving
+  registration.
+- **`document.title` and `<base>` use owner-aware restoration.** Both are global
+  singletons, and both were handled as if they were ordinary independently-owned
+  tags. `Head()` never restored the title on dispose, so a page kept a title
+  belonging to an unmounted component; `title()` kept a per-instance snapshot,
+  which restores a stale value whenever three owners overlap and the middle one
+  is disposed first — an everyday reordering, not a corner case. `Head` also
+  deleted whatever `<base>` it found (typically the server-rendered one) and put
+  nothing back, permanently changing how every relative URL on the page resolved.
+
+  Both resources now use one shared owner stack: writes come from the current
+  top, releasing a non-top owner changes nothing visible, and emptying the stack
+  restores what was there before the first owner arrived. `Head({ title })` and
+  `title()` contend for the same stack rather than two independent ones.
+- **Scoped styles now cover descendants created after render.**
+  `withScopedStyle()` stamped the scope attribute onto every element that existed
+  at render time, which makes the contract "elements present at render time"
+  rather than "this component's subtree": anything a signal, an `each()` row or a
+  conditional inserted later was unmarked and rendered unstyled. Selectors are
+  now anchored at the component root, so the DOM relationship does the matching
+  and future descendants are included automatically. Pseudo-classes,
+  pseudo-elements, combinators, media queries and keyframes are preserved, and
+  the root remains selectable by its own rules.
+- **`scrollRestoration({ mode: "auto" })` actually restores.** Auto mode
+  attached a `popstate` listener that only ever *saved* — the documented
+  save/restore behaviour was half implemented, and going Back never returned the
+  viewport anywhere. It now tags history entries with their key, saves the entry
+  being left, and restores the destination's position. A same-key pop is not
+  treated as a departure, which would otherwise overwrite the stored position
+  with the current one and destroy the value about to be restored. An unknown or
+  absent destination key is a safe no-op. A `getKey` option integrates the
+  feature with a router's own history identity.
+- **`clipboard()` and `permissions()` ignore completions after disposal.** A
+  clipboard write can sit on a permission prompt indefinitely; one resolving
+  after `dispose()` set state and armed a two-second timer against a torn-down
+  subtree. `permissions()` guarded its success path but not its failure path, so
+  a query rejecting after teardown still flipped a disposed controller to
+  `"unsupported"`.
 
 - **Retry cancellation now wins immediately.** A request that rejected *after*
   its `AbortSignal` had already aborted was still treated as a retryable

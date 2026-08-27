@@ -98,6 +98,23 @@ gate("TypeScript (tests + entry files)", "npx", ["tsc", "-p", "tsconfig.test.jso
   },
 });
 
+// --- public API invariants --------------------------------------------------
+// Cross-cutting certification for the public surface OUTSIDE the reactive core:
+// security parity between equivalent attribute writers, disposal on owned-tree
+// removal, async completions after disposal, and convenience wrappers keeping
+// the guarantees of the primitives they wrap.
+gate(
+  "Public wrapper invariants",
+  "npx",
+  ["vitest", "run", "tests/certify-public-wrapper-invariants.test.ts", "--reporter=dot"],
+  { extract: countTests },
+);
+// The browser-support floor is a published promise; this proves the source
+// actually honours it rather than having drifted above it.
+gate("Browser support floor", "npx", ["vitest", "run", "tests/hardening-browser-floor.test.ts", "--reporter=dot"], {
+  extract: countTests,
+});
+
 // --- fuzz gates -------------------------------------------------------------
 gate("Query model fuzzing", "npx", ["vitest", "run", "tests/fuzz-query-model.test.ts", "--reporter=dot"], {
   extract: countTests,

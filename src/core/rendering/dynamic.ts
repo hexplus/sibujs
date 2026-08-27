@@ -1,5 +1,5 @@
 import { track } from "../../reactivity/track";
-import { dispose, registerDisposer } from "./dispose";
+import { registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div } from "./html";
 
 type Component = () => HTMLElement;
@@ -82,11 +82,11 @@ export function DynamicComponent(is: () => string | Component): HTMLElement {
       el = resolveComponent(target);
     }
 
-    // Dispose old content before replacing to prevent reactive binding leaks
-    for (const child of Array.from(container.childNodes)) {
-      dispose(child);
-    }
-    container.replaceChildren(el);
+    // Dispose old content before replacing to prevent reactive binding leaks.
+    // Via the shared primitive rather than a hand-rolled dispose-then-replace:
+    // it detaches the INCOMING node first, so a re-render that legitimately
+    // returns the same element does not dispose the very node being reinstalled.
+    replaceChildrenSafely(container, el);
   }
 
   // Track reactive dependencies so render re-runs when `is()` changes.

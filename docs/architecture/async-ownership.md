@@ -364,3 +364,43 @@ detection therefore tests the `name` property rather than the constructor.
 | router `Suspense()` boundary | the boundary | boundary disposed, or anchor detached | `generation` + `tornDown` |
 | island activation | the mount scope | `cleanup()` | `activated` + `torndown` |
 | hydration | the container | container disposed | — |
+| `defineRemoteComponent()` load | the rendered container | container disposed | `disposed` flag on the container's disposer |
+| `infiniteScroll()` page load | the controller | `dispose()` | `disposed` + `generation` |
+| `clipboard().copy()` | the controller | `dispose()` | `disposed` |
+| `permissions()` query | the controller | `dispose()` | `disposed`, on **both** settle paths |
+| `serviceWorker()` registration | the wrapper | `unregister()` succeeded | `unregistered` + `unregisterRequested` |
+| `offlineStore().sync()` | the transaction | `close()` | adapter snapshotted for the whole sync |
+| keyed `loadWasmModule()` | the cache key | — | shared in-flight promise per key |
+
+### Load-vs-instantiate, restated for remote components
+
+`defineRemoteComponent()` makes the distinction in
+[Load-vs-instantiate invariant](#load-vs-instantiate-invariant) concrete:
+
+- **Caching the resolved module after disposal is correct.** The module is
+  shared, immutable, and expensive to fetch; the next instance renders instantly.
+- **Instantiating the component after disposal is not.** It builds DOM and
+  registers effects and disposers inside a container nobody will dispose again.
+
+So the loader's `.then` caches unconditionally and *then* checks liveness before
+calling the factory. The rejection path checks liveness too — a disposed
+container must not receive an error fallback either.
+
+### Settling state at disposal, not after it
+
+Where a pending completion is the only thing that would have cleared a flag,
+`dispose()` clears it itself rather than leaving the work to a completion that is
+no longer permitted to write. `infiniteScroll().dispose()` sets `loading` to
+`false` for this reason: guarding the completion without settling the flag would
+leave `loading()` permanently `true` for anything still reading the controller.
+
+### Containing a floating promise
+
+An `IntersectionObserver` callback cannot `await`. `infiniteScroll` therefore
+makes `loadMore()` **contain its own failure** — it reports through
+`reportError` (phase `"async"`) and never rejects to its caller — and the
+observer discards the promise explicitly with `void`. A floating rejection is an
+unhandled rejection, which crashes a Node SSR process and fires
+`window.onunhandledrejection` in a browser, for what is only a failed page of
+data. Containment is not silence: the failure still reaches the one place
+applications install telemetry.

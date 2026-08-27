@@ -39,6 +39,11 @@ export function permissions(name: string): {
       status.addEventListener("change", onChange);
     })
     .catch(() => {
+      // Lifetime check on the FAILURE path too. The success path already had
+      // one; without the matching guard here a query that rejected after
+      // teardown still flipped a disposed controller's state to "unsupported",
+      // which any lingering reader would then observe as fact.
+      if (disposed) return;
       setState("unsupported");
     });
 

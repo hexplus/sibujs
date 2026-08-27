@@ -27,13 +27,55 @@ export interface OfflineStoreOptions<T> {
   autoSync?: boolean;
 }
 
+/**
+ * How a pulled remote record is reconciled with a local record that still has
+ * an unpushed change queued for the same key. Records with no queued local
+ * change are never conflicts — the remote value always applies.
+ */
+export type ConflictStrategy = "client-wins" | "server-wins" | "manual";
+
+/** The state handed to a `manual` resolver for one conflicting key. */
+export interface SyncConflict<T> {
+  /** Value of the store's `keyPath` for the conflicting record. */
+  key: unknown;
+  /** Current local item — `undefined` when the queued local change is a delete. */
+  local: T | undefined;
+  /** The record as returned by the remote `pull()`. */
+  remote: T;
+  /** The queued local change that makes this key a conflict. */
+  pending: SyncChange<T>;
+}
+
 export interface SyncAdapter<T> {
   /** Push local changes to remote */
   push: (changes: SyncChange<T>[]) => Promise<SyncResult>;
   /** Pull remote changes since last sync */
   pull: (since: number | null) => Promise<T[]>;
-  /** Conflict resolution strategy */
-  conflictStrategy: "client-wins" | "server-wins" | "manual";
+  /**
+   * Conflict resolution strategy. Defaults to `"client-wins"`.
+   *
+   * - `client-wins` — a pulled record is DISCARDED for any key that still has
+   *   an unpushed local change. The local edit survives and is pushed on the
+   *   next round. This is the safe default: it never destroys work made
+   *   offline.
+   * - `server-wins` — the pulled record OVERWRITES local state even for keys
+   *   with queued changes. The queued change itself is **retained**, not
+   *   dropped: it still has to reach the server, and discarding it here would
+   *   turn a display-precedence choice into silent data loss. A subsequent
+   *   successful push therefore re-asserts the local edit remotely.
+   * - `manual` — `resolveConflict` decides per key. Without a `resolveConflict`
+   *   implementation this degrades to `client-wins` and warns, because the only
+   *   other option is to guess with the user's unsynced data.
+   */
+  conflictStrategy?: ConflictStrategy;
+  /**
+   * Resolve one conflicting key. Required for `conflictStrategy: "manual"`.
+   *
+   * Return the value to store locally, or `undefined` to keep the local record
+   * untouched. May be async. A resolver that throws falls back to keeping the
+   * local record — the conservative direction.
+   */
+  resolveConflict?: (conflict: SyncConflict<T>) => T | undefined | Promise<T | undefined>;
 }
 
 export interface SyncChange<T> {
@@ -227,6 +269,9 @@ function idbPutMany<T>(db: IDBDatabase, store: string, items: T[]): Promise<void
  *   adapter: syncAdapter({
  *     push: (changes) => fetch("/api/sync", { method: "POST", body: JSON.stringify(changes) }),
  *     pull: (since) => fetch(`/api/todos?since=${since}`).then(r => r.json()),
+ *     // client-wins (the default) never lets a pulled record overwrite a key
+ *     // that still has an unpushed local edit. Use "server-wins" to let the
+ *     // remote value win, or "manual" plus a `resolveConflict` resolver.
  *     conflictStrategy: "client-wins",
  *   }),
  * });
@@ -284,7 +329,13 @@ export async function offlineStore<T extends object>(options: OfflineStoreOption
   }
 
   async function sync(): Promise<void> {
-    if (!adapter || isSyncing() || closed) return;
+    // Snapshot the adapter for the WHOLE transaction. `adapter` is a mutable
+    // binding that `attach()` can reassign at any await point, so reading it
+    // per call let one sync push through adapter A and then pull through
+    // adapter B — two different backends splicing one logical transaction,
+    // with B's conflict strategy applied to A's push results.
+    const syncAdapter = adapter;
+    if (!syncAdapter || isSyncing() || closed) return;
 
     setIsSyncing(true);
     try {
@@ -292,7 +343,7 @@ export async function offlineStore<T extends object>(options: OfflineStoreOption
       const snapshot = await idbGetAllWithKeys<SyncChange<T>>(db, "_changes");
       if (closed) return;
       if (snapshot.length > 0) {
-        const result = await adapter.push(snapshot.map((e) => e.value));
+        const result = await syncAdapter.push(snapshot.map((e) => e.value));
         if (closed) return;
         if (result.ok) {
           await idbDeleteKeys(
@@ -309,24 +360,25 @@ export async function offlineStore<T extends object>(options: OfflineStoreOption
         }
       }
 
-      const remoteItems = await adapter.pull(lastSynced());
+      const remoteItems = await syncAdapter.pull(lastSynced());
       if (closed) return;
-      // Don't clobber items that have unsynced local edits queued during this
-      // pull window. The next sync round will push those edits and re-pull.
+      // A key with an unpushed local change is a CONFLICT: the remote value and
+      // the local value both claim to be current. Which one wins is the
+      // adapter's declared `conflictStrategy` — previously the strategy was
+      // never read and every adapter silently got client-wins.
       const pendingChanges = await idbGetAll<SyncChange<T>>(db, "_changes");
       if (closed) return;
-      const pendingKeys = new Set<unknown>();
+      const pendingByKey = new Map<unknown, SyncChange<T>>();
       for (const c of pendingChanges) {
         const k = (c.item as Record<string, unknown>)[keyPath];
-        if (k != null) pendingKeys.add(k);
+        if (k != null) pendingByKey.set(k, c);
       }
-      const safeRemote = remoteItems.filter((item) => {
-        const k = (item as Record<string, unknown>)[keyPath];
-        return k == null || !pendingKeys.has(k);
-      });
+
+      const resolved = await resolveRemoteItems(syncAdapter, remoteItems, pendingByKey);
+      if (closed) return;
       // Batch into a single transaction so a mid-loop crash can't leave
       // partial state with `lastSynced` un-updated.
-      await idbPutMany(db, "items", safeRemote);
+      await idbPutMany(db, "items", resolved);
       if (closed) return;
 
       const now = Date.now();
@@ -341,6 +393,68 @@ export async function offlineStore<T extends object>(options: OfflineStoreOption
     } finally {
       setIsSyncing(false);
     }
+  }
+
+  /**
+   * Apply the adapter's conflict strategy to one pull's worth of remote items,
+   * returning exactly the records that should be written to the local store.
+   *
+   * Non-conflicting records (no queued local change for that key) always pass
+   * through — the strategy only governs contested keys.
+   */
+  async function resolveRemoteItems(
+    activeAdapter: SyncAdapter<T>,
+    remoteItems: T[],
+    pendingByKey: Map<unknown, SyncChange<T>>,
+  ): Promise<T[]> {
+    const strategy = activeAdapter.conflictStrategy ?? "client-wins";
+    const out: T[] = [];
+
+    for (const remote of remoteItems) {
+      const key = (remote as Record<string, unknown>)[keyPath];
+      const pending = key == null ? undefined : pendingByKey.get(key);
+
+      if (!pending) {
+        out.push(remote);
+        continue;
+      }
+
+      if (strategy === "server-wins") {
+        // Remote value wins locally. The queued change stays queued — see the
+        // `conflictStrategy` docs: dropping it would silently discard an edit
+        // the server has not seen yet.
+        out.push(remote);
+        continue;
+      }
+
+      if (strategy === "manual") {
+        if (!activeAdapter.resolveConflict) {
+          if (typeof console !== "undefined") {
+            console.warn(
+              '[offlineStore] conflictStrategy is "manual" but the adapter has no resolveConflict(); ' +
+                "keeping the local record for this key (client-wins).",
+            );
+          }
+          continue;
+        }
+        try {
+          const local = pending.type === "delete" ? undefined : await idbGet<T>(db, "items", key as string | number);
+          const choice = await activeAdapter.resolveConflict({ key, local, remote, pending });
+          if (choice !== undefined) out.push(choice);
+        } catch (err) {
+          // A throwing resolver must not decide the conflict by accident.
+          // Keeping the local record is the direction that cannot lose data.
+          if (typeof console !== "undefined") {
+            console.warn("[offlineStore] resolveConflict threw; keeping the local record", err);
+          }
+        }
+      }
+
+      // client-wins (default) and every `manual` path that chose the local
+      // record fall through here: the remote value is simply not applied.
+    }
+
+    return out;
   }
 
   function attach(newAdapter: SyncAdapter<T>) {

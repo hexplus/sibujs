@@ -132,10 +132,10 @@
     "access": "public"
   },
   "browserslist": [
-    "Chrome >= 80",
-    "Firefox >= 78",
-    "Safari >= 14",
-    "Edge >= 80"
+    "Chrome >= 93",
+    "Firefox >= 92",
+    "Safari >= 15.4",
+    "Edge >= 93"
   ],
   "engines": {
     "node": ">=22.3.0"
