@@ -59,10 +59,30 @@ export function infiniteScroll(options: {
   function createObserver(): void {
     if (typeof IntersectionObserver === "undefined") return;
 
-    observer = new IntersectionObserver(
+    // Declared before construction so the callback can close over THIS
+    // observer's identity rather than over whatever `observer` happens to hold
+    // when it eventually runs.
+    let createdObserver!: IntersectionObserver;
+
+    createdObserver = new IntersectionObserver(
       (entries) => {
+        // OWNERSHIP FIRST — before entries, signals, or any caller code.
+        //
+        // `disconnect()` stops future notifications; it does not un-queue a
+        // callback the engine has already scheduled. So this can run after
+        // `dispose()`, or after a sentinel swap replaced this observer, and in
+        // both cases it belongs to an attachment that no longer exists.
+        //
+        // The order matters: `safeHasMore()` used to be evaluated before the
+        // `disposed` check, which meant a torn-down controller still executed
+        // caller-controlled code and could report predicate errors from work
+        // nobody was waiting on. And with no identity check at all, a callback
+        // queued against sentinel A could start a load that went on to publish
+        // state for — and re-observe — sentinel B.
+        if (disposed || observer !== createdObserver) return;
+
         const entry = entries[0];
-        if (entry?.isIntersecting && !loading() && safeHasMore() && !disposed) {
+        if (entry?.isIntersecting && !loading() && safeHasMore()) {
           // Explicitly discard the promise: `loadMore` is contained and never
           // rejects, so there is nothing left to handle here.
           void loadMore();
@@ -71,8 +91,10 @@ export function infiniteScroll(options: {
       { threshold },
     );
 
+    observer = createdObserver;
+
     if (sentinelRef.current) {
-      observer.observe(sentinelRef.current);
+      createdObserver.observe(sentinelRef.current);
     }
   }
 
@@ -112,7 +134,26 @@ export function infiniteScroll(options: {
       return _current;
     },
     set(el: HTMLElement | null) {
+      // A DIFFERENT element is a new attachment, and therefore a new ownership
+      // generation: a load started for the previous sentinel loses the right to
+      // publish state or to touch the new sentinel's observer. Re-assigning the
+      // SAME element is not a new attachment, so its in-flight load keeps its
+      // rights and no generation is burned.
+      const attachmentChanged = el !== _current;
       _current = el;
+
+      if (attachmentChanged) {
+        generation++;
+        // Release the superseded load's claim on `loading`.
+        //
+        // The generation bump above already stops that load from clearing the
+        // flag itself, so without this it would stay `true` forever — and the
+        // observer gate (`!loading()`) would then block the NEW sentinel from
+        // ever starting a load of its own. Settling here is what lets the new
+        // attachment work while keeping the stale one unable to write.
+        setLoading(false);
+      }
+
       // Disconnect old observer
       if (observer) {
         observer.disconnect();
