@@ -21,6 +21,7 @@ import {
   unregisterDisposer,
 } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /** Attribute marking a root that *currently* owns an active enhancement.
  *  Added on commit, removed on disposal — see the lifecycle notes on
@@ -285,13 +286,27 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
             // booleans) is serialized literally — so `aria-expanded` reads
             // "true"/"false" instead of being dropped. For boolean HTML
             // attributes (disabled, hidden…), return `cond || null` to get
-            // presence/absence. Writes are skipped when nothing changed.
+            // presence/absence.
             const next = v == null ? null : String(v);
-            if (next === null) {
-              if (el.hasAttribute(name)) el.removeAttribute(name);
-            } else if (el.getAttribute(name) !== next) {
-              el.setAttribute(name, next);
-            }
+
+            // Committed through the shared attribute primitive, like every
+            // other attribute writer. `attr()`'s VALUE is a runtime getter —
+            // the same trust level as a `bindAttribute` getter — so a raw
+            // `setAttribute` here made progressive enhancement the one public
+            // path where `javascript:` href/src, an unsafe `style` declaration
+            // list, or an `on*` handler string still reached the DOM.
+            //
+            // There is deliberately NO pre-write comparison here. This helper
+            // attaches to DOM that already exists, so comparing the raw desired
+            // value against the raw attribute skipped the sanitizer in exactly
+            // the case that matters: server markup already holding the same
+            // dangerous string. Write elision now lives inside the primitive,
+            // where it compares the POST-POLICY result and is therefore safe.
+            //
+            // `syncValueProperty: false` keeps this an ATTRIBUTE writer, as its
+            // name and existing behaviour promise: `attr(el, "value", …)` must
+            // set the content attribute, not the IDL property.
+            setSafeAttribute(el, name, next, { syncValueProperty: false, label: "enhance attr()" });
           }),
         );
       });

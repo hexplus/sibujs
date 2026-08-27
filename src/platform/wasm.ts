@@ -20,12 +20,18 @@ export interface WasmModuleState<T extends object = Record<string, unknown>> {
   ready: boolean;
 }
 
-export interface WasmConfig {
-  /** Import object passed to WebAssembly.instantiate */
-  imports?: WebAssembly.Imports;
-  /** Cache key for module caching (defaults to URL) */
-  cacheKey?: string;
-}
+/**
+ * Configuration for the `wasm()` reactive wrapper.
+ *
+ * Deliberately the SAME option bag as the underlying `loadWasmModule()`
+ * primitive rather than a hand-copied subset. The primitive REQUIRES an
+ * explicit origin policy for URL sources (`allowedOrigins`, or an explicit
+ * `unsafelyAllowAnyOrigin` opt-in), and the wrapper previously had no way to
+ * express one — so `wasm("/math.wasm")` could only ever reject, and the public
+ * convenience API was unusable for its documented primary use case. Extending
+ * the primitive's type keeps the two from drifting again.
+ */
+export interface WasmConfig extends LoadWasmOptions {}
 
 // ─── Module Cache ───────────────────────────────────────────────────────────
 
@@ -39,6 +45,43 @@ const instanceCache = globalSingleton(
   Symbol.for("sibujs.wasm.instanceCache.v1"),
   () => new Map<string, WebAssembly.Instance>(),
 );
+// In-flight loads, keyed the same way as `instanceCache`.
+//
+// A result-only cache cannot make a keyed load a singleton: two callers that
+// both miss the cache before either finishes each run a full instantiation, and
+// the "singleton instance" the API documents becomes two objects with two
+// separate linear memories. Whoever set the cache last wins, and the other
+// caller holds a detached instance whose mutations nobody else sees. Sharing
+// the in-flight promise closes the window.
+const inFlightCache = globalSingleton(
+  Symbol.for("sibujs.wasm.inFlightCache.v1"),
+  () => new Map<string, Promise<WebAssembly.Instance>>(),
+);
+
+/**
+ * Cache generation — what makes {@link clearWasmCache} an invalidation BARRIER
+ * rather than three `Map.clear()` calls.
+ *
+ * Clearing a map only erases what has already been written. A compile or
+ * instantiation already in flight still holds the same global maps and writes
+ * into them when it settles, so a caller that cleared the cache precisely to
+ * force a fresh load — a hot reload, a test between cases, a version bump —
+ * could have the invalidated module reinstated moments later BY THE WORK IT
+ * INVALIDATED. Nothing in the maps distinguishes "written before the clear"
+ * from "written after".
+ *
+ * A monotonic generation does. Every asynchronous producer captures the
+ * generation it began in and may publish only while that is still current. The
+ * operation still resolves normally to the caller that started it — cancelling
+ * their load was never the intent — it simply may not repopulate a cache
+ * generation it does not belong to.
+ */
+const cacheState = globalSingleton(Symbol.for("sibujs.wasm.cacheState.v1"), () => ({ generation: 0 }));
+
+/** True while `generation` is still the live cache generation. */
+function isCurrentGeneration(generation: number): boolean {
+  return generation === cacheState.generation;
+}
 
 // ─── wasm Hook ───────────────────────────────────────────────────────────
 
@@ -46,13 +89,27 @@ const instanceCache = globalSingleton(
  * Hook to load and use a WebAssembly module reactively.
  * Returns reactive state that updates when the module loads.
  *
+ * A URL source needs an explicit origin policy — WASM is compiled code with
+ * imports into JS memory, so fetching it from an unvetted URL is a supply-chain
+ * risk equivalent to importing a remote module (CWE-829). Pass `allowedOrigins`,
+ * or `unsafelyAllowAnyOrigin: true` to opt out deliberately. An `ArrayBuffer` /
+ * `Uint8Array` source needs neither: the bytes are already in hand.
+ *
  * @example
  * ```ts
- * const wasm = wasm<{ add: (a: number, b: number) => number }>('/math.wasm');
+ * const math = wasm<{ add: (a: number, b: number) => number }>(
+ *   'https://cdn.example.com/math.wasm',
+ *   { allowedOrigins: ['https://cdn.example.com'] },
+ * );
  * // In reactive context:
- * if (wasm.ready()) {
- *   const result = wasm.instance()!.add(1, 2);
+ * if (math.ready()) {
+ *   const result = math.instance()!.add(1, 2);
  * }
+ * ```
+ *
+ * @example Same-origin asset — still an explicit decision.
+ * ```ts
+ * const math = wasm('/math.wasm', { allowedOrigins: [location.origin] });
  * ```
  */
 export function wasm<T extends object = Record<string, unknown>>(
@@ -71,18 +128,47 @@ export function wasm<T extends object = Record<string, unknown>>(
 
   const cacheKey = config.cacheKey || (typeof source === "string" ? source : undefined);
 
+  /**
+   * Latest-run ownership for the reactive wrapper.
+   *
+   * The cache underneath is generationally correct, but this wrapper is a
+   * SEPARATE owner: it publishes `instance` / `error` / `loading`, and without a
+   * run id it publishes from whichever run settles last rather than from the
+   * newest one. Unkeyed `ArrayBuffer` / `Uint8Array` sources are documented to
+   * instantiate fresh every call instead of sharing an in-flight operation, so
+   * an automatic load and a `reload()` genuinely overlap — and a slow first run
+   * could land afterwards and overwrite the reload's result, or raise an error
+   * for a load that had already succeeded.
+   *
+   * Supersession, not cancellation: a stale run still completes (the API has no
+   * abort surface, and its result may legitimately populate the shared cache).
+   * It simply loses the right to publish reactive state.
+   */
+  let runId = 0;
+
   async function load() {
+    const myRun = ++runId;
+
     setLoading(true);
     setError(null);
     setInstance(null);
 
     try {
-      const wasmInstance = await loadWasmModule(source, config.imports, cacheKey);
+      // Forward the WHOLE config — including `allowedOrigins` /
+      // `unsafelyAllowAnyOrigin` — through the options-only entry point. The
+      // previous call passed `config.imports` positionally, so the security
+      // options the wrapper accepted were silently dropped and every URL source
+      // was refused by the primitive.
+      const wasmInstance = await loadWasmModuleWithOptions(source, { ...config, cacheKey });
+      if (myRun !== runId) return;
       setInstance(wasmInstance.exports as unknown as T);
     } catch (err) {
+      if (myRun !== runId) return;
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      setLoading(false);
+      // Only the newest run may settle `loading`. A stale run clearing it would
+      // report "done" while the run that actually owns the state is still going.
+      if (myRun === runId) setLoading(false);
     }
   }
 
@@ -122,22 +208,64 @@ export interface LoadWasmOptions {
   unsafelyAllowAnyOrigin?: boolean;
 }
 
+/**
+ * Load and instantiate a WebAssembly module — **positional/legacy form**.
+ *
+ * The second parameter is always `WebAssembly.Imports` and the third is always
+ * the cache key. There is no structural guessing, so a module namespace legally
+ * named `imports` or `cacheKey` is passed through unharmed.
+ *
+ * It previously accepted `WebAssembly.Imports | LoadWasmOptions` and decided
+ * between them at runtime by probing for `allowedOrigins` /
+ * `unsafelyAllowAnyOrigin`. That discriminator was unsound in both directions:
+ * an options bag carrying only `imports`/`cacheKey` was read as an import
+ * namespace (so `cacheKey` was dropped and the documented keyed-singleton
+ * guarantee silently did not hold), while a genuine namespace *named*
+ * `allowedOrigins` would have been read as options. No structural test can
+ * separate the two, because both are plain objects with caller-chosen keys — so
+ * the union was removed rather than re-guessed.
+ *
+ * For anything beyond imports and a cache key — notably the origin policy a URL
+ * source requires — use {@link loadWasmModuleWithOptions}.
+ *
+ * @see loadWasmModuleWithOptions
+ */
 export async function loadWasmModule(
   source: string | ArrayBuffer | Uint8Array,
-  imports?: WebAssembly.Imports | LoadWasmOptions,
+  imports?: WebAssembly.Imports,
   cacheKey?: string,
 ): Promise<WebAssembly.Instance> {
-  // Back-compat: `imports` may be either WebAssembly.Imports (a record of
-  // module-name -> imports map) or a LoadWasmOptions bag. Disambiguate via
-  // the unique option keys ONLY — never `imports`/`cacheKey`, which a user
-  // could legally name a WASM module namespace.
-  const isOptionsBag = !!(imports && ("allowedOrigins" in imports || "unsafelyAllowAnyOrigin" in imports));
-  const opts: LoadWasmOptions = isOptionsBag
-    ? (imports as LoadWasmOptions)
-    : { imports: imports as WebAssembly.Imports | undefined, cacheKey };
-  const wasmImports = opts.imports;
+  return loadWasmModuleWithOptions(source, { imports, cacheKey });
+}
+
+/**
+ * Load and instantiate a WebAssembly module — **options form**.
+ *
+ * Unambiguous by construction: options live in their own parameter, so a WASM
+ * module namespace named `imports`, `cacheKey`, or `allowedOrigins` is just a
+ * namespace and nothing has to be inferred from object shape.
+ *
+ * This is the form to use for a URL source, since the origin policy
+ * (`allowedOrigins`, or an explicit `unsafelyAllowAnyOrigin`) can only be
+ * expressed here.
+ *
+ * @example
+ * ```ts
+ * const instance = await loadWasmModuleWithOptions("https://cdn.example.com/math.wasm", {
+ *   allowedOrigins: ["https://cdn.example.com"],
+ *   imports: { env: { log: console.log } },
+ *   cacheKey: "math",
+ * });
+ * ```
+ */
+export async function loadWasmModuleWithOptions(
+  source: string | ArrayBuffer | Uint8Array,
+  opts: LoadWasmOptions = {},
+): Promise<WebAssembly.Instance> {
   const key = opts.cacheKey || (typeof source === "string" ? source : undefined);
 
+  // Origin policy runs BEFORE any cache lookup: a refused origin must be
+  // refused even when some earlier, permitted call already populated the key.
   if (typeof source === "string") {
     const allowed = opts.allowedOrigins ?? [];
     if (allowed.length > 0) {
@@ -159,50 +287,81 @@ export async function loadWasmModule(
     }
   }
 
-  // Check instance cache
-  if (key) {
-    const cachedInstance = instanceCache.get(key);
-    if (cachedInstance) {
-      return cachedInstance;
-    }
-  }
+  // The generation this load belongs to. Captured before any await so a clear
+  // that happens while it runs is observable at publish time.
+  const generation = cacheState.generation;
 
-  let module: WebAssembly.Module;
+  // Unkeyed loads are documented to instantiate fresh every call — no sharing.
+  if (!key) return instantiateWasm(source, opts.imports, undefined, generation);
 
-  // Check module cache
+  const cachedInstance = instanceCache.get(key);
+  if (cachedInstance) return cachedInstance;
+
+  const inFlight = inFlightCache.get(key);
+  if (inFlight) return inFlight;
+
+  const pending = instantiateWasm(source, opts.imports, key, generation).then((instance) => {
+    // Publish only into the generation this load started in. The caller still
+    // receives the instance; it just does not become the cached singleton for a
+    // generation that explicitly discarded it.
+    if (isCurrentGeneration(generation)) instanceCache.set(key, instance);
+    return instance;
+  });
+  inFlightCache.set(key, pending);
+
+  // Evict on settle so a FAILED load does not poison the key forever — the
+  // next caller retries from scratch. Guarded by identity so a retry that has
+  // already registered its own promise is not evicted by the loser's cleanup.
+  // The `.catch` consumes the rejection on THIS derived chain only; `pending`
+  // itself still rejects for every real awaiter.
+  void pending
+    .catch(() => {})
+    .then(() => {
+      if (inFlightCache.get(key) === pending) inFlightCache.delete(key);
+    });
+
+  return pending;
+}
+
+/**
+ * Fetch/compile/instantiate.
+ *
+ * `generation` is the cache generation the caller began in; every module-cache
+ * write is conditional on it still being live. Both compile paths publish, so
+ * both are guarded — fixing only the instance cache would leave the compiled
+ * module behind, and the next load would silently reuse pre-clear bytes.
+ */
+async function instantiateWasm(
+  source: string | ArrayBuffer | Uint8Array,
+  wasmImports: WebAssembly.Imports | undefined,
+  key: string | undefined,
+  generation: number,
+): Promise<WebAssembly.Instance> {
   const cachedModule = key ? moduleCache.get(key) : undefined;
   if (cachedModule) {
-    module = cachedModule;
-  } else {
-    // Fetch and compile
-    let bytes: ArrayBuffer;
-    if (typeof source === "string") {
-      // URL - use streaming compilation if available
-      if (typeof WebAssembly.instantiateStreaming === "function") {
-        const response = fetch(source);
-        const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
-        if (key) {
-          moduleCache.set(key, result.module);
-          instanceCache.set(key, result.instance);
-        }
-        return result.instance;
-      }
-      const response = await fetch(source);
-      bytes = await response.arrayBuffer();
-    } else if (source instanceof Uint8Array) {
-      bytes = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer;
-    } else {
-      bytes = source;
-    }
-
-    module = await WebAssembly.compile(bytes);
-    if (key) moduleCache.set(key, module);
+    return WebAssembly.instantiate(cachedModule, wasmImports || {});
   }
 
-  // Instantiate
-  const instance = await WebAssembly.instantiate(module, wasmImports || {});
-  if (key) instanceCache.set(key, instance);
-  return instance;
+  let bytes: ArrayBuffer;
+  if (typeof source === "string") {
+    // URL - use streaming compilation if available
+    if (typeof WebAssembly.instantiateStreaming === "function") {
+      const response = fetch(source);
+      const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
+      if (key && isCurrentGeneration(generation)) moduleCache.set(key, result.module);
+      return result.instance;
+    }
+    const response = await fetch(source);
+    bytes = await response.arrayBuffer();
+  } else if (source instanceof Uint8Array) {
+    bytes = source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength) as ArrayBuffer;
+  } else {
+    bytes = source;
+  }
+
+  const module = await WebAssembly.compile(bytes);
+  if (key && isCurrentGeneration(generation)) moduleCache.set(key, module);
+  return WebAssembly.instantiate(module, wasmImports || {});
 }
 
 // ─── preloadWasm ────────────────────────────────────────────────────────────
@@ -216,6 +375,9 @@ export async function preloadWasm(
   options: { allowedOrigins?: string[]; unsafelyAllowAnyOrigin?: boolean } = {},
 ): Promise<void> {
   if (moduleCache.has(url)) return;
+  // Same barrier as the loader: a preload compiling across a clear must not
+  // reinstate the module the clear discarded.
+  const generation = cacheState.generation;
   const allowed = options.allowedOrigins ?? [];
   if (allowed.length > 0) {
     let parsed: URL;
@@ -242,7 +404,7 @@ export async function preloadWasm(
     const bytes = await response.arrayBuffer();
     module = await WebAssembly.compile(bytes);
   }
-  moduleCache.set(url, module);
+  if (isCurrentGeneration(generation)) moduleCache.set(url, module);
 }
 
 // ─── createWasmBridge ───────────────────────────────────────────────────────
@@ -315,11 +477,27 @@ export function createWasmBridge<T extends object>(
 // ─── Cache Management ───────────────────────────────────────────────────────
 
 /**
- * Clear all cached WASM modules and instances.
+ * Invalidate the module, instance, and in-flight WASM cache generations.
+ *
+ * CONTRACT: work already started may still resolve to the callers that started
+ * it, but must never repopulate the caches after the clear. A load in flight
+ * across this call therefore still returns its instance to whoever awaited it,
+ * while the cache stays empty and the next load for that key compiles and
+ * instantiates afresh.
+ *
+ * This is an invalidation BARRIER, not a `Map.clear()`: emptying the maps alone
+ * would let the invalidated work write its results straight back in.
  */
 export function clearWasmCache(): void {
+  // Advance the generation FIRST. Any producer already in flight captured the
+  // previous one, so from this statement onward none of them can publish —
+  // including one that settles between these lines.
+  cacheState.generation++;
   moduleCache.clear();
   instanceCache.clear();
+  // In-flight entries are dropped too, so a load started after the clear does
+  // not join a pre-clear operation and inherit its invalidated result.
+  inFlightCache.clear();
 }
 
 /**

@@ -15,8 +15,12 @@ describe("title", () => {
   });
 
   it("sets document title with a static string", () => {
-    title("My Page");
+    // Released at the end: title ownership is a shared stack, so a leaked
+    // owner stays on it and the next test's release hands the title back to
+    // THIS one instead of to the document's original.
+    const dispose = title("My Page");
     expect(document.title).toBe("My Page");
+    dispose();
   });
 
   it("restores previous title on dispose", () => {
@@ -29,12 +33,13 @@ describe("title", () => {
 
   it("sets document title reactively from a getter", () => {
     const [getTitle, setTitle] = signal("Reactive Title");
-    title(getTitle);
+    const dispose = title(getTitle);
 
     expect(document.title).toBe("Reactive Title");
 
     setTitle("Updated Title");
     expect(document.title).toBe("Updated Title");
+    dispose();
   });
 
   it("restores previous title on dispose with reactive getter", () => {

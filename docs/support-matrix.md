@@ -23,9 +23,39 @@ interception, replacement hydration, SSR Suspense swap, and native progressive
 islands (`load`, `idle`, `visible`, `interaction`, `media`) against real
 `IntersectionObserver`, `requestIdleCallback`, and `matchMedia`.
 
-`browserslist` declares Chrome ≥ 80, Firefox ≥ 78, Safari ≥ 14, Edge ≥ 80.
-**Those minimum versions were not tested** — only current engines were. Treat
+`browserslist` declares **Chrome ≥ 93, Edge ≥ 93, Firefox ≥ 92, Safari ≥ 15.4**.
+**Those minimum versions were not executed** — only current engines were. Treat
 the floor as a build-target declaration, not a verified claim.
+
+### Why the floor is exactly Chrome 93 / Firefox 92 / Safari 15.4
+
+The floor previously read Chrome ≥ 80 / Firefox ≥ 78 / Safari ≥ 14 and was
+false: nothing checked it, and the source had drifted above it. Three platform
+APIs are used *without* a feature-detection guard and are unavailable at the old
+minimum, so a consumer targeting it shipped a bundle that throws on first use:
+
+| API | Used at | Requires |
+|---|---|---|
+| `Object.hasOwn()` | `core/signals/store.ts`, `core/signals/deepSignal.ts`, `platform/ssr.ts`, `patterns/composable.ts`, … | Chrome/Edge 93, Firefox 92, Safari 15.4 |
+| `ParentNode.replaceChildren()` | `core/rendering/dispose.ts` and the disposal-aware replacement path | Chrome/Edge 86, Firefox 78, Safari 14 |
+| `new Error(msg, { cause })` | `core/errors.ts` | Chrome/Edge 93, Firefox 91, Safari 15 |
+
+`Object.hasOwn` sets the binding constraint, and it sits inside the reactive
+core. Polyfilling only `replaceChildren` — the API the original audit named —
+would have left the bundle just as broken on Chrome 80–92, so the honest fix was
+to declare the floor the source actually requires rather than to keep a promise
+three APIs already broke.
+
+Everything else modern in the source **is** feature-detected and therefore does
+not constrain the floor: `structuredClone`, `requestIdleCallback`,
+`ResizeObserver`, `IntersectionObserver`, `AggregateError`, `CSS.escape`,
+`document.startViewTransition`, `crypto.randomUUID`, `URLPattern`.
+
+This is now enforced rather than documented: `tests/hardening-browser-floor.test.ts`
+parses `package.json#browserslist`, scans `src/**` for each API in a
+compatibility table, and fails when an unguarded usage needs a newer engine than
+the declared floor. Adding such an API forces a deliberate choice — guard it, or
+raise the floor and update this table.
 
 ## Node.js
 

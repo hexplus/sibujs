@@ -115,10 +115,11 @@ describe("scopedStyle selector rewriting", () => {
     expect(css).toContain(`[${attr}]::before`);
   });
 
-  it("withScopedStyle applies the scope attribute recursively to nested elements", () => {
+  it("withScopedStyle brings nested elements under the component's scope", () => {
     const Comp = withScopedStyle<{ label: string }>(".x { color: blue; }", (props) => {
       const root = document.createElement("div");
       const child = document.createElement("span");
+      child.className = "x";
       child.textContent = props.label;
       root.appendChild(child);
       return root;
@@ -126,8 +127,17 @@ describe("scopedStyle selector rewriting", () => {
     const el = Comp({ label: "hi" });
     const attr = el.getAttributeNames().find((a) => a.startsWith("data-sibu"));
     expect(attr).toBeTruthy();
-    // Recursive application: the nested span carries the same scope attribute.
-    expect((el.querySelector("span") as HTMLElement).hasAttribute(attr as string)).toBe(true);
+
+    // The CONTRACT is "the component's CSS selects the component's subtree",
+    // asserted by matching the generated selector against the DOM. It is
+    // deliberately not asserted as "every descendant carries the scope
+    // attribute": that was the old implementation, and stamping descendants at
+    // render time can only ever reach the nodes that already exist, leaving
+    // anything a signal or `each()` inserts later unstyled.
+    document.body.appendChild(el);
+    const child = el.querySelector("span") as HTMLElement;
+    expect(child.matches(`[${attr}] .x`)).toBe(true);
+    el.remove();
   });
 });
 

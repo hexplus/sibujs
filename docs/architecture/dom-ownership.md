@@ -228,6 +228,72 @@ import { replaceChildrenSafely } from "sibujs";
 replaceChildrenSafely(container, newContent);
 ```
 
+## Platform helpers that own trees
+
+The invariant applies to the whole public surface, not only the reactive core.
+These helpers replace or clear content they own, and all route through
+`replaceChildrenSafely()`:
+
+| Helper | What it owns |
+|---|---|
+| `createMicroApp().mount()` / `.unmount()` | the mounted component tree (light DOM or shadow root) |
+| `defineRemoteComponent()` | the loading placeholder, swapped for the resolved component |
+| `defineElement()` teardown | the rendered subtree inside a custom element |
+| `DynamicComponent()` | the currently-rendered component |
+| `DOMPool.release()` | children of a recycled element, before it re-enters the pool |
+| `render()` / `unmountAll()` (testing) | the test container's contents |
+
+`DOMPool` is the least obvious of these: an element returned to the pool still
+carrying live bindings hands them to whatever renders into it next.
+
+## Singleton document resources
+
+`document.title` and `<base>` are **not** ordinary owned nodes. A page can hold
+any number of `<meta>` tags, each independently created and removed, so
+"remember my element, delete it on cleanup" is complete teardown for those. A
+singleton has exactly one effective value, so setting it is *taking over* from
+whoever held it — and teardown means *giving it back*.
+
+The natural-looking approach, where each owner snapshots the previous value and
+writes it back, is wrong whenever three owners overlap:
+
+```text
+A takes the title ("Dashboard")   snapshot: "Original"
+B takes the title ("Settings")    snapshot: "Dashboard"
+C takes the title ("Report")      snapshot: "Settings"
+B disposes  → writes "Dashboard"  ← C is the visible owner and just got clobbered
+```
+
+Overlapping lifetimes are the normal case — a layout `Head` outliving a page
+`Head`, a modal's `title()` inside a route's — so this is an everyday reordering
+bug rather than a corner case.
+
+`src/utils/singletonResource.ts` replaces the snapshot with an **owner stack**:
+
+- writes always come from the current top,
+- releasing a non-top owner just removes its entry and changes nothing visible,
+- a superseded owner's reactive update is recorded but does not steal the
+  resource back,
+- emptying the stack restores the value captured before the first owner arrived.
+
+`src/utils/documentResources.ts` builds the two concrete managers on it and
+holds them in `globalSingleton` slots, so `Head({ title })` (platform) and
+`title()` (browser) — and any duplicated module copy — contend for **one** stack.
+Two independent stacks over one global resource would reintroduce exactly the
+clobbering the stack exists to prevent.
+
+The `<base>` manager reuses a single element rather than removing and appending,
+because HTML honours only the first `<base>`; that is what makes "latest owner
+wins" true in the document rather than only in the model. A server-rendered
+`<base>` is captured on first acquire and restored on release — it used to be
+deleted outright, permanently changing how every relative URL on the page
+resolved.
+
+> A consequence worth knowing: an owner that is never released stays on the
+> stack. `title()` returns a disposer for this reason, and leaking it means the
+> next release hands control back to the leaked owner rather than to the
+> document's original title.
+
 ## Verifying the invariant
 
 The rule is testable, not merely documented. `checkLeaks()` returns the number

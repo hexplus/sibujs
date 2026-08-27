@@ -2,7 +2,7 @@
 // TESTING UTILITIES
 // ============================================================================
 
-import { dispose } from "../core/rendering/dispose";
+import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { globalSingleton } from "../utils/globalSingleton";
 
 /**
@@ -30,8 +30,7 @@ export function unmountAll(): void {
   for (const container of _renderedContainers) {
     // Run reactive disposers before clearing markup so effects/listeners
     // registered during render don't leak across tests.
-    for (const child of Array.from(container.childNodes)) dispose(child);
-    container.replaceChildren();
+    replaceChildrenSafely(container);
     if (container.parentNode) container.parentNode.removeChild(container);
   }
   _renderedContainers.clear();
@@ -87,8 +86,7 @@ export function render(component: () => HTMLElement): {
   }
 
   function unmount(): void {
-    for (const child of Array.from(container.childNodes)) dispose(child);
-    container.replaceChildren();
+    replaceChildrenSafely(container);
     if (container.parentNode) container.parentNode.removeChild(container);
     _renderedContainers.delete(container);
   }

@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS Public API Hardening — browser test fixture</title>
+  </head>
+  <body>
+    <!-- These four invariants are asserted in jsdom too, but each one rests on
+         behaviour jsdom only emulates:
+
+           - SVG attribute namespaces and whether a string in an on* slot
+             actually becomes a live handler (jsdom does not execute one).
+           - Real CSS cascade: whether the scope selectors a component generates
+             genuinely match nodes inserted after render.
+           - A real Shadow DOM boundary for micro-app teardown.
+           - Real history + scroll for popstate restoration. -->
+
+    <section id="svg-host"></section>
+    <section id="micro-host"></section>
+    <section id="scope-host"></section>
+    <div style="height: 4000px"></div>
+
+    <script type="module">
+      // `div` / `registerDisposer` ship from the root entry; the platform and
+      // UI helpers under test ship from `sibujs/extras`.
+      import { div, registerDisposer } from "../dist/index.js";
+      import {
+        createMicroApp,
+        scrollRestoration,
+        svgElement,
+        withScopedStyle,
+      } from "../dist/extras.js";
+
+      let svgHandlerFired = 0;
+      window.__svgHandlerFired = () => svgHandlerFired;
+
+      const api = {
+        // --- SVG attribute security -------------------------------------
+        svgStringHandlerIsInert() {
+          const host = document.getElementById("svg-host");
+          host.replaceChildren();
+          const svg = svgElement("svg", {
+            width: "10",
+            height: "10",
+            onload: "window.__svgHandlerFired && window.__svgHandlerFired(); window.__XSS = true;",
+          });
+          host.appendChild(svg);
+          return {
+            hasAttr: svg.hasAttribute("onload"),
+            xssRan: window.__XSS === true,
+          };
+        },
+
+        svgFunctionHandlerStillWorks() {
+          const rect = svgElement("rect", { onclick: () => svgHandlerFired++ });
+          document.getElementById("svg-host").appendChild(rect);
+          rect.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+          return { fired: svgHandlerFired, hasAttr: rect.hasAttribute("onclick") };
+        },
+
+        svgXlinkHrefNamespace() {
+          const safe = svgElement("use", { "xlink:href": "#icon" });
+          const unsafe = svgElement("use", { "xlink:href": "javascript:window.__XSS2 = true" });
+          return {
+            safeNS: safe.getAttributeNS("http://www.w3.org/1999/xlink", "href"),
+            unsafeNS: unsafe.getAttributeNS("http://www.w3.org/1999/xlink", "href"),
+          };
+        },
+
+        // --- micro-app teardown across a real shadow boundary -----------
+        microAppDisposal(useShadow) {
+          const app = createMicroApp({ name: "browser-check", shadow: useShadow });
+          document.getElementById("micro-host").replaceChildren(app.element);
+
+          let disposals = 0;
+          const first = div("first");
+          registerDisposer(first, () => {
+            disposals++;
+          });
+
+          app.mount(() => first);
+          const mountedText = (app.element.shadowRoot ?? app.element).textContent;
+
+          app.mount(() => div("second"));
+          const afterRemount = disposals;
+
+          app.unmount();
+          const afterUnmount = disposals;
+
+          return { mountedText, afterRemount, afterUnmount };
+        },
+
+        // --- scoped styles vs the real cascade ---------------------------
+        scopedStyleAppliesToLateNodes() {
+          const Component = withScopedStyle(
+            ".tile { color: rgb(0, 128, 0); } .root { color: rgb(128, 0, 0); }",
+            () => div({ class: "root" }),
+          );
+          const el = Component({});
+          document.getElementById("scope-host").replaceChildren(el);
+
+          const early = document.createElement("span");
+          early.className = "tile";
+          early.textContent = "early";
+          el.appendChild(early);
+
+          const earlyColor = getComputedStyle(early).color;
+
+          // Inserted AFTER the component rendered — the case that used to be
+          // outside the scope contract entirely.
+          const late = document.createElement("span");
+          late.className = "tile";
+          late.textContent = "late";
+          el.appendChild(late);
+
+          const deep = document.createElement("i");
+          deep.className = "tile";
+          late.appendChild(deep);
+
+          return {
+            earlyColor,
+            lateColor: getComputedStyle(late).color,
+            deepColor: getComputedStyle(deep).color,
+            rootColor: getComputedStyle(el).color,
+          };
+        },
+
+        // --- functional pseudo-class selector lists ----------------------
+        // A comma inside :is()/:where()/:not() is an ARGUMENT separator, not a
+        // selector-list separator. A real engine is the only authority on
+        // whether the generated sheet still selects what the author wrote.
+        scopedFunctionalPseudos() {
+          const Component = withScopedStyle(
+            ":is(.alpha, .beta) { color: rgb(0, 0, 255); }" +
+              ".gamma:not(.x, .y) { color: rgb(0, 128, 0); }" +
+              ":where(.wrap, .box) > .leaf { color: rgb(255, 0, 0); }" +
+              '[data-v=","] { color: rgb(128, 0, 128); }',
+            () => div({ class: "root" }),
+          );
+          const el = Component({});
+          const host = document.getElementById("scope-host");
+          host.replaceChildren(el);
+
+          const add = (tag, cls, attrs) => {
+            const node = document.createElement(tag);
+            if (cls) node.className = cls;
+            if (attrs) for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+            el.appendChild(node);
+            return node;
+          };
+
+          const alpha = add("span", "alpha");
+          const beta = add("span", "beta");
+          const gammaPlain = add("span", "gamma");
+          const gammaExcluded = add("span", "gamma x");
+          const wrap = add("div", "wrap");
+          const leaf = document.createElement("i");
+          leaf.className = "leaf";
+          wrap.appendChild(leaf);
+          const comma = add("span", null, { "data-v": "," });
+
+          const color = (n) => getComputedStyle(n).color;
+          return {
+            alpha: color(alpha),
+            beta: color(beta),
+            gammaPlain: color(gammaPlain),
+            gammaExcluded: color(gammaExcluded),
+            leaf: color(leaf),
+            comma: color(comma),
+          };
+        },
+
+        // --- scroll restoration against real history + scrolling ---------
+        setupScroll() {
+          window.__sr = scrollRestoration({ mode: "auto", getKey: () => "page-a" });
+          return true;
+        },
+
+        // Full auto-mode round trip with the browser's OWN restoration proved
+        // disabled, so a pass cannot be the engine restoring the viewport for
+        // us. Every scrollTo SibuJS performs is recorded.
+        setupAutoRoundTrip() {
+          window.__scrollCalls = [];
+          const nativeScrollTo = window.scrollTo.bind(window);
+          window.scrollTo = (...args) => {
+            const [x, y] = args.length === 1 && typeof args[0] === "object" ? [args[0].left, args[0].top] : args;
+            window.__scrollCalls.push({ x: x || 0, y: y || 0 });
+            return nativeScrollTo(...args);
+          };
+          window.__restoreScrollTo = () => {
+            window.scrollTo = nativeScrollTo;
+          };
+
+          window.__sr = scrollRestoration({ mode: "auto", getKey: () => "A" });
+          return {
+            // Auto mode must have taken the browser out of the restoration
+            // business for itself.
+            nativeMode: history.scrollRestoration,
+            initialTag: (history.state || {}).__sibuScrollKey,
+          };
+        },
+        autoScrollTo(y) {
+          window.scrollTo(0, y);
+          window.__scrollCalls.length = 0;
+          return window.scrollY;
+        },
+        autoPushEntry(key, url) {
+          history.pushState({}, "", url);
+          window.__sr.onNavigation(key);
+          return (history.state || {}).__sibuScrollKey;
+        },
+        autoObserved() {
+          return { calls: window.__scrollCalls.slice(), y: window.scrollY };
+        },
+        autoPositions() {
+          return { A: window.__sr.getPosition("A") || null, B: window.__sr.getPosition("B") || null };
+        },
+        teardownAutoRoundTrip() {
+          window.__sr.dispose();
+          if (window.__restoreScrollTo) window.__restoreScrollTo();
+          return history.scrollRestoration;
+        },
+        saveAt(key, y) {
+          window.scrollTo(0, y);
+          window.__sr.save(key);
+          return { x: window.scrollX, y: window.scrollY };
+        },
+        positionFor(key) {
+          return window.__sr.getPosition(key) ?? null;
+        },
+        disposeScroll() {
+          window.__sr.dispose();
+          return true;
+        },
+      };
+
+      window.__t = api;
+      window.__ready = true;
+    </script>
+  </body>
+</html>
