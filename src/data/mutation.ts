@@ -1,7 +1,6 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
-import { untracked } from "../reactivity/track";
 import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
@@ -82,6 +81,33 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
   let runId = 0;
   let abortController: AbortController | null = null;
 
+  // THE CANCELLATION BASELINE.
+  //
+  // `status` has four values, but only three of them are ever a resting place:
+  // `"loading"` is a run in progress, not a state the mutation can be left in.
+  // Cancellation is the one outcome with no verdict of its own, so it restores
+  // the baseline — and the baseline must therefore be the last state the
+  // mutation actually SETTLED into, not whatever happened to be on screen when
+  // the cancelled run started.
+  //
+  // Those two are not the same thing. A run that supersedes an in-flight one
+  // starts while `status === "loading"`, so reading the visible state made
+  // `"loading"` the baseline, and restoring it left the mutation finished but in
+  // none of its terminal states — `loading` false with `status` still
+  // `"loading"`, so `isIdle()`, `isSuccess()` and `error()` were all falsy at
+  // once.
+  //
+  // Tracking it separately makes that unrepresentable by construction: this type
+  // has no `"loading"` member, so no chain of transient runs — however long —
+  // can become the baseline. Only a run that still owns the state
+  // (`myRun === runId`) may write here, and `reset()` rewrites it too.
+  //
+  // Plain variables, not signals: this is state-machine bookkeeping that no
+  // consumer subscribes to, and keeping it non-reactive also keeps `mutate()`
+  // from registering a dependency on the caller that invoked it.
+  let terminalStatus: "idle" | "success" | "error" = "idle";
+  let terminalError: Error | undefined;
+
   async function execute(variables: TVariables): Promise<TData> {
     // Abort any in-flight mutation (incl. its retry chain) before starting a
     // new one, so a superseding mutate() doesn't leave a zombie retry loop.
@@ -91,18 +117,10 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     const myRun = ++runId;
     let context: TContext | undefined;
 
-    // The state this run is about to paint over. Cancellation is the one
-    // outcome that produces no verdict of its own, so it restores what was here
-    // instead of inventing something — see the AbortError branch below. `data`
-    // is not snapshotted because starting a mutation does not clear it.
-    //
-    // Read untracked: `mutate()` is routinely called from inside an effect or an
-    // event handler that runs in one, and a bare read would subscribe that
-    // caller to `status`/`error` — making the caller re-run on every mutation it
-    // triggers. Snapshotting is bookkeeping, not a reactive dependency.
-    const previousStatus = untracked(status);
-    const previousError = untracked(error);
-
+    // Deliberately NOT snapshotting the visible state here — starting a run
+    // while another is in flight would capture `"loading"`. The baseline lives
+    // in `terminalStatus` / `terminalError` and is updated only when a run
+    // actually settles.
     batch(() => {
       setLoading(true);
       setError(undefined);
@@ -125,6 +143,12 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
       // Ignore stale responses — a newer mutate() call is in flight
       if (myRun !== runId) return result;
+
+      // This run settled and still owns the state, so it becomes the baseline a
+      // later cancellation restores. The stale check above is what keeps a
+      // superseded run from recording one.
+      terminalStatus = "success";
+      terminalError = undefined;
 
       batch(() => {
         setData(result);
@@ -191,8 +215,8 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
         if (myRun === runId) {
           batch(() => {
             setLoading(false);
-            setError(previousError);
-            setStatus(previousStatus);
+            setError(terminalError);
+            setStatus(terminalStatus);
           });
         }
         throw err;
@@ -202,6 +226,10 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;
+
+      // Settled, and still the owner — this failure is the new baseline.
+      terminalStatus = "error";
+      terminalError = errorObj;
 
       batch(() => {
         setError(errorObj);
@@ -224,6 +252,11 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     // Cancel any in-flight mutation + its pending retries.
     abortController?.abort();
     abortController = null;
+    // reset() is itself a terminal transition, so it replaces the baseline. Any
+    // run it just aborted is now stale and cannot restore what preceded the
+    // reset — and a future cancelled run correctly lands back on idle.
+    terminalStatus = "idle";
+    terminalError = undefined;
     batch(() => {
       setData(undefined);
       setError(undefined);

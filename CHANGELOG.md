@@ -51,10 +51,14 @@ This project follows [Semantic Versioning](https://semver.org/).
 
   Cleanup is run-owned, not blanket: only the run that still holds the state may
   repair it, so a late superseded run cannot clear the newer run's loading
-  state. A cancelled current run restores what it replaced rather than forcing
-  `idle` — cancelling produced no verdict, so `success(data)` stays
-  `success(data)` and `error(E)` stays `error(E)`. Cancellation still calls
-  neither `onError` nor `onSettled`.
+  state. A cancelled current run restores the last state the mutation actually
+  settled into — `idle`, `success` or `error` — rather than forcing `idle`,
+  because cancelling produced no verdict of its own: `success(data)` stays
+  `success(data)` and `error(E)` stays `error(E)`. The baseline is tracked
+  separately from the visible state, so a mutation started while another is
+  still loading cannot adopt `"loading"` as its restore point and end up
+  finished but in no terminal state at all. Cancellation still calls neither
+  `onError` nor `onSettled`.
 
   `onMutate` now states its contract explicitly: ordinary exceptions fail the
   mutation, an `AbortError` is cancellation — the same rule `mutationFn`

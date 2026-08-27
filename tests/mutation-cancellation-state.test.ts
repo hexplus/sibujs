@@ -25,11 +25,13 @@ import { mutation } from "../src/data/mutation";
 // that legitimately owns it.
 //
 // CHOSEN CANCELLATION SEMANTICS (non-destructive restoration): a cancelled
-// current run restores the externally observable state that existed just before
-// it started. Cancelling did not invalidate the previous result, so
-// `success(data)` stays `success(data)` and `error(E)` stays `error(E)`. Only
-// `status` and `error` are snapshotted — `execute()` does not touch `data` at
-// start, so there is nothing else to restore.
+// current run restores the LAST TERMINAL state — the last `idle`, `success` or
+// `error` the mutation actually settled into. Cancelling did not invalidate the
+// previous result, so `success(data)` stays `success(data)` and `error(E)` stays
+// `error(E)`. That baseline is deliberately NOT "whatever was visible when this
+// run started": a run superseding an in-flight one starts from `"loading"`, and
+// restoring that leaves the mutation in no terminal state at all. See the
+// terminal-baseline suites at the bottom of this file.
 // ---------------------------------------------------------------------------
 
 /** A promise whose settlement this test controls exactly. */
@@ -485,5 +487,425 @@ describe("cancellation interacts correctly with retry policy", () => {
     expect(m.isIdle()).toBe(true);
     expect(m.loading()).toBe(false);
     expect(m.error()).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The cancellation baseline is the LAST TERMINAL STATE, never a transient one.
+//
+//   LAST TERMINAL STATE (idle | success | error)
+//           |
+//           |  start any number of mutations
+//           v
+//        LOADING                     <-- never a baseline
+//           |
+//           +-- success       → REPLACE terminal state
+//           +-- normal error  → REPLACE terminal state
+//           +-- cancellation  → RESTORE terminal state
+//
+// Snapshotting `status()` at run start looked equivalent to "the state this run
+// replaced", and is — but only for a run that starts from rest. A run that
+// supersedes an in-flight one starts while `status === "loading"`, captures
+// that, and on cancellation restores it: `loading` set back to false while
+// `status` stays `"loading"`. The mutation is finished and in none of its three
+// terminal states — idle, success and error are all false at once.
+//
+// Special-casing `"loading"` back to `idle` would trade one wrong answer for
+// another: after `success("old")` the correct restore is `success("old")`, not
+// `idle`. The baseline has to be tracked separately from what happens to be
+// visible, so that `terminalStatus === "loading"` is unrepresentable.
+// ---------------------------------------------------------------------------
+
+/** Exactly one of idle / success / error, and not loading. */
+function expectCoherentTerminal(m: {
+  loading: () => boolean;
+  isIdle: () => boolean;
+  isSuccess: () => boolean;
+  error: () => unknown;
+}) {
+  expect(m.loading()).toBe(false);
+  const kinds = [m.isIdle(), m.isSuccess(), m.error() !== undefined].filter(Boolean);
+  // Zero kinds is the limbo this suite exists to prevent.
+  expect(kinds).toHaveLength(1);
+}
+
+const ABORT = () => {
+  const e = new Error("cancelled");
+  e.name = "AbortError";
+  return e;
+};
+
+/**
+ * A mutation whose runs are driven one at a time: run N settles only when the
+ * test says so. `script[i]` decides what run i+1 does.
+ */
+function scripted(script: Array<() => Promise<unknown>>) {
+  let calls = 0;
+  return {
+    fn: async () => {
+      const step = script[calls] ?? script[script.length - 1];
+      calls++;
+      return step();
+    },
+    get calls() {
+      return calls;
+    },
+  };
+}
+
+describe("cancellation restores the last TERMINAL state, not a transient one", () => {
+  it("idle → A loading → B supersedes → B cancels → idle", async () => {
+    const first = deferred<string>();
+    const s = scripted([
+      () => first.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    expect(m.loading()).toBe(true);
+
+    // B supersedes A while A is still pending — visible state is "loading".
+    const b = m.mutateAsync(undefined as never);
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    expect(m.loading()).toBe(false);
+    expect(m.isIdle()).toBe(true);
+    expect(m.error()).toBeUndefined();
+    expectCoherentTerminal(m);
+  });
+
+  it("success('old') → A loading → B supersedes → B cancels → success('old')", async () => {
+    const first = deferred<string>();
+    const s = scripted([
+      async () => "old",
+      () => first.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn);
+
+    await expect(m.mutateAsync(undefined as never)).resolves.toBe("old");
+    expect(m.isSuccess()).toBe(true);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    expect(m.loading()).toBe(true);
+
+    const b = m.mutateAsync(undefined as never);
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    // NOT idle — cancelling did not invalidate the old result.
+    expect(m.data()).toBe("old");
+    expect(m.isSuccess()).toBe(true);
+    expect(m.loading()).toBe(false);
+    expect(m.error()).toBeUndefined();
+    expectCoherentTerminal(m);
+  });
+
+  it("error(E) → A loading → B supersedes → B cancels → error(E)", async () => {
+    const failure = new Error("E");
+    const first = deferred<string>();
+    const s = scripted([
+      async () => {
+        throw failure;
+      },
+      () => first.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn, { retry: { maxRetries: 0 } });
+
+    await expect(m.mutateAsync(undefined as never)).rejects.toBe(failure);
+    expect(m.error()).toBe(failure);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    expect(m.loading()).toBe(true);
+
+    const b = m.mutateAsync(undefined as never);
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    expect(m.error()).toBe(failure);
+    expect(m.isIdle()).toBe(false);
+    expect(m.isSuccess()).toBe(false);
+    expectCoherentTerminal(m);
+  });
+
+  it("survives a chain of transient runs: success → A → B → C → C cancels", async () => {
+    const p1 = deferred<string>();
+    const p2 = deferred<string>();
+    const s = scripted([
+      async () => "old",
+      () => p1.promise,
+      () => p2.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn);
+
+    await m.mutateAsync(undefined as never);
+    expect(m.data()).toBe("old");
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    const b = m.mutateAsync(undefined as never);
+    b.catch(() => {});
+    await settle();
+    expect(m.loading()).toBe(true);
+
+    const c = m.mutateAsync(undefined as never);
+    await expect(c).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    expect(m.data()).toBe("old");
+    expect(m.isSuccess()).toBe(true);
+    expectCoherentTerminal(m);
+  });
+
+  it("a stale abort followed by the current run cancelling restores the baseline", async () => {
+    const p1 = deferred<string>();
+    const p2 = deferred<string>();
+    const s = scripted([async () => "old", () => p1.promise, () => p2.promise]);
+    const m = mutation(s.fn);
+
+    await m.mutateAsync(undefined as never);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    const b = m.mutateAsync(undefined as never);
+    b.catch(() => {});
+    await settle();
+
+    // A aborts late — stale, owns nothing.
+    p1.reject(ABORT());
+    await expect(a).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+    expect(m.loading()).toBe(true);
+
+    // Now the CURRENT run cancels too.
+    p2.reject(ABORT());
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    expect(m.data()).toBe("old");
+    expect(m.isSuccess()).toBe(true);
+    expectCoherentTerminal(m);
+  });
+});
+
+describe("the terminal snapshot tracks the LATEST terminal transition", () => {
+  it("a later success replaces an earlier one as the baseline", async () => {
+    const seq: Array<() => Promise<unknown>> = [
+      async () => "A",
+      async () => {
+        throw ABORT();
+      },
+      async () => "C",
+      async () => {
+        throw ABORT();
+      },
+    ];
+    const s = scripted(seq);
+    const m = mutation(s.fn);
+
+    await m.mutateAsync(undefined as never);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.data()).toBe("A");
+    expect(m.isSuccess()).toBe(true);
+
+    await m.mutateAsync(undefined as never);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.data()).toBe("C");
+    expect(m.isSuccess()).toBe(true);
+    expectCoherentTerminal(m);
+  });
+
+  it("a later error replaces an earlier one as the baseline", async () => {
+    const e1 = new Error("E1");
+    const e2 = new Error("E2");
+    const s = scripted([
+      async () => {
+        throw e1;
+      },
+      async () => {
+        throw ABORT();
+      },
+      async () => {
+        throw e2;
+      },
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn, { retry: { maxRetries: 0 } });
+
+    await expect(m.mutateAsync(undefined as never)).rejects.toBe(e1);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.error()).toBe(e1);
+
+    await expect(m.mutateAsync(undefined as never)).rejects.toBe(e2);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.error()).toBe(e2);
+    expectCoherentTerminal(m);
+  });
+
+  it("a success clears a previously recorded terminal error", async () => {
+    const e = new Error("E");
+    const s = scripted([
+      async () => {
+        throw e;
+      },
+      async () => "S",
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn, { retry: { maxRetries: 0 } });
+
+    await expect(m.mutateAsync(undefined as never)).rejects.toBe(e);
+    await m.mutateAsync(undefined as never);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(m.data()).toBe("S");
+    expect(m.isSuccess()).toBe(true);
+    expect(m.error()).toBeUndefined();
+    expectCoherentTerminal(m);
+  });
+
+  it("an error replaces a previously recorded terminal success", async () => {
+    const e = new Error("E");
+    const s = scripted([
+      async () => "S",
+      async () => {
+        throw e;
+      },
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn, { retry: { maxRetries: 0 } });
+
+    await m.mutateAsync(undefined as never);
+    await expect(m.mutateAsync(undefined as never)).rejects.toBe(e);
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(m.error()).toBe(e);
+    expect(m.isSuccess()).toBe(false);
+    expectCoherentTerminal(m);
+  });
+
+  it("a stale run's success does not become the baseline", async () => {
+    const p1 = deferred<string>();
+    const p2 = deferred<string>();
+    const s = scripted([
+      () => p1.promise,
+      () => p2.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    const b = m.mutateAsync(undefined as never);
+    b.catch(() => {});
+    await settle();
+
+    // A resolves late — stale, must not record a terminal state.
+    p1.resolve("stale");
+    await settle();
+    p2.resolve("current");
+    await expect(b).resolves.toBe("current");
+    await settle();
+
+    // Cancel a fresh run: the baseline must be B's success, never A's.
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.data()).toBe("current");
+    expect(m.isSuccess()).toBe(true);
+    expectCoherentTerminal(m);
+  });
+});
+
+describe("reset() replaces the terminal snapshot", () => {
+  it("reset while loading, late abort, then a cancelled run all end idle", async () => {
+    const p1 = deferred<string>();
+    const s = scripted([
+      async () => "old",
+      () => p1.promise,
+      async () => {
+        throw ABORT();
+      },
+    ]);
+    const m = mutation(s.fn);
+
+    await m.mutateAsync(undefined as never);
+    expect(m.isSuccess()).toBe(true);
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+
+    m.reset();
+    expect(m.isIdle()).toBe(true);
+
+    // A aborts late — stale, cannot restore the pre-reset success.
+    p1.reject(ABORT());
+    await expect(a).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+    expect(m.isIdle()).toBe(true);
+    expect(m.data()).toBeUndefined();
+    expectCoherentTerminal(m);
+
+    // A brand-new run that cancels must also land on idle, proving reset()
+    // rewrote the baseline rather than leaving the old success behind.
+    await expect(m.mutateAsync(undefined as never)).rejects.toMatchObject({ name: "AbortError" });
+    expect(m.isIdle()).toBe(true);
+    expect(m.error()).toBeUndefined();
+    expectCoherentTerminal(m);
+  });
+});
+
+describe("no cancellation path enters the failure branch", () => {
+  it("onError is never called for stale, current, or superseding cancellation", async () => {
+    const onError = vi.fn();
+    const onSettled = vi.fn();
+    const p1 = deferred<string>();
+    const p2 = deferred<string>();
+    const s = scripted([() => p1.promise, () => p2.promise]);
+    const m = mutation(s.fn, { onError, onSettled });
+
+    const a = m.mutateAsync(undefined as never);
+    a.catch(() => {});
+    await settle();
+    const b = m.mutateAsync(undefined as never);
+    b.catch(() => {});
+    await settle();
+
+    p1.reject(ABORT()); // stale cancellation
+    await expect(a).rejects.toMatchObject({ name: "AbortError" });
+    p2.reject(ABORT()); // current cancellation
+    await expect(b).rejects.toMatchObject({ name: "AbortError" });
+    await settle();
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onSettled).not.toHaveBeenCalled();
+    expectCoherentTerminal(m);
   });
 });
