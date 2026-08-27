@@ -1,11 +1,23 @@
+import { acquireScrollRestorationMode, type ResourceLease } from "../utils/documentResources";
+
 /** Default history-state slot used to identify which entry a popstate landed on. */
 const DEFAULT_STATE_KEY = "__sibuScrollKey";
 
 export interface ScrollRestorationOptions {
   /**
-   * `"auto"` (default) saves the outgoing entry and RESTORES the destination
-   * entry on `popstate`. `"manual"` attaches no listener — you call
-   * `save()` / `restore()` yourself.
+   * `"auto"` (default) manages history-entry identity and restores the
+   * destination on `popstate`. It tags the entry the page started on, tags each
+   * entry you announce with `onNavigation()`, saves the outgoing position, and
+   * takes over `history.scrollRestoration` so the browser does not restore in
+   * parallel.
+   *
+   * What auto mode CANNOT do is notice a `history.pushState` it was not told
+   * about — no library can, short of monkey-patching `history` globally. Entries
+   * created without `onNavigation()` carry no identity and are simply not
+   * restored (a safe no-op, not a wrong position).
+   *
+   * `"manual"` attaches no listener, claims no native restoration, and tags
+   * nothing — you call `save()` / `restore()` yourself.
    */
   mode?: "auto" | "manual";
   /**
@@ -36,9 +48,9 @@ export interface ScrollRestorationOptions {
  * implemented, and going Back never returned the viewport anywhere. The whole
  * point of the feature was the half that was missing.
  *
- * A real restore needs to know WHICH entry the user landed on, so `save()` in
- * auto mode tags the current history entry with its key (`stateKey`), and the
- * `popstate` handler reads that tag off `event.state`. On each pop it:
+ * A real restore needs to know WHICH entry the user landed on, so auto mode
+ * tags history entries with their key (`stateKey`) and the `popstate` handler
+ * reads that tag off `event.state`. On each pop it:
  *
  *   1. saves the position of the entry being LEFT (unless it is also the
  *      destination — a same-key pop is not a departure, and saving there would
@@ -48,10 +60,40 @@ export interface ScrollRestorationOptions {
  *
  * An unknown or absent destination key is a safe no-op: the browser's own
  * scroll behaviour applies rather than a guessed position.
+ *
+ * WHAT "AUTO" MEANS, EXACTLY
+ * --------------------------
+ * Reacting to `popstate` automatically is not enough on its own: the handler
+ * can only restore an entry that HAS an identity, and originally nothing ever
+ * gave one to the entry the page started on. The first Back a user pressed
+ * therefore restored nothing. Auto mode now owns identity as well as reaction:
+ *
+ *   - the INITIAL entry is tagged at construction, and
+ *   - `onNavigation(key)` tags each entry the application creates.
+ *
+ * That second half is an explicit hook rather than magic, and deliberately so:
+ * a library cannot observe arbitrary `history.pushState` calls without patching
+ * `history` globally, which would surprise every other consumer of it. So the
+ * honest contract is:
+ *
+ *   > Auto mode restores any entry it was given identity for, and never guesses
+ *   > about entries it was not told about.
+ *
+ * Auto mode also leases `history.scrollRestoration = "manual"` while active, so
+ * the browser is not restoring the viewport at the same time SibuJS is. The
+ * previous value is restored when the last controller is disposed.
  */
 export function scrollRestoration(options?: ScrollRestorationOptions): {
   save: (key: string) => void;
   restore: (key: string) => void;
+  /**
+   * Tell auto mode that the application created a new history entry.
+   *
+   * Records the outgoing entry's position, tags the new entry with `key`, and
+   * makes it current. Call it immediately after your `pushState` (before any
+   * scrolling), so the position captured is the one the user is leaving.
+   */
+  onNavigation: (key: string) => void;
   getPosition: (key: string) => { x: number; y: number } | undefined;
   dispose: () => void;
 } {
@@ -112,9 +154,40 @@ export function scrollRestoration(options?: ScrollRestorationOptions): {
     return positions.get(key);
   };
 
+  /**
+   * Tell auto mode a new history entry was created by the application.
+   *
+   * SibuJS cannot observe a third party calling `history.pushState` without
+   * monkey-patching it globally, which would be a far worse trade than an
+   * explicit hook. This is that hook, and it is what keeps the invariant true:
+   * every entry auto mode expects to restore carries its identity in
+   * `history.state`.
+   */
+  const onNavigation = (key: string): void => {
+    // The outgoing entry is the one the user is leaving, and at this moment the
+    // viewport still shows it — hence "call me right after pushState".
+    if (currentKey !== null && currentKey !== key) record(currentKey);
+    currentKey = key;
+    tagCurrentEntry(key);
+  };
+
+  // Auto mode owns the browser's own restoration for as long as it is active.
+  // Leaving it on means two independent things move the viewport on the same
+  // popstate and the result depends on which lands last. Leased rather than
+  // assigned so overlapping controllers cannot hand `"auto"` back while another
+  // is still restoring.
+  let nativeModeLease: ResourceLease<ScrollRestoration> | null = null;
+
   // In auto mode, save the outgoing entry and restore the destination
   // (client-only).
   if (mode === "auto" && typeof window !== "undefined") {
+    nativeModeLease = acquireScrollRestorationMode("manual");
+
+    // Tag the entry the page STARTED on. Without this the first Back — the one
+    // a user is most likely to press — arrives at an entry with no identity,
+    // and auto mode has nothing to look the position up by.
+    if (currentKey !== null) tagCurrentEntry(currentKey);
+
     popstateHandler = (event: PopStateEvent) => {
       const state = (event.state ?? null) as Record<string, unknown> | null;
       const rawDestination = state ? state[stateKey] : undefined;
@@ -146,8 +219,10 @@ export function scrollRestoration(options?: ScrollRestorationOptions): {
       window.removeEventListener("popstate", popstateHandler);
       popstateHandler = null;
     }
+    nativeModeLease?.release();
+    nativeModeLease = null;
     positions.clear();
   };
 
-  return { save, restore, getPosition, dispose };
+  return { save, restore, onNavigation, getPosition, dispose };
 }

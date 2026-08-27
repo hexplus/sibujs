@@ -41,6 +41,12 @@ type Api = {
     comma: string;
   };
   setupScroll(): boolean;
+  setupAutoRoundTrip(): { nativeMode: string; initialTag: string | undefined };
+  autoScrollTo(y: number): number;
+  autoPushEntry(key: string, url: string): string | undefined;
+  autoObserved(): { calls: Array<{ x: number; y: number }>; y: number };
+  autoPositions(): { A: { x: number; y: number } | null; B: { x: number; y: number } | null };
+  teardownAutoRoundTrip(): string;
   saveAt(key: string, y: number): { x: number; y: number };
   positionFor(key: string): { x: number; y: number } | null;
   disposeScroll(): boolean;
@@ -129,6 +135,53 @@ test("auto scroll restoration restores a destination on real popstate", async ({
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(400);
 
   await page.evaluate(() => (window as never as { __t: Api }).__t.disposeScroll());
+});
+
+test("auto mode restores Back and Forward with native restoration disabled", async ({ page }) => {
+  const setup = await page.evaluate(() => (window as never as { __t: Api }).__t.setupAutoRoundTrip());
+
+  // Two preconditions that make the rest of this test meaningful: SibuJS owns
+  // the browser's restoration, and the entry the page STARTED on has identity.
+  expect(setup.nativeMode, "the browser was left restoring in parallel").toBe("manual");
+  expect(setup.initialTag, "the initial history entry was never tagged").toBe("A");
+
+  // Scroll A, then navigate to B. Note there is no manual save("A") anywhere.
+  await page.evaluate(() => (window as never as { __t: Api }).__t.autoScrollTo(900));
+  const bTag = await page.evaluate(() => (window as never as { __t: Api }).__t.autoPushEntry("B", "#b"));
+  expect(bTag).toBe("B");
+
+  await page.evaluate(() => (window as never as { __t: Api }).__t.autoScrollTo(250));
+
+  // Back → A.
+  await page.goBack();
+  await page.waitForFunction(() => window.scrollY > 600, undefined, { timeout: 5000 });
+
+  const afterBack = await page.evaluate(() => (window as never as { __t: Api }).__t.autoObserved());
+  expect(afterBack.y).toBeGreaterThan(600);
+  // SibuJS must have done it — with history.scrollRestoration = "manual" the
+  // engine will not, and the recorded call proves who moved the viewport.
+  expect(afterBack.calls, "no scrollTo was observed — the engine restored, not SibuJS").toContainEqual({
+    x: 0,
+    y: 900,
+  });
+
+  // Forward → B.
+  await page.evaluate(() => {
+    (window as unknown as { __scrollCalls: unknown[] }).__scrollCalls.length = 0;
+  });
+  await page.goForward();
+  await page.waitForFunction(() => window.scrollY > 100 && window.scrollY < 600, undefined, { timeout: 5000 });
+
+  const afterForward = await page.evaluate(() => (window as never as { __t: Api }).__t.autoObserved());
+  expect(afterForward.calls).toContainEqual({ x: 0, y: 250 });
+
+  const positions = await page.evaluate(() => (window as never as { __t: Api }).__t.autoPositions());
+  expect(positions.A?.y).toBe(900);
+  expect(positions.B?.y).toBe(250);
+
+  // Disposing the last controller hands native restoration back.
+  const restored = await page.evaluate(() => (window as never as { __t: Api }).__t.teardownAutoRoundTrip());
+  expect(restored).toBe("auto");
 });
 
 test("saved positions stay distinct per key", async ({ page }) => {

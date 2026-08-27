@@ -119,6 +119,24 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
   }
 
   /**
+   * Restore ownership after an unregister that did not remove the worker.
+   *
+   * Shared by the two outcomes that mean the same thing operationally — the
+   * browser returned `false`, or the call rejected. In both cases the worker is
+   * still there, so the wrapper must go back to managing it. A registration
+   * that arrived while the request was outstanding was deliberately withheld
+   * from publication; this is where it becomes active, rather than being left
+   * with the browser holding a worker SibuJS has no reference to.
+   */
+  function recoverFailedUnregister(): void {
+    unregisterRequested = false;
+    if (!registration() && arrivedRegistration) {
+      activate(arrivedRegistration);
+      arrivedRegistration = null;
+    }
+  }
+
+  /**
    * Decide what to do with a registration that has just resolved.
    *
    * This function does NOT call the native unregister, even when a request is
@@ -171,7 +189,23 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
       return false;
     }
 
-    const result = await reg.unregister();
+    let result: boolean;
+    try {
+      result = await reg.unregister();
+    } catch (err) {
+      // A REJECTION is not evidence of removal. `false` means the browser
+      // declined; a rejection means the attempt did not complete, so the worker
+      // is — as far as anyone knows — still installed and still controlling
+      // pages. Ownership must revert BEFORE the failure propagates, or the
+      // caller gets an error *and* SibuJS has forgotten the registration it was
+      // supposed to manage.
+      //
+      // The rejection itself is preserved rather than folded into `false`:
+      // reporting `false` would claim the browser answered when it never did.
+      recoverFailedUnregister();
+      throw err;
+    }
+
     if (result) {
       detachListeners();
       setRegistration(null);
@@ -180,15 +214,9 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
       arrivedRegistration = null;
       unregistered = true;
     } else {
-      // Refused: the worker is still installed and still controlling pages, so
-      // the wrapper stays operational. A registration that arrived while this
-      // request was outstanding was withheld from publication — activate it now
-      // rather than leaving the browser holding a worker SibuJS forgot about.
-      unregisterRequested = false;
-      if (!registration() && arrivedRegistration) {
-        activate(arrivedRegistration);
-        arrivedRegistration = null;
-      }
+      // Refused — same recovery as a rejection: the worker is live and the
+      // wrapper stays operational.
+      recoverFailedUnregister();
     }
     return result;
   }

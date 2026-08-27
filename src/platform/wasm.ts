@@ -58,6 +58,31 @@ const inFlightCache = globalSingleton(
   () => new Map<string, Promise<WebAssembly.Instance>>(),
 );
 
+/**
+ * Cache generation — what makes {@link clearWasmCache} an invalidation BARRIER
+ * rather than three `Map.clear()` calls.
+ *
+ * Clearing a map only erases what has already been written. A compile or
+ * instantiation already in flight still holds the same global maps and writes
+ * into them when it settles, so a caller that cleared the cache precisely to
+ * force a fresh load — a hot reload, a test between cases, a version bump —
+ * could have the invalidated module reinstated moments later BY THE WORK IT
+ * INVALIDATED. Nothing in the maps distinguishes "written before the clear"
+ * from "written after".
+ *
+ * A monotonic generation does. Every asynchronous producer captures the
+ * generation it began in and may publish only while that is still current. The
+ * operation still resolves normally to the caller that started it — cancelling
+ * their load was never the intent — it simply may not repopulate a cache
+ * generation it does not belong to.
+ */
+const cacheState = globalSingleton(Symbol.for("sibujs.wasm.cacheState.v1"), () => ({ generation: 0 }));
+
+/** True while `generation` is still the live cache generation. */
+function isCurrentGeneration(generation: number): boolean {
+  return generation === cacheState.generation;
+}
+
 // ─── wasm Hook ───────────────────────────────────────────────────────────
 
 /**
@@ -238,8 +263,12 @@ export async function loadWasmModuleWithOptions(
     }
   }
 
+  // The generation this load belongs to. Captured before any await so a clear
+  // that happens while it runs is observable at publish time.
+  const generation = cacheState.generation;
+
   // Unkeyed loads are documented to instantiate fresh every call — no sharing.
-  if (!key) return instantiateWasm(source, opts.imports, undefined);
+  if (!key) return instantiateWasm(source, opts.imports, undefined, generation);
 
   const cachedInstance = instanceCache.get(key);
   if (cachedInstance) return cachedInstance;
@@ -247,8 +276,11 @@ export async function loadWasmModuleWithOptions(
   const inFlight = inFlightCache.get(key);
   if (inFlight) return inFlight;
 
-  const pending = instantiateWasm(source, opts.imports, key).then((instance) => {
-    instanceCache.set(key, instance);
+  const pending = instantiateWasm(source, opts.imports, key, generation).then((instance) => {
+    // Publish only into the generation this load started in. The caller still
+    // receives the instance; it just does not become the cached singleton for a
+    // generation that explicitly discarded it.
+    if (isCurrentGeneration(generation)) instanceCache.set(key, instance);
     return instance;
   });
   inFlightCache.set(key, pending);
@@ -267,11 +299,19 @@ export async function loadWasmModuleWithOptions(
   return pending;
 }
 
-/** Fetch/compile/instantiate. No caching decisions beyond the module cache. */
+/**
+ * Fetch/compile/instantiate.
+ *
+ * `generation` is the cache generation the caller began in; every module-cache
+ * write is conditional on it still being live. Both compile paths publish, so
+ * both are guarded — fixing only the instance cache would leave the compiled
+ * module behind, and the next load would silently reuse pre-clear bytes.
+ */
 async function instantiateWasm(
   source: string | ArrayBuffer | Uint8Array,
   wasmImports: WebAssembly.Imports | undefined,
   key: string | undefined,
+  generation: number,
 ): Promise<WebAssembly.Instance> {
   const cachedModule = key ? moduleCache.get(key) : undefined;
   if (cachedModule) {
@@ -284,7 +324,7 @@ async function instantiateWasm(
     if (typeof WebAssembly.instantiateStreaming === "function") {
       const response = fetch(source);
       const result = await WebAssembly.instantiateStreaming(response, wasmImports || {});
-      if (key) moduleCache.set(key, result.module);
+      if (key && isCurrentGeneration(generation)) moduleCache.set(key, result.module);
       return result.instance;
     }
     const response = await fetch(source);
@@ -296,7 +336,7 @@ async function instantiateWasm(
   }
 
   const module = await WebAssembly.compile(bytes);
-  if (key) moduleCache.set(key, module);
+  if (key && isCurrentGeneration(generation)) moduleCache.set(key, module);
   return WebAssembly.instantiate(module, wasmImports || {});
 }
 
@@ -311,6 +351,9 @@ export async function preloadWasm(
   options: { allowedOrigins?: string[]; unsafelyAllowAnyOrigin?: boolean } = {},
 ): Promise<void> {
   if (moduleCache.has(url)) return;
+  // Same barrier as the loader: a preload compiling across a clear must not
+  // reinstate the module the clear discarded.
+  const generation = cacheState.generation;
   const allowed = options.allowedOrigins ?? [];
   if (allowed.length > 0) {
     let parsed: URL;
@@ -337,7 +380,7 @@ export async function preloadWasm(
     const bytes = await response.arrayBuffer();
     module = await WebAssembly.compile(bytes);
   }
-  moduleCache.set(url, module);
+  if (isCurrentGeneration(generation)) moduleCache.set(url, module);
 }
 
 // ─── createWasmBridge ───────────────────────────────────────────────────────
@@ -410,14 +453,26 @@ export function createWasmBridge<T extends object>(
 // ─── Cache Management ───────────────────────────────────────────────────────
 
 /**
- * Clear all cached WASM modules and instances.
+ * Invalidate the module, instance, and in-flight WASM cache generations.
+ *
+ * CONTRACT: work already started may still resolve to the callers that started
+ * it, but must never repopulate the caches after the clear. A load in flight
+ * across this call therefore still returns its instance to whoever awaited it,
+ * while the cache stays empty and the next load for that key compiles and
+ * instantiates afresh.
+ *
+ * This is an invalidation BARRIER, not a `Map.clear()`: emptying the maps alone
+ * would let the invalidated work write its results straight back in.
  */
 export function clearWasmCache(): void {
+  // Advance the generation FIRST. Any producer already in flight captured the
+  // previous one, so from this statement onward none of them can publish —
+  // including one that settles between these lines.
+  cacheState.generation++;
   moduleCache.clear();
   instanceCache.clear();
-  // Also drop in-flight entries: leaving them would let a load started before
-  // the clear repopulate `instanceCache` afterwards, so the cache would not
-  // actually be empty once the pending fetch settled.
+  // In-flight entries are dropped too, so a load started after the clear does
+  // not join a pre-clear operation and inherit its invalidated result.
   inFlightCache.clear();
 }
 

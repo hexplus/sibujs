@@ -74,6 +74,35 @@ const baseResource = globalSingleton(Symbol.for("sibujs.documentBase.v1"), () =>
   }),
 );
 
+const scrollRestorationResource = globalSingleton(Symbol.for("sibujs.historyScrollRestoration.v1"), () =>
+  singletonResource<ScrollRestoration>({
+    read: () => history.scrollRestoration,
+    write: (mode) => {
+      history.scrollRestoration = mode;
+    },
+  }),
+);
+
+/**
+ * Take ownership of `history.scrollRestoration`.
+ *
+ * A third global singleton, and it needs the same lease discipline as the title
+ * and `<base>`: while SibuJS is restoring scroll positions itself, the browser
+ * must not also be restoring them, or the two race and the viewport lands
+ * wherever the last writer put it. Releasing hands the mode back to the previous
+ * owner — and, when the last owner releases, to whatever the page had before
+ * SibuJS touched it.
+ *
+ * Inert where `history` or the property is unavailable (SSR, older engines), so
+ * callers never have to feature-detect.
+ */
+export function acquireScrollRestorationMode(mode: ScrollRestoration): ResourceLease<ScrollRestoration> {
+  if (typeof history === "undefined" || !("scrollRestoration" in history)) {
+    return inertLease<ScrollRestoration>();
+  }
+  return (scrollRestorationResource as SingletonResource<ScrollRestoration>).acquire(mode);
+}
+
 /**
  * Take ownership of `document.title`.
  *

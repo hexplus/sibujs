@@ -175,6 +175,51 @@
           window.__sr = scrollRestoration({ mode: "auto", getKey: () => "page-a" });
           return true;
         },
+
+        // Full auto-mode round trip with the browser's OWN restoration proved
+        // disabled, so a pass cannot be the engine restoring the viewport for
+        // us. Every scrollTo SibuJS performs is recorded.
+        setupAutoRoundTrip() {
+          window.__scrollCalls = [];
+          const nativeScrollTo = window.scrollTo.bind(window);
+          window.scrollTo = (...args) => {
+            const [x, y] = args.length === 1 && typeof args[0] === "object" ? [args[0].left, args[0].top] : args;
+            window.__scrollCalls.push({ x: x || 0, y: y || 0 });
+            return nativeScrollTo(...args);
+          };
+          window.__restoreScrollTo = () => {
+            window.scrollTo = nativeScrollTo;
+          };
+
+          window.__sr = scrollRestoration({ mode: "auto", getKey: () => "A" });
+          return {
+            // Auto mode must have taken the browser out of the restoration
+            // business for itself.
+            nativeMode: history.scrollRestoration,
+            initialTag: (history.state || {}).__sibuScrollKey,
+          };
+        },
+        autoScrollTo(y) {
+          window.scrollTo(0, y);
+          window.__scrollCalls.length = 0;
+          return window.scrollY;
+        },
+        autoPushEntry(key, url) {
+          history.pushState({}, "", url);
+          window.__sr.onNavigation(key);
+          return (history.state || {}).__sibuScrollKey;
+        },
+        autoObserved() {
+          return { calls: window.__scrollCalls.slice(), y: window.scrollY };
+        },
+        autoPositions() {
+          return { A: window.__sr.getPosition("A") || null, B: window.__sr.getPosition("B") || null };
+        },
+        teardownAutoRoundTrip() {
+          window.__sr.dispose();
+          if (window.__restoreScrollTo) window.__restoreScrollTo();
+          return history.scrollRestoration;
+        },
         saveAt(key, y) {
           window.scrollTo(0, y);
           window.__sr.save(key);
