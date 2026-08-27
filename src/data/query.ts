@@ -4,6 +4,7 @@ import { signal } from "../core/signals/signal";
 import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import { globalSingleton } from "../utils/globalSingleton";
+import { isAbortError } from "./abort";
 import { notifyListeners, runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -128,15 +129,6 @@ const globalQueryCache = globalSingleton(Symbol.for("sibujs.query.cache.v1"), ()
 
 function getActiveQueryCache(): Map<string, CacheEntry> {
   return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;
-}
-
-/**
- * Recognise an abort across environments. `DOMException` is not guaranteed
- * everywhere a fetcher might run, and userland fetchers commonly reject with a
- * plain `{ name: "AbortError" }`.
- */
-function isAbortError(err: unknown): boolean {
-  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
 }
 
 /**
@@ -362,6 +354,10 @@ export function query<T>(
     } catch (err) {
       // Synchronous throw from fetcher / withRetry — keep state consistent.
       setIsFetching(false);
+      // Classify before normalizing, like the async path below: normalization
+      // discards `name`, and a cancellation that loses its name is
+      // indistinguishable from an application failure.
+      if (isAbortError(err)) return;
       const errorObj = err instanceof Error ? err : new Error(String(err));
       entry.error = errorObj;
       runCallback("query onError", () => onError?.(errorObj));

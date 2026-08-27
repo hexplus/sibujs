@@ -1,6 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
@@ -22,8 +23,15 @@ export interface MutationOptions<TData, TVariables, TContext = unknown> {
    *
    * Unlike the notification callbacks, `onMutate` is a **step of** the
    * mutation: it produces the rollback context everything downstream depends
-   * on. If it throws, the mutation fails — there is no context, and the
-   * optimistic update it was meant to apply never happened.
+   * on. An ordinary exception therefore fails the mutation — there is no
+   * context, and the optimistic update it was meant to apply never happened.
+   *
+   * An `AbortError` is the one exception, and it is cancellation rather than
+   * failure — the same rule `mutationFn` follows. `isAbortError()` is
+   * authoritative for the whole operation, so where a cancellation is raised
+   * inside it does not change what it means: no error state, no `onError`, and
+   * the state the mutation replaced is restored. Throw an ordinary `Error` from
+   * `onMutate` to fail the mutation.
    */
   onMutate?: (variables: TVariables) => TContext | Promise<TContext>;
   /** Called on successful mutation */
@@ -73,6 +81,33 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
   let runId = 0;
   let abortController: AbortController | null = null;
 
+  // THE CANCELLATION BASELINE.
+  //
+  // `status` has four values, but only three of them are ever a resting place:
+  // `"loading"` is a run in progress, not a state the mutation can be left in.
+  // Cancellation is the one outcome with no verdict of its own, so it restores
+  // the baseline — and the baseline must therefore be the last state the
+  // mutation actually SETTLED into, not whatever happened to be on screen when
+  // the cancelled run started.
+  //
+  // Those two are not the same thing. A run that supersedes an in-flight one
+  // starts while `status === "loading"`, so reading the visible state made
+  // `"loading"` the baseline, and restoring it left the mutation finished but in
+  // none of its terminal states — `loading` false with `status` still
+  // `"loading"`, so `isIdle()`, `isSuccess()` and `error()` were all falsy at
+  // once.
+  //
+  // Tracking it separately makes that unrepresentable by construction: this type
+  // has no `"loading"` member, so no chain of transient runs — however long —
+  // can become the baseline. Only a run that still owns the state
+  // (`myRun === runId`) may write here, and `reset()` rewrites it too.
+  //
+  // Plain variables, not signals: this is state-machine bookkeeping that no
+  // consumer subscribes to, and keeping it non-reactive also keeps `mutate()`
+  // from registering a dependency on the caller that invoked it.
+  let terminalStatus: "idle" | "success" | "error" = "idle";
+  let terminalError: Error | undefined;
+
   async function execute(variables: TVariables): Promise<TData> {
     // Abort any in-flight mutation (incl. its retry chain) before starting a
     // new one, so a superseding mutate() doesn't leave a zombie retry loop.
@@ -82,6 +117,10 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     const myRun = ++runId;
     let context: TContext | undefined;
 
+    // Deliberately NOT snapshotting the visible state here — starting a run
+    // while another is in flight would capture `"loading"`. The baseline lives
+    // in `terminalStatus` / `terminalError` and is updated only when a run
+    // actually settles.
     batch(() => {
       setLoading(true);
       setError(undefined);
@@ -105,6 +144,12 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       // Ignore stale responses — a newer mutate() call is in flight
       if (myRun !== runId) return result;
 
+      // This run settled and still owns the state, so it becomes the baseline a
+      // later cancellation restores. The stale check above is what keeps a
+      // superseded run from recording one.
+      terminalStatus = "success";
+      terminalError = undefined;
+
       batch(() => {
         setData(result);
         setLoading(false);
@@ -123,14 +168,68 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
 
       return result;
     } catch (err) {
-      const errorObj = err instanceof Error ? err : new Error(String(err));
+      // CLASSIFY BEFORE NORMALIZING.
+      //
+      // Normalization is lossy: `new Error(String(err))` keeps a message and
+      // throws everything else away, `name` included. A cancellation carried on
+      // a non-Error — the plain `{ name: "AbortError" }` that `isAbortError`
+      // deliberately accepts, as produced by polyfills and by structured-cloned
+      // rejections — becomes `Error("[object Object]")` with `name === "Error"`.
+      // Classifying after that point can only ever see an ordinary failure, so
+      // the cancellation surfaced as a mutation error: `error()` set, `onError`
+      // fired, and a console warning from the fire-and-forget `mutate()` path.
+      //
+      // So the ORIGINAL thrown value is classified first, while its identity is
+      // still intact, and rethrown unchanged — an AbortError is already an
+      // Error-shaped rejection reason and wrapping it would destroy the very
+      // identity every downstream `isAbortError` check depends on.
+      //
+      // A mutation aborted by reset()/supersession is intentional, so it must
+      // not surface as an error state at all.
+      //
+      // CANCELLATION STILL HAS TO TERMINATE — BUT ONLY ITS OWN RUN.
+      //
+      // "Not an error" was previously implemented as "not my problem": this
+      // branch rethrew before any terminal transition, leaving `loading` and
+      // `status` exactly as `execute()` set them on entry. That was invisible
+      // for the two cancellations SibuJS itself causes — `reset()` and a
+      // superseding `mutate()` both write the state on their way past — but the
+      // current run's own `mutationFn` rejecting an AbortError has no such
+      // successor. Nothing was coming, so the mutation stayed permanently
+      // pending and any spinner bound to `loading()` never stopped.
+      //
+      // Run ownership is what makes the repair safe. A blanket cleanup — the
+      // tempting `finally { setLoading(false) }` — would let a late, superseded
+      // run clear the loading state of the newer run that legitimately owns it:
+      //
+      //   A starts → B supersedes A → A rejects AbortError late → A clears B
+      //
+      // So only the run that still holds the state may touch it.
+      //
+      // What it restores: cancellation produced no verdict, so the previous one
+      // still stands. `success(data)` stays `success(data)` and `error(E)` stays
+      // `error(E)` — a cancelled attempt did not invalidate the result it was
+      // going to replace. Forcing `idle` would discard a result nothing
+      // superseded.
+      if (isAbortError(err)) {
+        if (myRun === runId) {
+          batch(() => {
+            setLoading(false);
+            setError(terminalError);
+            setStatus(terminalStatus);
+          });
+        }
+        throw err;
+      }
 
-      // A mutation aborted by reset()/supersession must not surface as an
-      // error state — it was intentionally cancelled.
-      if (errorObj instanceof DOMException && errorObj.name === "AbortError") throw errorObj;
+      const errorObj = err instanceof Error ? err : new Error(String(err));
 
       // Ignore stale errors — a newer mutate() call is in flight
       if (myRun !== runId) throw errorObj;
+
+      // Settled, and still the owner — this failure is the new baseline.
+      terminalStatus = "error";
+      terminalError = errorObj;
 
       batch(() => {
         setError(errorObj);
@@ -153,6 +252,11 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     // Cancel any in-flight mutation + its pending retries.
     abortController?.abort();
     abortController = null;
+    // reset() is itself a terminal transition, so it replaces the baseline. Any
+    // run it just aborted is now stale and cannot restore what preceded the
+    // reset — and a future cancelled run correctly lands back on idle.
+    terminalStatus = "idle";
+    terminalError = undefined;
     batch(() => {
       setData(undefined);
       setError(undefined);
@@ -173,7 +277,7 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       // failures aren't completely invisible when onError isn't wired.
       execute(variables).catch((err) => {
         // An abort (reset()/supersession) is intentional — don't warn for it.
-        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (isAbortError(err)) return;
         if (typeof console !== "undefined") {
           console.warn("[SibuJS mutation] mutate() failed; check `.error()` signal or onError option.", err);
         }

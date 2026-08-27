@@ -1,3 +1,5 @@
+import { createAbortError, isAbortError } from "./abort";
+
 /**
  * Configurable retry strategies for async operations.
  * Used by `resource` and `query` for automatic error recovery.
@@ -14,7 +16,15 @@ export interface RetryOptions {
   maxDelay?: number;
   /** Jitter factor (0-1) to randomize delay. Default: 0.1 */
   jitter?: number;
-  /** Predicate to decide if an error is retryable. Default: () => true */
+  /**
+   * Predicate deciding whether a **non-cancellation** failure is retryable.
+   * Default: `() => true`.
+   *
+   * Cancellation never reaches this callback. An aborted signal, or a rejection
+   * that is itself an `AbortError`, bypasses retry policy entirely — so a
+   * `shouldRetry` returning `true` for everything still cannot resurrect a
+   * cancelled operation.
+   */
   shouldRetry?: (error: unknown, attempt: number) => boolean;
 }
 
@@ -57,9 +67,16 @@ export function calculateDelay(
  * Execute an async function with retry logic.
  * Returns the result or throws after all retries are exhausted.
  *
+ * CANCELLATION OUTRANKS RETRY POLICY. A cancelled operation — signalled either
+ * by `signal.aborted` or by a rejection that is itself an `AbortError` — skips
+ * `shouldRetry`, `onRetry` and the backoff, and rejects immediately.
+ *
  * @param fn The async function to execute
  * @param options Retry configuration
- * @param onRetry Callback fired before each retry with error, attempt, and delay
+ * @param onRetry Fired only when another attempt WILL actually be scheduled —
+ *   never on the final failure, never for a rejection `shouldRetry` declined,
+ *   and never for a cancellation. Receives the error, the attempt index, and
+ *   the delay before the next attempt.
  * @param signal AbortSignal to cancel retries
  *
  * @example
@@ -86,30 +103,82 @@ export async function withRetry<T>(
 
   let lastError: unknown;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    if (signal?.aborted) throw createAbortError();
     try {
-      if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
       return await fn();
     } catch (error) {
       lastError = error;
+
+      // CANCELLATION OUTRANKS RETRY POLICY.
+      //
+      // A rejection that arrives once the signal is already aborted is a
+      // consequence of the cancellation, not an independent failure worth
+      // retrying. Checking here — before `shouldRetry` and before `onRetry` —
+      // is what stops a cancelled request from reporting a retry it will never
+      // perform, and from waiting out a backoff nobody is waiting for.
+      if (signal?.aborted) throw createAbortError();
+
+      // THE SIGNAL IS ONLY HALF THE EVIDENCE.
+      //
+      // Cancellation reaches `withRetry` two ways, and the signal we were handed
+      // sees only one of them. An operation can be cancelled by a signal we do
+      // not hold — an inner `fetch` with its own controller, a timeout wrapper,
+      // a caller that composed its own abort — and the only trace that reaches
+      // us is the AbortError it rejected with. Judging cancellation solely by
+      // `signal?.aborted` therefore treats those as ordinary failures: it asks
+      // `shouldRetry`, fires `onRetry`, schedules a backoff, and re-attempts an
+      // operation whose caller already walked away.
+      //
+      // The rejected VALUE is the other half of the evidence, so it is consulted
+      // here — still ahead of `shouldRetry` and `onRetry`, so a cancelled
+      // operation reaches none of the retry machinery. The original value is
+      // rethrown rather than a fresh AbortError: it is already an AbortError,
+      // and the caller's own instance carries their context.
+      if (isAbortError(error)) throw error;
+
       if (attempt >= maxRetries || !shouldRetry(error, attempt)) throw error;
       const delay = calculateDelay(attempt, strategy, baseDelay, maxDelay, jitter);
       onRetry?.(error, attempt, delay);
-      await new Promise<void>((resolve, reject) => {
-        let onAbort: (() => void) | null = null;
-        const timer = setTimeout(() => {
-          if (onAbort && signal) signal.removeEventListener("abort", onAbort);
-          resolve();
-        }, delay);
-        if (signal) {
-          onAbort = () => {
-            clearTimeout(timer);
-            reject(new DOMException("Aborted", "AbortError"));
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-        }
-      });
+      await waitForRetryDelay(delay, signal);
     }
   }
   throw lastError;
+}
+
+/**
+ * Sleep for the backoff, resolving on the timer and rejecting on abort.
+ *
+ * THE RACE THIS CLOSES: an `AbortSignal` does not replay a past `abort` event to
+ * a listener registered afterwards. Attaching the listener without first testing
+ * `signal.aborted` therefore meant an already-cancelled operation slept the full
+ * backoff — up to `maxDelay` — before anything noticed. The guarantee here is
+ * that there is no instant in which the signal can be aborted while neither an
+ * `aborted` check nor a live listener can observe it: the state is tested before
+ * the listener is attached AND again immediately after.
+ *
+ * Settles exactly once, and always removes the listener and clears the timer.
+ */
+function waitForRetryDelay(delay: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(createAbortError());
+
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      action();
+    };
+
+    const onAbort = () => finish(() => reject(createAbortError()));
+    const timer = setTimeout(() => finish(resolve), delay);
+
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+      // Closes the window between the check above and this registration.
+      if (signal.aborted) onAbort();
+    }
+  });
 }

@@ -141,9 +141,95 @@ export function sanitizeSrcset(value: string): string {
 }
 
 // Gate for the sanitizeCSSValue fast path: presence of any character that
-// could begin (or, via `\`, hex-encode) a blocked CSS construct. Allocated
+// could begin (or, via `\`, escape-encode) a blocked CSS construct. Allocated
 // once at module load, not per call.
 const CSS_DANGER_GATE = /[(:@\\]/;
+
+/** CSS whitespace, as the escape grammar defines it. */
+function isCssWhitespace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f";
+}
+
+function isHexDigit(ch: string): boolean {
+  return (ch >= "0" && ch <= "9") || (ch >= "a" && ch <= "f") || (ch >= "A" && ch <= "F");
+}
+
+/**
+ * Resolve CSS escape sequences to the characters a browser actually sees.
+ *
+ * WHY THIS EXISTS AS A UNIT: the danger-token scan below compares text against
+ * literal spellings (`url(`, `expression(`, `@import`). That comparison is only
+ * sound if the text has first been reduced to the form the CSS parser produces.
+ * The escape grammar has THREE productions and the previous decoder implemented
+ * one of them:
+ *
+ *   hex escape       `\75 rl(…)`     1–6 hex digits, optionally closed by a
+ *                                    single whitespace character
+ *   simple escape    `u\rl(…)`       `\` + any other character IS that
+ *                                    character — the backslash simply vanishes
+ *   escaped newline  `u\<LF>rl(…)`   `\` + LF / CR / CRLF / FF is a line
+ *                                    continuation; both halves vanish
+ *
+ * Only the first was decoded, so the other two carried a blocked construct past
+ * the scan intact: `u\rl(https://attacker.example/…)` reads as `url(` to every
+ * browser but matched nothing in the danger list.
+ *
+ * This is an INSPECTION transform. Its output decides safe/unsafe and is never
+ * returned to the caller — `sanitizeCSSValue` emits the author's original text,
+ * so legitimate escapes (`content: "\201C"`) reach CSS exactly as written.
+ *
+ * Invalid code points become U+FFFD, matching what a CSS parser substitutes.
+ * That is deliberate over deleting them: deletion would splice the surrounding
+ * characters together and could manufacture a token the browser never sees,
+ * rejecting safe values.
+ */
+function decodeCssEscapes(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+
+    // A trailing lone backslash escapes nothing and cannot complete a token.
+    if (i + 1 >= value.length) break;
+    const next = value[i + 1];
+
+    // Escaped newline — a line continuation. CRLF counts as ONE newline.
+    if (next === "\n" || next === "\f") {
+      i += 1;
+      continue;
+    }
+    if (next === "\r") {
+      i += value[i + 2] === "\n" ? 2 : 1;
+      continue;
+    }
+
+    if (isHexDigit(next)) {
+      let hex = "";
+      let j = i + 1;
+      while (j < value.length && hex.length < 6 && isHexDigit(value[j])) {
+        hex += value[j];
+        j++;
+      }
+      // At most ONE whitespace character terminates a hex escape; CRLF is one.
+      if (j < value.length && isCssWhitespace(value[j])) {
+        j += value[j] === "\r" && value[j + 1] === "\n" ? 2 : 1;
+      }
+      const code = Number.parseInt(hex, 16);
+      const invalid = code === 0 || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff);
+      out += invalid ? "�" : String.fromCodePoint(code);
+      i = j - 1;
+      continue;
+    }
+
+    // Simple escape: `\` + anything else is literally that character.
+    out += next;
+    i += 1;
+  }
+  return out;
+}
 
 /**
  * Sanitizes a CSS value to prevent data exfiltration via url(), expression(),
@@ -162,21 +248,13 @@ export function sanitizeCSSValue(value: string): string {
   // ("red", "14px", "#fff", "1px solid black", "flex").
   if (!CSS_DANGER_GATE.test(value)) return value;
 
-  // Decode CSS escapes (\xx hex and \uXXXX) so attackers can't bypass checks
-  // via e.g. "ex\\70 ression(...)" or "\\75 rl(...)".
-  const decoded = value.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex) => {
-    const code = Number.parseInt(hex, 16);
-    if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) return "";
-    try {
-      return String.fromCodePoint(code);
-      // Defensive: the range guard above already excludes every code point
-      // String.fromCodePoint would reject, so this never throws.
-      /* v8 ignore next 3 */
-    } catch {
-      return "";
-    }
-  });
-  const lower = decoded.toLowerCase().replace(/\s+/g, "");
+  // Normalize to what the CSS parser sees BEFORE looking for blocked tokens —
+  // every escape production, not just the hex one. See `decodeCssEscapes`.
+  // Without a `\` there is nothing to decode, and skipping the scan keeps the
+  // decoder off the path of the values that reach here most often: legitimate
+  // functional notation like `calc(…)`, `rgba(…)`, `var(…)`, gradients.
+  const normalized = value.includes("\\") ? decodeCssEscapes(value) : value;
+  const lower = normalized.toLowerCase().replace(/\s+/g, "");
   if (
     lower.includes("url(") ||
     lower.includes("expression(") ||
@@ -191,6 +269,64 @@ export function sanitizeCSSValue(value: string): string {
     return "";
   }
   return value;
+}
+
+/**
+ * Sanitize a WHOLE `style` attribute — a declaration list, not one value.
+ *
+ * `sanitizeCSSValue` judges a single property value. A style attribute is a
+ * list of them, so the two are not interchangeable: applied to a whole
+ * declaration list, `sanitizeCSSValue` can only answer all-or-nothing, and
+ * applied to nothing at all the list is simply trusted. String-valued `style`
+ * props took the latter path while object-valued ones were sanitized per
+ * property, so the same authoring intent had two different security policies:
+ *
+ *   style: { background: dangerous }   → sanitized
+ *   style: "background: dangerous"     → raw
+ *
+ * This closes that gap by splitting the list properly and applying the EXISTING
+ * per-value policy to each declaration. Both authoring forms now behave alike.
+ *
+ * Parsing is delegated to the engine's own `CSSStyleDeclaration` rather than a
+ * hand-rolled split on `;`, which would corrupt declarations that legitimately
+ * contain semicolons inside quoted strings or functions (`url('a;b.png')`,
+ * `content: 'a;b'`). Custom properties and `!important` survive. The probe
+ * element is created detached and never inserted, so assigning to it parses
+ * without fetching anything or affecting layout.
+ *
+ * Without a DOM (SSR in a bare runtime) there is no parser available, so the
+ * conservative all-or-nothing check applies: a list containing anything
+ * dangerous is dropped entirely rather than partially trusted.
+ */
+export function sanitizeStyleAttribute(cssText: string): string {
+  const input = String(cssText);
+  if (input.trim() === "") return "";
+
+  if (typeof document === "undefined") {
+    return sanitizeCSSValue(input) === "" ? "" : input;
+  }
+
+  const probe = document.createElement("div");
+  try {
+    probe.style.cssText = input;
+    /* v8 ignore next 3 -- assigning cssText does not throw in supported engines */
+  } catch {
+    return "";
+  }
+
+  const declarations: string[] = [];
+  for (let i = 0; i < probe.style.length; i++) {
+    const property = probe.style[i];
+    const value = probe.style.getPropertyValue(property);
+    // Check the value on its own AND joined to its property name: the danger
+    // list contains property-qualified forms (`behavior:`, `filter:progid`)
+    // that only match once the name is present.
+    if (sanitizeCSSValue(value) === "") continue;
+    if (sanitizeCSSValue(`${property}:${value}`) === "") continue;
+    const priority = probe.style.getPropertyPriority(property);
+    declarations.push(`${property}: ${value}${priority ? ` !${priority}` : ""}`);
+  }
+  return declarations.join("; ");
 }
 
 /**
@@ -325,6 +461,11 @@ export function sanitizeAttributeString(attr: string, value: string): string {
   const lower = attr.toLowerCase();
   if (lower === "srcset") return sanitizeSrcset(value);
   if (URL_ATTRIBUTES.has(lower)) return sanitizeUrl(value);
+  // `style` being an allowed attribute NAME does not make an arbitrary style
+  // VALUE trusted. Every generic writer (reactive bindings, html`` expressions,
+  // prop spreads) funnels through here, so the declaration-list policy applies
+  // to all of them rather than only to the tag factory.
+  if (lower === "style") return sanitizeStyleAttribute(value);
   return value;
 }
 

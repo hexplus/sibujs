@@ -2,7 +2,12 @@ import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { track } from "../../reactivity/track";
-import { isEventHandlerAttr, sanitizeAttributeString, sanitizeCSSValue } from "../../utils/sanitize";
+import {
+  isEventHandlerAttr,
+  sanitizeAttributeString,
+  sanitizeCSSValue,
+  sanitizeStyleAttribute,
+} from "../../utils/sanitize";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
@@ -92,16 +97,20 @@ function toKebab(prop: string): string {
 }
 
 function applyStyle(el: Element, style: TagProps["style"]) {
+  // A whole style STRING is a declaration list and gets the same per-property
+  // policy the object form below already applies. Writing it raw made the
+  // string form a security escape hatch from the object form — identical
+  // authoring intent with two different policies.
   if (typeof style === "function") {
     const teardown = track(() => {
-      el.setAttribute("style", (style as () => string)());
+      el.setAttribute("style", sanitizeStyleAttribute(String((style as () => string)())));
     });
     registerDisposer(el, teardown);
     return;
   }
 
   if (typeof style === "string") {
-    el.setAttribute("style", style);
+    el.setAttribute("style", sanitizeStyleAttribute(style));
     return;
   }
 

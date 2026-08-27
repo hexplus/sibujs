@@ -150,11 +150,15 @@ describe("BUG 1 — per-run dependency tracking", () => {
       const [w, setW] = signal("10px");
       const el = div({ style: () => (on() ? `width:${w()}` : "") }) as HTMLElement;
 
+      // String styles are parsed and re-serialized by the CSS sanitizer, so the
+      // attribute comes back canonically formatted (`width: 10px`) rather than
+      // byte-identical to the input. This test is about per-run TRACKING, so it
+      // asserts the declaration rather than the exact whitespace.
       expect(el.getAttribute("style") ?? "").toBe("");
       setOn(true);
-      expect(el.getAttribute("style")).toBe("width:10px");
+      expect(el.getAttribute("style")?.replace(/\s+/g, "")).toBe("width:10px");
       setW("20px");
-      expect(el.getAttribute("style")).toBe("width:20px");
+      expect(el.getAttribute("style")?.replace(/\s+/g, "")).toBe("width:20px");
     });
   });
 
