@@ -58,8 +58,10 @@ export interface ScrollRestorationOptions {
  *      the value about to be restored)
  *   2. restores the destination's saved position, if one exists
  *
- * An unknown or absent destination key is a safe no-op: the browser's own
- * scroll behaviour applies rather than a guessed position.
+ * An unknown or absent destination key is a safe SibuJS no-op: no guessed
+ * position is applied. Note this is not a hand-off to the browser — auto mode
+ * leases `history.scrollRestoration` to `"manual"` while active, so nothing
+ * else is restoring either. The viewport simply stays where the engine left it.
  *
  * WHAT "AUTO" MEANS, EXACTLY
  * --------------------------
@@ -164,6 +166,14 @@ export function scrollRestoration(options?: ScrollRestorationOptions): {
    * `history.state`.
    */
   const onNavigation = (key: string): void => {
+    // Auto-mode only. Manual mode's contract is that nothing happens unless the
+    // caller asks: no listener, no native claim, no tagging. Doing this work
+    // there would rewrite `history.state`, move the internal current key, and
+    // record a position the caller never requested. The method stays on the
+    // returned object in both modes — removing it would be a pointless API
+    // asymmetry — it simply does nothing outside auto.
+    if (mode !== "auto") return;
+
     // The outgoing entry is the one the user is leaving, and at this moment the
     // viewport still shows it — hence "call me right after pushState".
     if (currentKey !== null && currentKey !== key) record(currentKey);

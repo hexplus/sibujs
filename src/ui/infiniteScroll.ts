@@ -32,13 +32,37 @@ export function infiniteScroll(options: {
   // captured generation and skips every state write and re-observe.
   let generation = 0;
 
+  /**
+   * Evaluate the caller's `hasMore()` inside the same containment as
+   * `onLoadMore()`.
+   *
+   * It is user code in two hostile positions: inside a native
+   * `IntersectionObserver` callback, where a throw escapes anywhere the
+   * application could catch it, and inside `loadMore()`'s `finally`, where a
+   * throw propagates out of a function documented never to reject — and whose
+   * callers invoke it as `void loadMore()`, so the rejection has no handler at
+   * all.
+   *
+   * A predicate that cannot answer is treated as `false`: of the two possible
+   * guesses that is the one that stops, rather than the one that keeps asking a
+   * broken predicate for more pages.
+   */
+  function safeHasMore(): boolean {
+    try {
+      return hasMore();
+    } catch (err) {
+      reportError(err, { phase: "async", name: "infiniteScroll(hasMore)" });
+      return false;
+    }
+  }
+
   function createObserver(): void {
     if (typeof IntersectionObserver === "undefined") return;
 
     observer = new IntersectionObserver(
       (entries) => {
         const entry = entries[0];
-        if (entry?.isIntersecting && !loading() && hasMore() && !disposed) {
+        if (entry?.isIntersecting && !loading() && safeHasMore() && !disposed) {
           // Explicitly discard the promise: `loadMore` is contained and never
           // rejects, so there is nothing left to handle here.
           void loadMore();
@@ -72,7 +96,7 @@ export function infiniteScroll(options: {
         // loaded content didn't push it out of view, or the page isn't full yet),
         // the observer won't fire again on its own — re-observe to force a fresh
         // intersection check so loading doesn't stall.
-        if (observer && _current && hasMore()) {
+        if (observer && _current && safeHasMore()) {
           observer.unobserve(_current);
           observer.observe(_current);
         }

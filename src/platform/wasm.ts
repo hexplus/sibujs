@@ -128,7 +128,27 @@ export function wasm<T extends object = Record<string, unknown>>(
 
   const cacheKey = config.cacheKey || (typeof source === "string" ? source : undefined);
 
+  /**
+   * Latest-run ownership for the reactive wrapper.
+   *
+   * The cache underneath is generationally correct, but this wrapper is a
+   * SEPARATE owner: it publishes `instance` / `error` / `loading`, and without a
+   * run id it publishes from whichever run settles last rather than from the
+   * newest one. Unkeyed `ArrayBuffer` / `Uint8Array` sources are documented to
+   * instantiate fresh every call instead of sharing an in-flight operation, so
+   * an automatic load and a `reload()` genuinely overlap — and a slow first run
+   * could land afterwards and overwrite the reload's result, or raise an error
+   * for a load that had already succeeded.
+   *
+   * Supersession, not cancellation: a stale run still completes (the API has no
+   * abort surface, and its result may legitimately populate the shared cache).
+   * It simply loses the right to publish reactive state.
+   */
+  let runId = 0;
+
   async function load() {
+    const myRun = ++runId;
+
     setLoading(true);
     setError(null);
     setInstance(null);
@@ -140,11 +160,15 @@ export function wasm<T extends object = Record<string, unknown>>(
       // options the wrapper accepted were silently dropped and every URL source
       // was refused by the primitive.
       const wasmInstance = await loadWasmModuleWithOptions(source, { ...config, cacheKey });
+      if (myRun !== runId) return;
       setInstance(wasmInstance.exports as unknown as T);
     } catch (err) {
+      if (myRun !== runId) return;
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      setLoading(false);
+      // Only the newest run may settle `loading`. A stale run clearing it would
+      // report "done" while the run that actually owns the state is still going.
+      if (myRun === runId) setLoading(false);
     }
   }
 
