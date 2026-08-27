@@ -30,12 +30,15 @@ type ObserverCallback = (entries: Array<{ isIntersecting: boolean }>) => void;
 class FakeObserver {
   static instances: FakeObserver[] = [];
   readonly callback: ObserverCallback;
+  /** Captured so threshold forwarding can be asserted, not merely counted. */
+  readonly options: IntersectionObserverInit | undefined;
   observeCalls: Element[] = [];
   unobserveCalls: Element[] = [];
   disconnectCalls = 0;
 
-  constructor(cb: ObserverCallback) {
+  constructor(cb: ObserverCallback, options?: IntersectionObserverInit) {
     this.callback = cb;
+    this.options = options;
     FakeObserver.instances.push(this);
   }
   observe(el: Element): void {
@@ -466,15 +469,48 @@ describe("5 · existing behaviour is preserved", () => {
     expect(() => scroll.dispose()).not.toThrow();
   });
 
-  it("forwards the configured threshold to each observer", () => {
+  it("forwards the configured threshold to every observer it creates", () => {
     setRuntimeErrorHandler(vi.fn());
     const scroll = infiniteScroll({ onLoadMore: async () => {}, hasMore: () => true, threshold: 0.75 });
+
     scroll.sentinelRef.current = el("A");
-    // The fake records construction order; a second attachment builds a second
-    // observer, and both must carry the caller's threshold.
-    expect(FakeObserver.instances).toHaveLength(1);
     scroll.sentinelRef.current = el("B");
-    expect(FakeObserver.instances).toHaveLength(2);
+
+    const [observerA, observerB] = FakeObserver.instances;
+    expect(observerA).toBeDefined();
+    expect(observerB).toBeDefined();
+
+    // Counting instances proved nothing about the option actually reaching the
+    // constructor; assert the value each observer was built with.
+    expect(observerA.options?.threshold).toBe(0.75);
+    expect(observerB.options?.threshold).toBe(0.75);
+    scroll.dispose();
+  });
+
+  it("defaults the threshold to 0 when none is configured", () => {
+    setRuntimeErrorHandler(vi.fn());
+    const scroll = infiniteScroll({ onLoadMore: async () => {}, hasMore: () => true });
+    scroll.sentinelRef.current = el("A");
+
+    expect(FakeObserver.instances[0].options?.threshold).toBe(0);
+    scroll.dispose();
+  });
+
+  it("treats a same-element reassignment as the same attachment", () => {
+    setRuntimeErrorHandler(vi.fn());
+    const scroll = infiniteScroll({ onLoadMore: async () => {}, hasMore: () => true });
+    const sentinel = el("A");
+
+    scroll.sentinelRef.current = sentinel;
+    const observerA = FakeObserver.instances[0];
+
+    scroll.sentinelRef.current = sentinel;
+
+    // No new observer, and the existing one is left connected: the attachment
+    // never changed, so there is nothing to invalidate.
+    expect(FakeObserver.instances).toHaveLength(1);
+    expect(observerA.disconnectCalls).toBe(0);
+    expect(observerA.observeCalls).toEqual([sentinel]);
     scroll.dispose();
   });
 });

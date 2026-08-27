@@ -56,6 +56,42 @@ export function infiniteScroll(options: {
     }
   }
 
+  /**
+   * The complete identity of one sentinel attachment.
+   *
+   * Ownership is three-dimensional and all three are load-bearing:
+   *
+   *   generation  the attachment epoch, advanced by dispose() and by a sentinel
+   *               change — catches work whose attachment has been superseded
+   *   observer    the exact IntersectionObserver instance — catches a callback
+   *               queued against an observer that has since been replaced
+   *   sentinel    the exact element — the thing native calls must be aimed at
+   *
+   * Carrying them together, rather than comparing scattered variables at each
+   * site, is what makes it possible to re-check ownership cheaply after every
+   * reentrant boundary — and what stops native calls from being aimed at
+   * whatever `observer` / `_current` happen to hold by then.
+   */
+  interface AttachmentOwner {
+    generation: number;
+    observer: IntersectionObserver;
+    sentinel: HTMLElement;
+  }
+
+  /**
+   * Does `owner` still own this controller's current attachment?
+   *
+   * Called again after EVERY reentrant boundary. Passing an ownership check
+   * before invoking application code does not grant permanent ownership:
+   * `hasMore()` may synchronously call `dispose()` or reassign
+   * `sentinelRef.current` and then return `true`, and signal setters drain
+   * subscribers synchronously in this framework — so an effect reading
+   * `loading()` runs inline and can revoke ownership just as easily.
+   */
+  function ownsAttachment(owner: AttachmentOwner): boolean {
+    return !disposed && generation === owner.generation && observer === owner.observer && _current === owner.sentinel;
+  }
+
   function createObserver(): void {
     if (typeof IntersectionObserver === "undefined") return;
 
@@ -66,27 +102,34 @@ export function infiniteScroll(options: {
 
     createdObserver = new IntersectionObserver(
       (entries) => {
-        // OWNERSHIP FIRST — before entries, signals, or any caller code.
-        //
-        // `disconnect()` stops future notifications; it does not un-queue a
-        // callback the engine has already scheduled. So this can run after
-        // `dispose()`, or after a sentinel swap replaced this observer, and in
-        // both cases it belongs to an attachment that no longer exists.
-        //
-        // The order matters: `safeHasMore()` used to be evaluated before the
-        // `disposed` check, which meant a torn-down controller still executed
-        // caller-controlled code and could report predicate errors from work
-        // nobody was waiting on. And with no identity check at all, a callback
-        // queued against sentinel A could start a load that went on to publish
-        // state for — and re-observe — sentinel B.
-        if (disposed || observer !== createdObserver) return;
-
         const entry = entries[0];
-        if (entry?.isIntersecting && !loading() && safeHasMore()) {
-          // Explicitly discard the promise: `loadMore` is contained and never
-          // rejects, so there is nothing left to handle here.
-          void loadMore();
-        }
+        if (!entry?.isIntersecting) return;
+
+        // Snapshot the FULL attachment identity before any caller code runs, so
+        // the load that follows is authorized by — and bound to — this exact
+        // attachment rather than to whatever state exists after the predicate
+        // has had its say.
+        const sentinel = _current;
+        if (!sentinel) return;
+        const owner: AttachmentOwner = { generation, observer: createdObserver, sentinel };
+
+        // `disconnect()` stops future notifications; it does not un-queue a
+        // callback the engine already scheduled. So this can run after
+        // dispose(), or after a sentinel swap replaced this observer.
+        if (!ownsAttachment(owner) || loading()) return;
+
+        const shouldLoad = safeHasMore();
+
+        // REVALIDATE. `safeHasMore()` is arbitrary application code: it may have
+        // disposed the controller or swapped the sentinel and still returned
+        // `true`. Without this, a disposed controller started a load that then
+        // could not clear its own `loading` flag, and a superseded observer
+        // started work that went on to publish state for the newer attachment.
+        if (!shouldLoad || !ownsAttachment(owner)) return;
+
+        // Explicitly discard the promise: `loadMore` is contained and never
+        // rejects, so there is nothing left to handle here.
+        void loadMore(owner);
       },
       { threshold },
     );
@@ -98,31 +141,58 @@ export function infiniteScroll(options: {
     }
   }
 
-  async function loadMore(): Promise<void> {
-    const runGeneration = generation;
-    setLoading(true);
+  /**
+   * Run one page load on behalf of `owner`.
+   *
+   * Never rejects — the observer starts it as `void loadMore(owner)`, so any
+   * escape here becomes an unhandled rejection. That includes the native
+   * observer calls at the end: a previous version reached them through the
+   * mutable `observer` variable after `safeHasMore()` had nulled it via
+   * `dispose()`, and the resulting TypeError escaped from a `finally` block.
+   */
+  async function loadMore(owner: AttachmentOwner): Promise<void> {
     try {
-      await onLoadMore();
-    } catch (err) {
-      // Contained, not swallowed: a rejecting user callback is surfaced through
-      // the one place applications install reporting/telemetry, exactly like a
-      // throwing effect or binding.
-      reportError(err, { phase: "async", name: "infiniteScroll(onLoadMore)" });
-    } finally {
-      // Owner check before ANY state mutation. Without it a load in flight at
-      // dispose() time would re-raise `loading` state on a torn-down controller
-      // and re-arm the observer it had just disconnected.
-      if (!disposed && runGeneration === generation) {
-        setLoading(false);
-        // If the sentinel is still intersecting after the append (e.g. the newly
-        // loaded content didn't push it out of view, or the page isn't full yet),
-        // the observer won't fire again on its own — re-observe to force a fresh
-        // intersection check so loading doesn't stall.
-        if (observer && _current && safeHasMore()) {
-          observer.unobserve(_current);
-          observer.observe(_current);
-        }
+      setLoading(true);
+      // Signal setters drain subscribers synchronously here, so an effect
+      // reading `loading()` has just run and may have disposed the controller
+      // or swapped the sentinel. The revoking action settles `loading` itself
+      // (dispose() clears it; a sentinel change clears it), so returning here
+      // cannot strand the flag.
+      if (!ownsAttachment(owner)) return;
+
+      try {
+        await onLoadMore();
+      } catch (err) {
+        // Contained, not swallowed: a rejecting user callback is surfaced
+        // through the one place applications install reporting/telemetry,
+        // exactly like a throwing effect or binding.
+        reportError(err, { phase: "async", name: "infiniteScroll(onLoadMore)" });
       }
+
+      // The await is the widest reentrant gap of all.
+      if (!ownsAttachment(owner)) return;
+      setLoading(false);
+
+      // …and publishing that clears subscribers synchronously too.
+      if (!ownsAttachment(owner)) return;
+
+      // If the sentinel is still intersecting after the append (e.g. the newly
+      // loaded content didn't push it out of view, or the page isn't full yet),
+      // the observer won't fire again on its own — re-observe to force a fresh
+      // intersection check so loading doesn't stall.
+      const shouldContinue = safeHasMore();
+      if (!shouldContinue || !ownsAttachment(owner)) return;
+
+      // Aimed at the CAPTURED observer and sentinel. Reading the mutable
+      // `observer` / `_current` here would re-introduce the whole bug class:
+      // between the final check and the call there is no further boundary, but
+      // the shared variables may already describe a different attachment.
+      owner.observer.unobserve(owner.sentinel);
+      owner.observer.observe(owner.sentinel);
+    } catch (err) {
+      // Absolute backstop for the never-rejects invariant, including a throw
+      // from a native observer method or from a synchronous subscriber.
+      reportError(err, { phase: "async", name: "infiniteScroll(loadMore)" });
     }
   }
 
@@ -134,25 +204,28 @@ export function infiniteScroll(options: {
       return _current;
     },
     set(el: HTMLElement | null) {
+      // Re-assigning the SAME element is not a new attachment, so it is a
+      // complete no-op — including leaving the observer instance alone.
+      // Rebuilding it would silently revoke an in-flight load's ownership,
+      // since observer identity is part of that ownership: the load would
+      // survive the generation check and then fail the observer check, ending
+      // with `loading` stranded true and no one able to clear it.
+      if (el === _current) return;
+
       // A DIFFERENT element is a new attachment, and therefore a new ownership
       // generation: a load started for the previous sentinel loses the right to
-      // publish state or to touch the new sentinel's observer. Re-assigning the
-      // SAME element is not a new attachment, so its in-flight load keeps its
-      // rights and no generation is burned.
-      const attachmentChanged = el !== _current;
+      // publish state or to touch the new sentinel's observer.
       _current = el;
+      generation++;
 
-      if (attachmentChanged) {
-        generation++;
-        // Release the superseded load's claim on `loading`.
-        //
-        // The generation bump above already stops that load from clearing the
-        // flag itself, so without this it would stay `true` forever — and the
-        // observer gate (`!loading()`) would then block the NEW sentinel from
-        // ever starting a load of its own. Settling here is what lets the new
-        // attachment work while keeping the stale one unable to write.
-        setLoading(false);
-      }
+      // Release the superseded load's claim on `loading`.
+      //
+      // The generation bump above already stops that load from clearing the
+      // flag itself, so without this it would stay `true` forever — and the
+      // observer gate (`!loading()`) would then block the NEW sentinel from
+      // ever starting a load of its own. Settling here is what lets the new
+      // attachment work while keeping the stale one unable to write.
+      setLoading(false);
 
       // Disconnect old observer
       if (observer) {
