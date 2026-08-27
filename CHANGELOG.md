@@ -41,6 +41,24 @@ This project follows [Semantic Versioning](https://semver.org/).
   warning from the fire-and-forget `mutate()` path. `mutateAsync()` rejects with
   the original `AbortError` value; ordinary failures are still normalized to an
   `Error`.
+- **A cancelled mutation no longer stays permanently loading.** `mutation()`
+  set `loading`/`status` on entry, and the `AbortError` branch rethrew before
+  any terminal transition ran. That was invisible for the cancellations SibuJS
+  itself causes — `reset()` and a superseding `mutate()` write the state on
+  their way past — but when the *current* run's own `mutationFn` rejected an
+  `AbortError`, nothing else was coming: the promise rejected and `loading()`
+  stayed `true` forever, so a spinner bound to it never stopped.
+
+  Cleanup is run-owned, not blanket: only the run that still holds the state may
+  repair it, so a late superseded run cannot clear the newer run's loading
+  state. A cancelled current run restores what it replaced rather than forcing
+  `idle` — cancelling produced no verdict, so `success(data)` stays
+  `success(data)` and `error(E)` stays `error(E)`. Cancellation still calls
+  neither `onError` nor `onSettled`.
+
+  `onMutate` now states its contract explicitly: ordinary exceptions fail the
+  mutation, an `AbortError` is cancellation — the same rule `mutationFn`
+  follows, so where a cancellation is raised does not change what it means.
 - **Progressive island hydration is idempotent.** `hydrateIslands()` and
   `hydrateProgressively()` selected candidates without consulting
   `data-sibu-hydrated`, and a hydrated island deliberately keeps its

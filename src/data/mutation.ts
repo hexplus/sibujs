@@ -1,6 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { untracked } from "../reactivity/track";
 import { isAbortError } from "./abort";
 import { runCallback } from "./callbacks";
 import type { RetryOptions } from "./retry";
@@ -23,8 +24,15 @@ export interface MutationOptions<TData, TVariables, TContext = unknown> {
    *
    * Unlike the notification callbacks, `onMutate` is a **step of** the
    * mutation: it produces the rollback context everything downstream depends
-   * on. If it throws, the mutation fails — there is no context, and the
-   * optimistic update it was meant to apply never happened.
+   * on. An ordinary exception therefore fails the mutation — there is no
+   * context, and the optimistic update it was meant to apply never happened.
+   *
+   * An `AbortError` is the one exception, and it is cancellation rather than
+   * failure — the same rule `mutationFn` follows. `isAbortError()` is
+   * authoritative for the whole operation, so where a cancellation is raised
+   * inside it does not change what it means: no error state, no `onError`, and
+   * the state the mutation replaced is restored. Throw an ordinary `Error` from
+   * `onMutate` to fail the mutation.
    */
   onMutate?: (variables: TVariables) => TContext | Promise<TContext>;
   /** Called on successful mutation */
@@ -82,6 +90,18 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
     const signal = abortController.signal;
     const myRun = ++runId;
     let context: TContext | undefined;
+
+    // The state this run is about to paint over. Cancellation is the one
+    // outcome that produces no verdict of its own, so it restores what was here
+    // instead of inventing something — see the AbortError branch below. `data`
+    // is not snapshotted because starting a mutation does not clear it.
+    //
+    // Read untracked: `mutate()` is routinely called from inside an effect or an
+    // event handler that runs in one, and a bare read would subscribe that
+    // caller to `status`/`error` — making the caller re-run on every mutation it
+    // triggers. Snapshotting is bookkeeping, not a reactive dependency.
+    const previousStatus = untracked(status);
+    const previousError = untracked(error);
 
     batch(() => {
       setLoading(true);
@@ -142,7 +162,41 @@ export function mutation<TData, TVariables = void, TContext = unknown>(
       //
       // A mutation aborted by reset()/supersession is intentional, so it must
       // not surface as an error state at all.
-      if (isAbortError(err)) throw err;
+      //
+      // CANCELLATION STILL HAS TO TERMINATE — BUT ONLY ITS OWN RUN.
+      //
+      // "Not an error" was previously implemented as "not my problem": this
+      // branch rethrew before any terminal transition, leaving `loading` and
+      // `status` exactly as `execute()` set them on entry. That was invisible
+      // for the two cancellations SibuJS itself causes — `reset()` and a
+      // superseding `mutate()` both write the state on their way past — but the
+      // current run's own `mutationFn` rejecting an AbortError has no such
+      // successor. Nothing was coming, so the mutation stayed permanently
+      // pending and any spinner bound to `loading()` never stopped.
+      //
+      // Run ownership is what makes the repair safe. A blanket cleanup — the
+      // tempting `finally { setLoading(false) }` — would let a late, superseded
+      // run clear the loading state of the newer run that legitimately owns it:
+      //
+      //   A starts → B supersedes A → A rejects AbortError late → A clears B
+      //
+      // So only the run that still holds the state may touch it.
+      //
+      // What it restores: cancellation produced no verdict, so the previous one
+      // still stands. `success(data)` stays `success(data)` and `error(E)` stays
+      // `error(E)` — a cancelled attempt did not invalidate the result it was
+      // going to replace. Forcing `idle` would discard a result nothing
+      // superseded.
+      if (isAbortError(err)) {
+        if (myRun === runId) {
+          batch(() => {
+            setLoading(false);
+            setError(previousError);
+            setStatus(previousStatus);
+          });
+        }
+        throw err;
+      }
 
       const errorObj = err instanceof Error ? err : new Error(String(err));
 

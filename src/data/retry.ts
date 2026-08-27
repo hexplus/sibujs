@@ -16,7 +16,15 @@ export interface RetryOptions {
   maxDelay?: number;
   /** Jitter factor (0-1) to randomize delay. Default: 0.1 */
   jitter?: number;
-  /** Predicate to decide if an error is retryable. Default: () => true */
+  /**
+   * Predicate deciding whether a **non-cancellation** failure is retryable.
+   * Default: `() => true`.
+   *
+   * Cancellation never reaches this callback. An aborted signal, or a rejection
+   * that is itself an `AbortError`, bypasses retry policy entirely — so a
+   * `shouldRetry` returning `true` for everything still cannot resurrect a
+   * cancelled operation.
+   */
   shouldRetry?: (error: unknown, attempt: number) => boolean;
 }
 
@@ -59,9 +67,16 @@ export function calculateDelay(
  * Execute an async function with retry logic.
  * Returns the result or throws after all retries are exhausted.
  *
+ * CANCELLATION OUTRANKS RETRY POLICY. A cancelled operation — signalled either
+ * by `signal.aborted` or by a rejection that is itself an `AbortError` — skips
+ * `shouldRetry`, `onRetry` and the backoff, and rejects immediately.
+ *
  * @param fn The async function to execute
  * @param options Retry configuration
- * @param onRetry Callback fired before each retry with error, attempt, and delay
+ * @param onRetry Fired only when another attempt WILL actually be scheduled —
+ *   never on the final failure, never for a rejection `shouldRetry` declined,
+ *   and never for a cancellation. Receives the error, the attempt index, and
+ *   the delay before the next attempt.
  * @param signal AbortSignal to cancel retries
  *
  * @example
