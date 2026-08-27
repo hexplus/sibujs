@@ -32,6 +32,7 @@ import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
 import {
   isEventHandlerAttr,
+  isHtmlContentAttribute,
   sanitizeSrcset,
   sanitizeStyleAttribute,
   sanitizeUrl,
@@ -44,6 +45,24 @@ import {
  */
 function isPolicyAttr(lowerName: string): boolean {
   return lowerName === "style" || URL_ATTRS.has(lowerName);
+}
+
+/**
+ * Attributes the server must never emit at all.
+ *
+ * `srcdoc` is parsed by the browser as a nested HTML document, so escaping it
+ * is the wrong layer entirely — `escapeAttr()` correctly produces
+ * `srcdoc="&lt;script&gt;…"`, and the browser undoes that escaping before
+ * parsing, yielding `<script>…` again. Omission is the only treatment that
+ * holds, and it must hold identically in `renderToString`, the `renderToStream`
+ * generator, and `buildAttrString`, or the documented render paths disagree
+ * about what is safe.
+ *
+ * The rule itself lives in `utils/sanitize` so the client writers and the
+ * server serializers cannot drift apart.
+ */
+function isForbiddenSsrAttr(lowerName: string): boolean {
+  return isHtmlContentAttribute(lowerName);
 }
 
 /**
@@ -202,6 +221,7 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     const rawName = attr.name;
     if (!isSafeAttrName(rawName)) continue;
     if (isEventHandlerAttr(rawName)) continue;
+    if (isForbiddenSsrAttr(rawName)) continue;
 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;
@@ -509,6 +529,7 @@ function buildAttrString(
     if (!Object.hasOwn(attrs, rawKey)) continue;
     if (!isSafeAttrName(rawKey)) continue;
     if (!allowEventHandlers && isEventHandlerAttr(rawKey)) continue;
+    if (isForbiddenSsrAttr(rawKey)) continue;
     const lowerKey = rawKey.toLowerCase();
     let value = String(attrs[rawKey]);
     if (isPolicyAttr(lowerKey)) {
@@ -684,6 +705,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     const rawName = attr.name;
     if (!isSafeAttrName(rawName)) continue;
     if (isEventHandlerAttr(rawName)) continue;
+    if (isForbiddenSsrAttr(rawName)) continue;
 
     const lowerName = rawName.toLowerCase();
     let value = attr.value;

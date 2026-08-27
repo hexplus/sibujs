@@ -43,6 +43,7 @@ In order:
 | `null` / `undefined` | Removes the attribute. |
 | boolean | HTML boolean-attribute semantics; `checked` / `disabled` / `selected` write the IDL property, which is where their live state actually is. |
 | `value` / `checked` string | IDL property, unless `syncValueProperty: false`. |
+| `srcdoc` | **Refused**, and any existing value removed. See below. |
 | everything else | `sanitizeAttributeString` — URL allowlist, per-candidate `srcset` validation, `style` declaration-list policy, inert pass-through. |
 
 ### Namespaces
@@ -66,6 +67,79 @@ security:
 
 `enhance`'s `attr()` passes `false` as well — it is named for the attribute and
 documented to write one.
+
+## `srcdoc` is an HTML-parsing sink, not an attribute
+
+The policy above rests on one assumption: an attribute the browser stores as
+text is inert, so `setAttribute` cannot execute anything. That is true of every
+attribute except one.
+
+`<iframe srcdoc>` is not stored as text. The browser decodes the value and
+**parses it as a complete nested HTML document**, and without a sandbox the
+scripts in that document run with the embedding page's origin.
+
+Attribute escaping is not a weaker defence here — it is the wrong layer:
+
+```text
+written:  srcdoc="&lt;script&gt;alert(1)&lt;/script&gt;"   ← correctly escaped
+parsed:   <script>alert(1)</script>                        ← escaping undone
+```
+
+The escaping is undone *before* the parse, by design. So the generic writers
+refuse the attribute outright rather than trying to make a string safe:
+
+```ts
+setSafeAttribute(frame, "SRCDOC", html)   // → false, and any existing value removed
+```
+
+Refusal is a postcondition, like `on*`: a writer that names the slot removes
+whatever was already in it, so server markup or a third-party widget cannot
+leave a live document behind.
+
+Three consequences worth stating explicitly:
+
+- **Sanitizing arbitrary HTML is not attempted.** That is a different and much
+  larger problem, and doing it badly is worse than refusing.
+- **`TrustedHTML` does not unlock it.** That type is a compile-time brand —
+  `trustHTML()` returns the same string through a cast — so it has no runtime
+  identity and cannot serve as proof. A trusted-document API would need a
+  runtime-verifiable wrapper or browser Trusted Types, and does not exist today.
+- **`sandbox` does not unlock it either.** Accepting `srcdoc` when a `sandbox`
+  attribute happens to be present would make security depend on an attribute
+  any later code can remove.
+
+The rule lives in one place, `isHtmlContentAttribute()` in `utils/sanitize`, and
+is consulted by every client writer and every SSR serializer.
+
+### SSR omits it
+
+`renderToString`, the `renderToStream` generator, `buildAttrString`, and the
+router's document-attribute builder all drop `srcdoc` rather than escaping it.
+The string and streaming renderers are asserted against each other, because a
+divergence there is its own bug class — someone streams in production and
+snapshots with `renderToString` in tests.
+
+## Dynamic `html` attributes use the shared policy
+
+The tagged-template executor used to carry its own attribute rules: `srcset`,
+then URL attributes, then "write it". That list was the shared policy minus
+`style`, so `html\`<div style=${untrusted}>\`` never reached the
+declaration-list sanitizer even though this document claimed it did.
+
+A duplicated policy is a policy that drifts, so there is now one. Both dynamic
+forms commit through `setSafeAttribute`:
+
+```ts
+html`<div style=${value}></div>`              // single expression
+html`<div style="color:red;${value}"></div>`  // mixed — the ASSEMBLED string
+```
+
+Sanitizing the assembled string is what catches attacks split across the
+boundary, like `href="java${x}:…"`.
+
+**Fully static template text is deliberately excluded.** An attribute the
+developer typed literally into their own source is developer-controlled, at the
+same trust level as hand-written markup. Only expressions are runtime data.
 
 ## Security is a postcondition, not a promise about this write
 

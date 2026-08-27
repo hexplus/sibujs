@@ -1,7 +1,7 @@
 import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { isEventHandlerAttr, isUrlAttribute, sanitizeSrcset, sanitizeUrl } from "../../utils/sanitize";
+import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
@@ -388,23 +388,22 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         el.setAttribute(attr.name, attr.value);
         break;
       case 1: {
-        // expr
+        // expr — runtime data, so it goes through the SHARED commit primitive.
+        //
+        // This path used to carry its own copy of the policy (srcset, then URL
+        // attributes, then "just write it"). That copy was the shared list
+        // minus `style`, so a dynamic `style=${…}` never reached the
+        // declaration-list sanitizer — and it would have missed `srcdoc` too.
+        // A duplicated policy is a policy that drifts; there is now one.
         const name = attr.name;
-        // Block on* event handler attributes (XSS prevention; shared guard).
-        const lname = name.toLowerCase();
-        if (isEventHandlerAttr(name)) break;
         const val = values[attr.idx];
         if (typeof val === "function") {
           registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));
-        } else if (val != null) {
-          const str = String(val);
-          if (lname === "srcset") {
-            el.setAttribute(name, sanitizeSrcset(str));
-          } else if (isUrlAttribute(lname)) {
-            el.setAttribute(name, sanitizeUrl(str));
-          } else {
-            el.setAttribute(name, str);
-          }
+        } else {
+          // `syncValueProperty: false` matches the tag factory: on FIRST render
+          // the content attribute is the correct sink for `value`, since it
+          // seeds the control's default and survives a form reset.
+          setSafeAttribute(el, name, val, { syncValueProperty: false, label: "html" });
         }
         break;
       }
@@ -417,14 +416,11 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
           const ev = values[attr.exprs[j]];
           val += (ev == null ? "" : String(ev)) + attr.statics[j + 1];
         }
-        const lname2 = attr.name.toLowerCase();
-        if (lname2 === "srcset") {
-          el.setAttribute(attr.name, sanitizeSrcset(val));
-        } else if (isUrlAttribute(lname2)) {
-          el.setAttribute(attr.name, sanitizeUrl(val));
-        } else {
-          el.setAttribute(attr.name, val);
-        }
+        // Assembled from at least one expression, so the whole result is
+        // runtime data and commits through the same primitive. Sanitizing the
+        // ASSEMBLED string is what catches attacks split across the boundary,
+        // like `href="java${x}:…"`.
+        setSafeAttribute(el, attr.name, val, { syncValueProperty: false, label: "html" });
         break;
       }
       case 3: {

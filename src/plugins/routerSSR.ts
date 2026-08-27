@@ -15,6 +15,7 @@
 
 import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "../utils/guards";
+import { isHtmlContentAttribute } from "../utils/sanitize";
 import type { RouteDef } from "./router";
 import { __getNavigationEpoch, createRouter } from "./router";
 
@@ -649,6 +650,10 @@ function buildSafeAttrString(attrs: Record<string, string>): string {
     if (!Object.hasOwn(attrs, rawKey)) continue;
     if (!isSafeAttrName(rawKey)) continue;
     if (isEventHandlerAttr(rawKey)) continue;
+    // `srcdoc` is parsed as a nested HTML document, so escaping it is the wrong
+    // layer — it is omitted here exactly as in the main SSR serializers. The
+    // rule itself is shared so the two cannot drift.
+    if (isHtmlContentAttribute(rawKey)) continue;
     const lowerKey = rawKey.toLowerCase();
     let value = String(attrs[rawKey]);
     if (URL_ATTRS.has(lowerKey)) {

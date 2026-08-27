@@ -421,6 +421,41 @@ const URL_ATTRIBUTES = new Set([
 ]);
 
 /**
+ * Attributes whose value the browser parses as a nested HTML DOCUMENT rather
+ * than storing as inert text.
+ *
+ * There is exactly one today: `<iframe srcdoc>`. The browser decodes the
+ * attribute value and parses the result as a full document, and without a
+ * sandbox its scripts run with the embedding page's origin.
+ *
+ * This breaks the assumption the rest of the attribute policy rests on. HTML
+ * attribute escaping is the correct treatment for an attribute *value* and does
+ * nothing here, because the escaping is undone before the parse:
+ *
+ *     srcdoc="&lt;script&gt;…&lt;/script&gt;"   →   <script>…</script>
+ *
+ * So escaping is not a weaker fix, it is the wrong layer. Generic attribute
+ * writers refuse the attribute outright instead. Sanitizing arbitrary HTML is a
+ * different and much larger problem, deliberately not attempted here; a trusted
+ * iframe document would need its own explicit API backed by a runtime-verifiable
+ * wrapper (or browser Trusted Types), not a compile-time brand.
+ *
+ * Single source of truth: every writer and every SSR serializer consults this
+ * rather than carrying its own spelling of the rule.
+ */
+const HTML_CONTENT_ATTRIBUTES = new Set(["srcdoc"]);
+
+/**
+ * Is `name` an attribute the browser parses as nested HTML?
+ *
+ * Case-insensitive: HTML attribute names are, and `SRCDOC` reaches the parser
+ * as `srcdoc`.
+ */
+export function isHtmlContentAttribute(name: string): boolean {
+  return HTML_CONTENT_ATTRIBUTES.has(name.toLowerCase());
+}
+
+/**
  * Checks if an attribute name is safe to set without sanitization.
  */
 export function isSafeAttribute(attr: string): boolean {
@@ -451,7 +486,12 @@ export function isUrlAttribute(attr: string): boolean {
  *     would see the commas/descriptors and pass it through unchecked).
  *   - single-URL attributes (`href`, `src`, `xlink:href`, …) get protocol
  *     allowlist validation.
+ *   - `srcdoc` is REFUSED by the callers of this function: the browser parses
+ *     it as a nested HTML document, so no string treatment makes it safe. See
+ *     `isHtmlContentAttribute`.
  *   - everything else passes through — `setAttribute` stores it as inert text.
+ *     That is true of every remaining attribute, but it is a claim about the
+ *     attributes NOT listed above, not a general property of `setAttribute`.
  *
  * Single source of truth shared by the static write path (`tagFactory`) and
  * the reactive write paths (`bindAttribute` / `bindDynamic`) so the two can

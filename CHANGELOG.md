@@ -8,6 +8,40 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
+  The shared attribute policy classified attributes into event handlers, URLs,
+  `srcset`, `style`, and "everything else, which `setAttribute` stores as inert
+  text". That last claim is false for `<iframe srcdoc>`: the browser decodes the
+  value and parses it as a complete nested HTML document, and without a sandbox
+  its scripts run with the embedding page's origin.
+
+  Attribute escaping is not a weaker defence here, it is the wrong layer —
+  `srcdoc="&lt;script&gt;…"` is correctly escaped and still becomes `<script>…`
+  once parsed as a document. So the generic writers refuse the attribute
+  outright and, as with `on*`, remove any pre-existing value rather than merely
+  declining to add one. The rule lives in one place
+  (`isHtmlContentAttribute()`) and is consulted by the tag factory,
+  `bindAttribute`/`bindDynamic`, `bindAttrs`, `enhance().attr()`, `svgElement`,
+  the `html` template, and all four SSR attribute serializers.
+
+  Sanitizing arbitrary HTML is deliberately not attempted, and `TrustedHTML`
+  does not unlock it: that type is a compile-time brand with no runtime
+  identity. A trusted-document API would need a runtime-verifiable wrapper or
+  browser Trusted Types, and is not part of this change.
+
+- **Dynamic `html` template attributes now use the shared attribute policy.**
+  The tagged-template executor carried its own rules — `srcset`, then URL
+  attributes, then write — which was the shared list minus `style`. So
+  ``html`<div style=${untrusted}>` `` bypassed the declaration-list sanitizer,
+  contradicting the sanitizer's own documented invariant, and would have
+  bypassed the new `srcdoc` rule too. Both dynamic forms (a single expression,
+  and a mixed attribute assembled from statics and expressions) now commit
+  through the shared primitive, so a refused value also reconciles whatever was
+  already on the element. Fully static template text is unchanged: an attribute
+  the developer typed into their own source stays developer-controlled.
+
 ### Changed
 
 - **`loadWasmModule()`'s second parameter is now `WebAssembly.Imports` only; the
