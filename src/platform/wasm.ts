@@ -114,7 +114,7 @@ export function wasm<T extends object = Record<string, unknown>>(
       // previous call passed `config.imports` positionally, so the security
       // options the wrapper accepted were silently dropped and every URL source
       // was refused by the primitive.
-      const wasmInstance = await loadWasmWithOptions(source, { ...config, cacheKey });
+      const wasmInstance = await loadWasmModuleWithOptions(source, { ...config, cacheKey });
       setInstance(wasmInstance.exports as unknown as T);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -159,38 +159,59 @@ export interface LoadWasmOptions {
   unsafelyAllowAnyOrigin?: boolean;
 }
 
+/**
+ * Load and instantiate a WebAssembly module — **positional/legacy form**.
+ *
+ * The second parameter is always `WebAssembly.Imports` and the third is always
+ * the cache key. There is no structural guessing, so a module namespace legally
+ * named `imports` or `cacheKey` is passed through unharmed.
+ *
+ * It previously accepted `WebAssembly.Imports | LoadWasmOptions` and decided
+ * between them at runtime by probing for `allowedOrigins` /
+ * `unsafelyAllowAnyOrigin`. That discriminator was unsound in both directions:
+ * an options bag carrying only `imports`/`cacheKey` was read as an import
+ * namespace (so `cacheKey` was dropped and the documented keyed-singleton
+ * guarantee silently did not hold), while a genuine namespace *named*
+ * `allowedOrigins` would have been read as options. No structural test can
+ * separate the two, because both are plain objects with caller-chosen keys — so
+ * the union was removed rather than re-guessed.
+ *
+ * For anything beyond imports and a cache key — notably the origin policy a URL
+ * source requires — use {@link loadWasmModuleWithOptions}.
+ *
+ * @see loadWasmModuleWithOptions
+ */
 export async function loadWasmModule(
   source: string | ArrayBuffer | Uint8Array,
-  imports?: WebAssembly.Imports | LoadWasmOptions,
+  imports?: WebAssembly.Imports,
   cacheKey?: string,
 ): Promise<WebAssembly.Instance> {
-  // Back-compat: `imports` may be either WebAssembly.Imports (a record of
-  // module-name -> imports map) or a LoadWasmOptions bag. Disambiguate via
-  // the unique option keys ONLY — never `imports`/`cacheKey`, which a user
-  // could legally name a WASM module namespace.
-  const isOptionsBag = !!(imports && ("allowedOrigins" in imports || "unsafelyAllowAnyOrigin" in imports));
-  const opts: LoadWasmOptions = isOptionsBag
-    ? (imports as LoadWasmOptions)
-    : { imports: imports as WebAssembly.Imports | undefined, cacheKey };
-  return loadWasmWithOptions(source, opts);
+  return loadWasmModuleWithOptions(source, { imports, cacheKey });
 }
 
 /**
- * Unambiguous options-only entry point.
+ * Load and instantiate a WebAssembly module — **options form**.
  *
- * `loadWasmModule`'s second parameter is overloaded (imports OR options) and
- * disambiguated by looking for the security keys. That heuristic cannot see an
- * option bag carrying only `imports`/`cacheKey` — it would read it as a WASM
- * import namespace — so internal callers that already HAVE an options object
- * (notably the `wasm()` wrapper) go through this instead of round-tripping
- * their config through a guess.
+ * Unambiguous by construction: options live in their own parameter, so a WASM
+ * module namespace named `imports`, `cacheKey`, or `allowedOrigins` is just a
+ * namespace and nothing has to be inferred from object shape.
  *
- * Not exported from the package: it exists to keep the wrapper honest, not to
- * add a second public loader.
+ * This is the form to use for a URL source, since the origin policy
+ * (`allowedOrigins`, or an explicit `unsafelyAllowAnyOrigin`) can only be
+ * expressed here.
+ *
+ * @example
+ * ```ts
+ * const instance = await loadWasmModuleWithOptions("https://cdn.example.com/math.wasm", {
+ *   allowedOrigins: ["https://cdn.example.com"],
+ *   imports: { env: { log: console.log } },
+ *   cacheKey: "math",
+ * });
+ * ```
  */
-async function loadWasmWithOptions(
+export async function loadWasmModuleWithOptions(
   source: string | ArrayBuffer | Uint8Array,
-  opts: LoadWasmOptions,
+  opts: LoadWasmOptions = {},
 ): Promise<WebAssembly.Instance> {
   const key = opts.cacheKey || (typeof source === "string" ? source : undefined);
 

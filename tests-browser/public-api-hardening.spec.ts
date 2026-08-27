@@ -32,6 +32,14 @@ type Api = {
     deepColor: string;
     rootColor: string;
   };
+  scopedFunctionalPseudos(): {
+    alpha: string;
+    beta: string;
+    gammaPlain: string;
+    gammaExcluded: string;
+    leaf: string;
+    comma: string;
+  };
   setupScroll(): boolean;
   saveAt(key: string, y: number): { x: number; y: number };
   positionFor(key: string): { x: number; y: number } | null;
@@ -85,6 +93,25 @@ test("scoped styles reach descendants created after render", async ({ page }) =>
   // assertion the old descendant-stamping implementation could not satisfy.
   expect(result.lateColor).toBe("rgb(0, 128, 0)");
   expect(result.deepColor).toBe("rgb(0, 128, 0)");
+});
+
+test("scoped selector lists survive functional pseudo-classes", async ({ page }) => {
+  const c = await page.evaluate(() => (window as never as { __t: Api }).__t.scopedFunctionalPseudos());
+
+  // `:is(.alpha, .beta)` must still match BOTH arms. Splitting on the comma
+  // produced a selector that matched neither.
+  expect(c.alpha).toBe("rgb(0, 0, 255)");
+  expect(c.beta).toBe("rgb(0, 0, 255)");
+
+  // `:not(.x, .y)` must exclude both arms and keep everything else.
+  expect(c.gammaPlain).toBe("rgb(0, 128, 0)");
+  expect(c.gammaExcluded).not.toBe("rgb(0, 128, 0)");
+
+  // `:where(...) > .leaf` keeps its combinator and its argument list.
+  expect(c.leaf).toBe("rgb(255, 0, 0)");
+
+  // A comma inside an attribute value is ordinary text.
+  expect(c.comma).toBe("rgb(128, 0, 128)");
 });
 
 test("auto scroll restoration restores a destination on real popstate", async ({ page }) => {

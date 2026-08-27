@@ -30,6 +30,7 @@ import { isEventHandlerAttr, sanitizeAttributeString } from "./sanitize";
 
 const _isDev = isDev();
 
+const HTML_NS = "http://www.w3.org/1999/xhtml";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 const XML_NS = "http://www.w3.org/XML/1998/namespace";
@@ -40,6 +41,23 @@ const XML_NS = "http://www.w3.org/XML/1998/namespace";
  * update would leave the rendered control showing a stale value.
  */
 const BOOLEAN_IDL_ATTRS = new Set(["checked", "disabled", "selected"]);
+
+/**
+ * Is `el` in the HTML namespace?
+ *
+ * Decides two things that must NOT be applied to foreign content:
+ *   - attribute-name case folding (HTML names are case-insensitive, SVG's are
+ *     not — `viewBox`, `preserveAspectRatio` and `patternUnits` are meaningless
+ *     lowercased), and
+ *   - IDL-property synchronisation, which is an HTML form-control concept.
+ *
+ * `createElement` in an HTML document yields the XHTML namespace; a null
+ * namespace (detached/foreign-free nodes in some engines) is treated as HTML
+ * because that is where the case-insensitive parser rules apply.
+ */
+function isHtmlElement(el: Element): boolean {
+  return el.namespaceURI === null || el.namespaceURI === HTML_NS;
+}
 
 export interface SafeAttributeOptions {
   /**
@@ -104,6 +122,9 @@ export function setSafeAttribute(
   value: unknown,
   options: SafeAttributeOptions = {},
 ): boolean {
+  const ns = namespaceFor(el, name);
+  const localName = ns ? name.slice(name.indexOf(":") + 1) : name;
+
   if (isEventHandlerAttr(name)) {
     if (_isDev) {
       devWarn(
@@ -111,11 +132,17 @@ export function setSafeAttribute(
           `Its value would be evaluated as JavaScript. Use on:{ ${name.slice(2)}: fn } instead.`,
       );
     }
+    // RECONCILE, don't merely decline. A binding that names an `on*` slot now
+    // OWNS that slot, and the caller's expectation is that the framework
+    // governs it. Leaving a pre-existing `onclick="alert(1)"` — from server
+    // markup, a third-party widget, or anything `enhance()` was pointed at —
+    // would satisfy "I did not create a handler" while the page still has one.
+    // Security here is a postcondition on the attribute, not a property of this
+    // particular write.
+    if (ns) el.removeAttributeNS(ns, localName);
+    else el.removeAttribute(name);
     return false;
   }
-
-  const ns = namespaceFor(el, name);
-  const localName = ns ? name.slice(name.indexOf(":") + 1) : name;
 
   if (value == null) {
     if (ns) el.removeAttributeNS(ns, localName);
@@ -123,9 +150,15 @@ export function setSafeAttribute(
     return true;
   }
 
+  // HTML attribute names are case-insensitive, so the IDL decisions below must
+  // fold case — `VALUE` IS `value` to the browser. SVG names are case-sensitive
+  // and have no IDL form-control semantics, so neither applies there.
+  const html = isHtmlElement(el);
+  const idlName = html ? name.toLowerCase() : name;
+
   if (typeof value === "boolean") {
-    if (BOOLEAN_IDL_ATTRS.has(name) && name in el) {
-      setProp(el, name, value);
+    if (html && BOOLEAN_IDL_ATTRS.has(idlName) && idlName in el) {
+      setProp(el, idlName, value);
     } else if (value) {
       if (ns) el.setAttributeNS(ns, name, "");
       else el.setAttribute(name, "");
@@ -139,8 +172,8 @@ export function setSafeAttribute(
 
   const str = String(value);
 
-  if (options.syncValueProperty !== false && (name === "value" || name === "checked") && name in el) {
-    setProp(el, name, name === "checked" ? Boolean(value) : str);
+  if (options.syncValueProperty !== false && html && (idlName === "value" || idlName === "checked") && idlName in el) {
+    setProp(el, idlName, idlName === "checked" ? Boolean(value) : str);
     return true;
   }
 
@@ -148,6 +181,18 @@ export function setSafeAttribute(
   // consults already contains `xlink:href` — so the prefixed name is passed in
   // whole even though the write itself uses the local name plus a namespace.
   const safe = sanitizeAttributeString(name, str);
+
+  // No-op check on the SANITIZED result, never on the caller's raw input.
+  //
+  // This is the primitive's own write-elision, and it exists here so that no
+  // caller has to implement one. A caller comparing its RAW desired value
+  // against the DOM before delegating would skip the sanitizer exactly when the
+  // DOM already holds that raw value — which is precisely the dangerous case:
+  // `<a href="javascript:…">` re-bound to the same string would never be
+  // cleaned. Comparing post-policy makes the elision safe by construction.
+  const current = ns ? el.getAttributeNS(ns, localName) : el.getAttribute(name);
+  if (current === safe) return true;
+
   if (ns) el.setAttributeNS(ns, name, safe);
   else el.setAttribute(name, safe);
   return true;

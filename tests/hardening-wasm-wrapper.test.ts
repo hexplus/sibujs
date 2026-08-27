@@ -11,7 +11,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { clearWasmCache, loadWasmModule, wasm } from "../src/platform/wasm";
+import { clearWasmCache, loadWasmModuleWithOptions, wasm } from "../src/platform/wasm";
 
 function fakeModule(id = "mod") {
   return { __module: id } as unknown as WebAssembly.Module;
@@ -137,9 +137,9 @@ describe("loadWasmModule — concurrent singleton", () => {
 
     const opts = { allowedOrigins: ["https://cdn.example.com"], cacheKey: "same" };
     const [a, b, c] = await Promise.all([
-      loadWasmModule("https://cdn.example.com/a.wasm", opts),
-      loadWasmModule("https://cdn.example.com/a.wasm", opts),
-      loadWasmModule("https://cdn.example.com/a.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/a.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/a.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/a.wasm", opts),
     ]);
 
     expect(instantiations).toBe(1);
@@ -163,8 +163,8 @@ describe("loadWasmModule — concurrent singleton", () => {
 
     const opts = { allowedOrigins: ["https://cdn.example.com"], cacheKey: "streamed" };
     const [a, b] = await Promise.all([
-      loadWasmModule("https://cdn.example.com/s.wasm", opts),
-      loadWasmModule("https://cdn.example.com/s.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/s.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/s.wasm", opts),
     ]);
 
     expect(instantiations).toBe(1);
@@ -187,8 +187,8 @@ describe("loadWasmModule — concurrent singleton", () => {
 
     const base = { allowedOrigins: ["https://cdn.example.com"] };
     const [a, b] = await Promise.all([
-      loadWasmModule("https://cdn.example.com/a.wasm", { ...base, cacheKey: "k-a" }),
-      loadWasmModule("https://cdn.example.com/b.wasm", { ...base, cacheKey: "k-b" }),
+      loadWasmModuleWithOptions("https://cdn.example.com/a.wasm", { ...base, cacheKey: "k-a" }),
+      loadWasmModuleWithOptions("https://cdn.example.com/b.wasm", { ...base, cacheKey: "k-b" }),
     ]);
 
     expect(instantiations).toBe(2);
@@ -213,14 +213,14 @@ describe("loadWasmModule — concurrent singleton", () => {
     const opts = { allowedOrigins: ["https://cdn.example.com"], cacheKey: "retry" };
 
     const [r1, r2] = await Promise.allSettled([
-      loadWasmModule("https://cdn.example.com/r.wasm", opts),
-      loadWasmModule("https://cdn.example.com/r.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/r.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/r.wasm", opts),
     ]);
     expect(r1.status).toBe("rejected");
     expect(r2.status).toBe("rejected");
 
     // A later retry must be able to succeed.
-    const instance = await loadWasmModule("https://cdn.example.com/r.wasm", opts);
+    const instance = await loadWasmModuleWithOptions("https://cdn.example.com/r.wasm", opts);
     expect(instance).toBeTruthy();
   });
 
@@ -241,7 +241,7 @@ describe("loadWasmModule — concurrent singleton", () => {
 
     const opts = { allowedOrigins: ["https://cdn.example.com"], cacheKey: "shared" };
     const viaWrapper = wasm("https://cdn.example.com/w.wasm", opts);
-    const viaPrimitive = loadWasmModule("https://cdn.example.com/w.wasm", opts);
+    const viaPrimitive = loadWasmModuleWithOptions("https://cdn.example.com/w.wasm", opts);
 
     await viaPrimitive;
     await flush();

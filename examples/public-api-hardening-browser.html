@@ -125,6 +125,51 @@
           };
         },
 
+        // --- functional pseudo-class selector lists ----------------------
+        // A comma inside :is()/:where()/:not() is an ARGUMENT separator, not a
+        // selector-list separator. A real engine is the only authority on
+        // whether the generated sheet still selects what the author wrote.
+        scopedFunctionalPseudos() {
+          const Component = withScopedStyle(
+            ":is(.alpha, .beta) { color: rgb(0, 0, 255); }" +
+              ".gamma:not(.x, .y) { color: rgb(0, 128, 0); }" +
+              ":where(.wrap, .box) > .leaf { color: rgb(255, 0, 0); }" +
+              '[data-v=","] { color: rgb(128, 0, 128); }',
+            () => div({ class: "root" }),
+          );
+          const el = Component({});
+          const host = document.getElementById("scope-host");
+          host.replaceChildren(el);
+
+          const add = (tag, cls, attrs) => {
+            const node = document.createElement(tag);
+            if (cls) node.className = cls;
+            if (attrs) for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+            el.appendChild(node);
+            return node;
+          };
+
+          const alpha = add("span", "alpha");
+          const beta = add("span", "beta");
+          const gammaPlain = add("span", "gamma");
+          const gammaExcluded = add("span", "gamma x");
+          const wrap = add("div", "wrap");
+          const leaf = document.createElement("i");
+          leaf.className = "leaf";
+          wrap.appendChild(leaf);
+          const comma = add("span", null, { "data-v": "," });
+
+          const color = (n) => getComputedStyle(n).color;
+          return {
+            alpha: color(alpha),
+            beta: color(beta),
+            gammaPlain: color(gammaPlain),
+            gammaExcluded: color(gammaExcluded),
+            leaf: color(leaf),
+            comma: color(comma),
+          };
+        },
+
         // --- scroll restoration against real history + scrolling ---------
         setupScroll() {
           window.__sr = scrollRestoration({ mode: "auto", getKey: () => "page-a" });

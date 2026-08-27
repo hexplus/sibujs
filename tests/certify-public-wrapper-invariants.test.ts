@@ -26,7 +26,7 @@ import { div } from "../src/core/rendering/html";
 import { svgElement } from "../src/platform/customElement";
 import { Head } from "../src/platform/head";
 import { createMicroApp } from "../src/platform/microfrontend";
-import { clearWasmCache, loadWasmModule, wasm } from "../src/platform/wasm";
+import { clearWasmCache, loadWasmModule, loadWasmModuleWithOptions, wasm } from "../src/platform/wasm";
 import { bindAttribute } from "../src/reactivity/bindAttribute";
 import { bindAttrs } from "../src/ui/reactiveAttr";
 import { setSafeAttribute } from "../src/utils/setSafeAttribute";
@@ -305,9 +305,9 @@ describe("certification: wrapper parity", () => {
 
     const opts = { allowedOrigins: ["https://cdn.example.com"], cacheKey: "cert-key" };
     const results = await Promise.all([
-      loadWasmModule("https://cdn.example.com/c.wasm", opts),
-      loadWasmModule("https://cdn.example.com/c.wasm", opts),
-      loadWasmModule("https://cdn.example.com/c.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/c.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/c.wasm", opts),
+      loadWasmModuleWithOptions("https://cdn.example.com/c.wasm", opts),
     ]);
 
     expect(instantiations).toBe(1);

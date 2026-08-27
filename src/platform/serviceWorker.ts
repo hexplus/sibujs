@@ -47,6 +47,22 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
   /** unregister() was called; an arriving registration must not be adopted. */
   let unregisterRequested = false;
   let registrationPromise: Promise<ServiceWorkerRegistration | null> | null = null;
+  /**
+   * A registration that resolved while an unregister request was outstanding.
+   * It is deliberately NOT published — the outstanding request owns it — so a
+   * worker that is about to be removed never transiently reports as ready.
+   */
+  let arrivedRegistration: ServiceWorkerRegistration | null = null;
+  /**
+   * The single outstanding logical unregister request.
+   *
+   * `unregister()` is one operation, and it must consume at most one native
+   * `registration.unregister()`. Modelling it as an owned in-flight promise —
+   * rather than a set of booleans consulted from two places — is what makes
+   * that true by construction: every caller joins the same request, and the
+   * native call has exactly one site.
+   */
+  let pendingUnregister: Promise<boolean> | null = null;
 
   let updateFoundHandler: (() => void) | null = null;
   let stateChangeHandler: (() => void) | null = null;
@@ -95,25 +111,29 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
     reg.addEventListener("updatefound", updateFoundHandler);
   }
 
-  /**
-   * Decide what to do with a registration that has just resolved.
-   * Returns the registration when it was adopted, `null` when it was
-   * unregistered on arrival.
-   */
-  async function adopt(reg: ServiceWorkerRegistration): Promise<ServiceWorkerRegistration | null> {
-    if (unregisterRequested) {
-      const ok = await reg.unregister();
-      if (ok) {
-        unregistered = true;
-        return null;
-      }
-      // The browser refused. The worker is live, so adopt it normally — losing
-      // the reference here is exactly how a registration becomes orphaned.
-      unregisterRequested = false;
-    }
+  /** Publish a registration as the wrapper's active one. */
+  function activate(reg: ServiceWorkerRegistration): void {
     setRegistration(reg);
     setIsReady(true);
     attachListeners(reg);
+  }
+
+  /**
+   * Decide what to do with a registration that has just resolved.
+   *
+   * This function does NOT call the native unregister, even when a request is
+   * outstanding. That was the source of the double attempt: both `adopt()` and
+   * the resumed `unregister()` called it, and when the browser refused the
+   * first, the second fired against the very registration `adopt()` had just
+   * re-adopted. The outstanding request owns the removal; `adopt()` only hands
+   * the registration over.
+   */
+  function adopt(reg: ServiceWorkerRegistration): ServiceWorkerRegistration | null {
+    if (unregisterRequested) {
+      arrivedRegistration = reg;
+      return null;
+    }
+    activate(reg);
     return reg;
   }
 
@@ -136,21 +156,16 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
     }
   }
 
-  async function unregister(): Promise<boolean> {
-    if (!supported || unregistered) return false;
-
+  /** The one place `registration.unregister()` is ever called. */
+  async function performUnregister(): Promise<boolean> {
     unregisterRequested = true;
 
     // Wait out an in-flight registration first. Without this the call sees a
     // null registration, reports "nothing to do", and the worker that lands a
     // moment later stays registered in the browser forever.
-    if (registrationPromise) {
-      await registrationPromise.catch(() => null);
-      // `adopt()` may have already unregistered the arriving registration.
-      if (unregistered) return true;
-    }
+    if (registrationPromise) await registrationPromise.catch(() => null);
 
-    const reg = registration();
+    const reg = registration() ?? arrivedRegistration;
     if (!reg) {
       unregisterRequested = false;
       return false;
@@ -162,12 +177,41 @@ export function serviceWorker(scriptUrl: string, options?: RegistrationOptions):
       setRegistration(null);
       setIsReady(false);
       setIsUpdateAvailable(false);
+      arrivedRegistration = null;
       unregistered = true;
     } else {
-      // Refused: keep the registration, keep the listeners, stay operational.
+      // Refused: the worker is still installed and still controlling pages, so
+      // the wrapper stays operational. A registration that arrived while this
+      // request was outstanding was withheld from publication — activate it now
+      // rather than leaving the browser holding a worker SibuJS forgot about.
       unregisterRequested = false;
+      if (!registration() && arrivedRegistration) {
+        activate(arrivedRegistration);
+        arrivedRegistration = null;
+      }
     }
     return result;
+  }
+
+  async function unregister(): Promise<boolean> {
+    if (!supported || unregistered) return false;
+
+    // Join the outstanding request rather than starting a second one. Two
+    // concurrent callers are one logical removal.
+    if (pendingUnregister) return pendingUnregister;
+
+    const request = performUnregister();
+    pendingUnregister = request;
+    // Release the slot once settled so a LATER, genuinely new request (for
+    // instance after the browser refused this one) can run. Guarded by identity
+    // so a successor is never cleared by its predecessor's cleanup.
+    void request
+      .catch(() => {})
+      .then(() => {
+        if (pendingUnregister === request) pendingUnregister = null;
+      });
+
+    return request;
   }
 
   return { registration, isReady, isUpdateAvailable, error, update, unregister };

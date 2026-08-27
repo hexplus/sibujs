@@ -148,6 +148,180 @@ function scopeSelector(selector: string, attr: string): string {
 }
 
 /**
+ * If a string, comment, or escape sequence begins at `i`, return the index just
+ * past it; otherwise `-1`.
+ *
+ * Every depth-tracking walk below shares this, so a `,`, `{`, `(` or `[` that
+ * appears inside a quoted string, a comment, or after a backslash is never
+ * mistaken for structure. Centralising it is the point: the previous
+ * regex-driven rewriter had no notion of these contexts at all.
+ */
+function skipNonCode(text: string, i: number): number {
+  const ch = text[i];
+  if (ch === "\\") return i + 2;
+  if (ch === '"' || ch === "'") {
+    let j = i + 1;
+    while (j < text.length) {
+      if (text[j] === "\\") {
+        j += 2;
+        continue;
+      }
+      if (text[j] === ch) return j + 1;
+      j++;
+    }
+    return text.length;
+  }
+  if (ch === "/" && text[i + 1] === "*") {
+    const end = text.indexOf("*/", i + 2);
+    return end === -1 ? text.length : end + 2;
+  }
+  return -1;
+}
+
+/**
+ * Split a selector PRELUDE into its top-level selector list.
+ *
+ * A comma separates selectors only at depth zero. Inside a functional
+ * pseudo-class it is an argument separator (`:is(.a, .b)`); inside an attribute
+ * value or string it is ordinary text (`[data-v=","]`). Splitting on every
+ * comma tore those apart and scoped each fragment independently, producing CSS
+ * the engine either rejected or accepted with a different meaning:
+ *
+ *   :is(.a, .b)   ->   [s] :is(.a, :is(.a[s],[s] .b), .b)[s]
+ *
+ * which selects neither `.a` nor `.b` as authored.
+ */
+function splitSelectorList(prelude: string): string[] {
+  const parts: string[] = [];
+  let parens = 0;
+  let brackets = 0;
+  let start = 0;
+
+  for (let i = 0; i < prelude.length; i++) {
+    const skip = skipNonCode(prelude, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    const ch = prelude[i];
+    if (ch === "(") parens++;
+    else if (ch === ")") parens--;
+    else if (ch === "[") brackets++;
+    else if (ch === "]") brackets--;
+    else if (ch === "," && parens === 0 && brackets === 0) {
+      parts.push(prelude.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(prelude.slice(start));
+  return parts;
+}
+
+/** Index of the `}` closing the block opened at `openBrace`. */
+function findBlockEnd(css: string, openBrace: number): number {
+  let depth = 0;
+  for (let i = openBrace; i < css.length; i++) {
+    const skip = skipNonCode(css, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    const ch = css[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return css.length;
+}
+
+/**
+ * At-rules whose body is a nested list of STYLE RULES, so scoping recurses into
+ * them. Every other `@` prelude — `@keyframes`, `@font-face`, `@page`,
+ * `@import`, `@charset` — has a body that is not a selector context and is
+ * emitted verbatim. That is also what keeps keyframe stops (`from`, `to`,
+ * `50%`) unscoped, without special-casing their spellings.
+ */
+const NESTED_AT_RULE = /^@(media|supports|layer|container|scope|document)\b/i;
+
+/**
+ * Rewrite a stylesheet, scoping every style rule's selector list.
+ *
+ * Structure-aware rather than regex-driven: the walk tracks string, comment,
+ * escape, paren, bracket and brace state, so a `{` or `,` that is not
+ * structural is never treated as though it were.
+ */
+function scopeStylesheet(css: string, attr: string): string {
+  let out = "";
+  let preludeStart = 0;
+  let parens = 0;
+  let brackets = 0;
+  let i = 0;
+
+  while (i < css.length) {
+    const skip = skipNonCode(css, i);
+    if (skip !== -1) {
+      i = skip;
+      continue;
+    }
+    const ch = css[i];
+
+    if (ch === "(") {
+      parens++;
+      i++;
+      continue;
+    }
+    if (ch === ")") {
+      parens--;
+      i++;
+      continue;
+    }
+    if (ch === "[") {
+      brackets++;
+      i++;
+      continue;
+    }
+    if (ch === "]") {
+      brackets--;
+      i++;
+      continue;
+    }
+
+    if (ch === "{" && parens === 0 && brackets === 0) {
+      const prelude = css.slice(preludeStart, i);
+      const bodyEnd = findBlockEnd(css, i);
+      const body = css.slice(i + 1, bodyEnd);
+      const trimmed = prelude.trim();
+      const lead = prelude.slice(0, prelude.length - prelude.trimStart().length);
+
+      if (trimmed === "") {
+        out += `${prelude}{${body}}`;
+      } else if (trimmed.startsWith("@")) {
+        out += NESTED_AT_RULE.test(trimmed) ? `${prelude}{${scopeStylesheet(body, attr)}}` : `${prelude}{${body}}`;
+      } else {
+        const scoped = splitSelectorList(trimmed)
+          .map((part) => {
+            const selector = part.trim();
+            return selector ? scopeSelector(selector, attr) : part;
+          })
+          .join(", ");
+        out += `${lead}${scoped}{${body}}`;
+      }
+
+      i = bodyEnd + 1;
+      preludeStart = i;
+      continue;
+    }
+
+    i++;
+  }
+
+  out += css.slice(preludeStart);
+  return out;
+}
+
+/**
  * scopedStyle creates component-scoped CSS by generating a unique scope ID
  * and prefixing all selectors.
  * Returns the scope attribute name and injects the CSS into the document.
@@ -164,14 +338,7 @@ export function scopedStyle(css: string): { scope: string; attr: string } {
   const safeCss = sanitizeCSS(css);
 
   // Rewrite every selector into a ROOT-ANCHORED pair. See `scopeSelector`.
-  const scopedCSS = safeCss.replace(/([^\r\n,{}]+)(,(?=[^}]*{)|\s*{)/g, (match, selector, delimiter) => {
-    const trimmed = selector.trim();
-    // Skip @-rules and keyframe selectors
-    if (trimmed.startsWith("@") || trimmed.startsWith("from") || trimmed.startsWith("to") || /^\d+%$/.test(trimmed)) {
-      return match;
-    }
-    return `${scopeSelector(trimmed, attr)}${delimiter}`;
-  });
+  const scopedCSS = scopeStylesheet(safeCss, attr);
 
   // Inject into document (skip during SSR)
   if (typeof document !== "undefined") {

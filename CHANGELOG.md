@@ -10,6 +10,23 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`loadWasmModule()`'s second parameter is now `WebAssembly.Imports` only; the
+  options form is `loadWasmModuleWithOptions()`.** The parameter used to accept
+  `WebAssembly.Imports | LoadWasmOptions` and pick between them at runtime by
+  probing for `allowedOrigins` / `unsafelyAllowAnyOrigin`. That discriminator is
+  unsound in both directions, because both shapes are plain objects with
+  caller-chosen keys: an options bag carrying only `imports`/`cacheKey` was read
+  as an import namespace — so `cacheKey` was silently dropped and the documented
+  keyed-singleton guarantee did not hold — while a WASM module namespace legally
+  *named* `allowedOrigins` would have been read as options. No structural test
+  can separate them, so the union was removed rather than re-guessed.
+
+  Migration is mechanical and the compiler finds every site: a call passing an
+  options object becomes `loadWasmModuleWithOptions(source, options)`. Calls
+  passing real imports, or using the positional `(source, imports, cacheKey)`
+  form, are unchanged. `wasm()` uses the options API internally, so its own
+  surface is unaffected.
+
 - **Browser support floor raised to Chrome/Edge 93, Firefox 92, Safari 15.4.**
   The declared floor was Chrome 80 / Firefox 78 / Safari 14, and nothing checked
   it — so the source drifted above the promise and a consumer targeting the
@@ -73,6 +90,28 @@ This project follows [Semantic Versioning](https://semver.org/).
   wrote through unfiltered, making progressive enhancement the one public path
   where a `javascript:` URL, an unsafe `style` list, or an `on*` handler string
   still reached the DOM.
+- **Attribute security is now a postcondition on the managed attribute.** These
+  APIs attach to DOM that already exists — server markup, third-party widgets,
+  anything `enhance()` is pointed at — and two paths let a pre-existing
+  violation survive. `enhance().attr()` compared its RAW desired value against
+  the RAW attribute and skipped the write when they matched, so
+  `<a href="javascript:…">` re-bound to that same string never reached the
+  sanitizer at all. And a refused `on*` value left any existing
+  `onclick`/`onload` content attribute in place: the writer had declined to add
+  a handler while the page still had one.
+
+  Write elision now lives inside the shared primitive and compares the
+  POST-POLICY result, so no caller can skip the sanitizer by pre-comparing; and
+  a binding that names an `on*` slot clears that slot rather than merely
+  refusing it. Taking ownership of an attribute now means governing it.
+- **IDL synchronisation is case-insensitive for HTML attributes.** HTML
+  attribute names are case-insensitive, but the decision to write `value` /
+  `checked` / `disabled` / `selected` through the live IDL property was
+  case-sensitive — so a binding declared as `"VALUE"`, which the browser treats
+  as exactly `value`, fell back to content-attribute semantics and left a dirtied
+  control showing stale state. Normalisation is HTML-only: SVG attribute names
+  are case-sensitive, and `viewBox` / `preserveAspectRatio` / `patternUnits`
+  would be destroyed by folding them.
 
 ### Fixed
 
@@ -174,6 +213,32 @@ This project follows [Semantic Versioning](https://semver.org/).
   with the current one and destroy the value about to be restored. An unknown or
   absent destination key is a safe no-op. A `getKey` option integrates the
   feature with a router's own history identity.
+- **Scoped-style selector lists are parsed, not regex-split.** The rewriter
+  split selector preludes on every comma, but a comma is not a separator inside
+  a functional pseudo-class (`:is(.a, .b)`), an attribute value
+  (`[data-v=","]`), or a string. Those selectors were torn in half and each
+  fragment scoped independently, producing CSS the engine either rejected or
+  accepted with a different meaning — `:is(.a, .b)` became
+  `[s] :is(.a, :is(.a[s],[s] .b), .b)[s]`, which selects neither arm. Splitting
+  is now done by a scanner that tracks paren, bracket, quote, comment and escape
+  state, and the stylesheet walk uses the same scanner to find rule boundaries,
+  so `@media` / `@supports` / `@layer` recurse while `@keyframes` bodies are left
+  alone without special-casing `from`/`to`/percentage stops.
+- **One `unregister()` issues at most one native unregister.** On the pending
+  path there were two callers of `registration.unregister()`: the arrival
+  handler and the resumed public call. When the browser refused the first, the
+  arrival handler correctly re-adopted the still-live registration and the
+  resumed call then fired a second attempt at it. Unregistration is now a single
+  owned in-flight operation with exactly one call site — concurrent callers join
+  it, and the arrival handler hands the registration over instead of removing it
+  itself. A registration that lands while a removal is outstanding is no longer
+  published at all, so a worker about to be removed never transiently reports as
+  ready.
+- **`bindAttrs()` and `bindData()` types now describe the runtime.** Both
+  excluded `null`/`undefined` while the runtime treats them as removal, so the
+  documented behaviour was unreachable from type-checked code and the ordinary
+  `() => user?.label` getter was a compile error. A shared `AttributeValue` /
+  `AttributeSource` pair is now exported and used by both.
 - **`clipboard()` and `permissions()` ignore completions after disposal.** A
   clipboard write can sit on a permission prompt indefinitely; one resolving
   after `dispose()` set state and armed a two-second timer against a torn-down

@@ -3,6 +3,24 @@ import { track } from "../reactivity/track";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /**
+ * Every value the shared attribute primitive accepts, and nothing more.
+ *
+ * `null` / `undefined` are part of the contract, not an oversight: they REMOVE
+ * the attribute. That is what makes the ordinary optional-value getter —
+ * `() => user?.label` typed `string | null | undefined` — expressible without a
+ * cast. The declared type used to exclude both while the runtime handled them,
+ * so the documented behaviour was unreachable from type-checked code.
+ *
+ * Deliberately NOT widened to `unknown`: the runtime only defines behaviour for
+ * these, and a public signature should describe the runtime exactly rather than
+ * inviting values whose handling is incidental.
+ */
+export type AttributeValue = string | number | boolean | null | undefined;
+
+/** An attribute value, or a reactive getter producing one. */
+export type AttributeSource = AttributeValue | (() => AttributeValue);
+
+/**
  * Bind multiple reactive attributes to an element.
  * Each attribute value can be a static value or a reactive getter.
  * Returns a single teardown function that stops all bindings.
@@ -15,10 +33,7 @@ import { setSafeAttribute } from "../utils/setSafeAttribute";
  * authoring intent with two different verdicts. Both now commit through
  * `setSafeAttribute`.
  */
-export function bindAttrs(
-  el: HTMLElement,
-  attrs: Record<string, string | number | boolean | (() => string | number | boolean)>,
-): () => void {
+export function bindAttrs(el: HTMLElement, attrs: Record<string, AttributeSource>): () => void {
   const teardowns: Array<() => void> = [];
 
   for (const [attr, value] of Object.entries(attrs)) {
@@ -81,13 +96,18 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
  * Bind a data-* attribute reactively.
  * Shorthand for `bindAttribute(el, "data-<key>", getter)`.
  * Returns a teardown function to stop reactive tracking.
+ *
+ * Shares the removal semantics of every other attribute writer: `null` /
+ * `undefined` remove `data-<key>` rather than writing the text "null". The
+ * value is handed to the primitive unstringified so that decision is made in
+ * one place.
  */
-export function bindData(el: HTMLElement, key: string, getter: string | (() => string)): () => void {
+export function bindData(el: HTMLElement, key: string, getter: AttributeValue | (() => AttributeValue)): () => void {
   const dataAttr = `data-${key}`;
 
   // Static value — set once, no tracking needed
   if (typeof getter !== "function") {
-    setSafeAttribute(el, dataAttr, String(getter), { label: "bindData" });
+    setSafeAttribute(el, dataAttr, getter, { label: "bindData" });
     return () => {};
   }
 

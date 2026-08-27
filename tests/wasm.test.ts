@@ -4,6 +4,7 @@ import {
   createWasmBridge,
   isWasmCached,
   loadWasmModule,
+  loadWasmModuleWithOptions,
   preloadWasm,
   wasm,
 } from "../src/platform/wasm";
@@ -45,13 +46,15 @@ describe("loadWasmModule origin guard", () => {
   });
 
   it("rejects a URL whose origin is not in the allowlist", async () => {
-    await expect(loadWasmModule("https://evil.com/x.wasm", { allowedOrigins: ["https://good.com"] })).rejects.toThrow(
-      /not in the allowlist/,
-    );
+    await expect(
+      loadWasmModuleWithOptions("https://evil.com/x.wasm", { allowedOrigins: ["https://good.com"] }),
+    ).rejects.toThrow(/not in the allowlist/);
   });
 
   it("rejects an invalid URL when an allowlist is given", async () => {
-    await expect(loadWasmModule("http://[", { allowedOrigins: ["https://good.com"] })).rejects.toThrow(/invalid URL/);
+    await expect(loadWasmModuleWithOptions("http://[", { allowedOrigins: ["https://good.com"] })).rejects.toThrow(
+      /invalid URL/,
+    );
   });
 });
 
@@ -67,7 +70,7 @@ describe("loadWasmModule loading paths", () => {
       .mockResolvedValue({ module: mod, instance: inst });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockReturnValue("RESP" as never);
 
-    const result = await loadWasmModule("https://good.com/m.wasm", {
+    const result = await loadWasmModuleWithOptions("https://good.com/m.wasm", {
       allowedOrigins: ["https://good.com"],
     });
     expect(result).toBe(inst);
@@ -75,7 +78,7 @@ describe("loadWasmModule loading paths", () => {
     expect(isWasmCached("https://good.com/m.wasm")).toBe(true);
 
     // Second call returns the cached instance without re-fetching
-    const again = await loadWasmModule("https://good.com/m.wasm", {
+    const again = await loadWasmModuleWithOptions("https://good.com/m.wasm", {
       allowedOrigins: ["https://good.com"],
     });
     expect(again).toBe(inst);
@@ -92,7 +95,7 @@ describe("loadWasmModule loading paths", () => {
     (globalThis.WebAssembly as Record<string, unknown>).compile = vi.fn().mockResolvedValue(mod);
     (globalThis.WebAssembly as Record<string, unknown>).instantiate = vi.fn().mockResolvedValue(inst);
 
-    const result = await loadWasmModule("https://good.com/n.wasm", {
+    const result = await loadWasmModuleWithOptions("https://good.com/n.wasm", {
       allowedOrigins: ["https://good.com"],
     });
     expect(result).toBe(inst);
@@ -145,13 +148,13 @@ describe("loadWasmModule loading paths", () => {
     expect(instantiate).toHaveBeenCalledTimes(1);
   });
 
-  it("treats an options bag with allowedOrigins distinctly from WebAssembly.Imports", async () => {
+  it("takes imports from the options bag, alongside other options", async () => {
     const buffer = new ArrayBuffer(4);
     const instantiate = vi.fn().mockResolvedValue(fakeInstance({}));
     (globalThis.WebAssembly as Record<string, unknown>).compile = vi.fn().mockResolvedValue(fakeModule());
     (globalThis.WebAssembly as Record<string, unknown>).instantiate = instantiate;
 
-    await loadWasmModule(buffer, { imports: { env: {} }, allowedOrigins: ["x"] });
+    await loadWasmModuleWithOptions(buffer, { imports: { env: {} }, allowedOrigins: ["x"] });
     expect(instantiate).toHaveBeenCalledWith(expect.anything(), { env: {} });
   });
 

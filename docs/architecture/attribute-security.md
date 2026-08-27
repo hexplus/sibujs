@@ -67,6 +67,52 @@ security:
 `enhance`'s `attr()` passes `false` as well — it is named for the attribute and
 documented to write one.
 
+## Security is a postcondition, not a promise about this write
+
+The rule the primitive enforces is about the **attribute**, not about the call:
+
+> After a SibuJS binding commits to an attribute slot, that slot holds a value
+> the policy permits — regardless of what was in it beforehand.
+
+This matters because these APIs attach to DOM that already exists: server
+markup, a third-party widget, anything `enhance()` is pointed at. Two things
+follow, and both were once wrong.
+
+**Write elision compares the sanitized result.** A caller that compares its raw
+desired value against the raw attribute and skips the write when they match will
+skip the sanitizer in exactly the dangerous case — `<a href="javascript:…">`
+re-bound to that same string. The elision therefore lives *inside* the primitive
+and compares post-policy:
+
+```ts
+const safe = sanitizeAttributeString(name, str);
+if (current === safe) return true;   // nothing to do, and provably safe
+```
+
+No caller needs its own, and none should have one.
+
+**A refused `on*` value clears the slot.** Refusing to write a handler is not
+the same as ensuring there is no handler. A binding that names `onclick` owns
+that slot, so a pre-existing `onclick="alert(1)"` is removed rather than left
+behind. `bindAttribute` routes its early refusal through the primitive for this
+reason instead of returning early with its own warning — one implementation of
+the policy, one behaviour.
+
+Function-valued handlers are unaffected: they were never attributes.
+
+## Attribute-name case
+
+HTML attribute names are case-insensitive, so `VALUE` *is* `value` to the
+browser. The IDL-synchronisation decisions (`value`, `checked`, and the boolean
+set `checked`/`disabled`/`selected`) therefore fold case — otherwise a binding
+declared as `"VALUE"` silently took content-attribute semantics and left a
+dirtied control showing stale state.
+
+Folding is **HTML-only**. SVG attribute names are case-sensitive, and
+`viewBox`, `preserveAspectRatio` and `patternUnits` are meaningless lowercased;
+IDL form-control synchronisation has no meaning there either. The namespace is
+what decides.
+
 ## Writers
 
 Every one of these commits through the primitive:

@@ -1,4 +1,3 @@
-import { devWarn, isDev } from "../core/dev";
 import { reportError } from "../core/errors";
 // `isEventHandlerAttr` is the single shared `on*` guard — event-handler
 // attributes evaluate their value as JS via setAttribute, so the framework
@@ -6,8 +5,6 @@ import { reportError } from "../core/errors";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 import { reactiveBinding } from "./track";
-
-const _isDev = isDev();
 
 /**
  * Bind a reactive getter to an element attribute.
@@ -22,10 +19,12 @@ const _isDev = isDev();
  */
 export function bindAttribute(el: HTMLElement, attr: string, getter: () => unknown): () => void {
   if (isEventHandlerAttr(attr)) {
-    if (_isDev)
-      devWarn(
-        `bindAttribute: refusing to bind event-handler attribute "${attr}". Use on:{ ${attr.slice(2)}: fn } instead.`,
-      );
+    // Refused — but reconciled, not merely declined. The refusal itself lives in
+    // the shared primitive so there is one implementation of the policy: it
+    // warns and clears any pre-existing handler in the slot this binding just
+    // claimed. Subscribing the getter would be pointless (no value can ever be
+    // committed), so no reactive binding is created and teardown is a no-op.
+    setSafeAttribute(el, attr, "", { label: `bindAttribute("${attr}")` });
     return () => {};
   }
 
