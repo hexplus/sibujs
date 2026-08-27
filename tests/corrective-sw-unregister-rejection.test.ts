@@ -56,6 +56,27 @@ function fakeRegistration(unregisterImpl: () => Promise<boolean>) {
 const originalNavigator = globalThis.navigator;
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+/**
+ * Capture a promise's outcome with handlers attached SYNCHRONOUSLY.
+ *
+ * `const p = sw.unregister(); await flush(); await expect(p).rejects...` looks
+ * equivalent but is not: `p` rejects during the flush with nothing attached, so
+ * the runtime reports an unhandled rejection before the assertion ever runs.
+ * Attaching at creation closes that window — which is the same discipline the
+ * framework code under test is being held to.
+ */
+function settle<T>(promise: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  return promise.then(
+    (value) => ({ ok: true as const, value }),
+    (error) => ({ ok: false as const, error }),
+  );
+}
+
+function expectRejection(outcome: { ok: boolean; error?: unknown }, message: string): void {
+  expect(outcome.ok, "expected the unregister to reject").toBe(false);
+  expect((outcome.error as Error).message).toBe(message);
+}
+
 function installNavigator(register: () => Promise<unknown>, controller: unknown = {}) {
   Object.defineProperty(globalThis, "navigator", {
     value: { serviceWorker: { register, controller } },
@@ -83,7 +104,7 @@ describe("serviceWorker — native unregister rejection", () => {
     const sw = serviceWorker("/sw.js");
     await flush();
 
-    await expect(sw.unregister()).rejects.toThrow("native unregister failed");
+    expectRejection(await settle(sw.unregister()), "native unregister failed");
 
     // No evidence the worker was removed, so the wrapper must still own it.
     expect(sw.registration()).toBe(reg as unknown as ServiceWorkerRegistration);
@@ -104,12 +125,12 @@ describe("serviceWorker — native unregister rejection", () => {
     );
 
     const sw = serviceWorker("/sw.js");
-    const pending = sw.unregister();
+    const pending = settle(sw.unregister());
 
     resolveRegistration(reg);
     await flush();
 
-    await expect(pending).rejects.toThrow("native unregister failed");
+    expectRejection(await pending, "native unregister failed");
     await flush();
 
     // The registration arrived and was withheld pending removal; removal failed,
@@ -132,10 +153,10 @@ describe("serviceWorker — native unregister rejection", () => {
     );
 
     const sw = serviceWorker("/sw.js");
-    const pending = sw.unregister();
+    const pending = settle(sw.unregister());
     resolveRegistration(reg);
     await flush();
-    await expect(pending).rejects.toThrow();
+    expectRejection(await pending, "native unregister failed");
     await flush();
 
     const worker = fakeWorker("installed");
@@ -157,11 +178,12 @@ describe("serviceWorker — native unregister rejection", () => {
     const sw = serviceWorker("/sw.js");
     await flush();
 
-    const a = sw.unregister();
-    const b = sw.unregister();
+    // Both handlers attached before either can settle.
+    const a = settle(sw.unregister());
+    const b = settle(sw.unregister());
 
-    await expect(a).rejects.toThrow("native unregister failed");
-    await expect(b).rejects.toThrow("native unregister failed");
+    expectRejection(await a, "native unregister failed");
+    expectRejection(await b, "native unregister failed");
 
     expect(reg.unregister).toHaveBeenCalledTimes(1);
     expect(sw.registration()).toBe(reg as unknown as ServiceWorkerRegistration);
@@ -180,7 +202,7 @@ describe("serviceWorker — native unregister rejection", () => {
     const sw = serviceWorker("/sw.js");
     await flush();
 
-    await expect(sw.unregister()).rejects.toThrow("native unregister failed");
+    expectRejection(await settle(sw.unregister()), "native unregister failed");
     expect(sw.isReady()).toBe(true);
 
     await expect(sw.unregister()).resolves.toBe(true);
@@ -200,10 +222,7 @@ describe("serviceWorker — native unregister rejection", () => {
 
     // The caller asked the browser a question and got an error, not an answer.
     // Reporting `false` would claim the browser declined, which it never said.
-    const outcome = await sw.unregister().then(
-      (v) => ({ kind: "resolved" as const, v }),
-      (e) => ({ kind: "rejected" as const, e }),
-    );
-    expect(outcome.kind).toBe("rejected");
+    const outcome = await settle(sw.unregister());
+    expect(outcome.ok).toBe(false);
   });
 });
