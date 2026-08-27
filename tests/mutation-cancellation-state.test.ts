@@ -131,20 +131,29 @@ describe("current-run cancellation reaches a terminal state", () => {
       warn.mockRestore();
     });
 
-    it(`${label}: invokes mutationFn exactly once`, async () => {
+    it(`${label}: bypasses retry policy and invokes mutationFn once`, async () => {
+      // Deliberately a retrying configuration, and a `shouldRetry` that would
+      // approve anything — so a single invocation proves cancellation skipped
+      // the policy rather than the policy happening to decline.
+      //
+      // `onRetry` needs no assertion here: `mutation()` passes `undefined` for
+      // it, so it is structurally unreachable. The withRetry-level guarantee is
+      // pinned directly in tests/cancellation-precedence.test.ts.
       let calls = 0;
+      const shouldRetry = vi.fn(() => true);
       const thrown = make();
       const m = mutation(
         async () => {
           calls++;
           throw thrown;
         },
-        { retry: { maxRetries: 3, baseDelay: 5, maxDelay: 5, jitter: 0 } },
+        { retry: { maxRetries: 3, baseDelay: 5, maxDelay: 5, jitter: 0, shouldRetry } },
       );
 
       await expect(m.mutateAsync(undefined as never)).rejects.toBe(thrown);
       await settle();
       expect(calls).toBe(1);
+      expect(shouldRetry).not.toHaveBeenCalled();
       expectNotPending(m);
     });
   }
