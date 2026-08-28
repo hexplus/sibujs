@@ -8,7 +8,54 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Security
+### Fixed
+
+- **`optimisticList()` operations own rows, not the whole array.** Rollback used
+  a single global version counter and a captured array snapshot, which is wrong
+  in both directions: skipping the rollback (because a newer operation existed)
+  left a failed operation's optimistic item on screen permanently — `[1,2,3]`,
+  `add(4)`, `add(5)`, A fails produced `[1,2,3,4,5]` — while performing it
+  discarded every change newer operations had made to rows the failing one never
+  touched. The list is now a ledger of rows with stable ids and per-row operation
+  ownership, so disjoint operations settle independently, an operation can only
+  undo its own mutation, and where two touch the same row the later one wins.
+  Row identity no longer falls back to `Object.is`, so duplicate primitives and
+  duplicate object references address the correct occurrence — `[1]` plus an
+  optimistic `add(1)` confirmed as `10` now yields `[1, 10]`, not `[10, 1]`.
+  `items()` projects values only; no id or wrapper is observable.
+
+- **Chunk invalidation is a publication barrier.** `invalidate(id)` and `clear()`
+  left the pending map untouched, so an in-flight load could write a discarded
+  value back into the cache after the fact, delete a newer pending entry, or be
+  adopted by a post-invalidation `load()` that then never called its own loader.
+  The pending entry is now the load's claim on the key: removing it revokes
+  ownership, and a load publishes only if it still owns the key. Superseded work
+  still settles for its original caller — nothing is cancelled, since the loader
+  API takes no abort signal. `preload()` markers follow the same identity rule.
+
+- **Chunk lifecycle callbacks can no longer change what a load did.** A throwing
+  `onLoadEnd` turned a cached success into a rejection and then delivered its own
+  exception to `onLoadError`, leaving the caller told "failed" while the cache
+  held the value; a throwing `onLoadStart` stopped the load from starting at all.
+  Callbacks now run contained, and their failures are reported through the
+  runtime error pipeline instead of altering the operation.
+
+- **`wakeLock()` cannot orphan a sentinel.** Overlapping requests acquired two
+  native sentinels and kept only the last reference, leaving the other held with
+  no way to release it; `release()` did not supersede a request already in
+  flight, so a lock could reactivate after being given up; and a stale sentinel's
+  `release` event cleared the state of the current one. Requests now share one
+  in-flight acquisition, `release()`/`dispose()` revoke ownership before awaiting
+  anything, and any sentinel arriving without ownership is released immediately.
+  `dispose()` is idempotent and publishes nothing after disposal. Failed
+  request/release operations are reported through the runtime error pipeline
+  rather than `console.warn`, so application error handlers can observe them.
+
+- **`viewTransition().isTransitioning()` describes the controller, not the last
+  run to finish.** Two overlapping `start()` calls raced over one boolean, so the
+  flag went false while an earlier transition was still running. It now stays
+  true while any run is in flight and becomes false exactly when the last one
+  settles, in any order; every caller keeps its own resolution or rejection.
 
 - **URL-attribute classification in `Head()` is case-insensitive.** `head.ts`
   carried a private `new Set(["href", "src"])` and tested it against the
@@ -56,6 +103,8 @@ This project follows [Semantic Versioning](https://semver.org/).
   planned attribute map is keyed by canonical names, so client DOM and server
   HTML are exactly comparable; a table-driven parity suite asserts emitted
   status, attribute count, names, and values across all three.
+
+### Security
 
 - **Meta-refresh directives are structurally parsed, and client/SSR share one
   policy.** Dangerous destinations were detected by asking whether the

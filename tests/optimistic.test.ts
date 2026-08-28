@@ -196,7 +196,11 @@ describe("optimisticList", () => {
 
   // ---- concurrent version guard -------------------------------------------
 
-  it("concurrent: stale revert suppressed when newer op exists", async () => {
+  it("concurrent: a failed op withdraws ONLY its own row", async () => {
+    // This test used to assert `toContain(5)` alone, which passed while the
+    // failed item 4 was also still present — the exact bug. A failing operation
+    // must reverse its own optimistic mutation and nothing else, so the
+    // assertions state the complete ordered array.
     const o = optimisticList([1, 2, 3]);
 
     const p1 = o.add(4, async () => {
@@ -208,10 +212,10 @@ describe("optimisticList", () => {
     expect(o.items()).toEqual([1, 2, 3, 4, 5]);
 
     await p1;
-    // First op failed but second is newer — revert suppressed, 5 stays
-    expect(o.items()).toContain(5);
+    // The failed item is gone; the newer pending row is untouched.
+    expect(o.items()).toEqual([1, 2, 3, 5]);
 
     await p2;
-    expect(o.items()).toContain(50);
+    expect(o.items()).toEqual([1, 2, 3, 50]);
   });
 });
