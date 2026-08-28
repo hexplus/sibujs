@@ -306,9 +306,16 @@ describe("optimisticList — remove ownership", () => {
     expect(list.pending()).toBe(false);
   });
 
-  it("a failed remove DOES restore a row whose add succeeded", async () => {
+  it("a failed remove restores a row whose add succeeded, with the CONFIRMED value", async () => {
     // The mirror case, to prove the revocation is narrow rather than a blanket
     // suppression of the rollback.
+    //
+    // This assertion previously read `[1, 2]`, which encoded a defect rather
+    // than a contract: the add resolved with `20` while the row was hidden by
+    // the pending remove, the ledger held only visible rows so the settlement
+    // landed nowhere, and the failed remove then reinstated a copy captured
+    // BEFORE that settlement. A row that returns must carry the value it holds
+    // now, not the one it held when it was taken out.
     const list = optimisticList<number>([1]);
     const a = gate<number>();
     const r = gate<void>();
@@ -324,7 +331,7 @@ describe("optimisticList — remove ownership", () => {
     r.reject(new Error("remove failed"));
     await pr;
 
-    expect(list.items()).toEqual([1, 2]);
+    expect(list.items()).toEqual([1, 20]);
   });
 
   it("two failed removes of the same row restore it exactly once", async () => {

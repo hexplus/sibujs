@@ -10,6 +10,46 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`optimisticList()` rows survive being temporarily hidden.** The row ledger
+  held only the rows currently on screen, so a pending `remove()` took its rows
+  *out* of it and carried copies in its own rollback list — one logical row with
+  two representations. An operation that owned the row's value could then no
+  longer find it: a confirmed `add` value was written nowhere and lost when the
+  remove failed (`[1, 2]` instead of `[1, 20]`), and a failed `update` could not
+  roll back, so the failed remove later reinstated the stale optimistic patch.
+  Identity and visibility are now separate: the authoritative record lives as
+  long as any operation may settle against it, so `add`/`update` land while the
+  row is hidden, and a failed `remove` reinstates the row carrying whatever value
+  it holds now. Records are retired by reference counting as their last holder
+  settles, so nothing accumulates.
+
+- **A failed `remove` restores rows in the correct relative order.** Rollback
+  reinserted rows at their old ABSOLUTE index, so a concurrent successful removal
+  of an earlier row displaced them — removing `B`,`D` from `["A","B","C","D"]`
+  and then successfully removing `A` restored `["C","B","D"]`. Rows now carry a
+  monotonic ordering key and are reinserted by ordered insert, so they return to
+  their place relative to whatever is actually still present.
+
+- **Chunk ownership is installed before any user callback runs.** `onLoadStart`
+  fired before the pending entry existed, leaving a window in which the operation
+  had publicly started but owned nothing: `invalidate(id)` or `clear()` called
+  from that callback deleted a key with no entry and the load published anyway,
+  and a reentrant same-key `load()` found no owner and started a second loader —
+  which fired `onLoadStart` again, recursing 1889 deep in the reproduction — with
+  the outer call then overwriting whatever ownership the nested ones established.
+  The entry now goes in first, backed by a deferred the loader settles, so
+  invalidating from `onLoadStart` really supersedes the load and a reentrant call
+  shares it.
+
+- **`wakeLock()` never reports active for a released sentinel.** The sentinel was
+  installed and `active(true)` published without checking `released`, so a
+  sentinel the platform had already released was reported as a held lock — and,
+  worse, retained, which made `request()` treat the controller as already holding
+  one and refuse to acquire a live replacement. Acquisition now checks `released`,
+  attaches the listener, re-checks (a release in that gap fires with nobody
+  subscribed), and only then publishes. A listener registration failure releases
+  the sentinel rather than holding a handle it cannot track.
+
 - **`optimisticList()` operations own rows, not the whole array.** Rollback used
   a single global version counter and a captured array snapshot, which is wrong
   in both directions: skipping the rollback (because a newer operation existed)

@@ -201,39 +201,74 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
     const existing = pending.get(id);
     if (existing) return existing.promise as Promise<T>;
 
-    // Outside the promise chain: a throwing observer must not prevent the load.
-    notify("onLoadStart", () => onLoadStart?.(id));
+    // OWNERSHIP IS INSTALLED BEFORE ANY USER CODE RUNS.
+    //
+    // `onLoadStart` used to fire before the pending entry existed, which opened
+    // a window where the operation had publicly started but owned nothing:
+    //
+    //   - `invalidate(id)` or `clear()` called from inside `onLoadStart` deleted
+    //     a key with no pending entry, and the load then installed itself and
+    //     published anyway — the invalidation was simply skipped;
+    //   - a reentrant `load(id, …)` from inside `onLoadStart` found no pending
+    //     entry, started a SECOND loader (which fired `onLoadStart` again, and
+    //     so on), and the outer `pending.set` then overwrote whatever ownership
+    //     the nested call had established.
+    //
+    // The entry therefore goes into the map first, backed by a deferred that is
+    // settled by the loader below. `onLoadStart` then runs against a registry in
+    // which this operation genuinely exists: invalidating from it revokes this
+    // load, and a reentrant same-key call finds the entry and shares it.
+    let resolveOuter!: (value: T) => void;
+    let rejectOuter!: (reason: unknown) => void;
+    const outcome = new Promise<T>((resolve, reject) => {
+      resolveOuter = resolve;
+      rejectOuter = reject;
+    });
+    const entry: PendingLoad = { promise: outcome as Promise<unknown> };
+    pending.set(id, entry);
 
-    const entry: PendingLoad = { promise: undefined as unknown as Promise<unknown> };
     /** Do we still own the key? Re-read every time — never cached. */
     const owns = () => pending.get(id) === entry;
 
-    entry.promise = loadWithRetry(id, loader).then(
-      (value) => {
-        // Publish only while still the owner. A load superseded by invalidate()
-        // or clear() resolves normally for its caller and touches nothing else —
-        // in particular it does not delete a newer pending entry.
-        if (owns()) {
-          pending.delete(id);
-          evict();
-          const now = Date.now();
-          cache.set(id, { value, timestamp: now, lastAccess: now, accessCount: 1 });
-        }
-        notify("onLoadEnd", () => onLoadEnd?.(id));
-        return value;
-      },
-      (err) => {
-        if (owns()) pending.delete(id);
-        const error = err instanceof Error ? err : new Error(String(err));
-        // Only genuine loader/timeout errors reach here — a callback's own
-        // exception is contained by `notify` and can never arrive as one.
-        notify("onLoadError", () => onLoadError?.(id, error));
-        throw error;
-      },
-    );
+    // Outside the promise chain: a throwing observer must not prevent the load.
+    notify("onLoadStart", () => onLoadStart?.(id));
 
-    pending.set(id, entry);
-    return entry.promise as Promise<T>;
+    void loadWithRetry(id, loader)
+      .then(
+        (value) => {
+          // Publish only while still the owner. A load superseded by invalidate()
+          // or clear() — including one invalidated from inside `onLoadStart` —
+          // resolves normally for its caller and touches nothing else; in
+          // particular it does not delete a newer pending entry.
+          if (owns()) {
+            pending.delete(id);
+            evict();
+            const now = Date.now();
+            cache.set(id, { value, timestamp: now, lastAccess: now, accessCount: 1 });
+          }
+          notify("onLoadEnd", () => onLoadEnd?.(id));
+          resolveOuter(value);
+        },
+        (err) => {
+          if (owns()) pending.delete(id);
+          const error = err instanceof Error ? err : new Error(String(err));
+          // Only genuine loader/timeout errors reach here — a callback's own
+          // exception is contained by `notify` and can never arrive as one.
+          notify("onLoadError", () => onLoadError?.(id, error));
+          rejectOuter(error);
+        },
+      )
+      // Nobody observes the promise this `.then` produces, so a throw from
+      // either handler would surface as an unhandled rejection rather than as a
+      // failure of the load. Neither handler throws today — `notify` contains
+      // callback exceptions and the resolvers cannot fail — but the caller's
+      // promise must not be left pending if that ever changes.
+      .catch((internal) => {
+        reportError(internal, { phase: "async", name: "chunkRegistry(settlement)" });
+        rejectOuter(internal);
+      });
+
+    return outcome;
   }
 
   function preloadFn<T>(id: string, loader: () => Promise<T>): void {

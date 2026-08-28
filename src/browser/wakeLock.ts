@@ -152,14 +152,50 @@ export function wakeLock(): {
           return;
         }
 
-        current = sentinel;
-        sentinel.addEventListener("release", () => {
-          // Only the CURRENT sentinel may clear the state. A stale sentinel
-          // being released by the platform says nothing about the live one.
-          if (current !== sentinel) return;
-          current = null;
+        // A SENTINEL CAN ARRIVE ALREADY DEAD, OR DIE WHILE WE ARE WIRING IT UP.
+        //
+        // The platform may resolve the request with a sentinel it has already
+        // released — a tab hidden during acquisition, a power-policy change —
+        // and it may release one in the gap between checking and listening.
+        // Publishing `true` for either would contradict the invariant this
+        // controller exists to hold: `active()` is true exactly when a current,
+        // UNRELEASED sentinel is held. Retaining one as `current` is worse
+        // still, because `request()` treats a held sentinel as idempotent and
+        // would refuse to acquire a live replacement.
+        if (sentinel.released) {
           publishActive(false);
-        });
+          return;
+        }
+
+        try {
+          sentinel.addEventListener("release", () => {
+            // Only the CURRENT sentinel may clear the state. A stale sentinel
+            // being released by the platform says nothing about the live one.
+            if (current !== sentinel) return;
+            current = null;
+            publishActive(false);
+          });
+        } catch (listenerError) {
+          // Wiring failed, so we would never learn when this sentinel died.
+          // Give it back rather than hold a handle we cannot track.
+          discard(sentinel);
+          publishActive(false);
+          reportError(listenerError, { phase: "async", name: "wakeLock(listener registration)" });
+          return;
+        }
+
+        // Re-check AFTER listening. A release between the first check and the
+        // listener being attached would have fired with nobody subscribed, so
+        // nothing would ever arrive to correct the state. The listener is also
+        // attached before `current` is assigned, so an event in that window sees
+        // `current !== sentinel` and no-ops — this second read is what catches
+        // it. `request()` can then acquire a fresh sentinel immediately.
+        if (sentinel.released) {
+          publishActive(false);
+          return;
+        }
+
+        current = sentinel;
         publishActive(true);
       } catch (err) {
         // A failed acquisition leaves consistent state: nothing held, not
