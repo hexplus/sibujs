@@ -511,10 +511,15 @@ describe("optimisticList — update ownership", () => {
 
     u2.reject(new Error("u2 failed"));
     await p2;
-    // The newer failure reverts to what IT found — the older optimistic value —
-    // and hands ownership back to the older operation.
+    // The newer failure reveals what is beneath its claim. That used to be
+    // asserted as `"first"` — the older operation's OPTIMISTIC value — which was
+    // only correct while a single `owner` field forced the newer failure to
+    // restore whatever it happened to overwrite. The older operation has since
+    // SUCCEEDED, so what lies beneath is its confirmed server value: discarding
+    // `"first!"` in favour of a guess the server already replaced would throw
+    // away a confirmed result.
     expect(list.items()).toEqual([
-      { id: 1, text: "first" },
+      { id: 1, text: "first!" },
       { id: 2, text: "b" },
     ]);
   });

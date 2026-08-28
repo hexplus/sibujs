@@ -191,7 +191,54 @@ export function optimistic<T>(initialValue: T): {
 // release O(k), broad update O(n + k), bulk restoration O(n + k), publication
 // O(n).
 
-/** One tracked row. Never exposed; `items()` projects `value`. */
+//
+// OWNERSHIP IS A CLAIM CHAIN, NOT A SINGLE OWNER
+// ----------------------------------------------
+// A row used to record one `owner` — the id of whichever operation had written
+// it last. That records who owns the row *now*, not the order in which
+// operations claimed it, and it leaves nowhere to keep an older claim while a
+// newer one sits on top. Both gaps are reachable, because `update()` allocates
+// its id before PREPARE and PREPARE runs user code:
+//
+//     const opId = ++nextOpId;        // order established here
+//     predicate(row.value);           // user code — may re-enter
+//     { ...row.value, ...patch };     // patch getters — may re-enter
+//
+// A nested `update()` started from either gets a HIGHER id and commits first;
+// the outer operation's COMMIT then ran `row.owner = opId` unconditionally and
+// took the row back from an operation that started after it.
+//
+// So each row keeps its last confirmed value (`base`) plus a stack of claims
+// ordered by operation id. `items()` shows the TOP claim, or `base` when there
+// are none, and an operation inserts its claim at its own ordered position —
+// which puts a nested operation's claim above its parent's regardless of commit
+// order. On settlement a claim either resolves in place (success) or vanishes
+// (failure), and settled claims are folded into `base` from the bottom up. A
+// failing claim therefore reveals exactly what is beneath it: the older
+// operation's optimistic value while it is still pending, its confirmed value
+// once it has succeeded, or the original value if it failed too.
+//
+// Claims live only while their operation does. At idle every row has none, so
+// no per-row history accumulates.
+
+/** One operation's claim on one row's value. */
+interface Claim<T> {
+  /** Invocation order. Strictly increasing, and fixes this claim's position. */
+  readonly opId: number;
+  /** Optimistic while pending; the confirmed value once `settled`. */
+  value: T;
+  /**
+   * Has the owning operation finished successfully?
+   *
+   * A settled claim is not removed immediately: an older claim may still be
+   * pending beneath it, and collapsing out of order would publish the older
+   * value over the newer one. It is folded into `base` as soon as it reaches
+   * the bottom of the stack, where nothing can change under it any more.
+   */
+  settled: boolean;
+}
+
+/** One tracked row. Never exposed; `items()` projects the effective value. */
 interface Row<T> {
   /** Stable identity, independent of value and of visibility. */
   readonly id: number;
@@ -202,7 +249,10 @@ interface Row<T> {
    * already-sorted runs.
    */
   readonly key: number;
-  value: T;
+  /** The value beneath every claim — the last confirmed state of this row. */
+  base: T;
+  /** Ascending by `opId`. The last entry is what `items()` shows. */
+  claims: Claim<T>[];
   /**
    * Is this row currently on screen?
    *
@@ -220,43 +270,33 @@ interface Row<T> {
    * retires each row the moment its last holder settles.
    */
   refs: number;
-  /**
-   * The operation that last claimed this row's VALUE.
-   *
-   * Existence is owned separately: a row created by `add` is withdrawn by that
-   * same add's failure whatever its value-ownership has become, because an
-   * insert that never succeeded was never a real row. Only the value can be
-   * re-claimed by a later operation.
-   */
-  owner: number;
 }
 
 /**
  * optimisticList provides optimistic updates for array state.
  *
- * CONCURRENCY MODEL — per-row, per-operation ownership.
+ * CONCURRENCY MODEL — per-row claim chains ordered by invocation.
  *
- * Every operation gets an id, and every row records which operation last
- * claimed its value. On settlement an operation re-checks each row it touched:
+ * Every operation gets an id when it is invoked, and every row it touches gets
+ * a claim at that id's position in the row's stack. The newest claim is what
+ * `items()` shows. On settlement an operation touches only its own claim:
  *
  *   - a failed `add` withdraws exactly the row it inserted, and marks it so a
  *     concurrent failed `remove` cannot reinstate it;
- *   - a successful `add` publishes into its own row, unless a later operation
- *     has since claimed that row's value — and it lands even if the row is
- *     temporarily hidden by a pending `remove`;
+ *   - a successful `add` resolves its own claim; if a later operation has
+ *     claimed the row since, that newer claim stays on top;
  *   - a failed `remove` makes its rows visible again, in their correct relative
- *     order and carrying whatever value they hold NOW, not the value they held
- *     when they were taken out;
+ *     order and carrying whatever value they hold NOW;
  *   - a successful `remove` retires its rows; each record is dropped as soon as
  *     its last holder settles;
- *   - a failed `update` restores only the rows it still owns, including their
- *     previous owner;
- *   - a successful `update` publishes only to the rows it still owns.
+ *   - a failed `update` drops its claim, revealing whatever is beneath it;
+ *   - a successful `update` resolves its claim in place, which becomes visible
+ *     only once no newer claim sits above it.
  *
- * Operations on disjoint rows are completely independent, and no operation can
- * revert, overwrite or resurrect work it did not do. Where two operations touch
- * the same row, the later one wins — including when the later one was started
- * by a reactive subscriber woken by the earlier one.
+ * Operations on disjoint rows are completely independent. Where two operations
+ * touch the same row the later one is visible — including when the later one
+ * was started by a reactive subscriber, by the outer operation's own predicate,
+ * or by one of its patch's property getters.
  *
  * `pending()` is true while any operation is unsettled and becomes false exactly
  * when the last one settles, in any settlement order. It is always published in
@@ -303,12 +343,82 @@ export function optimisticList<T>(initialValue: T[]): {
   let order: number[] = [];
 
   for (const value of initialValue) {
-    const row: Row<T> = { id: nextRowId++, key: nextKey++, value, visible: true, refs: 0, owner: 0 };
+    const row: Row<T> = { id: nextRowId++, key: nextKey++, base: value, claims: [], visible: true, refs: 0 };
     records.set(row.id, row);
     order.push(row.id);
   }
 
-  const [items, setItems] = signal<T[]>(order.map((id) => (records.get(id) as Row<T>).value));
+  /**
+   * The effective value of a row: its top claim, or its base.
+   *
+   * Named `effectiveValue` rather than `valueOf` so it cannot be confused with
+   * the `Object.prototype` method of that name.
+   */
+  function effectiveValue(row: Row<T>): T {
+    const claims = row.claims;
+    return claims.length > 0 ? claims[claims.length - 1].value : row.base;
+  }
+
+  /**
+   * The value as an operation invoked at `opId` sees it — ignoring claims made
+   * by operations that started later.
+   *
+   * This is what an outer `update` patches. Reading the *top* claim instead
+   * would compute the older operation's optimistic value — and therefore its
+   * eventual fallback — from a newer operation's optimistic value, which is a
+   * value the older operation never saw and may never have existed on the
+   * server. The snapshot an operation prepares from is the list as of its own
+   * invocation.
+   */
+  function valueBelow(row: Row<T>, opId: number): T {
+    const claims = row.claims;
+    for (let i = claims.length - 1; i >= 0; i--) {
+      if (claims[i].opId < opId) return claims[i].value;
+    }
+    return row.base;
+  }
+
+  /**
+   * Insert a claim at its ordered position and return it.
+   *
+   * Ids increase, so a claim normally lands on top and this is O(1). It walks
+   * down only when an operation that started EARLIER commits later — exactly the
+   * reentrancy case — and then only past the handful of claims that row holds.
+   */
+  function stake(row: Row<T>, opId: number, value: T): Claim<T> {
+    const claim: Claim<T> = { opId, value, settled: false };
+    const claims = row.claims;
+    let at = claims.length;
+    while (at > 0 && claims[at - 1].opId > opId) at--;
+    claims.splice(at, 0, claim);
+    return claim;
+  }
+
+  /** Remove a claim outright — a failed operation leaves nothing behind. */
+  function dropClaim(row: Row<T>, claim: Claim<T>): void {
+    const at = row.claims.indexOf(claim);
+    if (at !== -1) row.claims.splice(at, 1);
+  }
+
+  /**
+   * Fold settled claims into `base`, bottom up.
+   *
+   * A settled claim can only be discarded once nothing remains beneath it;
+   * until then an older operation might still resolve or fail underneath, and
+   * collapsing early would lose its result. Once a settled claim reaches the
+   * bottom its value IS the row's confirmed state.
+   */
+  function collapse(row: Row<T>): void {
+    const claims = row.claims;
+    let i = 0;
+    while (i < claims.length && claims[i].settled) {
+      row.base = claims[i].value;
+      i++;
+    }
+    if (i > 0) claims.splice(0, i);
+  }
+
+  const [items, setItems] = signal<T[]>(order.map((id) => effectiveValue(records.get(id) as Row<T>)));
   const [pending, setPending] = signal(false);
   let inflight = 0;
 
@@ -333,7 +443,7 @@ export function optimisticList<T>(initialValue: T[]): {
 
   function project(): T[] {
     const out: T[] = new Array(order.length);
-    for (let i = 0; i < order.length; i++) out[i] = (records.get(order[i]) as Row<T>).value;
+    for (let i = 0; i < order.length; i++) out[i] = effectiveValue(records.get(order[i]) as Row<T>);
     return out;
   }
 
@@ -461,7 +571,8 @@ export function optimisticList<T>(initialValue: T[]): {
   async function add(item: T, asyncAction: () => Promise<T>): Promise<void> {
     const opId = ++nextOpId;
     // PREPARE — nothing user-controlled, nothing observable yet.
-    const row: Row<T> = { id: nextRowId++, key: nextKey++, value: item, visible: false, refs: 1, owner: opId };
+    const row: Row<T> = { id: nextRowId++, key: nextKey++, base: item, claims: [], visible: false, refs: 1 };
+    const claim = stake(row, opId, item);
 
     // COMMIT + PUBLISH.
     commit(() => {
@@ -489,15 +600,18 @@ export function optimisticList<T>(initialValue: T[]): {
           // reinstating a row whose insert failed would put a phantom item back
           // on screen.
           retiredRowIds.add(row.id);
+          dropClaim(row, claim);
           return hide(row.id);
         }
         // Addressed through `records`, so a row a pending `remove` has hidden is
-        // still reachable and the confirmed value is not lost. Publish only if
-        // no later operation has claimed the value.
-        const current = records.get(row.id);
-        if (!current || current.owner !== opId) return false;
-        current.value = result as T;
-        return current.visible;
+        // still reachable and the confirmed value is not lost. The claim resolves
+        // in place; if a newer operation has claimed the row since, that claim
+        // stays on top and nothing visible changes yet.
+        const before = effectiveValue(row);
+        claim.value = result as T;
+        claim.settled = true;
+        collapse(row);
+        return row.visible && !Object.is(before, effectiveValue(row));
       } finally {
         settle([row.id]);
       }
@@ -505,13 +619,16 @@ export function optimisticList<T>(initialValue: T[]): {
   }
 
   async function remove(predicate: (item: T) => boolean, asyncAction: () => Promise<void>): Promise<void> {
+    const opId = ++nextOpId;
     // PREPARE — `predicate` is user code and may throw, or may even re-enter
     // this list. Only IDS are recorded, never values: a rollback reinstates the
     // row as it stands at that moment, which is what lets an `add` or `update`
-    // that settled while the row was hidden still be reflected.
+    // that settled while the row was hidden still be reflected. The predicate
+    // sees the list as of this operation's invocation, so an operation it starts
+    // itself cannot change what it matches.
     const matchedIds: number[] = [];
     for (const id of order) {
-      if (predicate((records.get(id) as Row<T>).value)) matchedIds.push(id);
+      if (predicate(valueBelow(records.get(id) as Row<T>, opId))) matchedIds.push(id);
     }
 
     commit(() => {
@@ -561,32 +678,40 @@ export function optimisticList<T>(initialValue: T[]): {
   ): Promise<void> {
     const opId = ++nextOpId;
     // PREPARE — both the predicate AND the patch spread run here. Object spread
-    // executes the patch's property getters, so this is user code that can
-    // throw; doing it after the inflight slot was taken leaked `pending()` as
-    // true forever. Nothing is mutated, retained or counted until every row has
-    // been prepared successfully.
-    const prepared: Array<{ row: Row<T>; previousValue: T; previousOwner: number; nextValue: T }> = [];
+    // executes the patch's property getters, so this is user code that can throw
+    // AND that can re-enter this list. Nothing is mutated, claimed, retained or
+    // counted until every row has been prepared successfully: a throw at any
+    // point leaves no reservation for this operation, while an operation the
+    // user code started in the meantime is entirely unaffected.
+    //
+    // Values are read through `valueBelow`, so this operation prepares from the
+    // list as of its own invocation. Reading the top claim instead would compute
+    // this operation's optimistic value — and therefore its eventual fallback —
+    // from a value a newer operation invented.
+    const prepared: Array<{ row: Row<T>; nextValue: T }> = [];
     for (const id of order) {
       const row = records.get(id) as Row<T>;
-      if (!predicate(row.value)) continue;
-      const nextValue = { ...row.value, ...patch } as T;
-      prepared.push({ row, previousValue: row.value, previousOwner: row.owner, nextValue });
+      const seen = valueBelow(row, opId);
+      if (!predicate(seen)) continue;
+      prepared.push({ row, nextValue: { ...seen, ...patch } as T });
     }
     const preparedIds = prepared.map((p) => p.row.id);
 
+    // COMMIT + PUBLISH. Each claim goes in at this operation's ordered position,
+    // so a claim staked by an operation the PREPARE above started sits ABOVE it
+    // even though that operation committed first.
+    const claims: Claim<T>[] = [];
     commit(() => {
       retain(preparedIds);
       inflight++;
       let visibleChanged = false;
       for (const p of prepared) {
-        p.row.value = p.nextValue;
-        p.row.owner = opId;
-        if (p.row.visible) visibleChanged = true;
+        const before = effectiveValue(p.row);
+        claims.push(stake(p.row, opId, p.nextValue));
+        if (p.row.visible && !Object.is(before, effectiveValue(p.row))) visibleChanged = true;
       }
       return visibleChanged;
     });
-    // Fully committed. A subscriber woken here may claim these rows, and this
-    // operation will not take them back.
 
     let result: T | undefined;
     let failed = false;
@@ -599,19 +724,26 @@ export function optimisticList<T>(initialValue: T[]): {
     commit(() => {
       try {
         let visibleChanged = false;
-        for (const p of prepared) {
-          // Still ours? A later operation — possibly one a subscriber started
-          // during this operation's own publication — may have claimed the row.
-          // The row is addressed directly, so a row hidden by a pending `remove`
-          // still receives its confirmed value.
-          if (p.row.owner !== opId) continue;
+        // Iterate the claims actually staked, not the prepared plan. They are
+        // pushed in prepared order so the indices align, but keying off the
+        // claims means a settlement can never dereference one that was not
+        // installed.
+        for (let i = 0; i < claims.length; i++) {
+          const row = prepared[i].row;
+          const claim = claims[i];
+          const before = effectiveValue(row);
           if (failed) {
-            p.row.value = p.previousValue;
-            p.row.owner = p.previousOwner;
+            // Drop this operation's claim and nothing else, revealing whatever
+            // is beneath: an older operation's optimistic value while it is
+            // still pending, its confirmed value once it has succeeded, or the
+            // original value.
+            dropClaim(row, claim);
           } else {
-            p.row.value = result as T;
+            claim.value = result as T;
+            claim.settled = true;
           }
-          if (p.row.visible) visibleChanged = true;
+          collapse(row);
+          if (row.visible && !Object.is(before, effectiveValue(row))) visibleChanged = true;
         }
         return visibleChanged;
       } finally {
