@@ -104,9 +104,33 @@ export function getLocale(): string {
  * Dictionaries are APPLICATION-GLOBAL, including when this is called from
  * inside an SSR request: messages registered anywhere are visible everywhere,
  * and merging preserves whatever was registered before.
+ *
+ * PREPARE, THEN COMMIT. `messages` is caller-controlled, and spreading it runs
+ * the caller's property getters and proxy traps — arbitrary synchronous code
+ * that can call this function again. Merging in a single expression
+ *
+ *     locales[locale] = { ...locales[locale], ...messages };
+ *
+ * captures the dictionary BEFORE that code runs and writes it back after, so a
+ * nested registration that committed in between is silently erased. Copying
+ * `messages` first leaves a plain object with no getters left, so by the time
+ * the live dictionary is read for the merge no caller code can run again.
+ *
+ * Precedence, deliberately: the outer call's prepared values win over a nested
+ * call's for the same key — it is the registration the caller asked for last,
+ * and its value was computed from what it intended to publish. Nested keys the
+ * outer object does not mention survive untouched.
+ *
+ * A getter that throws leaves the dictionary exactly as it was: preparation has
+ * published nothing. A nested registration that completed before the throw is
+ * unaffected, because it committed on its own.
  */
 export function registerTranslations(locale: string, messages: Translations) {
-  locales[locale] = { ...locales[locale], ...messages };
+  // PREPARE — every getter and proxy trap in `messages` runs here.
+  const prepared = { ...messages };
+  // COMMIT — the live dictionary is read only now, after all caller code has
+  // finished, and published in one assignment.
+  locales[locale] = { ...locales[locale], ...prepared };
 }
 
 export function t(key: string, params?: Params): string {

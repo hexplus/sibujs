@@ -10,6 +10,16 @@
 export * from "./src/components/ErrorBoundary";
 export * from "./src/components/ErrorDisplay";
 export * from "./src/components/Loading";
+// Runtime error pipeline — one place to observe errors the runtime caught
+// and contained (effects, bindings, cleanups, the scheduler).
+export {
+  getRuntimeErrorHandler,
+  type RuntimeErrorContext,
+  type RuntimeErrorHandler,
+  type RuntimeErrorPhase,
+  reportError,
+  setRuntimeErrorHandler,
+} from "./src/core/errors";
 export * from "./src/core/rendering/action";
 export * from "./src/core/rendering/catch";
 export * from "./src/core/rendering/context";
@@ -55,16 +65,6 @@ export type {
 } from "./src/core/rendering/tagPropTypes";
 // Rendering types
 export type { Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
-// Runtime error pipeline — one place to observe errors the runtime caught
-// and contained (effects, bindings, cleanups, the scheduler).
-export {
-  getRuntimeErrorHandler,
-  type RuntimeErrorContext,
-  type RuntimeErrorHandler,
-  type RuntimeErrorPhase,
-  reportError,
-  setRuntimeErrorHandler,
-} from "./src/core/errors";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/asyncDerived";
 export * from "./src/core/signals/deepSignal";
@@ -76,8 +76,24 @@ export * from "./src/core/signals/signal";
 export * from "./src/core/signals/store";
 export * from "./src/core/signals/watch";
 export * from "./src/core/signals/writable";
-// SSR context
-export * from "./src/core/ssr-context";
+// SSR context.
+//
+// Explicit rather than a wildcard: `getRequestStore()` is an internal helper
+// that `plugins/i18n.ts` uses to find the current request's store, and it hands
+// back a MUTABLE `SSRStore`. A wildcard re-export made it part of the public
+// package surface — ESM, CJS, both declaration files and the CDN global — which
+// is an accidental semver commitment to a mutable internal. The list below is
+// exactly the surface this module published before that helper existed.
+export {
+  disableSSR,
+  enableSSR,
+  getRequestScopedCache,
+  getSSRStore,
+  isSSR,
+  runInSSRContext,
+  type SSRStore,
+  withSSR,
+} from "./src/core/ssr-context";
 export * from "./src/core/strict";
 // Islands & progressive enhancement — attach fine-grained reactivity to
 // existing (server-rendered) HTML with no build step. The third rendering mode
