@@ -23,6 +23,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { findDeclaredExports } from "./lib/declared-exports.mjs";
 
 // Helpers that exist only so one framework module can reach another. A wildcard
 // re-export once turned `getRequestStore()` — which hands back a MUTABLE
@@ -177,9 +178,10 @@ for (const subpath of subpaths) {
     const typesPath = resolve(PKG_DIR, targets.types);
     if (existsSync(typesPath)) {
       const dts = readFileSync(typesPath, "utf8");
-      const at = dts.lastIndexOf("export {");
-      const exported = at === -1 ? "" : dts.slice(at);
-      const leakedDts = INTERNAL_ONLY.filter((name) => new RegExp(`\b${name}\b`).test(exported));
+      // Structural extraction, not a text search: `findDeclaredExports` reads
+      // every `export { … }` clause in the file — including the re-export blocks
+      // tsup emits at the top — and compares exact identifiers.
+      const leakedDts = findDeclaredExports(dts, INTERNAL_ONLY);
       if (leakedDts.length > 0) fail(subpath, "internal:types", `declares ${leakedDts.join(", ")}`);
       else pass(subpath, "internal:types");
     }

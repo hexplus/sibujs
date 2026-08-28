@@ -34,6 +34,33 @@ This project follows [Semantic Versioning](https://semver.org/).
   runtimes without `AsyncLocalStorage` the documented limitation is unchanged
   and now applies to the locale on exactly the same terms as the SSR flag.
 
+- **i18n locale names and translation keys are treated as literal strings.**
+  The locale registry and the translation dictionaries are objects, and lookups
+  reached into them with bracket access and `in`, both of which walk the
+  prototype chain. So every locale reported translations nobody registered —
+  `hasTranslation("toString")` was `true` and `t("toString")` returned
+  `Object.prototype.toString`, a function from a call declared to return a
+  string — and the locale name `"__proto__"` was not a locale at all:
+  `locales[locale] = dictionary` invoked the inherited `__proto__` setter, so the
+  locale never appeared in `getAvailableLocales()` while every key of its
+  dictionary read back as a locale of its own.
+
+  Lookups now consult own properties only and publication goes through
+  `Object.defineProperty`, so `__proto__`, `constructor`, `toString`,
+  `hasOwnProperty` and the rest behave like any other name as both a locale and
+  a translation key, registry prototypes are never modified, and an inherited
+  property is never a translation. The guard is on the operations rather than on
+  the initialiser, because the i18n singleton is deliberately shared across
+  duplicated bundle copies: a copy that finds a registry created by an older one
+  is protected on exactly the same terms.
+
+  **A registered empty string is now preserved.** `t()` fell back to the key for
+  any falsy message, so `registerTranslations(locale, { note: "" })` rendered
+  `"note"` instead of a blank string; only a genuinely unregistered key falls
+  back now, and `hasTranslation()` agrees with `t()` about which keys those are.
+  Reentrant registration, request-scoped locale ownership, client locale
+  reactivity and the application-global ownership of dictionaries are unchanged.
+
 - **`optimisticList()` rows survive being temporarily hidden.** The row ledger
   held only the rows currently on screen, so a pending `remove()` took its rows
   *out* of it and carried copies in its own rollback list — one logical row with

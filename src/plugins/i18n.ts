@@ -52,12 +52,70 @@ type Params = Record<string, string | number>;
 // one shared store, which is correct for a fully synchronous render and shared
 // between two requests that interleave across an await. See
 // docs/support-matrix.md.
+//
+// ============================================================================
+// PROTOTYPE SAFETY
+// ============================================================================
+//
+// A locale name and a translation key are arbitrary caller-supplied STRINGS,
+// but the registry and the dictionaries are objects, and bracket access on an
+// ordinary object consults `Object.prototype`. Every lookup therefore answered
+// for keys nobody registered:
+//
+//     registerTranslations(locale, { greeting: "Hello" });
+//     hasTranslation("toString")   -> true
+//     typeof t("toString")         -> "function"   (t() promises a string)
+//
+// and publication was worse. `locales[locale] = dictionary` for the locale name
+// `"__proto__"` does not create an entry at all — it invokes the inherited
+// `__proto__` SETTER and replaces the registry's prototype with the dictionary,
+// so the locale is missing from getAvailableLocales() while every one of its
+// KEYS becomes a phantom locale: after registering `{ greeting: "Hello" }` under
+// `"__proto__"`, `locales["greeting"]` reads back `"Hello"`.
+//
+// The correction is at the access and publication operations themselves, not at
+// the initialiser. `locales: Object.create(null)` alone would not be enough:
+// this singleton is deliberately shared across duplicated bundle copies through
+// `globalThis`, so an OLDER copy of the framework may have created it as an
+// ordinary `{}` before a corrected copy loads and reuses it. Reads are guarded
+// with `Object.hasOwn` and publication goes through `Object.defineProperty`,
+// both of which are correct whichever object the registry turns out to be. The
+// null prototype is kept as defence in depth for the case where this copy
+// creates it first.
 const _i18n = globalSingleton(Symbol.for("sibujs.i18n.v1"), () => ({
   locale: signal("en"),
-  locales: {} as LocaleMap,
+  locales: Object.create(null) as LocaleMap,
 }));
 const [clientLocale, setClientLocale] = _i18n.locale;
 const locales = _i18n.locales;
+
+/**
+ * The dictionary registered under `locale`, or `undefined`. Own properties
+ * only: an inherited member of `Object.prototype` is not a registered locale,
+ * and neither is an entry left on the prototype by an older copy that published
+ * `"__proto__"` through the setter.
+ */
+function dictionaryFor(locale: string): Translations | undefined {
+  return Object.hasOwn(locales, locale) ? locales[locale] : undefined;
+}
+
+/**
+ * The message registered under `key` for the active locale, or `undefined` when
+ * there is none. This is the single definition of "registered", so `t()` and
+ * `hasTranslation()` can never disagree.
+ *
+ * A registered EMPTY STRING is a message like any other and is returned as one;
+ * only a genuinely absent key yields `undefined`. The non-string guard keeps the
+ * `string` return type honest at runtime — untyped JavaScript can put anything
+ * in a dictionary, and returning `Object.prototype.toString` from `t()` is
+ * exactly the bug this replaces.
+ */
+function lookup(key: string): string | undefined {
+  const dictionary = dictionaryFor(getLocale());
+  if (dictionary === undefined || !Object.hasOwn(dictionary, key)) return undefined;
+  const message = dictionary[key];
+  return typeof message === "string" ? message : undefined;
+}
 
 /**
  * Set the active locale.
@@ -124,18 +182,35 @@ export function getLocale(): string {
  * A getter that throws leaves the dictionary exactly as it was: preparation has
  * published nothing. A nested registration that completed before the throw is
  * unaffected, because it committed on its own.
+ *
+ * Publication uses `Object.defineProperty` rather than `locales[locale] = ...`,
+ * because the assignment form would invoke the inherited `__proto__` setter for
+ * a locale of that name instead of registering it. Locale names and translation
+ * keys are treated literally throughout — see PROTOTYPE SAFETY above.
  */
 export function registerTranslations(locale: string, messages: Translations) {
-  // PREPARE — every getter and proxy trap in `messages` runs here.
+  // PREPARE — every getter and proxy trap in `messages` runs here. Spreading
+  // first leaves a plain data object, so nothing below can run caller code.
   const prepared = { ...messages };
   // COMMIT — the live dictionary is read only now, after all caller code has
-  // finished, and published in one assignment.
-  locales[locale] = { ...locales[locale], ...prepared };
+  // finished, and merged into one new dictionary. Own keys only, on both sides.
+  const merged: Translations = Object.assign(Object.create(null), dictionaryFor(locale), prepared);
+  // PUBLISH — one own, enumerable data property, whatever the locale is named.
+  Object.defineProperty(locales, locale, {
+    value: merged,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
 }
 
+/**
+ * Translate `key` in the current locale, falling back to the key itself when it
+ * is not registered. A registered empty string is a translation and is returned
+ * unchanged; the previous `|| key` discarded it and returned the key.
+ */
 export function t(key: string, params?: Params): string {
-  const locale = getLocale();
-  const message = locales[locale]?.[key] || key;
+  const message = lookup(key) ?? key;
 
   return params ? message.replace(/\{(\w+)\}/g, (_, p) => String(params[p] ?? "")) : message;
 }
@@ -165,15 +240,21 @@ export function Trans(key: string, params?: Params): HTMLElement {
 /**
  * Check if a translation key exists for the current locale — the request's
  * locale during SSR, the client locale otherwise.
+ *
+ * Registered keys only. `toString`, `constructor` and the rest of
+ * `Object.prototype` are not translations unless an application registers them,
+ * and a registered empty string counts as present.
  */
 export function hasTranslation(key: string): boolean {
-  const locale = getLocale();
-  return key in (locales[locale] || {});
+  return lookup(key) !== undefined;
 }
 
 /**
  * Get all available locales. Dictionaries are application-global, so this is
  * the same set inside and outside a request.
+ *
+ * Own enumerable keys, so a locale is listed exactly when it was registered -
+ * including one named `"__proto__"`, which publication now stores literally.
  */
 export function getAvailableLocales(): string[] {
   return Object.keys(locales);
