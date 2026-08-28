@@ -5,851 +5,54 @@ All notable changes to SibuJS will be documented in this file.
 This project follows [Semantic Versioning](https://semver.org/).
 
 ---
-
-## [Unreleased]
-
-### Fixed
-
-- **The active i18n locale is request-scoped during SSR.** It lived in a
-  process-global signal, which is exactly right in a browser — one page, one
-  active locale, shared across duplicated bundle copies — and exactly wrong on a
-  server, where two overlapping renders overwrote each other: a request that
-  paused across an `await` could resume and render the locale a *different*
-  request had selected in the meantime. The locale now lives in the existing
-  per-request `AsyncLocalStorage` store (no second one is created), so
-  `setLocale()`, `getLocale()`, `t()`, `Trans()` and `hasTranslation()` all
-  resolve the locale belonging to the current request, across every `await` and
-  through nested contexts. An SSR request never writes the application default,
-  so a success, a synchronous throw and an asynchronous rejection all leave the
-  client locale untouched.
-
-  Outside a request scope nothing changes: `setLocale()` updates the client
-  locale reactively, duplicated bundle copies keep sharing it, and applications
-  need no explicit i18n object. **Translation dictionaries remain
-  application-global** — static data read identically by every request, so
-  copying them per request would duplicate every message for no benefit;
-  `registerTranslations()` merges and is visible everywhere, including when
-  called from inside a request. A request that never calls `setLocale()` follows
-  the application default, preserving the established `"en"` behaviour. On
-  runtimes without `AsyncLocalStorage` the documented limitation is unchanged
-  and now applies to the locale on exactly the same terms as the SSR flag.
-
-- **i18n locale names and translation keys are treated as literal strings.**
-  The locale registry and the translation dictionaries are objects, and lookups
-  reached into them with bracket access and `in`, both of which walk the
-  prototype chain. So every locale reported translations nobody registered —
-  `hasTranslation("toString")` was `true` and `t("toString")` returned
-  `Object.prototype.toString`, a function from a call declared to return a
-  string — and the locale name `"__proto__"` was not a locale at all:
-  `locales[locale] = dictionary` invoked the inherited `__proto__` setter, so the
-  locale never appeared in `getAvailableLocales()` while every key of its
-  dictionary read back as a locale of its own.
-
-  Lookups now consult own properties only and publication goes through
-  `Object.defineProperty`, so `__proto__`, `constructor`, `toString`,
-  `hasOwnProperty` and the rest behave like any other name as both a locale and
-  a translation key, registry prototypes are never modified, and an inherited
-  property is never a translation. The guard is on the operations rather than on
-  the initialiser, because the i18n singleton is deliberately shared across
-  duplicated bundle copies: a copy that finds a registry created by an older one
-  is protected on exactly the same terms.
-
-  **A registered empty string is now preserved.** `t()` fell back to the key for
-  any falsy message, so `registerTranslations(locale, { note: "" })` rendered
-  `"note"` instead of a blank string; only a genuinely unregistered key falls
-  back now, and `hasTranslation()` agrees with `t()` about which keys those are.
-  Reentrant registration, request-scoped locale ownership, client locale
-  reactivity and the application-global ownership of dictionaries are unchanged.
-
-- **`optimisticList()` rows survive being temporarily hidden.** The row ledger
-  held only the rows currently on screen, so a pending `remove()` took its rows
-  *out* of it and carried copies in its own rollback list — one logical row with
-  two representations. An operation that owned the row's value could then no
-  longer find it: a confirmed `add` value was written nowhere and lost when the
-  remove failed (`[1, 2]` instead of `[1, 20]`), and a failed `update` could not
-  roll back, so the failed remove later reinstated the stale optimistic patch.
-  Identity and visibility are now separate: the authoritative record lives as
-  long as any operation may settle against it, so `add`/`update` land while the
-  row is hidden, and a failed `remove` reinstates the row carrying whatever value
-  it holds now. Records are retired by reference counting as their last holder
-  settles, so nothing accumulates.
-
-  Each operation runs in three ordered phases. PREPARE executes all
-  user-controlled work — predicates, and the patch spread that runs a patch's
-  property getters — and mutates nothing, so a throw there leaves the list
-  untouched and idle rather than leaking `pending()` as true. COMMIT applies the
-  change with no user code running and recomputes structural changes from the
-  live list. PUBLISH writes `pending` and `items` in one batch, so a subscriber
-  never sees one without the other and the operation is fully committed before
-  any reentrant call it wakes can run. A reactive subscriber may therefore start
-  an operation from inside another one: the outer operation can no longer erase
-  the row the subscriber added, and an older update can no longer reclaim
-  ownership of a row a newer reentrant update has taken.
-
-  Broad operations are no longer quadratic. Row visibility is a flag rather than
-  a scan of the visible array, and bulk restoration merges two already-sorted
-  runs instead of reinserting rows one at a time. For `n` visible and `k`
-  affected rows: membership O(1), reference release O(k), broad update O(n + k),
-  bulk restoration O(n + k), publication O(n). A 20,000-row failed remove went
-  from 8,300 ms to 13 ms on the development machine.
-
-- **A failed `remove` restores rows in the correct relative order.** Rollback
-  reinserted rows at their old ABSOLUTE index, so a concurrent successful removal
-  of an earlier row displaced them — removing `B`,`D` from `["A","B","C","D"]`
-  and then successfully removing `A` restored `["C","B","D"]`. Rows now carry a
-  monotonic ordering key and are reinserted by ordered insert, so they return to
-  their place relative to whatever is actually still present.
-
-- **Chunk ownership is installed before any user callback runs.** `onLoadStart`
-  fired before the pending entry existed, leaving a window in which the operation
-  had publicly started but owned nothing: `invalidate(id)` or `clear()` called
-  from that callback deleted a key with no entry and the load published anyway,
-  and a reentrant same-key `load()` found no owner and started a second loader —
-  which fired `onLoadStart` again, recursing 1889 deep in the reproduction — with
-  the outer call then overwriting whatever ownership the nested ones established.
-  The entry now goes in first, backed by a deferred the loader settles, so
-  invalidating from `onLoadStart` really supersedes the load and a reentrant call
-  shares it.
-
-- **`wakeLock()` never reports active for a released sentinel.** The sentinel was
-  installed and `active(true)` published without checking `released`, so a
-  sentinel the platform had already released was reported as a held lock — and,
-  worse, retained, which made `request()` treat the controller as already holding
-  one and refuse to acquire a live replacement. Acquisition now checks `released`,
-  attaches the listener, re-checks (a release in that gap fires with nobody
-  subscribed), and only then publishes. A listener registration failure releases
-  the sentinel rather than holding a handle it cannot track.
-
-- **`optimisticList()` operations own rows, not the whole array.** Rollback used
-  a single global version counter and a captured array snapshot, which is wrong
-  in both directions: skipping the rollback (because a newer operation existed)
-  left a failed operation's optimistic item on screen permanently — `[1,2,3]`,
-  `add(4)`, `add(5)`, A fails produced `[1,2,3,4,5]` — while performing it
-  discarded every change newer operations had made to rows the failing one never
-  touched. The list is now a ledger of rows with stable ids and per-row operation
-  ownership, so disjoint operations settle independently, an operation can only
-  undo its own mutation, and where two touch the same row the later one wins.
-  Row identity no longer falls back to `Object.is`, so duplicate primitives and
-  duplicate object references address the correct occurrence — `[1]` plus an
-  optimistic `add(1)` confirmed as `10` now yields `[1, 10]`, not `[10, 1]`.
-  `items()` projects values only; no id or wrapper is observable.
-
-- **Chunk invalidation is a publication barrier.** `invalidate(id)` and `clear()`
-  left the pending map untouched, so an in-flight load could write a discarded
-  value back into the cache after the fact, delete a newer pending entry, or be
-  adopted by a post-invalidation `load()` that then never called its own loader.
-  The pending entry is now the load's claim on the key: removing it revokes
-  ownership, and a load publishes only if it still owns the key. Superseded work
-  still settles for its original caller — nothing is cancelled, since the loader
-  API takes no abort signal. `preload()` markers follow the same identity rule.
-
-- **Chunk lifecycle callbacks can no longer change what a load did.** A throwing
-  `onLoadEnd` turned a cached success into a rejection and then delivered its own
-  exception to `onLoadError`, leaving the caller told "failed" while the cache
-  held the value; a throwing `onLoadStart` stopped the load from starting at all.
-  Callbacks now run contained, and their failures are reported through the
-  runtime error pipeline instead of altering the operation.
-
-- **`wakeLock()` cannot orphan a sentinel.** Overlapping requests acquired two
-  native sentinels and kept only the last reference, leaving the other held with
-  no way to release it; `release()` did not supersede a request already in
-  flight, so a lock could reactivate after being given up; and a stale sentinel's
-  `release` event cleared the state of the current one. Requests now share one
-  in-flight acquisition, `release()`/`dispose()` revoke ownership before awaiting
-  anything, and any sentinel arriving without ownership is released immediately.
-  `dispose()` is idempotent and publishes nothing after disposal. Failed
-  request/release operations are reported through the runtime error pipeline
-  rather than `console.warn`, so application error handlers can observe them.
-
-- **`viewTransition().isTransitioning()` describes the controller, not the last
-  run to finish.** Two overlapping `start()` calls raced over one boolean, so the
-  flag went false while an earlier transition was still running. It now stays
-  true while any run is in flight and becomes false exactly when the last one
-  settles, in any order; every caller keeps its own resolution or rejection.
-
-- **URL-attribute classification in `Head()` is case-insensitive.** `head.ts`
-  carried a private `new Set(["href", "src"])` and tested it against the
-  AUTHORED attribute spelling. HTML attribute names are ASCII case-insensitive,
-  so the browser reads `SRC` as `src` — but that lookup did not, and
-  `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
-  sanitization completely and appended a `<script>` a real browser fetched and
-  executed. Both SSR paths, which lower-cased first, refused the identical
-  value. Every classification — URL sinks, event handlers, `srcdoc`, duplicate
-  detection — now runs on one canonical, deliberately ASCII-only fold
-  (`canonicalAttrName`), because `String.prototype.toLowerCase` maps some
-  non-ASCII code points *into* ASCII letters and the HTML parser does not.
-
-- **Router SSR no longer carries its own URL sanitizer.** `sanitizeUrlLocal`
-  described itself as mirroring `utils/sanitize.ts` but was a BLOCKLIST of four
-  schemes where the canonical sanitizer is an ALLOWLIST, so router SSR emitted
-  `file:`, `about:`, `chrome:` and every custom scheme that `Head()` and
-  `renderToDocument` both refused. It is deleted; all three paths call the
-  canonical `sanitizeAttributeString`.
-
-- **A refused URL attribute is OMITTED, not published as `href=""`.** An empty
-  URL attribute resolves against the current document — `<link href="">`
-  references the page itself and `<script src="">` is a request, not a no-op —
-  so an empty substitute is a different document from an absent attribute. The
-  sanitization contract now distinguishes "accepted, possibly empty" from
-  "rejected"; an empty string remains a legitimate value for inert text
-  attributes like `content` and `id`. `setCanonical()` and `Head({ base })`
-  follow the same rule, and a rejected update clears any previously accepted
-  value rather than leaving a stale one standing.
-
-- **`srcdoc` is refused by `Head()` too.** The client preserved it while both
-  servers dropped it. The browser parses `srcdoc` as a nested HTML *document*,
-  so escaping is the wrong layer, and the rule now applies identically on all
-  three paths in every casing.
-
-- **An entry with no effective attributes is dropped everywhere.** The client
-  published an attribute-less `<meta>` where both servers emitted nothing. One
-  shared answer, decided at the shared planning layer.
-
-- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` share the
-  policy itself, not merely a policy function.** The pipeline used to take the
-  name filter and value sanitizer as parameters, so each target supplied its
-  own and the three diverged in four separate ways. Only value resolution — the
-  client has reactive getters, the servers do not — is parameterized now. The
-  planned attribute map is keyed by canonical names, so client DOM and server
-  HTML are exactly comparable; a table-driven parity suite asserts emitted
-  status, attribute count, names, and values across all three.
-
-### Security
-
-- **Meta-refresh directives are structurally parsed, and client/SSR share one
-  policy.** Dangerous destinations were detected by asking whether the
-  lower-cased `content` contained `url=javascript:` (plus three sibling
-  schemes). That recognises one spelling of a grammar the browser accepts in
-  many: `0; url = javascript:…`, `0;URL=JAVASCRIPT:…`, `0;url='javascript:…'`,
-  and tab-separated forms all produced a live redirect the check never saw.
-
-  The destination is now extracted by a parser and handed to `sanitizeUrl()` —
-  the same protocol authority every other URL sink uses — instead of being
-  pattern-matched. Directives the parser cannot read unambiguously (unterminated
-  quotes, competing `url=` assignments, non-numeric delays, trailing junk, empty
-  destinations) are dropped rather than emitted on the basis that no forbidden
-  substring appeared. This is deliberately stricter than a browser and does not
-  claim parity with the WHATWG algorithm.
-
-  `head.ts` and `ssr.ts` previously carried separate copies of the rule, so a fix
-  to either would have diverged from the other; both now call
-  `utils/metaRefresh.ts`, as does router SSR.
-
-- **Reactive `Head()` meta entries are validated as complete snapshots.** One
-  effect per reactive *attribute* meant each write was judged alone, so a
-  reactive `http-equiv` flipping to `"refresh"` could activate static `content`
-  that had been accepted only because the entry was not a refresh at the time.
-  There is now one effect per entry: it resolves every attribute and validates
-  the assembled snapshot — and a snapshot that fails validation withdraws the
-  element rather than blanking one attribute.
-
-- **`Head()` meta publication is a swap, not a reconciliation.** Validating the
-  whole snapshot was not enough while the snapshot was then applied to a
-  *connected* element one attribute at a time. Updating an entry from
-  `http-equiv="x-custom"` + a forbidden `content` to an entirely valid
-  `http-equiv="refresh"` + `content="5;url=/safe"` wrote the new `http-equiv`
-  while the old content was still in place, so the document briefly held a live
-  `<meta http-equiv="refresh" content="0;url=javascript:…">` that no snapshot ever
-  approved. Reordering the writes would only move the hole — attribute order is
-  not a security mechanism. An accepted snapshot is now materialised on a fresh
-  element while detached and published with a single `replaceWith()`, and the
-  managed-element reference is updated in the same step so disposal never leaks a
-  replaced node.
-
-- **Native meta-refresh directives managed by client-side `Head()` must be
-  static.** A browser processes a refresh when the element is *inserted*, and
-  removing or replacing it afterwards is not a defined way to cancel the
-  scheduled navigation. A reactive entry therefore never publishes a snapshot
-  whose effective `http-equiv` is `refresh` — even when the destination is
-  allowed, because what cannot be withdrawn must not be handed over. This is a
-  publication rule, not a parse rule: the snapshot is still parsed and still
-  refused outright when the directive is dangerous.
-
-  **Behaviour change:** `Head({ meta: [{ "http-equiv": "refresh", content: () => …
-  }] })` and the reactive-`http-equiv` equivalent no longer insert a refresh
-  element. Fully static refresh directives are unaffected, and every other
-  reactive meta entry — description, keywords, Open Graph, non-refresh
-  `http-equiv` — behaves exactly as before. Documentation no longer claims that
-  detaching an inserted refresh cancels its navigation.
-
-- **Duplicate case-insensitive attribute names in a meta entry are rejected.**
-  `{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", … }` is legal
-  JavaScript; a first-match lookup validated one spelling while the DOM committed
-  the other. Rejection was chosen over last-write-wins because it removes the
-  class of bug rather than re-parameterising it.
-
-- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` run one meta
-  pipeline in one order.** Sharing a policy function was not the same as sharing
-  a decision: the client filtered unsafe attribute names *before* checking for
-  duplicates while the servers checked the raw record first, so
-  `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
-  by the client and dropped by both servers. `planMetaEntry` now fixes the order
-  for all three — raw duplicate names, name filtering, value resolution,
-  sanitization, then the refresh verdict on the effective snapshot — so the value
-  inspected by the policy is exactly the value committed, and the three paths
-  agree on whether an entry exists and on its effective attributes.
-
-- **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
-  The shared attribute policy classified attributes into event handlers, URLs,
-  `srcset`, `style`, and "everything else, which `setAttribute` stores as inert
-  text". That last claim is false for `<iframe srcdoc>`: the browser decodes the
-  value and parses it as a complete nested HTML document, and without a sandbox
-  its scripts run with the embedding page's origin.
-
-  Attribute escaping is not a weaker defence here, it is the wrong layer —
-  `srcdoc="&lt;script&gt;…"` is correctly escaped and still becomes `<script>…`
-  once parsed as a document. So the generic writers refuse the attribute
-  outright and, as with `on*`, remove any pre-existing value rather than merely
-  declining to add one. The rule lives in one place
-  (`isHtmlContentAttribute()`) and is consulted by the tag factory,
-  `bindAttribute`/`bindDynamic`, `bindAttrs`, `enhance().attr()`, `svgElement`,
-  the `html` template, and all four SSR attribute serializers.
-
-  Sanitizing arbitrary HTML is deliberately not attempted, and `TrustedHTML`
-  does not unlock it: that type is a compile-time brand with no runtime
-  identity. A trusted-document API would need a runtime-verifiable wrapper or
-  browser Trusted Types, and is not part of this change.
-
-- **Dynamic `html` template attributes now use the shared attribute policy.**
-  The tagged-template executor carried its own rules — `srcset`, then URL
-  attributes, then write — which was the shared list minus `style`. So
-  ``html`<div style=${untrusted}>` `` bypassed the declaration-list sanitizer,
-  contradicting the sanitizer's own documented invariant, and would have
-  bypassed the new `srcdoc` rule too. Both dynamic forms (a single expression,
-  and a mixed attribute assembled from statics and expressions) now commit
-  through the shared primitive, so a refused value also reconciles whatever was
-  already on the element. Fully static template text is unchanged: an attribute
-  the developer typed into their own source stays developer-controlled.
-
-### Changed
-
-- **`loadWasmModule()`'s second parameter is now `WebAssembly.Imports` only; the
-  options form is `loadWasmModuleWithOptions()`.** The parameter used to accept
-  `WebAssembly.Imports | LoadWasmOptions` and pick between them at runtime by
-  probing for `allowedOrigins` / `unsafelyAllowAnyOrigin`. That discriminator is
-  unsound in both directions, because both shapes are plain objects with
-  caller-chosen keys: an options bag carrying only `imports`/`cacheKey` was read
-  as an import namespace — so `cacheKey` was silently dropped and the documented
-  keyed-singleton guarantee did not hold — while a WASM module namespace legally
-  *named* `allowedOrigins` would have been read as options. No structural test
-  can separate them, so the union was removed rather than re-guessed.
-
-  Migration is mechanical and the compiler finds every site: a call passing an
-  options object becomes `loadWasmModuleWithOptions(source, options)`. Calls
-  passing real imports, or using the positional `(source, imports, cacheKey)`
-  form, are unchanged. `wasm()` uses the options API internally, so its own
-  surface is unaffected.
-
-- **Browser support floor raised to Chrome/Edge 93, Firefox 92, Safari 15.4.**
-  The declared floor was Chrome 80 / Firefox 78 / Safari 14, and nothing checked
-  it — so the source drifted above the promise and a consumer targeting the
-  declared minimum shipped a bundle that threw on first use. Three APIs are used
-  without a feature guard and are unavailable at the old floor: `Object.hasOwn()`
-  (Chrome 93), `ParentNode.replaceChildren()` (Chrome 86), and the `Error`
-  `cause` option (Chrome 93). `Object.hasOwn` sets the binding constraint and
-  sits inside the reactive core, so polyfilling `replaceChildren` alone would
-  have left the bundle equally broken on Chrome 80–92. The floor now states what
-  the source actually requires.
-
-  This is enforced rather than documented: a compatibility gate parses
-  `browserslist`, scans the source for each API in a baseline table, and fails
-  when an unguarded usage needs a newer engine than the floor declares. Adding
-  such an API now forces a deliberate choice — guard it, or raise the floor and
-  update the support matrix. Everything else modern in the source is already
-  feature-detected and does not constrain the floor.
-
-- **A reactive attribute value of `null`/`undefined` now removes the attribute**
-  instead of writing the literal text `"null"`. `bindAttribute`/`bindAttrs`
-  stringified the value before writing, so a getter returning null produced
-  `title="null"` — visible to users as a tooltip reading "null". Absence is the
-  only sensible reading, and it is what the tag factory and `enhance()`'s
-  `attr()` already did. A getter returning the *string* `"null"` still writes
-  `"null"`.
-
-### Removed
-
-- **`CustomElementOptions.extends`.** The option was public and read nowhere, so
-  it advertised customized built-in elements that were never implemented. Real
-  support needs the constructor to derive from the concrete element class,
-  `customElements.define(name, ctor, { extends })`, and `is=""` at every call
-  site — and Safari has never shipped them. Removed rather than faked.
-
-### Security
-
-- **Static and reactive attribute writes now share one security policy.** The
-  same value reached opposite verdicts depending only on the shape of the
-  expression: `bindAttrs(a, { href: url })` wrote `javascript:` straight to the
-  DOM, while the identical `bindAttrs(a, { href: () => url })` blocked it. The
-  divergence — not any single missing check — was the vulnerability, because a
-  routine refactor between the two forms silently changed an application's
-  security posture. The same gap ran between the HTML tag factory and
-  `svgElement()`, which turned an `onload` string into a live event handler that
-  the equivalent HTML call had always refused.
-
-  Every public attribute writer now commits through one primitive: the tag
-  factory, `bindAttribute`/`bindDynamic`, `bindAttrs`/`bindBoolAttr`/`bindData`,
-  `svgElement()`, and `enhance()`'s reactive `attr()`. `on*` strings are refused
-  everywhere, URL attributes go through the protocol allowlist, `srcset` is
-  validated per candidate, and `style` goes through the declaration-list
-  sanitizer. Function-valued `on*` props keep their existing meaning —
-  `addEventListener`, never an attribute. The policy itself is unchanged; what
-  changed is that no writer can skip it.
-- **`svgElement()` writes `xlink:href` in the xlink namespace.** A plain
-  `setAttribute` produced an attribute whose literal name contained a colon and
-  whose namespace was null, which SVG renderers ignore — so the reference
-  silently failed to resolve while also bypassing URL filtering.
-- **`enhance()`'s reactive `attr()` is no longer a raw sink.** Its value is a
-  runtime getter at the same trust level as any other reactive binding, but it
-  wrote through unfiltered, making progressive enhancement the one public path
-  where a `javascript:` URL, an unsafe `style` list, or an `on*` handler string
-  still reached the DOM.
-- **Attribute security is now a postcondition on the managed attribute.** These
-  APIs attach to DOM that already exists — server markup, third-party widgets,
-  anything `enhance()` is pointed at — and two paths let a pre-existing
-  violation survive. `enhance().attr()` compared its RAW desired value against
-  the RAW attribute and skipped the write when they matched, so
-  `<a href="javascript:…">` re-bound to that same string never reached the
-  sanitizer at all. And a refused `on*` value left any existing
-  `onclick`/`onload` content attribute in place: the writer had declined to add
-  a handler while the page still had one.
-
-  Write elision now lives inside the shared primitive and compares the
-  POST-POLICY result, so no caller can skip the sanitizer by pre-comparing; and
-  a binding that names an `on*` slot clears that slot rather than merely
-  refusing it. Taking ownership of an attribute now means governing it.
-- **IDL synchronisation is case-insensitive for HTML attributes.** HTML
-  attribute names are case-insensitive, but the decision to write `value` /
-  `checked` / `disabled` / `selected` through the live IDL property was
-  case-sensitive — so a binding declared as `"VALUE"`, which the browser treats
-  as exactly `value`, fell back to content-attribute semantics and left a dirtied
-  control showing stale state. Normalisation is HTML-only: SVG attribute names
-  are case-sensitive, and `viewBox` / `preserveAspectRatio` / `patternUnits`
-  would be destroyed by folding them.
-
-### Fixed
-
-- **Removing an owned tree now disposes it.** `createMicroApp()` cleared its
-  container with a bare `replaceChildren()`, which detaches nodes without
-  running SibuJS teardown — so every effect, binding and listener inside the
-  outgoing tree survived as an unreachable zombie firing against detached DOM,
-  one leaked component tree per remount. Micro-app mount/unmount, remote
-  component swaps, custom-element teardown, `DynamicComponent`, `DOMPool` reuse
-  and the testing `render()` helpers all route through the disposal-aware
-  replacement primitive now. Re-mounting a node that is already in the container
-  keeps it alive rather than disposing the tree being reinstalled.
-- **A remote component no longer instantiates after its owner is gone.**
-  `defineRemoteComponent()`'s loader is an unbounded async gap — a route can
-  change or a list row can be removed long before the module arrives — and the
-  resolution built DOM and registered disposers inside a container nobody would
-  ever dispose again. The resolved module is still cached after disposal, which
-  is correct and deliberate: it is shared, immutable and expensive to fetch, so
-  the next instance renders instantly. Only the instantiation is owner-scoped.
-  The rejection path is guarded too: a disposed container no longer receives an
-  error fallback.
-- **`infiniteScroll()` no longer leaks an unhandled rejection.** The
-  `IntersectionObserver` callback started an async `loadMore()` and dropped the
-  promise, so a rejecting `onLoadMore` became an unhandled rejection — which
-  crashes a Node SSR process and fires `window.onunhandledrejection` in a
-  browser, for what is only a failed page of data. Failures are now contained
-  and reported through the central runtime error pipeline (phase `"async"`),
-  `loading` is always cleared, and a load settling after `dispose()` mutates
-  nothing. `dispose()` clears `loading` itself rather than leaving it to a
-  completion that is no longer permitted to write.
-- **`wasm(url)` can express the origin policy its loader requires.**
-  `loadWasmModule()` demands `allowedOrigins` or an explicit
-  `unsafelyAllowAnyOrigin` opt-in for URL sources, and the public `wasm()`
-  wrapper had no way to supply either — so every URL load was refused and the
-  convenience API was unusable for its primary documented use case. `WasmConfig`
-  now extends the loader's option type rather than copying a subset, so the two
-  cannot drift again.
-- **A keyed WASM load is genuinely one instance.** The cache stored only
-  results, so two callers that both missed it before either finished each ran a
-  full instantiation — and the documented singleton became two objects with two
-  separate linear memories, one of them detached from every other holder.
-  Concurrent loads now share an in-flight promise per key, and a failed load no
-  longer poisons the key against a later retry.
-- **`offlineStore` conflict strategies actually differ.** `conflictStrategy` was
-  part of the exported adapter type and read nowhere; every adapter silently got
-  client-wins. `client-wins` (still the default) discards a pulled record for any
-  key with an unpushed local edit; `server-wins` lets the remote value win while
-  *retaining* the queued change, since dropping it would turn a display-precedence
-  choice into silent data loss; `manual` defers to a new `resolveConflict`
-  resolver, and without one degrades to client-wins with a warning rather than
-  guessing with unsynced data.
-- **One `offlineStore` sync uses one adapter.** `attach()` landing mid-sync
-  could split a single transaction across two backends — pushing through the old
-  adapter and pulling through the new one, with the new one's conflict strategy
-  applied to the old one's push results. The adapter is snapshotted for the whole
-  operation; the next sync picks up the new one.
-- **`serviceWorker()` no longer throws under SSR.** `"serviceWorker" in
-  navigator` is a `TypeError` where `navigator` does not exist. The helper now
-  reports an inert unsupported state instead.
-- **A failed `unregister()` no longer detaches the service-worker wrapper.**
-  `registration.unregister()` returns `false` when the browser declines — the
-  worker is still installed and still controlling pages — but that was treated
-  as teardown, permanently blinding the wrapper to a live worker: no update
-  tracking, no registration, no way back. A failed unregister now changes
-  nothing.
-- **`unregister()` before the registration resolves no longer orphans it.** The
-  call saw a null registration, reported "nothing to do", and the worker that
-  landed a moment later stayed registered in the browser while SibuJS reported
-  nothing at all. The request is now remembered and applied to the arriving
-  registration.
-- **`document.title` and `<base>` use owner-aware restoration.** Both are global
-  singletons, and both were handled as if they were ordinary independently-owned
-  tags. `Head()` never restored the title on dispose, so a page kept a title
-  belonging to an unmounted component; `title()` kept a per-instance snapshot,
-  which restores a stale value whenever three owners overlap and the middle one
-  is disposed first — an everyday reordering, not a corner case. `Head` also
-  deleted whatever `<base>` it found (typically the server-rendered one) and put
-  nothing back, permanently changing how every relative URL on the page resolved.
-
-  Both resources now use one shared owner stack: writes come from the current
-  top, releasing a non-top owner changes nothing visible, and emptying the stack
-  restores what was there before the first owner arrived. `Head({ title })` and
-  `title()` contend for the same stack rather than two independent ones.
-- **Scoped styles now cover descendants created after render.**
-  `withScopedStyle()` stamped the scope attribute onto every element that existed
-  at render time, which makes the contract "elements present at render time"
-  rather than "this component's subtree": anything a signal, an `each()` row or a
-  conditional inserted later was unmarked and rendered unstyled. Selectors are
-  now anchored at the component root, so the DOM relationship does the matching
-  and future descendants are included automatically. Pseudo-classes,
-  pseudo-elements, combinators, media queries and keyframes are preserved, and
-  the root remains selectable by its own rules.
-- **`scrollRestoration({ mode: "auto" })` actually restores.** Auto mode
-  attached a `popstate` listener that only ever *saved* — the documented
-  save/restore behaviour was half implemented, and going Back never returned the
-  viewport anywhere. It now tags history entries with their key, saves the entry
-  being left, and restores the destination's position. A same-key pop is not
-  treated as a departure, which would otherwise overwrite the stored position
-  with the current one and destroy the value about to be restored. An unknown or
-  absent destination key is a safe no-op. A `getKey` option integrates the
-  feature with a router's own history identity.
-- **Scoped-style selector lists are parsed, not regex-split.** The rewriter
-  split selector preludes on every comma, but a comma is not a separator inside
-  a functional pseudo-class (`:is(.a, .b)`), an attribute value
-  (`[data-v=","]`), or a string. Those selectors were torn in half and each
-  fragment scoped independently, producing CSS the engine either rejected or
-  accepted with a different meaning — `:is(.a, .b)` became
-  `[s] :is(.a, :is(.a[s],[s] .b), .b)[s]`, which selects neither arm. Splitting
-  is now done by a scanner that tracks paren, bracket, quote, comment and escape
-  state, and the stylesheet walk uses the same scanner to find rule boundaries,
-  so `@media` / `@supports` / `@layer` recurse while `@keyframes` bodies are left
-  alone without special-casing `from`/`to`/percentage stops.
-- **One `unregister()` issues at most one native unregister.** On the pending
-  path there were two callers of `registration.unregister()`: the arrival
-  handler and the resumed public call. When the browser refused the first, the
-  arrival handler correctly re-adopted the still-live registration and the
-  resumed call then fired a second attempt at it. Unregistration is now a single
-  owned in-flight operation with exactly one call site — concurrent callers join
-  it, and the arrival handler hands the registration over instead of removing it
-  itself. A registration that lands while a removal is outstanding is no longer
-  published at all, so a worker about to be removed never transiently reports as
-  ready.
-- **`bindAttrs()` and `bindData()` types now describe the runtime.** Both
-  excluded `null`/`undefined` while the runtime treats them as removal, so the
-  documented behaviour was unreachable from type-checked code and the ordinary
-  `() => user?.label` getter was a compile error. A shared `AttributeValue` /
-  `AttributeSource` pair is now exported and used by both.
-- **`clipboard()` and `permissions()` ignore completions after disposal.** A
-  clipboard write can sit on a permission prompt indefinitely; one resolving
-  after `dispose()` set state and armed a two-second timer against a torn-down
-  subtree. `permissions()` guarded its success path but not its failure path, so
-  a query rejecting after teardown still flipped a disposed controller to
-  `"unsupported"`.
-
-- **Retry cancellation now wins immediately.** A request that rejected *after*
-  its `AbortSignal` had already aborted was still treated as a retryable
-  failure: `shouldRetry` was consulted, `onRetry` fired, and the backoff was
-  scheduled. The backoff itself then attached its `abort` listener without
-  first checking `signal.aborted` — and a signal does not replay a past `abort`
-  event — so cancellation was delayed by the entire delay, up to `maxDelay`.
-  This affected every primitive built on `withRetry()` (`resource`, `query`,
-  `infiniteQuery`, `mutation` and data loaders).
-
-  Cancellation is now judged on both halves of the evidence: the signal, and the
-  rejected value. An operation cancelled by a signal `withRetry()` does not hold
-  — an inner `fetch` with its own controller, a timeout wrapper, a caller that
-  composed its own abort — rejects with an `AbortError` while our signal reads
-  as healthy, and was retried like any other failure. Such a rejection now
-  bypasses `shouldRetry`, `onRetry` and the backoff, and propagates unchanged so
-  the caller keeps their own error instance.
-- **Data primitives now share one `AbortError` classifier.** `resource` and
-  `mutation` recognised only `DOMException`, while `query` and `infiniteQuery`
-  accepted any object named `AbortError`. A fetcher rejecting with an ordinary
-  `Error` named `AbortError` was therefore silently ignored by two primitives
-  and stored as application error state by the other two. Classification is by
-  `name`, never by message: `new Error("AbortError")` remains a real failure.
-
-  Classification also runs *before* normalization now. `mutation()` wrapped the
-  thrown value in `new Error(String(err))` first, which keeps a message and
-  discards everything else — `name` included. A cancellation carried on a plain
-  object became `Error("[object Object]")` named `"Error"`, so the abort
-  surfaced as a mutation failure: `error()` set, `onError` called, and a console
-  warning from the fire-and-forget `mutate()` path. `mutateAsync()` rejects with
-  the original `AbortError` value; ordinary failures are still normalized to an
-  `Error`.
-- **A cancelled mutation no longer stays permanently loading.** `mutation()`
-  set `loading`/`status` on entry, and the `AbortError` branch rethrew before
-  any terminal transition ran. That was invisible for the cancellations SibuJS
-  itself causes — `reset()` and a superseding `mutate()` write the state on
-  their way past — but when the *current* run's own `mutationFn` rejected an
-  `AbortError`, nothing else was coming: the promise rejected and `loading()`
-  stayed `true` forever, so a spinner bound to it never stopped.
-
-  Cleanup is run-owned, not blanket: only the run that still holds the state may
-  repair it, so a late superseded run cannot clear the newer run's loading
-  state. A cancelled current run restores the last state the mutation actually
-  settled into — `idle`, `success` or `error` — rather than forcing `idle`,
-  because cancelling produced no verdict of its own: `success(data)` stays
-  `success(data)` and `error(E)` stays `error(E)`. The baseline is tracked
-  separately from the visible state, so a mutation started while another is
-  still loading cannot adopt `"loading"` as its restore point and end up
-  finished but in no terminal state at all. Cancellation still calls neither
-  `onError` nor `onSettled`.
-
-  `onMutate` now states its contract explicitly: ordinary exceptions fail the
-  mutation, an `AbortError` is cancellation — the same rule `mutationFn`
-  follows, so where a cancellation is raised does not change what it means.
-- **Progressive island hydration is idempotent.** `hydrateIslands()` and
-  `hydrateProgressively()` selected candidates without consulting
-  `data-sibu-hydrated`, and a hydrated island deliberately keeps its
-  `data-sibu-island` marker — so a second pass over an overlapping root
-  re-ran the factory and replaced the live subtree, destroying its state and
-  listeners. Both now skip already-hydrated islands, at candidate discovery and
-  again when an asynchronous trigger actually fires.
-- **`RouterLink` preserves native behaviour for `download` anchors.** A link
-  carrying `download` was `preventDefault()`ed and routed, so the file never
-  downloaded and a history entry appeared for a URL that was never a view.
-  Presence is what counts — `download`, `download=""` and `download="a.pdf"`
-  all mean the same thing.
-- **String and reactive-string `style` props are sanitized like object styles.**
-  Object-valued styles ran every property through the CSS sanitizer while the
-  string forms went straight to `setAttribute("style", …)`, making the string
-  form a silent escape hatch (`url()` exfiltration, `expression()`, `behavior:`,
-  `-moz-binding`, `@import`). All whole-style-string sinks — the tag factory,
-  reactive bindings, `html``  `` expressions, prop spreads and `RouterLink` —
-  now share one declaration-list policy.
-
-  Two observable consequences: a `url()` in a string style is now dropped, as it
-  already was in the object form; and string styles are re-serialized
-  canonically by the CSS parser, so `"width:10px"` reads back as `width: 10px`.
-- **The CSS sanitizer understands every escape form, not just hex.** Blocked
-  constructs are matched against literal spellings (`url(`, `expression(`,
-  `@import`), which is only sound once the value has been reduced to what the
-  CSS parser sees. Only hex escapes (`\75 rl(…)`) were decoded, so the other two
-  productions of the escape grammar carried a payload straight through: simple
-  escapes, where `\` before any non-hex character *is* that character
-  (`u\rl(https://…)`), and escaped newlines, where `\` and the newline both
-  vanish. Every browser resolves all three spellings identically; now so does
-  the sanitizer, for object, string and reactive styles alike. Decoding is used
-  only to inspect — the value written to CSS is still the author's original
-  text, so legitimate escapes such as `content: "\201C"` are unchanged.
-- **Server-rendered `style` attributes are sanitized.** `renderToString()`,
-  `renderToStream()` (and so `renderToReadableStream()` /
-  `renderToSuspenseStream()`) and `renderToDocument()` each carried their own
-  inline attribute rules covering URLs only, so `style` was emitted verbatim —
-  including into `<body style="…">` via `bodyAttrs`, and into `<meta>` / `<link>`
-  entries. The same component was filtered in the browser and an exfiltration
-  vector from the server. All three serializers now apply one shared policy,
-  before HTML escaping, and drop the attribute entirely when no declaration
-  survives rather than emitting an empty `style=""`.
-
-
-A correctness and release-hardening pass over the reactive core, keyed lists,
-error reporting and packaging. No public API was removed or renamed; one new
-export and one additive field were added.
-
-### Fixed
-
-- **Derived values no longer notify downstream effects when the derived output
-  stayed equal.** Previously an effect whose only relevant dependency was a
-  `derived()` re-ran whenever an *upstream source* changed, even if the derived
-  recomputed to the same value — so `derived(() => value() % 2)` re-ran its
-  subscribers on every write. `equals` deduplicated notifications but never
-  actually stopped propagation. This applies to the default `Object.is`
-  comparator and to a custom `equals`, through multi-level chains, diamonds and
-  batches.
-- **Keyed `each()` rows no longer display stale data when an item is replaced
-  under the same key.** Replacing `{id: 1, name: "Alice"}` with
-  `{id: 1, name: "Bob"}` now updates the row's contents while keeping the same
-  DOM node. Each row owns reactive `item()` / `index()` cells that
-  reconciliation writes on reuse; `render` still runs exactly once per key, and
-  DOM identity across reorders is unchanged.
-- **`index()` inside a keyed row is now reactive**, so reordering a list updates
-  index-derived content without recreating rows.
-- **Application exceptions thrown from an effect or binding re-run are now
-  reported in production.** They were caught to protect the notification drain
-  and then discarded unless a development flag was set, making a thrown
-  exception indistinguishable from success. They are still contained — one
-  broken subscriber cannot freeze unrelated bindings — but they are no longer
-  silent.
-- **A runaway subscriber no longer discards unrelated pending work.** Tripping
-  the cycle guard now quarantines the offending subscriber for the rest of that
-  update while every other queued subscriber still runs; previously the entire
-  drain was aborted.
-- **Long but finite update cascades are no longer misreported as cycles.** A
-  legitimate cascade deeper than the old 50-run guard was aborted mid-flight,
-  leaving the un-drained tail of the graph holding wrong values. The guard is
-  now 1 000 runs, and `maxDrainIterations` remains the absolute backstop.
-- **`sanitizeUrl()` no longer rewrites legitimate URLs.** The aggressively
-  stripped copy used to detect obfuscated schemes (`java\tscript:`) was being
-  returned to the caller, so `mailto:a@b.com?subject=Hello World` came back as
-  `...HelloWorld`. Detection and output are now separate: dangerous schemes are
-  still rejected, and safe URLs keep their interior characters.
-- **`sanitizeSrcset()` now drops candidates with a malformed descriptor**,
-  closing a case where a whitespace-obfuscated scheme survived because the
-  candidate split left the dangerous half in the descriptor position.
-- **The README's CDN snippet pointed at a file the build does not emit**
-  (`dist/sibu.global.js`); the correct artifact is `dist/cdn.global.js`.
-- **Runtime errors associated with a DOM node were treated as handled merely
-  because an `ErrorBoundary` event had been dispatched.** If no boundary was
-  mounted above the node, the event went nowhere and reporting stopped anyway —
-  so the configured runtime error handler and the `console.error` fallback were
-  both skipped and the failure disappeared. A boundary must now explicitly claim
-  an error (the event is cancelable; claiming means `preventDefault()`), and an
-  unclaimed error falls through to the handler or the console.
-- **Keyed-list render failures bypassed the central runtime error pipeline.**
-  `each()` dispatched its own boundary event and otherwise warned only in
-  development, so a row that failed to render in production with no boundary
-  mounted was silent. The same applied to `Portal`, `lazy()`/`Suspense`,
-  reactive bindings (`bindChildNode`, `bindTextNode`, `bindAttribute`,
-  `bindDynamic`), lifecycle hooks (`onMount`/`onUnmount`) and node disposers —
-  all of which now report through the one pipeline.
-- **Runtime error handlers are now shared between compatible duplicate SibuJS
-  runtime instances.** The handler was module-local, so when a bundler
-  materialized SibuJS twice, a handler installed through one copy was invisible
-  to the shared reactive engine owned by the other, and application telemetry
-  silently never fired.
-- **Reactive-binding failures were reported as phase `"effect"`.** The scheduler
-  invokes effects and DOM bindings through the same call and had no way to tell
-  them apart; bindings now report phase `"binding"` and carry the node they own,
-  which is also what lets an `ErrorBoundary` catch a binding that throws on a
-  later update rather than only during the initial render.
-- **An effect that hit its rerun safety ceiling was not reported when
-  `__SIBU_DEV_WARN__` was `false`.** That flag controls optional developer
-  diagnostics; reaching a safety ceiling means the framework forcibly stopped
-  the user's work, which stays observable regardless.
-- **`ErrorBoundary` fallback state was shared between independent boundaries.**
-  Fallbacks were memoized in a module-global cache keyed by the fallback
-  function plus `error.message`, and the cached entry closed over one specific
-  boundary's `Error` and `retry`. Two boundaries sharing a fallback function —
-  the idiomatic way to use one — whose errors carried the same message therefore
-  aliased each other: a boundary could render another boundary's Error and be
-  handed another boundary's `retry`, and retrying one wiped the other's state.
-  The cache is removed; each boundary owns its error, its retry and its rendered
-  fallback. Sharing one fallback function across an application is safe.
-  (The cache also never memoized any rendering — it cached a closure that was
-  invoked on every call — so nothing observable is lost.)
-- **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
-  runtime error pipeline.** They previously went to `console.warn` only, which
-  no configured runtime error handler could observe.
-- **`ErrorBoundary` `resetKeys` now compare selected VALUES, not dependency
-  invalidation.** A getter is a selector, and re-running because its source was
-  replaced is not a change. `resetKeys: [() => route().pathname]` no longer
-  recovers a failed boundary when an unrelated field of the route object is
-  written; values are compared with `Object.is` against the values captured
-  when the error was caught.
-- **A reset-key change that causes an error no longer immediately resets the
-  newly-failed boundary.** Reset keys are now watched only while the boundary is
-  failed, with the values at the moment of failure as the baseline — so a single
-  update that both moves a reset key and makes the children throw leaves the
-  boundary failed. Only changes observed after the failure trigger recovery.
-  Because the getters are evaluated only during a failed episode, a getter that
-  throws is now reported when the boundary fails rather than at construction.
-- **`ErrorBoundary` `resetKeys` watchers no longer subscribe to the boundary's
-  own error state.** Once a reset key had changed while the boundary was
-  healthy, the watcher became a subscriber of that boundary's error signal, so a
-  later unrelated failure re-ran the watcher and immediately reset itself — the
-  fallback appeared and vanished without any reset key changing. Reset keys are
-  triggers; the current error is only inspected when a trigger fires.
-- **Reporting an error no longer runs inside the failing subscriber's tracking
-  context.** An `ErrorBoundary` listener (or an application handler) that reads
-  a signal while deciding what to do would otherwise have that read attributed
-  to the throwing subscriber — which subscribed the failing binding to the
-  boundary's own error signal, re-ran it, and reported the same failure twice.
-
-### Added
-
-- **`asyncDerived()` now returns a `dispose()` method.** It previously created
-  an internal effect with no way to stop it, so it stayed subscribed to its
-  sources for the lifetime of the page. Disposal unsubscribes, aborts the
-  in-flight run, ignores any promise that settles afterwards, makes `refresh()`
-  a no-op, and is idempotent.
-- **`asyncDerived()` factories receive an `AbortSignal`.** Forward it to `fetch`
-  or any abortable API to cancel work that can no longer affect the result:
-  `asyncDerived(async ({ signal }) => (await fetch(url(), { signal })).json())`.
-  Superseded runs and disposal both abort. The run-id guard is retained because
-  not every async API honours `AbortSignal`. Existing zero-argument factories
-  continue to work unchanged.
-- **The runtime error handling API**, exported from the package root — one place
-  to observe every error the runtime catches and contains:
-  `setRuntimeErrorHandler()`, `getRuntimeErrorHandler()`, `reportError()`, and
-  the `RuntimeErrorHandler`, `RuntimeErrorContext` and `RuntimeErrorPhase`
-  types. A handler receives the original error plus a context naming the phase
-  (`effect`, `binding`, `derived`, `cleanup`, `event`, `async`, `render`,
-  `scheduler`), the failing subscriber's debug name, and the associated node
-  where one exists. Without a handler, errors go to `console.error`.
-  `reportError()` is intended for plugin/integration code that catches an
-  application exception on SibuJS's behalf; ordinary application code should use
-  `ErrorBoundary` or `setRuntimeErrorHandler()`.
-- Browser tests (Playwright) now run in CI: Chromium on pull requests,
-  Chromium + Firefox + WebKit on `main`. They previously existed but ran only
-  when invoked manually, so a real-engine regression could ship with CI green.
-- Benchmarks for computed stabilization — workloads where an upstream write does
-  *not* change the downstream value — reporting downstream effect runs alongside
-  timings, so the run count cannot regress unnoticed.
-
-### Changed
-
-- Errors from a throwing `onCleanup` are now reported through the runtime error
-  pipeline (`console.error` by default) instead of `console.warn`. Behaviour is
-  otherwise unchanged: a throwing cleanup still does not prevent its siblings
-  from running.
-- `maxSubscriberRepeats` now defaults to 1 000 (was 50). Configurable via
-  `setMaxSubscriberRepeats()`.
-
 ---
 
-## [4.0.0-rc.1] — 2026-08-25
+## [4.0.0] — 2026-08-28
 
-First release candidate for 4.0. **The only breaking change is the Node.js
-requirement**; everything else is a fix, a widened type, or new certification
-infrastructure.
+SibuJS 4.0 is a stability release. The public API is the 3.x API: nothing was
+renamed and nothing else was removed. The four breaking changes below are a
+runtime floor, a browser floor, one narrowed overload, and one type field that
+was never implemented.
 
-This entry covers three passes: a release-candidate certification of the packed
-package against real bundlers, browsers and randomized workloads; a stable
-preflight that executed the declared Node range for the first time; and a final
-gap-closure pass before tagging.
+The recurring theme of the fixes is **async ownership**: when asynchronous work
+finishes, who still holds the right to commit it? Navigation, queries, hydration
+bootstrap, island activation, optimistic-list operations, chunk loading and SSR
+Suspense boundaries now answer that with monotonic generations rather than by
+comparing keys, URLs, or values — because returning to the same key or URL is
+*not* the same generation.
 
-The recurring theme of the underlying fixes is **async ownership**: when
-asynchronous work finishes, who still holds the right to commit it? Navigation,
-queries, hydration bootstrap, island activation, and SSR Suspense boundaries now
-answer that with monotonic generations rather than by comparing keys, URLs, or
-values — because returning to the same key or URL is *not* the same generation.
+The second theme is **security as a postcondition**. Attribute writes, URL and
+style sanitization, and `<head>` publication are enforced at the sink that
+performs the write, so a new call site cannot reach the same DOM property by a
+different path and skip the policy on the way.
 
-Beyond the engine floor there are no breaking changes. Everything else is
-additive: new public exports, additive fields on existing result types, and
-several type declarations that became *more* permissive. No existing signature
-was removed or narrowed, and no behaviour that was already correct changed.
-(See each release entry's **Added** section for the exact surface — a running
-count is not maintained here, because it goes stale the moment anything is
-added.)
+The third is **verification**: the package is now certified the way a consumer
+receives it — installed from a real `npm pack` tarball into throwaway projects,
+across four bundlers, three browser engines, and every Node version in the
+declared range.
 
 ### Migration to 4.0
 
-**Upgrade Node before upgrading SibuJS.** Node 18 and Node 20 are not supported
-by 4.0 and are both already end-of-life (April 2025 and April 2026). Run Node
-22.3.0 or newer.
+1. **Upgrade Node before upgrading SibuJS.** Node 18 and Node 20 are not
+   supported by 4.0 and are both already end-of-life (April 2025 and April
+   2026). Run Node 22.3.0 or newer.
+2. **Check your browser targets.** The supported floor is now Chrome/Edge 93,
+   Firefox 92 and Safari 15.4, up from Chrome 80 / Firefox 78 / Safari 14. The
+   old floor was never real — the source already used APIs those versions do not
+   have — so this states what 3.x also required, and now enforces it.
+3. **Replace `loadWasmModule(source, options)` with
+   `loadWasmModuleWithOptions(source, options)`.** Calls passing real imports, or
+   the positional `(source, imports, cacheKey)` form, are unchanged. The compiler
+   finds every affected site.
+4. **Drop `extends` from any `CustomElementOptions`.** It was read nowhere and
+   advertised customized built-in elements that were never implemented.
 
-Nothing else in your application needs to change: no public API was removed or
-renamed, and no existing signature or behaviour that was already correct was
-altered. Several type declarations became *more* permissive (see Fixed below),
-so code that compiled against 3.x still compiles.
+Nothing else in your application needs to change: no other public API was
+removed or renamed, and several type declarations became *more* permissive, so
+code that compiled against 3.x still compiles.
 
-If you cannot move off Node 18/20 yet, stay on 3.4.x. Note that SSR request
-isolation never actually worked there under ESM — see below.
+If you cannot move off Node 18/20 yet, stay on 3.4.x — noting that SSR request
+isolation never actually worked there under ESM. See below.
 
 ### Breaking
 
@@ -874,6 +77,48 @@ isolation never actually worked there under ESM — see below.
   runtime — `runInSSRContext` now emits a one-time warning instead of degrading
   silently. A fully synchronous render was never affected.
 
+- **Browser support floor raised to Chrome/Edge 93, Firefox 92, Safari 15.4.**
+  The declared floor was Chrome 80 / Firefox 78 / Safari 14, and nothing checked
+  it — so the source drifted above the promise and a consumer targeting the
+  declared minimum shipped a bundle that threw on first use. Three APIs are used
+  without a feature guard and are unavailable at the old floor: `Object.hasOwn()`
+  (Chrome 93), `ParentNode.replaceChildren()` (Chrome 86), and the `Error`
+  `cause` option (Chrome 93). `Object.hasOwn` sets the binding constraint and
+  sits inside the reactive core, so polyfilling `replaceChildren` alone would
+  have left the bundle equally broken on Chrome 80–92. The floor now states what
+  the source actually requires.
+
+  This is enforced rather than documented: a compatibility gate parses
+  `browserslist`, scans the source for each API in a baseline table, and fails
+  when an unguarded usage needs a newer engine than the floor declares. Adding
+  such an API now forces a deliberate choice — guard it, or raise the floor and
+  update the support matrix. Everything else modern in the source is already
+  feature-detected and does not constrain the floor.
+
+- **`loadWasmModule()`'s second parameter is now `WebAssembly.Imports` only; the
+  options form is `loadWasmModuleWithOptions()`.** The parameter used to accept
+  `WebAssembly.Imports | LoadWasmOptions` and pick between them at runtime by
+  probing for `allowedOrigins` / `unsafelyAllowAnyOrigin`. That discriminator is
+  unsound in both directions, because both shapes are plain objects with
+  caller-chosen keys: an options bag carrying only `imports`/`cacheKey` was read
+  as an import namespace — so `cacheKey` was silently dropped and the documented
+  keyed-singleton guarantee did not hold — while a WASM module namespace legally
+  *named* `allowedOrigins` would have been read as options. No structural test
+  can separate them, so the union was removed rather than re-guessed.
+
+  Migration is mechanical and the compiler finds every site: a call passing an
+  options object becomes `loadWasmModuleWithOptions(source, options)`. Calls
+  passing real imports, or using the positional `(source, imports, cacheKey)`
+  form, are unchanged. `wasm()` uses the options API internally, so its own
+  surface is unaffected.
+
+- **`CustomElementOptions.extends` is removed.** The option was public and read
+  nowhere, so it advertised customized built-in elements that were never
+  implemented. Real support needs the constructor to derive from the concrete
+  element class, `customElements.define(name, ctor, { extends })`, and `is=""`
+  at every call site — and Safari has never shipped them. Removed rather than
+  faked.
+
 ### Added
 
 - **`replaceChildrenSafely(parent, ...next)`** — replaces a node's children,
@@ -886,16 +131,83 @@ isolation never actually worked there under ESM — see below.
   `next` are never disposed, including when they currently sit *inside* the
   outgoing subtree.
 - **`reason` on failed navigation results** — `NavigationResult` and
-  `NavigationFailure` now carry an optional discriminator: `"guard"`,
-  `"superseded"`, `"router-destroyed"`, `"redirect-loop"`, `"unsafe-target"`,
-  `"duplicate"`, or `"error"`. Previously a guard rejection and a navigation
+  `NavigationFailure` now carry an optional `reason` discriminator, typed as the
+  newly exported `NavigationFailureReason`: `"guard"`, `"superseded"`,
+  `"router-destroyed"`, `"redirect-loop"`, `"unsafe-target"`, `"duplicate"`, or
+  `"error"`. Previously a guard rejection and a navigation
   superseded by a newer one were both `{ success: false, type: "aborted" }`, so
   applications could not tell "you lack access to this page" from "you clicked a
   newer link" — forcing a choice between spurious error messages during rapid
   navigation and swallowing genuine authorization failures. Existing `type`
   values are unchanged, so code branching on `type` is unaffected.
 
+- **`asyncDerived()` now returns a `dispose()` method.** It previously created
+  an internal effect with no way to stop it, so it stayed subscribed to its
+  sources for the lifetime of the page. Disposal unsubscribes, aborts the
+  in-flight run, ignores any promise that settles afterwards, makes `refresh()`
+  a no-op, and is idempotent.
+- **`asyncDerived()` factories receive an `AbortSignal`** through the newly
+  exported `AsyncDerivedContext`. Forward it to `fetch` or any abortable API to
+  cancel work that can no longer affect the result:
+  `asyncDerived(async ({ signal }) => (await fetch(url(), { signal })).json())`.
+  Superseded runs and disposal both abort. The run-id guard is retained because
+  not every async API honours `AbortSignal`. Existing zero-argument factories
+  continue to work unchanged.
+- **The runtime error handling API**, exported from the package root — one place
+  to observe every error the runtime catches and contains:
+  `setRuntimeErrorHandler()`, `getRuntimeErrorHandler()`, `reportError()`, and
+  the `RuntimeErrorHandler`, `RuntimeErrorContext` and `RuntimeErrorPhase`
+  types. A handler receives the original error plus a context naming the phase
+  (`effect`, `binding`, `derived`, `cleanup`, `event`, `async`, `render`,
+  `scheduler`), the failing subscriber's debug name, and the associated node
+  where one exists. Without a handler, errors go to `console.error`.
+  `reportError()` is intended for plugin/integration code that catches an
+  application exception on SibuJS's behalf; ordinary application code should use
+  `ErrorBoundary` or `setRuntimeErrorHandler()`.
+- Browser tests (Playwright) now run in CI: Chromium on pull requests,
+  Chromium + Firefox + WebKit on `main`. They previously existed but ran only
+  when invoked manually, so a real-engine regression could ship with CI green.
+- Benchmarks for computed stabilization — workloads where an upstream write does
+  *not* change the downstream value — reporting downstream effect runs alongside
+  timings, so the run count cannot regress unnoticed.
+
+### Changed
+
+- **`@types/node` aligned to `^22.20.1`** (was `^25.5.0`) so the type definitions
+  match the supported runtime floor. Typing against Node 25 while claiming Node
+  22.3 lets TypeScript quietly accept an API the minimum runtime does not have.
+  The source uses a small Node surface — `node:async_hooks`, `node:fs`,
+  `node:path`, and `process.env` / `versions` / `getBuiltinModule` / `cwd` — and
+  compiles clean against Node 22 definitions. Development tooling is unaffected;
+  it runs on whatever Node the contributor has.
+- **`package-lock.json` is now committed.** A library's lockfile does not affect
+  consumers' dependency resolution, but without one CI could not use `npm ci` and
+  silently re-resolved transitive dev dependencies on every run. It is not
+  included in the published tarball.
+- **Benchmark baseline re-recorded** with its environment captured alongside it
+  (`bench-baseline.meta.json`: commit, Node, npm, OS, CPU, RAM, jsdom version).
+  `npm run bench:check` remains **informational only** — on a shared host,
+  consecutive runs against a freshly recorded baseline flag different benchmarks
+  at the 20% threshold, so it is noise rather than a usable gate until it is
+  re-recorded on the machine that will enforce it.
+
+- **A reactive attribute value of `null`/`undefined` now removes the attribute**
+  instead of writing the literal text `"null"`. `bindAttribute`/`bindAttrs`
+  stringified the value before writing, so a getter returning null produced
+  `title="null"` — visible to users as a tooltip reading "null". Absence is the
+  only sensible reading, and it is what the tag factory and `enhance()`'s
+  `attr()` already did. A getter returning the *string* `"null"` still writes
+  `"null"`.
+
+- Errors from a throwing `onCleanup` are now reported through the runtime error
+  pipeline (`console.error` by default) instead of `console.warn`. Behaviour is
+  otherwise unchanged: a throwing cleanup still does not prevent its siblings
+  from running.
+- `maxSubscriberRepeats` now defaults to 1 000 (was 50). Configurable via
+  `setMaxSubscriberRepeats()`.
+
 ### Fixed
+
 #### Route component loading
 
 - **Route component factories now run once per instance, not twice.** The
@@ -1280,26 +592,731 @@ suite for the first time, which went from 130 errors to 0.
   `SelectProps.value` is `reactive<string>`, which needs wider tag-prop-type
   changes.
 
+#### Internationalization
 
-### Changed
+- **The active i18n locale is request-scoped during SSR.** It lived in a
+  process-global signal, which is exactly right in a browser — one page, one
+  active locale, shared across duplicated bundle copies — and exactly wrong on a
+  server, where two overlapping renders overwrote each other: a request that
+  paused across an `await` could resume and render the locale a *different*
+  request had selected in the meantime. The locale now lives in the existing
+  per-request `AsyncLocalStorage` store (no second one is created), so
+  `setLocale()`, `getLocale()`, `t()`, `Trans()` and `hasTranslation()` all
+  resolve the locale belonging to the current request, across every `await` and
+  through nested contexts. An SSR request never writes the application default,
+  so a success, a synchronous throw and an asynchronous rejection all leave the
+  client locale untouched.
 
-- **`@types/node` aligned to `^22.20.1`** (was `^25.5.0`) so the type definitions
-  match the supported runtime floor. Typing against Node 25 while claiming Node
-  22.3 lets TypeScript quietly accept an API the minimum runtime does not have.
-  The source uses a small Node surface — `node:async_hooks`, `node:fs`,
-  `node:path`, and `process.env` / `versions` / `getBuiltinModule` / `cwd` — and
-  compiles clean against Node 22 definitions. Development tooling is unaffected;
-  it runs on whatever Node the contributor has.
-- **`package-lock.json` is now committed.** A library's lockfile does not affect
-  consumers' dependency resolution, but without one CI could not use `npm ci` and
-  silently re-resolved transitive dev dependencies on every run. It is not
-  included in the published tarball.
-- **Benchmark baseline re-recorded** with its environment captured alongside it
-  (`bench-baseline.meta.json`: commit, Node, npm, OS, CPU, RAM, jsdom version).
-  `npm run bench:check` remains **informational only** — on a shared host,
-  consecutive runs against a freshly recorded baseline flag different benchmarks
-  at the 20% threshold, so it is noise rather than a usable gate until it is
-  re-recorded on the machine that will enforce it.
+  Outside a request scope nothing changes: `setLocale()` updates the client
+  locale reactively, duplicated bundle copies keep sharing it, and applications
+  need no explicit i18n object. **Translation dictionaries remain
+  application-global** — static data read identically by every request, so
+  copying them per request would duplicate every message for no benefit;
+  `registerTranslations()` merges and is visible everywhere, including when
+  called from inside a request. A request that never calls `setLocale()` follows
+  the application default, preserving the established `"en"` behaviour. On
+  runtimes without `AsyncLocalStorage` the documented limitation is unchanged
+  and now applies to the locale on exactly the same terms as the SSR flag.
+
+- **i18n locale names and translation keys are treated as literal strings.**
+  The locale registry and the translation dictionaries are objects, and lookups
+  reached into them with bracket access and `in`, both of which walk the
+  prototype chain. So every locale reported translations nobody registered —
+  `hasTranslation("toString")` was `true` and `t("toString")` returned
+  `Object.prototype.toString`, a function from a call declared to return a
+  string — and the locale name `"__proto__"` was not a locale at all:
+  `locales[locale] = dictionary` invoked the inherited `__proto__` setter, so the
+  locale never appeared in `getAvailableLocales()` while every key of its
+  dictionary read back as a locale of its own.
+
+  Lookups now consult own properties only and publication goes through
+  `Object.defineProperty`, so `__proto__`, `constructor`, `toString`,
+  `hasOwnProperty` and the rest behave like any other name as both a locale and
+  a translation key, registry prototypes are never modified, and an inherited
+  property is never a translation. The guard is on the operations rather than on
+  the initialiser, because the i18n singleton is deliberately shared across
+  duplicated bundle copies: a copy that finds a registry created by an older one
+  is protected on exactly the same terms.
+
+  **A registered empty string is now preserved.** `t()` fell back to the key for
+  any falsy message, so `registerTranslations(locale, { note: "" })` rendered
+  `"note"` instead of a blank string; only a genuinely unregistered key falls
+  back now, and `hasTranslation()` agrees with `t()` about which keys those are.
+  Reentrant registration, request-scoped locale ownership, client locale
+  reactivity and the application-global ownership of dictionaries are unchanged.
+
+#### Optimistic UI, chunk loading, and device APIs
+
+- **`optimisticList()` rows survive being temporarily hidden.** The row ledger
+  held only the rows currently on screen, so a pending `remove()` took its rows
+  *out* of it and carried copies in its own rollback list — one logical row with
+  two representations. An operation that owned the row's value could then no
+  longer find it: a confirmed `add` value was written nowhere and lost when the
+  remove failed (`[1, 2]` instead of `[1, 20]`), and a failed `update` could not
+  roll back, so the failed remove later reinstated the stale optimistic patch.
+  Identity and visibility are now separate: the authoritative record lives as
+  long as any operation may settle against it, so `add`/`update` land while the
+  row is hidden, and a failed `remove` reinstates the row carrying whatever value
+  it holds now. Records are retired by reference counting as their last holder
+  settles, so nothing accumulates.
+
+  Each operation runs in three ordered phases. PREPARE executes all
+  user-controlled work — predicates, and the patch spread that runs a patch's
+  property getters — and mutates nothing, so a throw there leaves the list
+  untouched and idle rather than leaking `pending()` as true. COMMIT applies the
+  change with no user code running and recomputes structural changes from the
+  live list. PUBLISH writes `pending` and `items` in one batch, so a subscriber
+  never sees one without the other and the operation is fully committed before
+  any reentrant call it wakes can run. A reactive subscriber may therefore start
+  an operation from inside another one: the outer operation can no longer erase
+  the row the subscriber added, and an older update can no longer reclaim
+  ownership of a row a newer reentrant update has taken.
+
+  Broad operations are no longer quadratic. Row visibility is a flag rather than
+  a scan of the visible array, and bulk restoration merges two already-sorted
+  runs instead of reinserting rows one at a time. For `n` visible and `k`
+  affected rows: membership O(1), reference release O(k), broad update O(n + k),
+  bulk restoration O(n + k), publication O(n). A 20,000-row failed remove went
+  from 8,300 ms to 13 ms on the development machine.
+
+- **A failed `remove` restores rows in the correct relative order.** Rollback
+  reinserted rows at their old ABSOLUTE index, so a concurrent successful removal
+  of an earlier row displaced them — removing `B`,`D` from `["A","B","C","D"]`
+  and then successfully removing `A` restored `["C","B","D"]`. Rows now carry a
+  monotonic ordering key and are reinserted by ordered insert, so they return to
+  their place relative to whatever is actually still present.
+
+- **Chunk ownership is installed before any user callback runs.** `onLoadStart`
+  fired before the pending entry existed, leaving a window in which the operation
+  had publicly started but owned nothing: `invalidate(id)` or `clear()` called
+  from that callback deleted a key with no entry and the load published anyway,
+  and a reentrant same-key `load()` found no owner and started a second loader —
+  which fired `onLoadStart` again, recursing 1889 deep in the reproduction — with
+  the outer call then overwriting whatever ownership the nested ones established.
+  The entry now goes in first, backed by a deferred the loader settles, so
+  invalidating from `onLoadStart` really supersedes the load and a reentrant call
+  shares it.
+
+- **`wakeLock()` never reports active for a released sentinel.** The sentinel was
+  installed and `active(true)` published without checking `released`, so a
+  sentinel the platform had already released was reported as a held lock — and,
+  worse, retained, which made `request()` treat the controller as already holding
+  one and refuse to acquire a live replacement. Acquisition now checks `released`,
+  attaches the listener, re-checks (a release in that gap fires with nobody
+  subscribed), and only then publishes. A listener registration failure releases
+  the sentinel rather than holding a handle it cannot track.
+
+- **`optimisticList()` operations own rows, not the whole array.** Rollback used
+  a single global version counter and a captured array snapshot, which is wrong
+  in both directions: skipping the rollback (because a newer operation existed)
+  left a failed operation's optimistic item on screen permanently — `[1,2,3]`,
+  `add(4)`, `add(5)`, A fails produced `[1,2,3,4,5]` — while performing it
+  discarded every change newer operations had made to rows the failing one never
+  touched. The list is now a ledger of rows with stable ids and per-row operation
+  ownership, so disjoint operations settle independently, an operation can only
+  undo its own mutation, and where two touch the same row the later one wins.
+  Row identity no longer falls back to `Object.is`, so duplicate primitives and
+  duplicate object references address the correct occurrence — `[1]` plus an
+  optimistic `add(1)` confirmed as `10` now yields `[1, 10]`, not `[10, 1]`.
+  `items()` projects values only; no id or wrapper is observable.
+
+- **Chunk invalidation is a publication barrier.** `invalidate(id)` and `clear()`
+  left the pending map untouched, so an in-flight load could write a discarded
+  value back into the cache after the fact, delete a newer pending entry, or be
+  adopted by a post-invalidation `load()` that then never called its own loader.
+  The pending entry is now the load's claim on the key: removing it revokes
+  ownership, and a load publishes only if it still owns the key. Superseded work
+  still settles for its original caller — nothing is cancelled, since the loader
+  API takes no abort signal. `preload()` markers follow the same identity rule.
+
+- **Chunk lifecycle callbacks can no longer change what a load did.** A throwing
+  `onLoadEnd` turned a cached success into a rejection and then delivered its own
+  exception to `onLoadError`, leaving the caller told "failed" while the cache
+  held the value; a throwing `onLoadStart` stopped the load from starting at all.
+  Callbacks now run contained, and their failures are reported through the
+  runtime error pipeline instead of altering the operation.
+
+- **`wakeLock()` cannot orphan a sentinel.** Overlapping requests acquired two
+  native sentinels and kept only the last reference, leaving the other held with
+  no way to release it; `release()` did not supersede a request already in
+  flight, so a lock could reactivate after being given up; and a stale sentinel's
+  `release` event cleared the state of the current one. Requests now share one
+  in-flight acquisition, `release()`/`dispose()` revoke ownership before awaiting
+  anything, and any sentinel arriving without ownership is released immediately.
+  `dispose()` is idempotent and publishes nothing after disposal. Failed
+  request/release operations are reported through the runtime error pipeline
+  rather than `console.warn`, so application error handlers can observe them.
+
+- **`viewTransition().isTransitioning()` describes the controller, not the last
+  run to finish.** Two overlapping `start()` calls raced over one boolean, so the
+  flag went false while an earlier transition was still running. It now stays
+  true while any run is in flight and becomes false exactly when the last one
+  settles, in any order; every caller keeps its own resolution or rejection.
+
+#### Document head and attribute policy
+
+- **URL-attribute classification in `Head()` is case-insensitive.** `head.ts`
+  carried a private `new Set(["href", "src"])` and tested it against the
+  AUTHORED attribute spelling. HTML attribute names are ASCII case-insensitive,
+  so the browser reads `SRC` as `src` — but that lookup did not, and
+  `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
+  sanitization completely and appended a `<script>` a real browser fetched and
+  executed. Both SSR paths, which lower-cased first, refused the identical
+  value. Every classification — URL sinks, event handlers, `srcdoc`, duplicate
+  detection — now runs on one canonical, deliberately ASCII-only fold
+  (`canonicalAttrName`), because `String.prototype.toLowerCase` maps some
+  non-ASCII code points *into* ASCII letters and the HTML parser does not.
+
+- **Router SSR no longer carries its own URL sanitizer.** `sanitizeUrlLocal`
+  described itself as mirroring `utils/sanitize.ts` but was a BLOCKLIST of four
+  schemes where the canonical sanitizer is an ALLOWLIST, so router SSR emitted
+  `file:`, `about:`, `chrome:` and every custom scheme that `Head()` and
+  `renderToDocument` both refused. It is deleted; all three paths call the
+  canonical `sanitizeAttributeString`.
+
+- **A refused URL attribute is OMITTED, not published as `href=""`.** An empty
+  URL attribute resolves against the current document — `<link href="">`
+  references the page itself and `<script src="">` is a request, not a no-op —
+  so an empty substitute is a different document from an absent attribute. The
+  sanitization contract now distinguishes "accepted, possibly empty" from
+  "rejected"; an empty string remains a legitimate value for inert text
+  attributes like `content` and `id`. `setCanonical()` and `Head({ base })`
+  follow the same rule, and a rejected update clears any previously accepted
+  value rather than leaving a stale one standing.
+
+- **`srcdoc` is refused by `Head()` too.** The client preserved it while both
+  servers dropped it. The browser parses `srcdoc` as a nested HTML *document*,
+  so escaping is the wrong layer, and the rule now applies identically on all
+  three paths in every casing.
+
+- **An entry with no effective attributes is dropped everywhere.** The client
+  published an attribute-less `<meta>` where both servers emitted nothing. One
+  shared answer, decided at the shared planning layer.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` share the
+  policy itself, not merely a policy function.** The pipeline used to take the
+  name filter and value sanitizer as parameters, so each target supplied its
+  own and the three diverged in four separate ways. Only value resolution — the
+  client has reactive getters, the servers do not — is parameterized now. The
+  planned attribute map is keyed by canonical names, so client DOM and server
+  HTML are exactly comparable; a table-driven parity suite asserts emitted
+  status, attribute count, names, and values across all three.
+
+#### Micro-apps, remote components, and infinite scroll
+
+- **Removing an owned tree now disposes it.** `createMicroApp()` cleared its
+  container with a bare `replaceChildren()`, which detaches nodes without
+  running SibuJS teardown — so every effect, binding and listener inside the
+  outgoing tree survived as an unreachable zombie firing against detached DOM,
+  one leaked component tree per remount. Micro-app mount/unmount, remote
+  component swaps, custom-element teardown, `DynamicComponent`, `DOMPool` reuse
+  and the testing `render()` helpers all route through the disposal-aware
+  replacement primitive now. Re-mounting a node that is already in the container
+  keeps it alive rather than disposing the tree being reinstalled.
+- **A remote component no longer instantiates after its owner is gone.**
+  `defineRemoteComponent()`'s loader is an unbounded async gap — a route can
+  change or a list row can be removed long before the module arrives — and the
+  resolution built DOM and registered disposers inside a container nobody would
+  ever dispose again. The resolved module is still cached after disposal, which
+  is correct and deliberate: it is shared, immutable and expensive to fetch, so
+  the next instance renders instantly. Only the instantiation is owner-scoped.
+  The rejection path is guarded too: a disposed container no longer receives an
+  error fallback.
+- **`infiniteScroll()` no longer leaks an unhandled rejection.** The
+  `IntersectionObserver` callback started an async `loadMore()` and dropped the
+  promise, so a rejecting `onLoadMore` became an unhandled rejection — which
+  crashes a Node SSR process and fires `window.onunhandledrejection` in a
+  browser, for what is only a failed page of data. Failures are now contained
+  and reported through the central runtime error pipeline (phase `"async"`),
+  `loading` is always cleared, and a load settling after `dispose()` mutates
+  nothing. `dispose()` clears `loading` itself rather than leaving it to a
+  completion that is no longer permitted to write.
+
+#### Browser and platform integrations
+
+- **`wasm(url)` can express the origin policy its loader requires.**
+  `loadWasmModule()` demands `allowedOrigins` or an explicit
+  `unsafelyAllowAnyOrigin` opt-in for URL sources, and the public `wasm()`
+  wrapper had no way to supply either — so every URL load was refused and the
+  convenience API was unusable for its primary documented use case. `WasmConfig`
+  now extends the loader's option type rather than copying a subset, so the two
+  cannot drift again.
+- **A keyed WASM load is genuinely one instance.** The cache stored only
+  results, so two callers that both missed it before either finished each ran a
+  full instantiation — and the documented singleton became two objects with two
+  separate linear memories, one of them detached from every other holder.
+  Concurrent loads now share an in-flight promise per key, and a failed load no
+  longer poisons the key against a later retry.
+- **`offlineStore` conflict strategies actually differ.** `conflictStrategy` was
+  part of the exported adapter type and read nowhere; every adapter silently got
+  client-wins. `client-wins` (still the default) discards a pulled record for any
+  key with an unpushed local edit; `server-wins` lets the remote value win while
+  *retaining* the queued change, since dropping it would turn a display-precedence
+  choice into silent data loss; `manual` defers to a new `resolveConflict`
+  resolver, and without one degrades to client-wins with a warning rather than
+  guessing with unsynced data. The strategy union and the resolver's argument are
+  now exported as `ConflictStrategy` and `SyncConflict`.
+- **One `offlineStore` sync uses one adapter.** `attach()` landing mid-sync
+  could split a single transaction across two backends — pushing through the old
+  adapter and pulling through the new one, with the new one's conflict strategy
+  applied to the old one's push results. The adapter is snapshotted for the whole
+  operation; the next sync picks up the new one.
+- **`serviceWorker()` no longer throws under SSR.** `"serviceWorker" in
+  navigator` is a `TypeError` where `navigator` does not exist. The helper now
+  reports an inert unsupported state instead.
+- **A failed `unregister()` no longer detaches the service-worker wrapper.**
+  `registration.unregister()` returns `false` when the browser declines — the
+  worker is still installed and still controlling pages — but that was treated
+  as teardown, permanently blinding the wrapper to a live worker: no update
+  tracking, no registration, no way back. A failed unregister now changes
+  nothing.
+- **`unregister()` before the registration resolves no longer orphans it.** The
+  call saw a null registration, reported "nothing to do", and the worker that
+  landed a moment later stayed registered in the browser while SibuJS reported
+  nothing at all. The request is now remembered and applied to the arriving
+  registration.
+- **`document.title` and `<base>` use owner-aware restoration.** Both are global
+  singletons, and both were handled as if they were ordinary independently-owned
+  tags. `Head()` never restored the title on dispose, so a page kept a title
+  belonging to an unmounted component; `title()` kept a per-instance snapshot,
+  which restores a stale value whenever three owners overlap and the middle one
+  is disposed first — an everyday reordering, not a corner case. `Head` also
+  deleted whatever `<base>` it found (typically the server-rendered one) and put
+  nothing back, permanently changing how every relative URL on the page resolved.
+
+  Both resources now use one shared owner stack: writes come from the current
+  top, releasing a non-top owner changes nothing visible, and emptying the stack
+  restores what was there before the first owner arrived. `Head({ title })` and
+  `title()` contend for the same stack rather than two independent ones.
+- **Scoped styles now cover descendants created after render.**
+  `withScopedStyle()` stamped the scope attribute onto every element that existed
+  at render time, which makes the contract "elements present at render time"
+  rather than "this component's subtree": anything a signal, an `each()` row or a
+  conditional inserted later was unmarked and rendered unstyled. Selectors are
+  now anchored at the component root, so the DOM relationship does the matching
+  and future descendants are included automatically. Pseudo-classes,
+  pseudo-elements, combinators, media queries and keyframes are preserved, and
+  the root remains selectable by its own rules.
+- **`scrollRestoration({ mode: "auto" })` actually restores.** Auto mode
+  attached a `popstate` listener that only ever *saved* — the documented
+  save/restore behaviour was half implemented, and going Back never returned the
+  viewport anywhere. It now tags history entries with their key, saves the entry
+  being left, and restores the destination's position. A same-key pop is not
+  treated as a departure, which would otherwise overwrite the stored position
+  with the current one and destroy the value about to be restored. An unknown or
+  absent destination key is a safe no-op. A `getKey` option integrates the
+  feature with a router's own history identity.
+- **Scoped-style selector lists are parsed, not regex-split.** The rewriter
+  split selector preludes on every comma, but a comma is not a separator inside
+  a functional pseudo-class (`:is(.a, .b)`), an attribute value
+  (`[data-v=","]`), or a string. Those selectors were torn in half and each
+  fragment scoped independently, producing CSS the engine either rejected or
+  accepted with a different meaning — `:is(.a, .b)` became
+  `[s] :is(.a, :is(.a[s],[s] .b), .b)[s]`, which selects neither arm. Splitting
+  is now done by a scanner that tracks paren, bracket, quote, comment and escape
+  state, and the stylesheet walk uses the same scanner to find rule boundaries,
+  so `@media` / `@supports` / `@layer` recurse while `@keyframes` bodies are left
+  alone without special-casing `from`/`to`/percentage stops.
+- **One `unregister()` issues at most one native unregister.** On the pending
+  path there were two callers of `registration.unregister()`: the arrival
+  handler and the resumed public call. When the browser refused the first, the
+  arrival handler correctly re-adopted the still-live registration and the
+  resumed call then fired a second attempt at it. Unregistration is now a single
+  owned in-flight operation with exactly one call site — concurrent callers join
+  it, and the arrival handler hands the registration over instead of removing it
+  itself. A registration that lands while a removal is outstanding is no longer
+  published at all, so a worker about to be removed never transiently reports as
+  ready.
+- **`bindAttrs()` and `bindData()` types now describe the runtime.** Both
+  excluded `null`/`undefined` while the runtime treats them as removal, so the
+  documented behaviour was unreachable from type-checked code and the ordinary
+  `() => user?.label` getter was a compile error. A shared `AttributeValue` /
+
+#### Queries, mutations, and cancellation
+
+  `AttributeSource` pair is now exported and used by both.
+- **`clipboard()` and `permissions()` ignore completions after disposal.** A
+  clipboard write can sit on a permission prompt indefinitely; one resolving
+  after `dispose()` set state and armed a two-second timer against a torn-down
+  subtree. `permissions()` guarded its success path but not its failure path, so
+  a query rejecting after teardown still flipped a disposed controller to
+  `"unsupported"`.
+
+- **Retry cancellation now wins immediately.** A request that rejected *after*
+  its `AbortSignal` had already aborted was still treated as a retryable
+  failure: `shouldRetry` was consulted, `onRetry` fired, and the backoff was
+  scheduled. The backoff itself then attached its `abort` listener without
+  first checking `signal.aborted` — and a signal does not replay a past `abort`
+  event — so cancellation was delayed by the entire delay, up to `maxDelay`.
+  This affected every primitive built on `withRetry()` (`resource`, `query`,
+  `infiniteQuery`, `mutation` and data loaders).
+
+  Cancellation is now judged on both halves of the evidence: the signal, and the
+  rejected value. An operation cancelled by a signal `withRetry()` does not hold
+  — an inner `fetch` with its own controller, a timeout wrapper, a caller that
+  composed its own abort — rejects with an `AbortError` while our signal reads
+  as healthy, and was retried like any other failure. Such a rejection now
+  bypasses `shouldRetry`, `onRetry` and the backoff, and propagates unchanged so
+  the caller keeps their own error instance.
+- **Data primitives now share one `AbortError` classifier.** `resource` and
+  `mutation` recognised only `DOMException`, while `query` and `infiniteQuery`
+  accepted any object named `AbortError`. A fetcher rejecting with an ordinary
+  `Error` named `AbortError` was therefore silently ignored by two primitives
+  and stored as application error state by the other two. Classification is by
+  `name`, never by message: `new Error("AbortError")` remains a real failure.
+
+  Classification also runs *before* normalization now. `mutation()` wrapped the
+  thrown value in `new Error(String(err))` first, which keeps a message and
+  discards everything else — `name` included. A cancellation carried on a plain
+  object became `Error("[object Object]")` named `"Error"`, so the abort
+  surfaced as a mutation failure: `error()` set, `onError` called, and a console
+  warning from the fire-and-forget `mutate()` path. `mutateAsync()` rejects with
+  the original `AbortError` value; ordinary failures are still normalized to an
+  `Error`.
+- **A cancelled mutation no longer stays permanently loading.** `mutation()`
+  set `loading`/`status` on entry, and the `AbortError` branch rethrew before
+  any terminal transition ran. That was invisible for the cancellations SibuJS
+  itself causes — `reset()` and a superseding `mutate()` write the state on
+  their way past — but when the *current* run's own `mutationFn` rejected an
+  `AbortError`, nothing else was coming: the promise rejected and `loading()`
+  stayed `true` forever, so a spinner bound to it never stopped.
+
+  Cleanup is run-owned, not blanket: only the run that still holds the state may
+  repair it, so a late superseded run cannot clear the newer run's loading
+  state. A cancelled current run restores the last state the mutation actually
+  settled into — `idle`, `success` or `error` — rather than forcing `idle`,
+  because cancelling produced no verdict of its own: `success(data)` stays
+  `success(data)` and `error(E)` stays `error(E)`. The baseline is tracked
+  separately from the visible state, so a mutation started while another is
+  still loading cannot adopt `"loading"` as its restore point and end up
+  finished but in no terminal state at all. Cancellation still calls neither
+  `onError` nor `onSettled`.
+
+  `onMutate` now states its contract explicitly: ordinary exceptions fail the
+  mutation, an `AbortError` is cancellation — the same rule `mutationFn`
+  follows, so where a cancellation is raised does not change what it means.
+
+#### Island hydration, links, and style sanitization
+
+- **Progressive island hydration is idempotent.** `hydrateIslands()` and
+  `hydrateProgressively()` selected candidates without consulting
+  `data-sibu-hydrated`, and a hydrated island deliberately keeps its
+  `data-sibu-island` marker — so a second pass over an overlapping root
+  re-ran the factory and replaced the live subtree, destroying its state and
+  listeners. Both now skip already-hydrated islands, at candidate discovery and
+  again when an asynchronous trigger actually fires.
+- **`RouterLink` preserves native behaviour for `download` anchors.** A link
+  carrying `download` was `preventDefault()`ed and routed, so the file never
+  downloaded and a history entry appeared for a URL that was never a view.
+  Presence is what counts — `download`, `download=""` and `download="a.pdf"`
+  all mean the same thing.
+- **String and reactive-string `style` props are sanitized like object styles.**
+  Object-valued styles ran every property through the CSS sanitizer while the
+  string forms went straight to `setAttribute("style", …)`, making the string
+  form a silent escape hatch (`url()` exfiltration, `expression()`, `behavior:`,
+  `-moz-binding`, `@import`). All whole-style-string sinks — the tag factory,
+  reactive bindings, `html``  `` expressions, prop spreads and `RouterLink` —
+  now share one declaration-list policy.
+
+  Two observable consequences: a `url()` in a string style is now dropped, as it
+  already was in the object form; and string styles are re-serialized
+  canonically by the CSS parser, so `"width:10px"` reads back as `width: 10px`.
+- **The CSS sanitizer understands every escape form, not just hex.** Blocked
+  constructs are matched against literal spellings (`url(`, `expression(`,
+  `@import`), which is only sound once the value has been reduced to what the
+  CSS parser sees. Only hex escapes (`\75 rl(…)`) were decoded, so the other two
+  productions of the escape grammar carried a payload straight through: simple
+  escapes, where `\` before any non-hex character *is* that character
+  (`u\rl(https://…)`), and escaped newlines, where `\` and the newline both
+  vanish. Every browser resolves all three spellings identically; now so does
+  the sanitizer, for object, string and reactive styles alike. Decoding is used
+  only to inspect — the value written to CSS is still the author's original
+  text, so legitimate escapes such as `content: "\201C"` are unchanged.
+- **Server-rendered `style` attributes are sanitized.** `renderToString()`,
+  `renderToStream()` (and so `renderToReadableStream()` /
+  `renderToSuspenseStream()`) and `renderToDocument()` each carried their own
+  inline attribute rules covering URLs only, so `style` was emitted verbatim —
+  including into `<body style="…">` via `bodyAttrs`, and into `<meta>` / `<link>`
+  entries. The same component was filtered in the browser and an exfiltration
+  vector from the server. All three serializers now apply one shared policy,
+  before HTML escaping, and drop the attribute entirely when no declaration
+  survives rather than emitting an empty `style=""`.
+
+A correctness and release-hardening pass over the reactive core, keyed lists,
+error reporting and packaging. No public API was removed or renamed; one new
+export and one additive field were added.
+
+#### Reactive core
+
+- **Derived values no longer notify downstream effects when the derived output
+  stayed equal.** Previously an effect whose only relevant dependency was a
+  `derived()` re-ran whenever an *upstream source* changed, even if the derived
+  recomputed to the same value — so `derived(() => value() % 2)` re-ran its
+  subscribers on every write. `equals` deduplicated notifications but never
+  actually stopped propagation. This applies to the default `Object.is`
+  comparator and to a custom `equals`, through multi-level chains, diamonds and
+  batches.
+- **Keyed `each()` rows no longer display stale data when an item is replaced
+  under the same key.** Replacing `{id: 1, name: "Alice"}` with
+  `{id: 1, name: "Bob"}` now updates the row's contents while keeping the same
+  DOM node. Each row owns reactive `item()` / `index()` cells that
+  reconciliation writes on reuse; `render` still runs exactly once per key, and
+  DOM identity across reorders is unchanged.
+- **`index()` inside a keyed row is now reactive**, so reordering a list updates
+  index-derived content without recreating rows.
+- **Application exceptions thrown from an effect or binding re-run are now
+  reported in production.** They were caught to protect the notification drain
+  and then discarded unless a development flag was set, making a thrown
+  exception indistinguishable from success. They are still contained — one
+  broken subscriber cannot freeze unrelated bindings — but they are no longer
+  silent.
+- **A runaway subscriber no longer discards unrelated pending work.** Tripping
+  the cycle guard now quarantines the offending subscriber for the rest of that
+  update while every other queued subscriber still runs; previously the entire
+  drain was aborted.
+- **Long but finite update cascades are no longer misreported as cycles.** A
+  legitimate cascade deeper than the old 50-run guard was aborted mid-flight,
+  leaving the un-drained tail of the graph holding wrong values. The guard is
+  now 1 000 runs, and `maxDrainIterations` remains the absolute backstop.
+
+#### URL and srcset sanitization
+
+- **`sanitizeUrl()` no longer rewrites legitimate URLs.** The aggressively
+  stripped copy used to detect obfuscated schemes (`java\tscript:`) was being
+  returned to the caller, so `mailto:a@b.com?subject=Hello World` came back as
+  `...HelloWorld`. Detection and output are now separate: dangerous schemes are
+  still rejected, and safe URLs keep their interior characters.
+- **`sanitizeSrcset()` now drops candidates with a malformed descriptor**,
+  closing a case where a whitespace-obfuscated scheme survived because the
+  candidate split left the dangerous half in the descriptor position.
+- **The README's CDN snippet pointed at a file the build does not emit**
+  (`dist/sibu.global.js`); the correct artifact is `dist/cdn.global.js`.
+
+#### Runtime error handling and ErrorBoundary
+
+- **Runtime errors associated with a DOM node were treated as handled merely
+  because an `ErrorBoundary` event had been dispatched.** If no boundary was
+  mounted above the node, the event went nowhere and reporting stopped anyway —
+  so the configured runtime error handler and the `console.error` fallback were
+  both skipped and the failure disappeared. A boundary must now explicitly claim
+  an error (the event is cancelable; claiming means `preventDefault()`), and an
+  unclaimed error falls through to the handler or the console.
+- **Keyed-list render failures bypassed the central runtime error pipeline.**
+  `each()` dispatched its own boundary event and otherwise warned only in
+  development, so a row that failed to render in production with no boundary
+  mounted was silent. The same applied to `Portal`, `lazy()`/`Suspense`,
+  reactive bindings (`bindChildNode`, `bindTextNode`, `bindAttribute`,
+  `bindDynamic`), lifecycle hooks (`onMount`/`onUnmount`) and node disposers —
+  all of which now report through the one pipeline.
+- **Runtime error handlers are now shared between compatible duplicate SibuJS
+  runtime instances.** The handler was module-local, so when a bundler
+  materialized SibuJS twice, a handler installed through one copy was invisible
+  to the shared reactive engine owned by the other, and application telemetry
+  silently never fired.
+- **Reactive-binding failures were reported as phase `"effect"`.** The scheduler
+  invokes effects and DOM bindings through the same call and had no way to tell
+  them apart; bindings now report phase `"binding"` and carry the node they own,
+  which is also what lets an `ErrorBoundary` catch a binding that throws on a
+  later update rather than only during the initial render.
+- **An effect that hit its rerun safety ceiling was not reported when
+  `__SIBU_DEV_WARN__` was `false`.** That flag controls optional developer
+  diagnostics; reaching a safety ceiling means the framework forcibly stopped
+  the user's work, which stays observable regardless.
+- **`ErrorBoundary` fallback state was shared between independent boundaries.**
+  Fallbacks were memoized in a module-global cache keyed by the fallback
+  function plus `error.message`, and the cached entry closed over one specific
+  boundary's `Error` and `retry`. Two boundaries sharing a fallback function —
+  the idiomatic way to use one — whose errors carried the same message therefore
+  aliased each other: a boundary could render another boundary's Error and be
+  handed another boundary's `retry`, and retrying one wiped the other's state.
+  The cache is removed; each boundary owns its error, its retry and its rendered
+  fallback. Sharing one fallback function across an application is safe.
+  (The cache also never memoized any rendering — it cached a closure that was
+  invoked on every call — so nothing observable is lost.)
+- **Errors thrown by `ErrorBoundary` `resetKeys` getters now use the central
+  runtime error pipeline.** They previously went to `console.warn` only, which
+  no configured runtime error handler could observe.
+- **`ErrorBoundary` `resetKeys` now compare selected VALUES, not dependency
+  invalidation.** A getter is a selector, and re-running because its source was
+  replaced is not a change. `resetKeys: [() => route().pathname]` no longer
+  recovers a failed boundary when an unrelated field of the route object is
+  written; values are compared with `Object.is` against the values captured
+  when the error was caught.
+- **A reset-key change that causes an error no longer immediately resets the
+  newly-failed boundary.** Reset keys are now watched only while the boundary is
+  failed, with the values at the moment of failure as the baseline — so a single
+  update that both moves a reset key and makes the children throw leaves the
+  boundary failed. Only changes observed after the failure trigger recovery.
+  Because the getters are evaluated only during a failed episode, a getter that
+  throws is now reported when the boundary fails rather than at construction.
+- **`ErrorBoundary` `resetKeys` watchers no longer subscribe to the boundary's
+  own error state.** Once a reset key had changed while the boundary was
+  healthy, the watcher became a subscriber of that boundary's error signal, so a
+  later unrelated failure re-ran the watcher and immediately reset itself — the
+  fallback appeared and vanished without any reset key changing. Reset keys are
+  triggers; the current error is only inspected when a trigger fires.
+- **Reporting an error no longer runs inside the failing subscriber's tracking
+  context.** An `ErrorBoundary` listener (or an application handler) that reads
+  a signal while deciding what to do would otherwise have that read attributed
+  to the throwing subscriber — which subscribed the failing binding to the
+  boundary's own error signal, re-ran it, and reported the same failure twice.
+
+### Security
+
+- **Meta-refresh directives are structurally parsed, and client/SSR share one
+  policy.** Dangerous destinations were detected by asking whether the
+  lower-cased `content` contained `url=javascript:` (plus three sibling
+  schemes). That recognises one spelling of a grammar the browser accepts in
+  many: `0; url = javascript:…`, `0;URL=JAVASCRIPT:…`, `0;url='javascript:…'`,
+  and tab-separated forms all produced a live redirect the check never saw.
+
+  The destination is now extracted by a parser and handed to `sanitizeUrl()` —
+  the same protocol authority every other URL sink uses — instead of being
+  pattern-matched. Directives the parser cannot read unambiguously (unterminated
+  quotes, competing `url=` assignments, non-numeric delays, trailing junk, empty
+  destinations) are dropped rather than emitted on the basis that no forbidden
+  substring appeared. This is deliberately stricter than a browser and does not
+  claim parity with the WHATWG algorithm.
+
+  `head.ts` and `ssr.ts` previously carried separate copies of the rule, so a fix
+  to either would have diverged from the other; both now call
+  `utils/metaRefresh.ts`, as does router SSR.
+
+- **Reactive `Head()` meta entries are validated as complete snapshots.** One
+  effect per reactive *attribute* meant each write was judged alone, so a
+  reactive `http-equiv` flipping to `"refresh"` could activate static `content`
+  that had been accepted only because the entry was not a refresh at the time.
+  There is now one effect per entry: it resolves every attribute and validates
+  the assembled snapshot — and a snapshot that fails validation withdraws the
+  element rather than blanking one attribute.
+
+- **`Head()` meta publication is a swap, not a reconciliation.** Validating the
+  whole snapshot was not enough while the snapshot was then applied to a
+  *connected* element one attribute at a time. Updating an entry from
+  `http-equiv="x-custom"` + a forbidden `content` to an entirely valid
+  `http-equiv="refresh"` + `content="5;url=/safe"` wrote the new `http-equiv`
+  while the old content was still in place, so the document briefly held a live
+  `<meta http-equiv="refresh" content="0;url=javascript:…">` that no snapshot ever
+  approved. Reordering the writes would only move the hole — attribute order is
+  not a security mechanism. An accepted snapshot is now materialised on a fresh
+  element while detached and published with a single `replaceWith()`, and the
+  managed-element reference is updated in the same step so disposal never leaks a
+  replaced node.
+
+- **Native meta-refresh directives managed by client-side `Head()` must be
+  static.** A browser processes a refresh when the element is *inserted*, and
+  removing or replacing it afterwards is not a defined way to cancel the
+  scheduled navigation. A reactive entry therefore never publishes a snapshot
+  whose effective `http-equiv` is `refresh` — even when the destination is
+  allowed, because what cannot be withdrawn must not be handed over. This is a
+  publication rule, not a parse rule: the snapshot is still parsed and still
+  refused outright when the directive is dangerous.
+
+  **Behaviour change:** `Head({ meta: [{ "http-equiv": "refresh", content: () => …
+  }] })` and the reactive-`http-equiv` equivalent no longer insert a refresh
+  element. Fully static refresh directives are unaffected, and every other
+  reactive meta entry — description, keywords, Open Graph, non-refresh
+  `http-equiv` — behaves exactly as before. Documentation no longer claims that
+  detaching an inserted refresh cancels its navigation.
+
+- **Duplicate case-insensitive attribute names in a meta entry are rejected.**
+  `{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", … }` is legal
+  JavaScript; a first-match lookup validated one spelling while the DOM committed
+  the other. Rejection was chosen over last-write-wins because it removes the
+  class of bug rather than re-parameterising it.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` run one meta
+  pipeline in one order.** Sharing a policy function was not the same as sharing
+  a decision: the client filtered unsafe attribute names *before* checking for
+  duplicates while the servers checked the raw record first, so
+  `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
+  by the client and dropped by both servers. `planMetaEntry` now fixes the order
+  for all three — raw duplicate names, name filtering, value resolution,
+  sanitization, then the refresh verdict on the effective snapshot — so the value
+  inspected by the policy is exactly the value committed, and the three paths
+  agree on whether an entry exists and on its effective attributes.
+
+- **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
+  The shared attribute policy classified attributes into event handlers, URLs,
+  `srcset`, `style`, and "everything else, which `setAttribute` stores as inert
+  text". That last claim is false for `<iframe srcdoc>`: the browser decodes the
+  value and parses it as a complete nested HTML document, and without a sandbox
+  its scripts run with the embedding page's origin.
+
+  Attribute escaping is not a weaker defence here, it is the wrong layer —
+  `srcdoc="&lt;script&gt;…"` is correctly escaped and still becomes `<script>…`
+  once parsed as a document. So the generic writers refuse the attribute
+  outright and, as with `on*`, remove any pre-existing value rather than merely
+  declining to add one. The rule lives in one place
+  (`isHtmlContentAttribute()`) and is consulted by the tag factory,
+  `bindAttribute`/`bindDynamic`, `bindAttrs`, `enhance().attr()`, `svgElement`,
+  the `html` template, and all four SSR attribute serializers.
+
+  Sanitizing arbitrary HTML is deliberately not attempted, and `TrustedHTML`
+  does not unlock it: that type is a compile-time brand with no runtime
+  identity. A trusted-document API would need a runtime-verifiable wrapper or
+  browser Trusted Types, and is not part of this change.
+
+- **Dynamic `html` template attributes now use the shared attribute policy.**
+  The tagged-template executor carried its own rules — `srcset`, then URL
+  attributes, then write — which was the shared list minus `style`. So
+  ``html`<div style=${untrusted}>` `` bypassed the declaration-list sanitizer,
+  contradicting the sanitizer's own documented invariant, and would have
+  bypassed the new `srcdoc` rule too. Both dynamic forms (a single expression,
+  and a mixed attribute assembled from statics and expressions) now commit
+  through the shared primitive, so a refused value also reconciles whatever was
+  already on the element. Fully static template text is unchanged: an attribute
+  the developer typed into their own source stays developer-controlled.
+
+- **Static and reactive attribute writes now share one security policy.** The
+  same value reached opposite verdicts depending only on the shape of the
+  expression: `bindAttrs(a, { href: url })` wrote `javascript:` straight to the
+  DOM, while the identical `bindAttrs(a, { href: () => url })` blocked it. The
+  divergence — not any single missing check — was the vulnerability, because a
+  routine refactor between the two forms silently changed an application's
+  security posture. The same gap ran between the HTML tag factory and
+  `svgElement()`, which turned an `onload` string into a live event handler that
+  the equivalent HTML call had always refused.
+
+  Every public attribute writer now commits through one primitive: the tag
+  factory, `bindAttribute`/`bindDynamic`, `bindAttrs`/`bindBoolAttr`/`bindData`,
+  `svgElement()`, and `enhance()`'s reactive `attr()`. `on*` strings are refused
+  everywhere, URL attributes go through the protocol allowlist, `srcset` is
+  validated per candidate, and `style` goes through the declaration-list
+  sanitizer. Function-valued `on*` props keep their existing meaning —
+  `addEventListener`, never an attribute. The policy itself is unchanged; what
+  changed is that no writer can skip it.
+- **`svgElement()` writes `xlink:href` in the xlink namespace.** A plain
+  `setAttribute` produced an attribute whose literal name contained a colon and
+  whose namespace was null, which SVG renderers ignore — so the reference
+  silently failed to resolve while also bypassing URL filtering.
+- **`enhance()`'s reactive `attr()` is no longer a raw sink.** Its value is a
+  runtime getter at the same trust level as any other reactive binding, but it
+  wrote through unfiltered, making progressive enhancement the one public path
+  where a `javascript:` URL, an unsafe `style` list, or an `on*` handler string
+  still reached the DOM.
+- **Attribute security is now a postcondition on the managed attribute.** These
+  APIs attach to DOM that already exists — server markup, third-party widgets,
+  anything `enhance()` is pointed at — and two paths let a pre-existing
+  violation survive. `enhance().attr()` compared its RAW desired value against
+  the RAW attribute and skipped the write when they matched, so
+  `<a href="javascript:…">` re-bound to that same string never reached the
+  sanitizer at all. And a refused `on*` value left any existing
+  `onclick`/`onload` content attribute in place: the writer had declined to add
+  a handler while the page still had one.
+
+  Write elision now lives inside the shared primitive and compares the
+  POST-POLICY result, so no caller can skip the sanitizer by pre-comparing; and
+  a binding that names an `on*` slot clears that slot rather than merely
+  refusing it. Taking ownership of an attribute now means governing it.
+- **IDL synchronisation is case-insensitive for HTML attributes.** HTML
+  attribute names are case-insensitive, but the decision to write `value` /
+  `checked` / `disabled` / `selected` through the live IDL property was
+  case-sensitive — so a binding declared as `"VALUE"`, which the browser treats
+  as exactly `value`, fell back to content-attribute semantics and left a dirtied
+  control showing stale state. Normalisation is HTML-only: SVG attribute names
+  are case-sensitive, and `viewBox` / `preserveAspectRatio` / `patternUnits`
+  would be destroyed by folding them.
 
 ### Documented
 
@@ -1571,8 +1588,6 @@ A security-hardening, correctness, and performance release. No breaking changes.
 ---
 
 ## [3.2.2] — 2026-06-05
-
-
 
 ### Fixed
 - 3.2.1 was published wrongly with the same changes than its previous version
