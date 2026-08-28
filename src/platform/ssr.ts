@@ -30,21 +30,27 @@
 import { isDev } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
+import { serializeHeadEntry } from "../utils/headEntry";
+import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import {
   isEventHandlerAttr,
   isHtmlContentAttribute,
-  sanitizeSrcset,
-  sanitizeStyleAttribute,
+  isPolicyAttribute,
+  sanitizeAttributeString,
   sanitizeUrl,
-  stripControlChars,
 } from "../utils/sanitize";
 
 /**
- * Attribute names whose SSR value carries a security policy. Anything outside
- * this set is emitted as-is (after HTML escaping).
+ * Attribute names whose SSR value carries a security policy. Anything else is
+ * emitted as-is (after HTML escaping).
+ *
+ * Delegated to `utils/sanitize.ts`. This used to be a private set that happened
+ * to differ from the canonical one — it carried `manifest` and lacked
+ * `formtarget` — so "the SSR policy" and "the client policy" were two different
+ * claims about the same attribute names.
  */
 function isPolicyAttr(lowerName: string): boolean {
-  return lowerName === "style" || URL_ATTRS.has(lowerName);
+  return isPolicyAttribute(lowerName);
 }
 
 /**
@@ -69,34 +75,20 @@ function isForbiddenSsrAttr(lowerName: string): boolean {
  * Sanitize ONE attribute value for SSR emission. Returns `""` when the
  * attribute must be dropped entirely.
  *
- * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES. There are three
- * attribute serializers — `renderToString`, the `renderToStream` generator, and
- * `buildAttrString` (which feeds `renderToDocument`'s `<meta>`, `<link>`, and
- * `<body>` attributes). Each previously carried its own inline rules, and each
- * covered URLs only. `style` was therefore emitted verbatim by all three, while
- * the client's `tagFactory` filtered it — so the identical component was safe
- * in the browser and an exfiltration vector from the server, `<body style="…">`
- * included. Rendering target is not a security boundary; the policy has to be
- * one function that every serializer calls.
+ * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES — and, since this
+ * pass, not a separate policy at all. There are three attribute serializers
+ * (`renderToString`, the `renderToStream` generator, and `buildAttrString`), and
+ * each once carried its own inline rules covering URLs only, so `style` was
+ * emitted verbatim by all three while the client's `tagFactory` filtered it.
+ * Rendering target is not a security boundary.
  *
- * `srcset` is a comma/space-separated candidate list, not a single URL — running
- * it through `sanitizeUrl` returns the whole string unchanged (its scheme scan
- * fails on the list), letting blocked schemes survive. It goes through the
- * candidate parser instead, matching client-side behaviour.
- *
- * `style` is a declaration list, so `sanitizeStyleAttribute` filters it
- * per-declaration: safe declarations survive, dangerous ones are dropped. When
- * nothing survives the result is `""` and the caller drops the attribute rather
- * than emitting a `style=""` that advertises styling the element no longer has.
- *
- * Called BEFORE `escapeAttr`: sanitization reads and re-serializes CSS, so
- * escaping first would feed it `&quot;` entities and hand back text that has to
- * be escaped again.
+ * The rules themselves — `srcset` parsed as a candidate list rather than a
+ * single URL, `style` filtered per declaration, single-URL sinks through the
+ * protocol allowlist — now live in `sanitizeAttributeString`, the same authority
+ * the client writers use, so the two cannot drift.
  */
 function sanitizeSsrAttributeValue(lowerName: string, value: string): string {
-  if (lowerName === "style") return sanitizeStyleAttribute(value);
-  if (lowerName === "srcset") return sanitizeSrcset(value);
-  return sanitizeUrl(value);
+  return sanitizeAttributeString(lowerName, value);
 }
 
 const _isDev = isDev();
@@ -107,27 +99,6 @@ const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
 function isSafeAttrName(name: string): boolean {
   return SAFE_ATTR_NAME.test(name);
 }
-
-/**
- * Attribute names whose value is a URL and therefore require
- * `sanitizeUrl()` before emission. Missing any of these would allow a
- * `javascript:` / `data:` / `vbscript:` / `blob:` URI to reach the browser
- * as raw HTML.
- */
-const URL_ATTRS = new Set([
-  "href",
-  "src",
-  "action",
-  "formaction",
-  "cite",
-  "poster",
-  "background",
-  "srcset",
-  "ping",
-  "manifest",
-  "data",
-  "xlink:href",
-]);
 
 /** Format an SSR error as an HTML comment. In production, omits the message to prevent information leakage. */
 function ssrErrorComment(err: unknown): string {
@@ -542,32 +513,20 @@ function buildAttrString(
 }
 
 /**
- * Detect `<meta http-equiv="refresh" content="0;url=javascript:...">`.
- * Returns true if the props describe a refresh directive whose URL uses
- * a dangerous protocol — in which case the entire meta entry must be
- * dropped to avoid an XSS vector via the browser refresh mechanism.
+ * Should this meta entry be dropped entirely?
+ *
+ * Delegates to the SHARED meta-refresh policy. This used to be a private copy
+ * of four `includes()` checks that happened to match the client's private copy
+ * — two implementations of one rule, so a fix to either would silently diverge
+ * from the other. The exported name is kept for back-compat; the policy is no
+ * longer local.
+ *
+ * Returns true for a forbidden refresh directive AND for an entry carrying
+ * duplicate case-insensitive attribute names, since there the value validated
+ * would not be the value the browser ends up honouring.
  */
 export function isDangerousMetaRefresh(metaProps: Record<string, string>): boolean {
-  // HTML attribute names are case-insensitive, so look up http-equiv/content
-  // case-insensitively — otherwise `HTTP-EQUIV`/`CONTENT` bypass the guard
-  // while the browser still honors the refresh directive.
-  let httpEquiv: string | undefined;
-  let content: string | undefined;
-  for (const k in metaProps) {
-    const lk = k.toLowerCase();
-    if (lk === "http-equiv") httpEquiv = metaProps[k];
-    else if (lk === "content") content = metaProps[k];
-  }
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  if (typeof content !== "string") return false;
-  const normalized = stripControlChars(content).toLowerCase();
-  return (
-    normalized.includes("url=javascript:") ||
-    normalized.includes("url=data:") ||
-    normalized.includes("url=vbscript:") ||
-    normalized.includes("url=blob:")
-  );
+  return isForbiddenMetaEntry(metaProps);
 }
 
 /**
@@ -603,22 +562,16 @@ export function renderToDocument(
     content = ssrErrorComment(err);
   }
 
+  // Names filtered, values sanitized, duplicate casings rejected, and dangerous
+  // `<meta http-equiv="refresh" content="0;url=javascript:...">` entries dropped
+  // — all by the one shared pipeline the client also runs.
   const metaTags = (options.meta || [])
-    .map((attrs) => {
-      // Drop any dangerous `<meta http-equiv="refresh" content="0;url=javascript:...">`
-      // entry before it reaches the attribute builder.
-      if (isDangerousMetaRefresh(attrs)) return "";
-      const pairs = buildAttrString(attrs);
-      return pairs ? `<meta ${pairs} />` : "";
-    })
+    .map((attrs) => serializeHeadEntry("meta", attrs))
     .filter(Boolean)
     .join("\n    ");
 
   const linkTags = (options.links || [])
-    .map((attrs) => {
-      const pairs = buildAttrString(attrs);
-      return pairs ? `<link ${pairs} />` : "";
-    })
+    .map((attrs) => serializeHeadEntry("link", attrs))
     .filter(Boolean)
     .join("\n    ");
 

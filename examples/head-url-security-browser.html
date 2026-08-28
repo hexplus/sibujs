@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS head URL security — browser fixture</title>
+  </head>
+  <body>
+    <section id="log"></section>
+
+    <script type="module">
+      // jsdom never fetches a `<script src>` and never applies a stylesheet, so
+      // "the dangerous value was not written" is the only thing it can check.
+      // A real engine is where "and it did not EXECUTE" becomes provable.
+      //
+      // `Head({ script: [{ SRC: "data:text/javascript,…" }] })` was a working
+      // XSS: `head.ts` classified URL sinks with a case-SENSITIVE set
+      // (`new Set(["href", "src"])`) tested against the authored spelling, so
+      // `SRC` skipped sanitization completely, and the element it appended was a
+      // live `<script>` the browser fetched and ran.
+      import { signal, dispose } from "../dist/index.js";
+      import { Head } from "../dist/extras.js";
+
+      window.__sibuHeadXss = false;
+
+      let head = null;
+
+      const attrsOf = (el) => {
+        if (!el) return null;
+        const out = {};
+        for (const a of Array.from(el.attributes)) out[a.name] = a.value;
+        return out;
+      };
+
+      const api = {
+        reset() {
+          if (head) dispose(head);
+          head = null;
+          for (const el of Array.from(document.head.querySelectorAll("meta,link,script"))) {
+            if (!el.hasAttribute("charset") && el.type !== "module") el.remove();
+          }
+          window.__sibuHeadXss = false;
+          return true;
+        },
+
+        /** THE mandated exploit: a mixed-case `SRC` carrying a data: script. */
+        mixedCaseScriptSrc() {
+          head = Head({
+            script: [{ SRC: "data:text/javascript,globalThis.__sibuHeadXss=1" }],
+          });
+          return {
+            scripts: Array.from(document.head.querySelectorAll("script:not([type=module])")).map(attrsOf),
+            xss: window.__sibuHeadXss === true,
+          };
+        },
+
+        /** The same value under the lowercase spelling, for symmetry. */
+        lowerCaseScriptSrc() {
+          head = Head({
+            script: [{ src: "data:text/javascript,globalThis.__sibuHeadXss=1" }],
+          });
+          return {
+            scripts: Array.from(document.head.querySelectorAll("script:not([type=module])")).map(attrsOf),
+            xss: window.__sibuHeadXss === true,
+          };
+        },
+
+        /** A safe same-origin script src IS honoured — the positive control. */
+        safeScriptSrc() {
+          head = Head({ script: [{ SRC: "/examples/head-url-security-probe.js" }] });
+          return {
+            scripts: Array.from(document.head.querySelectorAll("script:not([type=module])")).map(attrsOf),
+          };
+        },
+
+        /** A mixed-case `HREF` carrying `javascript:` on a stylesheet link. */
+        mixedCaseLinkHref() {
+          head = Head({ link: [{ rel: "stylesheet", HREF: "javascript:window.__sibuHeadXss=1" }] });
+          return {
+            links: Array.from(document.head.querySelectorAll("link")).map(attrsOf),
+            xss: window.__sibuHeadXss === true,
+          };
+        },
+
+        /** A safe same-origin stylesheet IS applied — the positive control. */
+        safeLinkHref() {
+          head = Head({ link: [{ REL: "stylesheet", HREF: "/examples/head-url-security-probe.css" }] });
+          return { links: Array.from(document.head.querySelectorAll("link")).map(attrsOf) };
+        },
+
+        /** A refused URL must be OMITTED, never published as an empty one. */
+        rejectedUrlIsOmitted() {
+          head = Head({ link: [{ rel: "icon", HREF: "javascript:window.__sibuHeadXss=1" }] });
+          const el = document.head.querySelector('link[rel="icon"]');
+          return {
+            attrs: attrsOf(el),
+            hasHref: el ? el.hasAttribute("href") : null,
+          };
+        },
+
+        /** A reactive meta URL going safe → unsafe → safe. */
+        reactiveMetaUrl() {
+          const [url, setUrl] = signal("/a.css");
+          head = Head({ meta: [{ name: "probe", HREF: () => url() }] });
+          const initial = attrsOf(document.head.querySelector('meta[name="probe"]'));
+          setUrl("javascript:window.__sibuHeadXss=1");
+          const during = attrsOf(document.head.querySelector('meta[name="probe"]'));
+          setUrl("/b.css");
+          const after = attrsOf(document.head.querySelector('meta[name="probe"]'));
+          return { initial, during, after, xss: window.__sibuHeadXss === true };
+        },
+
+        xss() {
+          return window.__sibuHeadXss === true;
+        },
+      };
+
+      window.__t = api;
+      window.__ready = true;
+    </script>
+  </body>
+</html>

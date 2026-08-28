@@ -56,21 +56,30 @@ describe("Head / meta http-equiv refresh", () => {
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
-  it("strips a dangerous reactive (function) refresh content", () => {
+  it("drops a dangerous reactive (function) refresh content", () => {
     Head({
       meta: [{ "http-equiv": "refresh", content: () => "0;url=javascript:alert(1)" }],
     });
-    // The meta element exists (content is a function, so the static guard
-    // can't drop it), but the dangerous content must NOT be written.
-    const el = document.head.querySelector('meta[http-equiv="refresh"]');
-    const content = el?.getAttribute("content") ?? "";
-    expect(content).not.toContain("javascript:");
+    // The whole entry is withdrawn, not merely blanked: leaving
+    // `http-equiv="refresh"` in the head with an emptied `content` is still a
+    // live directive, and a partially cleared element is still live markup.
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
-  it("keeps a safe reactive refresh content", () => {
+  it("does not publish a native refresh from a reactive entry, even a safe one", () => {
+    // A browser processes a meta refresh when the element is INSERTED, and
+    // removing it afterwards is not a defined way to cancel the scheduled
+    // navigation. So a reactive entry cannot honestly offer one: if the state
+    // later says "withdraw", there would be nothing left to withdraw. The
+    // destination here is perfectly safe — reversibility is the objection, not
+    // safety. Static refresh directives are unaffected (see below).
     Head({ meta: [{ "http-equiv": "refresh", content: () => "5;url=/home" }] });
-    const el = document.head.querySelector('meta[http-equiv="refresh"]');
-    expect(el?.getAttribute("content")).toBe("5;url=/home");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
+  });
+
+  it("still keeps a fully static safe refresh", () => {
+    Head({ meta: [{ "http-equiv": "refresh", content: "5;url=/home" }] });
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')?.getAttribute("content")).toBe("5;url=/home");
   });
 });
 

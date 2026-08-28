@@ -10,6 +10,126 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **URL-attribute classification in `Head()` is case-insensitive.** `head.ts`
+  carried a private `new Set(["href", "src"])` and tested it against the
+  AUTHORED attribute spelling. HTML attribute names are ASCII case-insensitive,
+  so the browser reads `SRC` as `src` — but that lookup did not, and
+  `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
+  sanitization completely and appended a `<script>` a real browser fetched and
+  executed. Both SSR paths, which lower-cased first, refused the identical
+  value. Every classification — URL sinks, event handlers, `srcdoc`, duplicate
+  detection — now runs on one canonical, deliberately ASCII-only fold
+  (`canonicalAttrName`), because `String.prototype.toLowerCase` maps some
+  non-ASCII code points *into* ASCII letters and the HTML parser does not.
+
+- **Router SSR no longer carries its own URL sanitizer.** `sanitizeUrlLocal`
+  described itself as mirroring `utils/sanitize.ts` but was a BLOCKLIST of four
+  schemes where the canonical sanitizer is an ALLOWLIST, so router SSR emitted
+  `file:`, `about:`, `chrome:` and every custom scheme that `Head()` and
+  `renderToDocument` both refused. It is deleted; all three paths call the
+  canonical `sanitizeAttributeString`.
+
+- **A refused URL attribute is OMITTED, not published as `href=""`.** An empty
+  URL attribute resolves against the current document — `<link href="">`
+  references the page itself and `<script src="">` is a request, not a no-op —
+  so an empty substitute is a different document from an absent attribute. The
+  sanitization contract now distinguishes "accepted, possibly empty" from
+  "rejected"; an empty string remains a legitimate value for inert text
+  attributes like `content` and `id`. `setCanonical()` and `Head({ base })`
+  follow the same rule, and a rejected update clears any previously accepted
+  value rather than leaving a stale one standing.
+
+- **`srcdoc` is refused by `Head()` too.** The client preserved it while both
+  servers dropped it. The browser parses `srcdoc` as a nested HTML *document*,
+  so escaping is the wrong layer, and the rule now applies identically on all
+  three paths in every casing.
+
+- **An entry with no effective attributes is dropped everywhere.** The client
+  published an attribute-less `<meta>` where both servers emitted nothing. One
+  shared answer, decided at the shared planning layer.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` share the
+  policy itself, not merely a policy function.** The pipeline used to take the
+  name filter and value sanitizer as parameters, so each target supplied its
+  own and the three diverged in four separate ways. Only value resolution — the
+  client has reactive getters, the servers do not — is parameterized now. The
+  planned attribute map is keyed by canonical names, so client DOM and server
+  HTML are exactly comparable; a table-driven parity suite asserts emitted
+  status, attribute count, names, and values across all three.
+
+- **Meta-refresh directives are structurally parsed, and client/SSR share one
+  policy.** Dangerous destinations were detected by asking whether the
+  lower-cased `content` contained `url=javascript:` (plus three sibling
+  schemes). That recognises one spelling of a grammar the browser accepts in
+  many: `0; url = javascript:…`, `0;URL=JAVASCRIPT:…`, `0;url='javascript:…'`,
+  and tab-separated forms all produced a live redirect the check never saw.
+
+  The destination is now extracted by a parser and handed to `sanitizeUrl()` —
+  the same protocol authority every other URL sink uses — instead of being
+  pattern-matched. Directives the parser cannot read unambiguously (unterminated
+  quotes, competing `url=` assignments, non-numeric delays, trailing junk, empty
+  destinations) are dropped rather than emitted on the basis that no forbidden
+  substring appeared. This is deliberately stricter than a browser and does not
+  claim parity with the WHATWG algorithm.
+
+  `head.ts` and `ssr.ts` previously carried separate copies of the rule, so a fix
+  to either would have diverged from the other; both now call
+  `utils/metaRefresh.ts`, as does router SSR.
+
+- **Reactive `Head()` meta entries are validated as complete snapshots.** One
+  effect per reactive *attribute* meant each write was judged alone, so a
+  reactive `http-equiv` flipping to `"refresh"` could activate static `content`
+  that had been accepted only because the entry was not a refresh at the time.
+  There is now one effect per entry: it resolves every attribute and validates
+  the assembled snapshot — and a snapshot that fails validation withdraws the
+  element rather than blanking one attribute.
+
+- **`Head()` meta publication is a swap, not a reconciliation.** Validating the
+  whole snapshot was not enough while the snapshot was then applied to a
+  *connected* element one attribute at a time. Updating an entry from
+  `http-equiv="x-custom"` + a forbidden `content` to an entirely valid
+  `http-equiv="refresh"` + `content="5;url=/safe"` wrote the new `http-equiv`
+  while the old content was still in place, so the document briefly held a live
+  `<meta http-equiv="refresh" content="0;url=javascript:…">` that no snapshot ever
+  approved. Reordering the writes would only move the hole — attribute order is
+  not a security mechanism. An accepted snapshot is now materialised on a fresh
+  element while detached and published with a single `replaceWith()`, and the
+  managed-element reference is updated in the same step so disposal never leaks a
+  replaced node.
+
+- **Native meta-refresh directives managed by client-side `Head()` must be
+  static.** A browser processes a refresh when the element is *inserted*, and
+  removing or replacing it afterwards is not a defined way to cancel the
+  scheduled navigation. A reactive entry therefore never publishes a snapshot
+  whose effective `http-equiv` is `refresh` — even when the destination is
+  allowed, because what cannot be withdrawn must not be handed over. This is a
+  publication rule, not a parse rule: the snapshot is still parsed and still
+  refused outright when the directive is dangerous.
+
+  **Behaviour change:** `Head({ meta: [{ "http-equiv": "refresh", content: () => …
+  }] })` and the reactive-`http-equiv` equivalent no longer insert a refresh
+  element. Fully static refresh directives are unaffected, and every other
+  reactive meta entry — description, keywords, Open Graph, non-refresh
+  `http-equiv` — behaves exactly as before. Documentation no longer claims that
+  detaching an inserted refresh cancels its navigation.
+
+- **Duplicate case-insensitive attribute names in a meta entry are rejected.**
+  `{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", … }` is legal
+  JavaScript; a first-match lookup validated one spelling while the DOM committed
+  the other. Rejection was chosen over last-write-wins because it removes the
+  class of bug rather than re-parameterising it.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` run one meta
+  pipeline in one order.** Sharing a policy function was not the same as sharing
+  a decision: the client filtered unsafe attribute names *before* checking for
+  duplicates while the servers checked the raw record first, so
+  `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
+  by the client and dropped by both servers. `planMetaEntry` now fixes the order
+  for all three — raw duplicate names, name filtering, value resolution,
+  sanitization, then the refresh verdict on the effective snapshot — so the value
+  inspected by the policy is exactly the value committed, and the three paths
+  agree on whether an entry exists and on its effective attributes.
+
 - **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
   The shared attribute policy classified attributes into event handlers, URLs,
   `srcset`, `style`, and "everything else, which `setAttribute` stores as inert

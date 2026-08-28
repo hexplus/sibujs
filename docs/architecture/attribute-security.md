@@ -141,6 +141,252 @@ boundary, like `href="java${x}:…"`.
 developer typed literally into their own source is developer-controlled, at the
 same trust level as hand-written markup. Only expressions are runtime data.
 
+## `<meta http-equiv="refresh">` is parsed, not pattern-matched
+
+A refresh directive is a grammar, and the browser's parser accepts many
+spellings of it. The previous policy asked whether the lower-cased `content`
+*contained* `url=javascript:` (plus three sibling schemes), which recognises
+exactly one. Every one of these is a live redirect the substring never saw:
+
+```text
+0; url = javascript:alert(1)        whitespace around the separator and `=`
+0;URL=JAVASCRIPT:alert(1)           mixed-case key and scheme
+0;url='javascript:alert(1)'         quoted destination
+0;	url	=	javascript:alert(1)     tabs
+```
+
+Pattern-matching a grammar is a losing position — each new spelling needs a new
+pattern, and the attacker picks the spelling. So `utils/metaRefresh.ts` extracts
+the destination structurally and hands it to `sanitizeUrl()`, the same protocol
+authority every other URL sink uses. Adding a scheme to that allowlist now fixes
+this sink too, automatically.
+
+The grammar accepted (whitespace runs optional, `url` case-insensitive):
+
+```text
+content := WS* delay WS*
+         | WS* delay WS* ";" WS* "url" WS* "=" WS* dest WS*
+delay   := DIGIT+
+dest    := "'"…"'" | '"'…'"' | unquoted-run
+```
+
+**This is deliberately stricter than a browser, and does not claim parity with
+the WHATWG algorithm.** Real browsers recover aggressively from malformed
+directives and differ from one another at the edges; reproducing that would mean
+matching recovery behaviour we cannot verify across the whole support floor.
+Anything this parser cannot read *unambiguously* is refused instead — an
+unterminated quote, competing `url=` assignments, a non-numeric delay, trailing
+junk, an empty destination, a key that is not `url`. The cost is that a few
+odd-but-harmless directives are dropped; the benefit is that no unreadable
+directive is ever emitted on the strength of "no forbidden substring was found".
+
+The decision is a discriminated union — `not-refresh`, `delay-only`, `allowed`,
+`forbidden` — because callers act differently on each. A boolean forced
+"ignore me, I'm a description tag" and "drop this element" into one answer.
+
+### Duplicate case-insensitive names are rejected
+
+HTML attribute names are case-insensitive; JavaScript object keys are not, so
+this object is legal and was the bug:
+
+```ts
+{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", content: "0;url=javascript:…" }
+```
+
+A helper returning the *first* case-insensitive match validated `x-custom` while
+the DOM loop wrote both attributes and the later `HTTP-EQUIV` became effective.
+The verdict and the commit were about different entries.
+
+The rule is **rejection**, not precedence. Last-write-wins would also be sound if
+the validated value were provably the committed one, but rejection removes the
+class of bug rather than re-parameterising it — and duplicate casings in a meta
+entry are a mistake in every real case.
+
+### Reactive entries are committed as whole snapshots
+
+`Head()` used to create one effect per reactive *attribute*, so each write was
+judged alone. That lets the combination become dangerous while no individual
+write ever looks wrong:
+
+```ts
+{ "http-equiv": () => equiv(), content: "0;url=javascript:alert(1)" }
+```
+
+With `equiv()` initially `"x-custom"` the entry is not a refresh, so the static
+content is accepted. `setEquiv("refresh")` re-runs only the `http-equiv` effect —
+the content is never revalidated, and the element is now a live redirect nothing
+ever approved.
+
+Security decisions are properties of the whole entry, so the whole entry is the
+unit of work: one effect per entry resolves every attribute, folds duplicate
+casings, and validates the assembled snapshot. A snapshot that fails validation
+**withdraws** the element rather than blanking an attribute — a partially cleared
+element is still live markup.
+
+### Publication is a swap, not a reconciliation
+
+Validating a whole snapshot is not enough if the snapshot is then applied to a
+**connected** element one attribute at a time. Reconciling
+
+```text
+http-equiv="x-custom"  content="0;url=javascript:alert(1)"   (old, connected)
+```
+
+into the entirely valid
+
+```text
+http-equiv="refresh"   content="5;url=/safe"                 (new, approved)
+```
+
+writes `http-equiv="refresh"` while the element still carries the old content. For
+the duration of one `setAttribute` the document contains a live
+`<meta http-equiv="refresh" content="0;url=javascript:alert(1)">` — a pair no
+snapshot ever approved, existing only because two safe states were interpolated
+through the DOM. Reordering the writes moves the hole rather than closing it:
+**attribute order is not a security mechanism.**
+
+So an accepted snapshot is materialised on a *fresh* element while it is
+detached, every attribute is set there, and it is published with a single
+`replaceWith()` (or `appendChild()` when nothing is attached yet). Every
+intermediate state is unobservable because it never touches the document. The
+managed-element reference is updated in the same step, so disposal always removes
+the element that is live and never leaks the one it replaced.
+
+### Native refresh directives must be static
+
+A browser processes a meta refresh when the element is **inserted**: the document
+records that it will declaratively refresh and schedules the navigation right
+there. Removing or replacing the element afterwards is not a defined cancellation
+mechanism — see the
+[HTML refresh processing model](https://html.spec.whatwg.org/multipage/semantics.html#attr-meta-http-equiv-refresh).
+
+That makes "reactive refresh" a promise a framework cannot keep. Once a reactive
+entry has published `http-equiv="refresh"`, a later state change that ought to
+withdraw it has nothing left to withdraw; the navigation already belongs to the
+browser, and a test asserting "the element is gone" is measuring the wrong thing.
+The same applies to a safe-to-safe change: the first destination stays scheduled.
+
+The contract is therefore the narrow, honest one:
+
+> A meta entry containing reactive attributes must never publish a snapshot whose
+> effective `http-equiv` value is `refresh`.
+
+This is a *publication* rule, not a parse rule. The snapshot is still parsed and
+still refused outright if the directive is dangerous; a reactive entry whose
+snapshot happens to be a perfectly safe refresh is withheld **anyway**, because
+the question is reversibility rather than safety. Concretely:
+
+- a reactive `http-equiv` flipping to `refresh` inserts nothing;
+- a static `refresh` with reactive `content` inserts nothing, on first render or
+  after;
+- a reactive entry that later resolves to an ordinary non-refresh meta publishes
+  that ordinary entry normally;
+- fully static refresh directives are unaffected — safe ones are emitted, and
+  forbidden or ambiguous ones are dropped as before;
+- every other reactive meta entry — description, keywords, Open Graph, non-refresh
+  `http-equiv` — behaves exactly as it always did.
+
+No framework navigation timer stands in for the withheld directive. Scheduling a
+redirect the developer did not ask the *framework* to own would be a larger
+promise than the one being withdrawn.
+
+### Attribute names are canonicalized once, then never re-derived
+
+HTML attribute names are ASCII case-insensitive: the parser reads `SRC` as
+`src`. Every security classification therefore has to run on a canonical name,
+and `head.ts` did not — it carried a private, case-SENSITIVE set:
+
+```ts
+const HEAD_URL_ATTRS = new Set(["href", "src"]);
+if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);   // `SRC` misses
+```
+
+so `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
+sanitization completely and appended a `<script>` the browser fetched and ran,
+while both SSR paths — which lower-cased first — refused the identical value.
+`isUrlAttribute()` in `utils/sanitize.ts` already carried a comment warning about
+exactly this mistake. `head.ts` simply was not calling it.
+
+There is now one fold, `canonicalAttrName()`, and it is deliberately **ASCII
+only**. `String.prototype.toLowerCase` maps some non-ASCII code points *into*
+ASCII letters — U+212A KELVIN SIGN becomes `k` — which would make the framework
+and the browser disagree about what an attribute is called. The parser
+lower-cases exactly `A`–`Z`, so the fold does too. URL sinks, event handlers,
+`srcdoc`, and duplicate detection all consult that one string.
+
+### A refused value is omitted, never emptied
+
+`href=""` is not "no href". An empty URL attribute resolves against the current
+document, so `<link href="">` references the page itself and `<script src="">`
+is a request rather than a no-op. Publishing an empty substitute for a refused
+URL is a different document from publishing nothing.
+
+The sanitization contract therefore returns `string | null`, and `null` means
+*omit this attribute*. An empty string is only ever a rejection for a **policy
+sink** (a URL attribute, `style`, `srcset`); for inert text like `content` or
+`id` it is a perfectly legitimate value and is committed as authored.
+
+When nothing survives, the entry itself is dropped — one shared answer rather
+than three. The client used to publish an attribute-less `<meta>` where both
+servers emitted nothing at all.
+
+### One URL policy, not three
+
+Router SSR carried a `sanitizeUrlLocal` described in its own comment as
+mirroring `utils/sanitize.ts`. It did not mirror it: the canonical sanitizer is
+an **allowlist** (`http:`, `https:`, `mailto:`, `tel:`, `ftp:`, plus relative
+URLs), while the local copy was a **blocklist** of four schemes. Router SSR
+therefore emitted `file:`, `about:`, `chrome:` and every custom scheme that
+`Head()` and `renderToDocument` both refused.
+
+A comment is not a mechanism. All three paths now call `sanitizeAttributeString`
+— the same authority the tag factory and the reactive bindings use — so `<head>`
+cannot hold a value the rest of the framework would reject.
+
+### One pipeline, one order
+
+A shared policy function is not the same thing as a shared decision. All three
+paths already called one policy and still disagreed, because they called it at
+different points in their own pipelines:
+
+```text
+client:  filter unsafe names  →  resolve values     →  check duplicates
+server:  check duplicates     →  filter unsafe names →  sanitize values
+```
+
+So `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
+by the client — which dropped both event handlers as unsafe names and then saw no
+duplicate — and rejected by both servers, which saw the duplicate in the raw
+record. Same rule, same function, opposite outcomes.
+
+`planMetaEntry` / `planHeadElementEntry` (`utils/headEntry.ts`) fix the order in
+one place for all three:
+
+1. reject duplicate case-insensitive names, on the **raw authored names**
+2. canonicalize each name
+3. drop names that may not be emitted (malformed, `on*`, `srcdoc`)
+4. resolve values — the ONE step that differs, since only the client has getters
+5. sanitize values, **omitting** rejected ones rather than emptying them
+6. drop the entry when nothing effective remains
+7. for `<meta>`, validate the complete effective snapshot against the
+   meta-refresh policy — what is judged is what is committed
+
+An earlier version of this pipeline took the name filter and the value sanitizer
+as *parameters*, so each target supplied its own. That is a shared function, not
+a shared decision, and the three promptly diverged in four separate ways — the
+case-sensitive URL set, the router's scheme blocklist, `srcdoc` kept on the
+client and dropped by both servers, and refused URLs emptied on the client and
+omitted by the servers. **Only value resolution is parameterized now.** There is
+nothing left for the three paths to disagree about, and the attribute map they
+produce is keyed by canonical names, so client DOM and server HTML are directly
+comparable rather than merely equivalent.
+
+`tests/security-meta-refresh-parity.test.ts` drives one table through all three
+and asserts exact equality — emitted-or-not, attribute count, canonical names,
+and values — against a pinned expectation *and* against each other. Comparing
+only to each other would let a row they all get wrong pass; comparing only to an
+expectation would let drift between them pass.
+
 ## Security is a postcondition, not a promise about this write
 
 The rule the primitive enforces is about the **attribute**, not about the call:

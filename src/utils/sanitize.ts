@@ -9,6 +9,24 @@ export function stripControlChars(value: string): string {
 }
 
 /**
+ * Fold an attribute name to the form the HTML parser will use.
+ *
+ * ASCII-only, deliberately. The HTML parser lower-cases exactly `A`-`Z` and
+ * leaves everything else alone, whereas `String.prototype.toLowerCase`
+ * additionally maps some non-ASCII code points INTO ASCII letters (U+212A
+ * KELVIN SIGN becomes `k`). Using the latter would let this function and the
+ * browser disagree about what an attribute is called, which is precisely the
+ * kind of gap every name comparison here exists to close.
+ *
+ * THE single fold. Every security-relevant attribute-name comparison in the
+ * framework routes through it, so a value cannot be judged under one name and
+ * committed under another.
+ */
+export function canonicalAttrName(name: string): string {
+  return name.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+}
+
+/**
  * Is `name` an intrinsic event-handler attribute (`onclick`, `onerror`, …)?
  * Their value is evaluated as JavaScript on dispatch, so the framework never
  * sets them via `setAttribute`. Case-insensitive; matches `on` followed by an
@@ -418,6 +436,10 @@ const URL_ATTRIBUTES = new Set([
   "srcset",
   "ping",
   "data",
+  // `<html manifest>` is a URL sink too. It was carried only by the SSR
+  // serializers' private copy of this set; folding that copy into this one would
+  // otherwise have silently dropped its coverage.
+  "manifest",
 ]);
 
 /**
@@ -475,6 +497,23 @@ export function isSafeAttribute(attr: string): boolean {
  */
 export function isUrlAttribute(attr: string): boolean {
   return URL_ATTRIBUTES.has(attr.toLowerCase());
+}
+
+/**
+ * Does this attribute name carry a value the policy inspects, rather than inert
+ * text the browser stores verbatim?
+ *
+ * The distinction matters for one specific reason: for a policy sink, an empty
+ * sanitizer result means REJECTED and the attribute must be omitted; for every
+ * other attribute an empty string is simply a legitimate value. Callers that
+ * conflate the two end up publishing `href=""` in place of a refused URL, which
+ * is not the same thing as not publishing it at all.
+ *
+ * Case-insensitive, like every other name comparison here.
+ */
+export function isPolicyAttribute(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === "style" || URL_ATTRIBUTES.has(lower);
 }
 
 /**

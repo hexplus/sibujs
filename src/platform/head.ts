@@ -1,74 +1,38 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
-import { isEventHandlerAttr, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import {
+  type HeadValueResolver,
+  planHeadElementEntry,
+  planMetaEntry,
+  STATIC_VALUE_RESOLVER as STATIC_HEAD_RESOLVER,
+} from "../utils/headEntry";
+import { sanitizeUrl } from "../utils/sanitize";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
 // ============================================================================
 //
-// Security: all URL-bearing attributes (href/src, and meta `content`
-// when it carries a URL like og:image) are routed through `sanitizeUrl`
-// to block `javascript:` / `data:` / `vbscript:` / `blob:` URIs. The base
-// tag's `href` is also sanitized — overlooking it previously meant an
-// attacker-controlled base href could rewrite every relative URL on the
-// page to a javascript: URI.
+// Security: every URL-bearing attribute is routed through the CANONICAL
+// `sanitizeUrl` protocol allowlist — `http:`, `https:`, `mailto:`, `tel:`,
+// `ftp:`, and relative URLs — and a value it refuses is OMITTED rather than
+// published as an empty substitute. The `<base>` tag's `href` is sanitized too:
+// overlooking it previously meant an attacker-controlled base href could rewrite
+// every relative URL on the page into a javascript: URI.
 
-// Only `href` and `src` are treated as URL slots. `content` is free text
-// for most meta tags (description, keywords, og:title, etc.) and running
-// it through `sanitizeUrl` would strip legitimate whitespace. The one
-// truly dangerous `content` form — `<meta http-equiv="refresh"
-// content="0;url=javascript:...">` — is filtered separately by
-// `isDangerousMetaRefresh()` at the meta-tag writing site.
-const HEAD_URL_ATTRS = new Set(["href", "src"]);
-function sanitizeHeadAttr(key: string, value: string): string {
-  if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);
-  return value;
-}
-
-/**
- * Detect `<meta http-equiv="refresh" content="0;url=javascript:...">`.
- * Returns true if the meta props describe a refresh directive whose URL
- * uses a dangerous protocol.
- */
-function isDangerousRefreshContent(content: string): boolean {
-  const normalized = stripControlChars(content).toLowerCase();
-  return (
-    normalized.includes("url=javascript:") ||
-    normalized.includes("url=data:") ||
-    normalized.includes("url=vbscript:") ||
-    normalized.includes("url=blob:")
-  );
-}
-
-/** Case-insensitive lookup of a meta attribute value (HTML attr names are CI). */
-function getMetaAttr(
-  metaProps: Record<string, string | (() => string)>,
-  name: string,
-): string | (() => string) | undefined {
-  for (const k in metaProps) {
-    if (k.toLowerCase() === name) return metaProps[k];
-  }
-  return undefined;
-}
-
-function isDangerousMetaRefresh(metaProps: Record<string, string | (() => string)>): boolean {
-  const httpEquiv = getMetaAttr(metaProps, "http-equiv");
-  if (typeof httpEquiv !== "string") return false;
-  if (httpEquiv.toLowerCase() !== "refresh") return false;
-  const content = getMetaAttr(metaProps, "content");
-  if (typeof content !== "string") return false;
-  return isDangerousRefreshContent(content);
-}
-
-/** Strict attribute-name validation — blocks injection via crafted keys. */
-const SAFE_HEAD_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
-
-function isSafeHeadAttr(name: string): boolean {
-  if (!SAFE_HEAD_ATTR_NAME.test(name)) return false;
-  if (isEventHandlerAttr(name)) return false;
-  return true;
-}
+// `content` is deliberately NOT a URL slot: it is free text for most meta tags
+// (description, keywords, og:title, …) and running it through `sanitizeUrl`
+// would strip legitimate whitespace. The one truly dangerous `content` form —
+// `<meta http-equiv="refresh" content="0;url=javascript:...">` — is filtered by
+// `planMetaEntry()`, which parses the directive structurally instead of
+// substring-matching it.
+//
+// Every other classification — which names are URL sinks, which are event
+// handlers, which the browser parses as nested HTML — lives in
+// `utils/headEntry.ts` and is keyed on the CANONICAL (ASCII-lower-cased)
+// attribute name. `head.ts` used to carry a private `Set(["href", "src"])` and
+// test it against the authored spelling, so `Head({ script: [{ SRC: "data:…" }] })`
+// skipped sanitization entirely while both SSR paths refused the same value.
 
 /**
  * Escape a JSON string for safe embedding inside a `<script>` tag. Matches
@@ -84,6 +48,135 @@ function escapeScriptJsonLocal(json: string): string {
     .replace(/\u2029/g, "\\u2029");
 }
 
+/**
+ * How `Head()` turns an authored value into a string.
+ *
+ * This is the ONLY thing `Head()` contributes to the shared pipeline — the
+ * client has reactive getters to invoke and the servers do not, and that is the
+ * entire difference between them. Name canonicalization, eligibility, URL
+ * sanitization, duplicate detection, the empty-entry rule, and the meta-refresh
+ * verdict all live in `utils/headEntry.ts`, so the three rendering paths have
+ * nothing left to disagree about.
+ */
+const CLIENT_RESOLVER: HeadValueResolver<string | (() => string)> = {
+  resolveValue: (_name, value) => (typeof value === "function" ? String(value()) : String(value)),
+  isReactiveValue: (value) => typeof value === "function",
+};
+
+/**
+ * Render ONE meta entry, transactionally.
+ *
+ * WHY ONE EFFECT PER ENTRY
+ * ------------------------
+ * An earlier implementation created one effect per reactive ATTRIBUTE, so every
+ * write was judged on its own. That lets the combination become dangerous while
+ * no individual write ever looks wrong:
+ *
+ *     { "http-equiv": () => equiv(), content: "0;url=javascript:alert(1)" }
+ *
+ * With `equiv()` initially `"x-custom"` the entry is not a refresh directive, so
+ * the static content is accepted. `setEquiv("refresh")` then re-runs only the
+ * `http-equiv` effect — the content is never revalidated, and the element is now
+ * a live redirect that nothing ever approved.
+ *
+ * Security decisions are properties of the WHOLE entry, so the whole entry is
+ * the unit of work: one effect resolves every attribute and `planMetaEntry`
+ * judges the assembled snapshot.
+ *
+ * WHY THE ELEMENT IS BUILT DETACHED AND SWAPPED IN
+ * -----------------------------------------------
+ * Validating a whole snapshot is not enough if the snapshot is then applied to a
+ * CONNECTED element one attribute at a time. Reconciling
+ *
+ *     http-equiv="x-custom"  content="0;url=javascript:alert(1)"   (old, connected)
+ *
+ * into the perfectly valid
+ *
+ *     http-equiv="refresh"   content="5;url=/safe"                 (new, approved)
+ *
+ * writes `http-equiv="refresh"` while the element still carries the old content,
+ * so for the duration of one `setAttribute` the document contains a live
+ * `<meta http-equiv="refresh" content="0;url=javascript:alert(1)">`. Nothing
+ * approved that pair; it exists only because two safe states were interpolated
+ * through the DOM. Ordering the writes differently would only move the hole —
+ * attribute order is not a security mechanism.
+ *
+ * So an accepted snapshot is materialised on a FRESH element while it is
+ * detached, and published with a single `replaceWith()` (or `appendChild()` when
+ * nothing is attached yet). Every intermediate state is unobservable because it
+ * never touches the document.
+ *
+ * Returns a teardown that stops the effect and removes the published element.
+ */
+function applyMetaEntry(
+  metaProps: Record<string, string | (() => string)>,
+  managedElements: HTMLElement[],
+): () => void {
+  /** The element currently published for this entry, if any. */
+  let current: HTMLMetaElement | null = null;
+
+  /** Withdraw the entry entirely: nothing in the document, nothing counted. */
+  const retract = (): void => {
+    if (!current) return;
+    const index = managedElements.indexOf(current);
+    if (index !== -1) managedElements.splice(index, 1);
+    current.remove();
+    current = null;
+  };
+
+  /** Is `attributes` already exactly what is published? */
+  const alreadyPublished = (attributes: ReadonlyMap<string, string>): boolean => {
+    if (!current || current.attributes.length !== attributes.size) return false;
+    for (const [name, value] of attributes) {
+      if (current.getAttribute(name) !== value) return false;
+    }
+    return true;
+  };
+
+  /** Publish an approved snapshot in ONE DOM operation. */
+  const publish = (attributes: ReadonlyMap<string, string>): void => {
+    if (alreadyPublished(attributes)) return;
+
+    const next = document.createElement("meta");
+    for (const [name, value] of attributes) next.setAttribute(name, value);
+
+    const index = current ? managedElements.indexOf(current) : -1;
+    if (current?.parentNode) {
+      current.replaceWith(next);
+    } else {
+      // Never attached, or removed from under us — either way there is nothing
+      // to swap, so append.
+      current?.remove();
+      document.head.appendChild(next);
+    }
+
+    // Update the managed reference in the same step, so disposal always removes
+    // the element that is actually live and never leaks the one it replaced.
+    if (index !== -1) managedElements[index] = next;
+    else managedElements.push(next);
+    current = next;
+  };
+
+  const stopEffect = effect(() => {
+    // Resolving every attribute here is also what subscribes this single effect
+    // to all of them, so any change re-runs the whole validation.
+    const plan = planMetaEntry(metaProps, CLIENT_RESOLVER);
+    if (plan.kind === "drop") {
+      // Withdraw rather than merely skipping the write: an element already in
+      // the head would otherwise stay live with its previous — now unapproved —
+      // attributes.
+      retract();
+      return;
+    }
+    publish(plan.attributes);
+  });
+
+  return () => {
+    stopEffect();
+    retract();
+  };
+}
+
 interface HeadProps {
   title?: string | (() => string);
   meta?: Record<string, string | (() => string)>[];
@@ -94,6 +187,26 @@ interface HeadProps {
 
 /**
  * Head() manages document <head> tags reactively.
+ *
+ * META SECURITY: each meta entry is committed TRANSACTIONALLY. All of its
+ * attributes — static and reactive — are resolved into one snapshot, duplicate
+ * case-insensitive names are rejected, and the assembled snapshot is validated
+ * against the shared meta-refresh policy before anything reaches the DOM. An
+ * approved snapshot is then materialised on a fresh `<meta>` element while it is
+ * still detached and swapped in with a single `replaceWith()`, so no partially
+ * updated element is ever connected. A snapshot that fails validation withdraws
+ * the element entirely. See `utils/metaRefresh.ts`; the same policy governs SSR.
+ *
+ * NATIVE REFRESH DIRECTIVES MUST BE STATIC. A browser processes a meta refresh
+ * when the element is INSERTED — it records the pending navigation there and
+ * then, and removing or replacing the element afterwards is not a defined way to
+ * cancel it. `Head()` therefore never publishes a snapshot whose effective
+ * `http-equiv` is `refresh` from an entry that contains any reactive attribute,
+ * even when the destination is allowed: what cannot be withdrawn must not be
+ * handed over. Static refresh directives work as before, and every other
+ * reactive meta entry — description, keywords, Open Graph, non-refresh
+ * `http-equiv` — is unaffected.
+ *
  * Supports dynamic title, meta tags, link tags, and structured data.
  * Each instance tracks its own elements and effects for independent cleanup.
  */
@@ -139,68 +252,31 @@ export function Head(props: HeadProps): Comment {
       }
     }
 
-    // Meta tags — keys validated, URL-bearing values sanitized, and
-    // dangerous `http-equiv="refresh"` directives dropped entirely.
+    // Meta tags — each entry is committed TRANSACTIONALLY. See `applyMetaEntry`.
     if (props.meta) {
       for (const metaProps of props.meta) {
-        if (isDangerousMetaRefresh(metaProps)) continue;
-        // A `http-equiv="refresh"` meta with a reactive (or function) content
-        // can carry a `javascript:`/`data:` redirect that the static guard
-        // above never saw. `http-equiv` itself may be reactive, so resolve it
-        // freshly each time `content` is written rather than caching a verdict
-        // that could desync if http-equiv later becomes "refresh".
-        const httpEquiv = getMetaAttr(metaProps, "http-equiv");
-        const isRefreshNow = (): boolean => {
-          const eq = typeof httpEquiv === "function" ? (httpEquiv as () => string)() : httpEquiv;
-          return typeof eq === "string" && eq.toLowerCase() === "refresh";
-        };
-        const el = document.createElement("meta");
-        for (const [key, value] of Object.entries(metaProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          const isContent = key.toLowerCase() === "content";
-          if (typeof value === "function") {
-            const cleanupFn = effect(() => {
-              const resolved = (value as () => string)();
-              if (isContent && isRefreshNow() && isDangerousRefreshContent(resolved)) {
-                el.removeAttribute(key);
-                return;
-              }
-              el.setAttribute(key, sanitizeHeadAttr(key, resolved));
-            });
-            effectCleanups.push(cleanupFn);
-          } else {
-            if (isContent && isRefreshNow() && isDangerousRefreshContent(value)) continue;
-            el.setAttribute(key, sanitizeHeadAttr(key, value));
-          }
-        }
-        document.head.appendChild(el);
-        managedElements.push(el);
+        const stop = applyMetaEntry(metaProps, managedElements);
+        effectCleanups.push(stop);
       }
     }
 
-    // Link tags — keys validated, URL attributes sanitized.
-    if (props.link) {
-      for (const linkProps of props.link) {
-        const el = document.createElement("link");
-        for (const [key, value] of Object.entries(linkProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          el.setAttribute(key, sanitizeHeadAttr(key, value));
-        }
-        document.head.appendChild(el);
-        managedElements.push(el);
-      }
-    }
-
-    // Script tags — same validation posture. Note: inline script bodies
-    // are never written here; only the `src` attribute is used, and it
-    // passes through `sanitizeUrl`.
-    if (props.script) {
-      for (const scriptProps of props.script) {
-        const el = document.createElement("script");
-        for (const [key, value] of Object.entries(scriptProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          el.setAttribute(key, sanitizeHeadAttr(key, value));
-        }
+    // Link and script tags — the SAME shared plan the meta entries and both SSR
+    // paths run, so `HREF`/`SRC` are classified on the canonical name and a
+    // refused URL is omitted rather than published as `href=""`. Built fully
+    // while detached, then appended, so no partially-populated element is ever
+    // connected.
+    //
+    // Inline script bodies are never written here; only attributes are.
+    for (const [tag, entries] of [
+      ["link", props.link],
+      ["script", props.script],
+    ] as const) {
+      if (!entries) continue;
+      for (const entryProps of entries) {
+        const plan = planHeadElementEntry(entryProps, STATIC_HEAD_RESOLVER);
+        if (plan.kind === "drop") continue;
+        const el = document.createElement(tag);
+        for (const [name, value] of plan.attributes) el.setAttribute(name, value);
         document.head.appendChild(el);
         managedElements.push(el);
       }
@@ -271,5 +347,12 @@ export function setCanonical(url: string): void {
     link.rel = "canonical";
     document.head.appendChild(link);
   }
-  link.href = sanitizeUrl(url);
+  // A refused URL is OMITTED, never published as `href=""`. The two are not the
+  // same document: an empty URL attribute resolves against the current page, so
+  // `<link rel="canonical" href="">` declares the page canonical to itself,
+  // which is a claim nobody made. Any previously accepted value is cleared too,
+  // so a rejected update cannot leave a stale canonical standing.
+  const safe = sanitizeUrl(url);
+  if (safe) link.setAttribute("href", safe);
+  else link.removeAttribute("href");
 }

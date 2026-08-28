@@ -38,13 +38,32 @@ describe("Head (coverage2)", () => {
     expect(script?.getAttribute("async")).toBe("true");
   });
 
-  it("sanitizes javascript: in link/script src to empty", () => {
+  it("OMITS a rejected link href / script src rather than emitting an empty one", () => {
     Head({
       link: [{ rel: "icon", href: "javascript:alert(1)" }],
       script: [{ src: "javascript:alert(1)" }],
     });
-    expect(document.head.querySelector("link")?.getAttribute("href")).toBe("");
-    expect(document.head.querySelector("script")?.getAttribute("src")).toBe("");
+    // `href=""` is not "no href": an empty URL attribute resolves against the
+    // current document, so the browser would treat it as a reference to the page
+    // itself rather than as an absent attribute. A refused URL is omitted.
+    expect(document.head.querySelector("link")?.hasAttribute("href")).toBe(false);
+    expect(document.head.querySelector("link")?.getAttribute("rel")).toBe("icon");
+    // The script entry has nothing left at all, so no element is published.
+    expect(document.head.querySelector("script")).toBeNull();
+  });
+
+  it("rejects a MIXED-CASE link HREF / script SRC identically", () => {
+    // HTML attribute names are ASCII case-insensitive, so `SRC` reaches the
+    // browser as `src`. Classifying on the authored spelling meant these skipped
+    // URL sanitization entirely.
+    Head({
+      link: [{ rel: "icon", HREF: "javascript:alert(1)" }],
+      script: [{ SRC: "data:text/javascript,globalThis.__x=1" }],
+    });
+    const link = document.head.querySelector("link");
+    expect(link?.hasAttribute("href")).toBe(false);
+    expect(link?.getAttribute("rel")).toBe("icon");
+    expect(document.head.querySelector("script")).toBeNull();
   });
 
   it("skips unsafe attribute names (event handlers / bad chars)", () => {
@@ -82,26 +101,37 @@ describe("Head (coverage2)", () => {
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
-  it("removes reactive content when it becomes a dangerous refresh url", () => {
+  it("never publishes a native refresh from an entry with reactive content", () => {
     const [content, setContent] = signal("5;url=https://ok");
     Head({
       meta: [{ "http-equiv": "refresh", content: () => content() }],
     });
-    const meta = document.head.querySelector('meta[http-equiv="refresh"]');
-    expect(meta?.getAttribute("content")).toBe("5;url=https://ok");
 
-    // Now flip it to a dangerous value -> the effect removes the content attr
+    // A browser schedules a meta refresh when the element is INSERTED; removing
+    // the element afterwards is not a defined way to cancel it. So a reactive
+    // entry never publishes one at all — not when the value is safe, and not
+    // when it later turns dangerous. Withdrawing something already handed to the
+    // browser is not a mitigation the framework can actually perform.
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
+
     setContent("0;url=javascript:alert(1)");
-    expect(meta?.getAttribute("content")).toBeNull();
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
+
+    setContent("7;url=/next");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
   it("writes reactive non-refresh meta content normally", () => {
     const [desc, setDesc] = signal("hello");
     Head({ meta: [{ name: "description", content: () => desc() }] });
-    const meta = document.head.querySelector('meta[name="description"]');
-    expect(meta?.getAttribute("content")).toBe("hello");
+    expect(document.head.querySelector('meta[name="description"]')?.getAttribute("content")).toBe("hello");
+
     setDesc("world");
-    expect(meta?.getAttribute("content")).toBe("world");
+    // Re-queried rather than held: an accepted snapshot is materialised on a
+    // FRESH element and swapped in with one operation, so a connected element is
+    // never mutated attribute-by-attribute. The head still holds exactly one.
+    expect(document.head.querySelectorAll('meta[name="description"]')).toHaveLength(1);
+    expect(document.head.querySelector('meta[name="description"]')?.getAttribute("content")).toBe("world");
   });
 
   it("treats data: refresh url as dangerous", () => {
@@ -146,8 +176,11 @@ describe("setStructuredData / setCanonical (coverage2)", () => {
     link = links[0] as HTMLLinkElement;
     expect(link.getAttribute("href")).toBe("https://example.com/other");
 
-    // Dangerous URL sanitized to empty
+    // A rejected URL is OMITTED, and the previously accepted one is cleared —
+    // publishing `href=""` would declare the page canonical to itself, and
+    // leaving the old value standing would be a claim nobody made.
     setCanonical("javascript:alert(1)");
-    expect((document.head.querySelector('link[rel="canonical"]') as HTMLLinkElement).getAttribute("href")).toBe("");
+    const canonical = document.head.querySelector('link[rel="canonical"]') as HTMLLinkElement;
+    expect(canonical.hasAttribute("href")).toBe(false);
   });
 });
