@@ -33,6 +33,17 @@ export interface SSRStore {
    * server renders. Typed loosely to avoid a dependency cycle with data/.
    */
   caches?: Map<string, Map<string, unknown>>;
+  /**
+   * The locale this request has selected, or `undefined` when it has not
+   * chosen one and should follow the application default.
+   *
+   * A plain string rather than a signal: reactive locale switching is a client
+   * concern (one page, one active locale, subscribers to notify), while a
+   * server render reads the value once per request and never re-renders. Giving
+   * every request its own signal would allocate subscriber machinery nothing
+   * will ever use. See `plugins/i18n.ts`.
+   */
+  locale?: string;
 }
 
 type ALSLike<T> = {
@@ -50,6 +61,18 @@ type ALSLike<T> = {
 interface SSRShared {
   als: ALSLike<SSRStore> | null;
   fallbackStore: SSRStore;
+  /**
+   * How many `runInSSRContext` scopes are active on the FALLBACK path.
+   *
+   * With AsyncLocalStorage, "is a request active" is answered by whether the
+   * store exists. Without it there is only the one shared store, so the depth
+   * is what distinguishes "inside a request, mutating the shared store under
+   * save/restore" from "no request at all, and the store IS the process
+   * global". Subsystems that own request-scoped state need that distinction:
+   * writing to the process global because no request could be identified is the
+   * exact bleed request scoping exists to prevent.
+   */
+  fallbackDepth: number;
 }
 const SSR_KEY = Symbol.for("sibujs.ssr.v1");
 
@@ -94,7 +117,11 @@ function detectSSRShared(): SSRShared {
     detected = null;
   }
   /* v8 ignore stop */
-  return { als: detected, fallbackStore: { ssr: false, suspenseIdCounter: 0 } };
+  return {
+    als: detected,
+    fallbackStore: { ssr: false, suspenseIdCounter: 0, locale: undefined },
+    fallbackDepth: 0,
+  };
 }
 
 const _shared: SSRShared = ((globalThis as typeof globalThis & { [SSR_KEY]?: SSRShared })[SSR_KEY] ??=
@@ -103,6 +130,8 @@ const _shared: SSRShared = ((globalThis as typeof globalThis & { [SSR_KEY]?: SSR
 // `fallbackStore` is a shared object every copy mutates/reads in place.
 const als = _shared.als;
 const fallbackStore = _shared.fallbackStore;
+// A copy published by an earlier build of this module may predate the field.
+_shared.fallbackDepth ??= 0;
 
 // Warn once, on a Node runtime that reached the shared-store fallback.
 //
@@ -138,6 +167,28 @@ export function getSSRStore(): SSRStore {
     if (s) return s;
   }
   return fallbackStore;
+}
+
+/**
+ * The store belonging to the CURRENT request, or `null` when there is none.
+ *
+ * Deliberately different from `getSSRStore()`, which returns the process-global
+ * fallback when no request is active. A subsystem that owns request-scoped
+ * state must be able to tell those apart: silently writing request state into
+ * the fallback is cross-request bleed, not a graceful degradation.
+ *
+ * Note this is NOT the same question as `isSSR()`. `enableSSR()` sets a flag on
+ * whatever store is current — including the process global — whereas a request
+ * scope is exactly what `runInSSRContext` establishes.
+ */
+export function getRequestStore(): SSRStore | null {
+  if (als) return als.getStore() ?? null;
+  // Without AsyncLocalStorage there is one shared store, which `runInSSRContext`
+  // mutates under save/restore. Inside such a scope it is the closest thing to a
+  // request store this runtime has; outside one it is the process global and
+  // must not be treated as request-scoped. The documented limitation is
+  // unchanged: two requests interleaving across an `await` still share it.
+  return _shared.fallbackDepth > 0 ? fallbackStore : null;
 }
 
 /** Returns true when running in SSR mode. */
@@ -179,7 +230,7 @@ export function disableSSR(): void {
  * it falls back to mutating the module-global store.
  */
 export function runInSSRContext<T>(fn: () => T): T {
-  const store: SSRStore = { ssr: true, suspenseIdCounter: 0 };
+  const store: SSRStore = { ssr: true, suspenseIdCounter: 0, locale: undefined };
   if (als) {
     return als.run(store, fn);
   }
@@ -187,16 +238,21 @@ export function runInSSRContext<T>(fn: () => T): T {
   // Module-global fallback for runtimes without AsyncLocalStorage (browser,
   // some edge runtimes). Unreachable under the Node test runner where `als`
   // is always present.
-  /* v8 ignore next 11 */
+  /* v8 ignore next 15 */
   const prevSSR = fallbackStore.ssr;
   const prevCounter = fallbackStore.suspenseIdCounter;
+  const prevLocale = fallbackStore.locale;
   fallbackStore.ssr = true;
   fallbackStore.suspenseIdCounter = 0;
+  fallbackStore.locale = undefined;
+  _shared.fallbackDepth++;
   try {
     return fn();
   } finally {
+    _shared.fallbackDepth--;
     fallbackStore.ssr = prevSSR;
     fallbackStore.suspenseIdCounter = prevCounter;
+    fallbackStore.locale = prevLocale;
   }
 }
 
