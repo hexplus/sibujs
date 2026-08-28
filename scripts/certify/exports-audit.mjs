@@ -14,12 +14,23 @@
 //   4. importing it in bare Node does not touch `window`/`document`, install
 //      global listeners, start timers, or mutate globals beyond a documented
 //      allowlist
+//   5. no framework-internal helper is reachable from a public subpath, in the
+//      ESM namespace, the CJS namespace, or the generated declarations
 //
 // Exit code 0 = PASS. Any failure exits 1 and prints the offending subpath.
 // ---------------------------------------------------------------------------
 
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
+import { findDeclaredExports } from "./lib/declared-exports.mjs";
+
+// Helpers that exist only so one framework module can reach another. A wildcard
+// re-export once turned `getRequestStore()` — which hands back a MUTABLE
+// per-request SSR store — into part of the package API by accident. Publishing
+// an internal is a semver commitment nobody meant to make, so the packed
+// package is checked for it directly rather than trusting the barrel source.
+const INTERNAL_ONLY = ["getRequestStore"];
 
 // Resolve from the CONSUMER's cwd, not from this script's location. The repo
 // itself is named `sibujs`, so a module-relative resolve would hit Node's
@@ -125,6 +136,10 @@ for (const subpath of subpaths) {
       const named = Object.keys(ns).filter((k) => k !== "default");
       if (named.length === 0) fail(subpath, "import", "resolved but exports nothing");
       else pass(subpath, "import", `${named.length} named exports`);
+
+      const leakedEsm = INTERNAL_ONLY.filter((name) => named.includes(name));
+      if (leakedEsm.length > 0) fail(subpath, "internal:esm", `exposes ${leakedEsm.join(", ")}`);
+      else pass(subpath, "internal:esm");
     } catch (err) {
       fail(subpath, "import", `${err.name}: ${err.message}`);
     }
@@ -143,6 +158,34 @@ for (const subpath of subpaths) {
   if (newReads > 0)
     fail(subpath, "side-effect:listeners", listenerLog.slice(readsBefore).join(", "));
   else pass(subpath, "side-effect:listeners");
+
+  // CJS namespace, where a `require` condition is declared. A subpath can be
+  // clean in ESM and still expose an internal through its CommonJS build.
+  if (targets.require) {
+    try {
+      const required = createRequire(resolve(process.cwd(), "noop.js"))(spec);
+      const leakedCjs = INTERNAL_ONLY.filter((name) => name in required);
+      if (leakedCjs.length > 0) fail(subpath, "internal:cjs", `exposes ${leakedCjs.join(", ")}`);
+      else pass(subpath, "internal:cjs");
+    } catch (err) {
+      fail(subpath, "internal:cjs", `${err.name}: ${err.message}`);
+    }
+  }
+
+  // Generated declarations: a consumer reads these, so an internal listed here
+  // is public to TypeScript even when the runtime namespace is clean.
+  if (targets.types) {
+    const typesPath = resolve(PKG_DIR, targets.types);
+    if (existsSync(typesPath)) {
+      const dts = readFileSync(typesPath, "utf8");
+      // Structural extraction, not a text search: `findDeclaredExports` reads
+      // every `export { … }` clause in the file — including the re-export blocks
+      // tsup emits at the top — and compares exact identifiers.
+      const leakedDts = findDeclaredExports(dts, INTERNAL_ONLY);
+      if (leakedDts.length > 0) fail(subpath, "internal:types", `declares ${leakedDts.join(", ")}`);
+      else pass(subpath, "internal:types");
+    }
+  }
 
   // types file
   if (targets.types) {

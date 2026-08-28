@@ -59,16 +59,16 @@ This is the invariant that matters most on a server:
 > Request-specific SibuJS state may never leak between concurrent SSR renders.
 
 SibuJS backs its per-request store with Node's **`AsyncLocalStorage`**, detected
-once at module load. The store holds the SSR flag, the suspense-id counter, and
-lazily-created request-scoped caches.
+once at module load. The store holds the SSR flag, the suspense-id counter, the
+active i18n locale, and lazily-created request-scoped caches.
 
 ```text
-Request A ──► runInSSRContext ──► store A { ssr, suspenseIdCounter, caches }
+Request A ──► runInSSRContext ──► store A { ssr, suspenseIdCounter, locale, caches }
                                      │
                                      ├── survives every await in A
                                      └── invisible to B
 
-Request B ──► runInSSRContext ──► store B { ssr, suspenseIdCounter, caches }
+Request B ──► runInSSRContext ──► store B { ssr, suspenseIdCounter, locale, caches }
 ```
 
 ALS propagates across `await`, so an interleaved render keeps its own store.
@@ -78,6 +78,34 @@ released in reverse order — every request saw only its own markers.
 The instance is published on `globalThis` under
 `Symbol.for("sibujs.ssr.v1")`, so duplicate copies of the module (which bundler
 pre-bundling can produce) share one store rather than each keeping their own.
+
+### i18n locale ownership
+
+The active locale is per-visitor, so on a server it is per-request. Inside
+`runInSSRContext` it lives in that request's store:
+
+```ts
+runInSSRContext(async () => {
+  setLocale("es");        // this request only
+  await loadData();
+  return t("greeting");   // "Hola" — even if another request chose "en"
+});
+```
+
+Outside a request scope `setLocale()` updates the client locale reactively,
+exactly as it always has, so browser apps are unaffected and need no explicit
+i18n object.
+
+**Translation dictionaries stay application-global.** They are static data:
+registered once at startup, read identically by every request. Copying them per
+request would duplicate every message for no benefit and force each request to
+re-register before it could translate anything. `registerTranslations()` merges,
+so it never drops what was registered before — including when called from inside
+a request, where the result is visible to every other request and to the client.
+
+A request that never calls `setLocale()` follows the application default (`"en"`
+unless the application changed it at startup). An SSR request never writes to
+that default: it cannot change what a concurrent request, or the client, renders.
 
 ### `withSSR()` is not request-scoped
 
@@ -90,9 +118,16 @@ withSSR(fn);          // mutates the CURRENT store — fine for a one-shot rende
 `runInSSRContext` that is the process-global fallback. Use it for scripts and
 tests; use `runInSSRContext` for anything serving concurrent requests.
 
+`withSSR()` therefore does not scope the locale either: a `setLocale()` inside
+it updates the client locale, because no request store was created.
+
 On runtimes without `AsyncLocalStorage`, the store falls back to a module
 global. **Concurrent rendering is not request-isolated there** — a documented
-limitation for non-Node edge runtimes.
+limitation for non-Node edge runtimes. `runInSSRContext` saves and restores that
+shared store around the call, which is correct for a fully synchronous render;
+an `async` callback's scope ends at its first `await`, after which reads fall
+back to the process-wide values. This applies to the locale exactly as it does
+to the SSR flag and the suspense counter.
 
 ## Escaping
 

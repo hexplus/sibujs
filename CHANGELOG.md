@@ -10,6 +10,57 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The active i18n locale is request-scoped during SSR.** It lived in a
+  process-global signal, which is exactly right in a browser — one page, one
+  active locale, shared across duplicated bundle copies — and exactly wrong on a
+  server, where two overlapping renders overwrote each other: a request that
+  paused across an `await` could resume and render the locale a *different*
+  request had selected in the meantime. The locale now lives in the existing
+  per-request `AsyncLocalStorage` store (no second one is created), so
+  `setLocale()`, `getLocale()`, `t()`, `Trans()` and `hasTranslation()` all
+  resolve the locale belonging to the current request, across every `await` and
+  through nested contexts. An SSR request never writes the application default,
+  so a success, a synchronous throw and an asynchronous rejection all leave the
+  client locale untouched.
+
+  Outside a request scope nothing changes: `setLocale()` updates the client
+  locale reactively, duplicated bundle copies keep sharing it, and applications
+  need no explicit i18n object. **Translation dictionaries remain
+  application-global** — static data read identically by every request, so
+  copying them per request would duplicate every message for no benefit;
+  `registerTranslations()` merges and is visible everywhere, including when
+  called from inside a request. A request that never calls `setLocale()` follows
+  the application default, preserving the established `"en"` behaviour. On
+  runtimes without `AsyncLocalStorage` the documented limitation is unchanged
+  and now applies to the locale on exactly the same terms as the SSR flag.
+
+- **i18n locale names and translation keys are treated as literal strings.**
+  The locale registry and the translation dictionaries are objects, and lookups
+  reached into them with bracket access and `in`, both of which walk the
+  prototype chain. So every locale reported translations nobody registered —
+  `hasTranslation("toString")` was `true` and `t("toString")` returned
+  `Object.prototype.toString`, a function from a call declared to return a
+  string — and the locale name `"__proto__"` was not a locale at all:
+  `locales[locale] = dictionary` invoked the inherited `__proto__` setter, so the
+  locale never appeared in `getAvailableLocales()` while every key of its
+  dictionary read back as a locale of its own.
+
+  Lookups now consult own properties only and publication goes through
+  `Object.defineProperty`, so `__proto__`, `constructor`, `toString`,
+  `hasOwnProperty` and the rest behave like any other name as both a locale and
+  a translation key, registry prototypes are never modified, and an inherited
+  property is never a translation. The guard is on the operations rather than on
+  the initialiser, because the i18n singleton is deliberately shared across
+  duplicated bundle copies: a copy that finds a registry created by an older one
+  is protected on exactly the same terms.
+
+  **A registered empty string is now preserved.** `t()` fell back to the key for
+  any falsy message, so `registerTranslations(locale, { note: "" })` rendered
+  `"note"` instead of a blank string; only a genuinely unregistered key falls
+  back now, and `hasTranslation()` agrees with `t()` about which keys those are.
+  Reentrant registration, request-scoped locale ownership, client locale
+  reactivity and the application-global ownership of dictionaries are unchanged.
+
 - **`optimisticList()` rows survive being temporarily hidden.** The row ledger
   held only the rows currently on screen, so a pending `remove()` took its rows
   *out* of it and carried copies in its own rollback list — one logical row with

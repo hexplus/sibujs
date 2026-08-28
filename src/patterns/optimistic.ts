@@ -100,13 +100,19 @@ export function optimistic<T>(initialValue: T): {
 // question is per row: does this operation still own what it is about to change?
 //
 // So the list is stored as a ledger of tracked rows. Each row carries a stable
-// id and the id of the operation that last claimed its value. An operation
-// records only the rows it touched and, on settlement, re-checks ownership row
-// by row. Disjoint operations therefore never interact, and an operation can
-// only ever undo its own mutation.
+// id, its last CONFIRMED value, and an ordered chain of claims — one per
+// operation that has touched it, positioned by invocation order. An operation
+// records only the rows it touched and, on settlement, resolves or drops its own
+// claim and nothing else. Disjoint operations therefore never interact, and an
+// operation can only ever undo its own mutation.
 //
-// `items()` projects `value` out of the ledger, so no id, generation or wrapper
-// is observable through the public API.
+// (An earlier version stored a single `owner` field — the id of whichever
+// operation had written the row last. That records who owns the row *now*, not
+// the order in which operations claimed it, and leaves nowhere to keep an older
+// claim while a newer one sits above it. See "OWNERSHIP IS A CLAIM CHAIN" below.)
+//
+// `items()` projects the effective value out of the ledger, so no id, claim or
+// wrapper is observable through the public API.
 
 //
 // WHY THE REGISTRY OUTLIVES VISIBILITY
