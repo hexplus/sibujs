@@ -2,8 +2,7 @@
 
 A lightweight, function-based frontend framework with fine-grained reactivity, direct DOM rendering, and zero compilation. **No Virtual DOM. No magic.**
 
-[[NPM Version]](https://www.npmjs.com/package/sibujs)
-[[License]](https://github.com/hexplus/sibujs/blob/main/LICENSE)
+[NPM](https://www.npmjs.com/package/sibujs) · [License](https://github.com/hexplus/sibujs/blob/main/LICENSE)
 
 ## Why SibuJS?
 
@@ -14,6 +13,16 @@ A lightweight, function-based frontend framework with fine-grained reactivity, d
 - **Modular & Lean:** The core stays small; every advanced capability ships as a tree-shakeable subpath import, so you pay only for what you use.
 - **Full-Featured:** When you need more, it's already there — router, i18n, SSR with streaming and hydration, islands & progressive enhancement, data fetching, state machines, and reactive wrappers for dozens of browser APIs.
 - **TypeScript-First:** Written in TypeScript with typed props for common elements and full type inference across signals and components.
+
+## Requirements
+
+- **Node.js ≥ 22.3.0** for SSR and tooling. Node 18 and 20 are not supported —
+  both are end-of-life, and SSR request isolation depends on
+  `process.getBuiltinModule`, added in 22.3.
+- **Browsers:** Chrome/Edge ≥ 93, Firefox ≥ 92, Safari ≥ 15.4. The floor is what
+  the source actually requires (`Object.hasOwn`, `ParentNode.replaceChildren`
+  and `new Error(msg, { cause })`), enforced by a build gate rather than only
+  documented.
 
 ## Quick Start
 
