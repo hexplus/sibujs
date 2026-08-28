@@ -5,30 +5,69 @@
     <title>SibuJS meta-refresh security — browser fixture</title>
   </head>
   <body>
-    <!-- Only a real engine honours a refresh directive, so this is where
-         "the entry was removed before the browser could act" is actually
-         provable. jsdom never navigates.
-
-         Synchronization is deliberate, not a fixed delay:
-
-           - a BENIGN control performs a real same-origin refresh, and the test
-             waits on waitForURL(). That proves the probe works AND establishes
-             an upper bound on how long this engine takes to honour a directive.
-           - the dangerous target is same-origin and its request is counted by a
-             route interceptor in the test, so a navigation cannot pass silently.
-
-         The dangerous destination is a local path, never an external host. -->
-
     <section id="log"></section>
 
     <script type="module">
-      // `Head` ships from `sibujs/extras`; signals and dispose from the root.
+      // Only a real engine honours a refresh directive, so this is where the
+      // static-only contract is actually observable. jsdom never navigates.
+      //
+      // WHAT THIS FIXTURE PROVES, AND HOW
+      // ---------------------------------
+      // A browser processes a meta refresh when the element is INSERTED: it
+      // records the pending navigation there and then. Removing the element
+      // afterwards is NOT a defined way to cancel it. So "the element is gone
+      // now" is worthless evidence, and the only checkable claim is the stronger
+      // one: the forbidden or reactive element was never connected at all.
+      //
+      // The probe below records the state of every connected <meta> after each
+      // DOM mutation. Element state only changes when one of those operations
+      // runs, so the recording is the COMPLETE trace of observable states rather
+      // than a sample of it — and it can be read synchronously, with no timing
+      // assumptions whatsoever.
+      //
+      // Navigation is proven separately, per test, by a same-origin control that
+      // really does refresh. See the spec.
       import { signal, dispose } from "../dist/index.js";
       import { Head } from "../dist/extras.js";
 
       const params = new URLSearchParams(location.search);
       window.__arrivedAt = params.get("arrived") || null;
+      window.__XSS = false;
 
+      // ─── probe ────────────────────────────────────────────────────────────
+
+      let trace = [];
+
+      const sample = () => {
+        for (const m of document.head.querySelectorAll("meta")) {
+          trace.push({
+            httpEquiv: m.getAttribute("http-equiv"),
+            content: m.getAttribute("content"),
+            name: m.getAttribute("name"),
+          });
+        }
+      };
+
+      for (const [owner, method] of [
+        [Element.prototype, "setAttribute"],
+        [Element.prototype, "removeAttribute"],
+        [Element.prototype, "replaceWith"],
+        [Element.prototype, "remove"],
+        [Node.prototype, "appendChild"],
+        [Node.prototype, "insertBefore"],
+        [Node.prototype, "removeChild"],
+      ]) {
+        const original = owner[method];
+        owner[method] = function (...args) {
+          const result = original.apply(this, args);
+          sample();
+          return result;
+        };
+      }
+
+      // ─── cases ────────────────────────────────────────────────────────────
+
+      const PROTECTED = "/examples/should-never-load.html";
       let head = null;
 
       const liveRefresh = () =>
@@ -46,59 +85,139 @@
       };
 
       const api = {
-        /** Reactive http-equiv flipping onto STATIC dangerous content. */
-        dangerousTransition() {
-          const [equiv, setEquiv] = signal("x-custom");
+        /** Clear per-test state. Every case is independent of every other. */
+        reset() {
+          if (head) dispose(head);
+          head = null;
+          for (const m of Array.from(document.head.querySelectorAll("meta[http-equiv], meta[name], meta[property]"))) {
+            if (!m.hasAttribute("charset")) m.remove();
+          }
+          trace = [];
+          window.__XSS = false;
+          return true;
+        },
+
+        /** Every connected-<meta> state observed so far, in order. */
+        trace() {
+          return trace;
+        },
+
+        /** Those observations that were an active refresh directive. */
+        connectedRefreshStates() {
+          return trace.filter((o) => (o.httpEquiv || "").trim().toLowerCase() === "refresh");
+        },
+
+        /**
+         * FINDING 1 — one state update carrying both fields.
+         *
+         * The old snapshot is a forbidden refresh, the new one is entirely
+         * valid. Reconciling attribute-by-attribute on the connected element
+         * writes `http-equiv="refresh"` while the old content is still present.
+         * The first assignment of the old content targets a protected local
+         * path, so a permissive implementation would also be caught by the route
+         * interceptor in the spec.
+         */
+        atomicTransition() {
+          const [state, setState] = signal({
+            equiv: "x-custom",
+            content: "0;url=" + PROTECTED + ";url=javascript:window.__XSS=1",
+          });
           head = Head({
-            meta: [{ "http-equiv": () => equiv(), content: "0;url=javascript:window.__XSS=1" }],
+            meta: [{ "http-equiv": () => state().equiv, content: () => state().content }],
           });
           const before = snapshot();
-          // Synchronous effects: the transition completes before this returns.
-          setEquiv("refresh");
+          // Effects run synchronously: the transition completes before this
+          // function returns, so the trace is already final.
+          setState({ equiv: "refresh", content: "5;url=/safe" });
           return { before, after: snapshot() };
         },
 
         /**
-         * A MALFORMED directive whose first assignment points at a protected
-         * local path.
-         *
-         * A relative path is a perfectly legal refresh destination, so this is
-         * not about protocol policy — it is about the conservative rule for
-         * ambiguous syntax. Two competing `url=` assignments have no single
-         * defensible reading, so the whole directive is dropped. A permissive
-         * implementation that took the first assignment would navigate, and the
-         * route interceptor in the test would see the request.
+         * A reactive `http-equiv` flipping to `refresh` over a SAFE, same-origin
+         * destination. Nothing about the directive is dangerous; it is withheld
+         * because a reactive entry cannot withdraw a navigation the browser has
+         * already scheduled.
          */
-        malformedNavigationTransition() {
+        reactiveRefreshFlip() {
           const [equiv, setEquiv] = signal("x-custom");
-          head = Head({
-            meta: [
-              {
-                "http-equiv": () => equiv(),
-                content: "0;url=/examples/should-never-load.html;url=javascript:window.__XSS=1",
-              },
-            ],
-          });
-          setEquiv("refresh");
-          return snapshot();
-        },
-
-        /** A whitespace/quoted spelling the old substring check missed. */
-        obfuscatedTransition() {
-          const [content, setContent] = signal("5;url=/examples/meta-refresh-security-browser.html");
-          head = Head({ meta: [{ "http-equiv": "refresh", content: () => content() }] });
+          head = Head({ meta: [{ "http-equiv": () => equiv(), content: "0;url=" + PROTECTED }] });
           const before = snapshot();
-          setContent("0; URL = 'javascript:window.__XSS=1'");
+          setEquiv("refresh");
           return { before, after: snapshot() };
         },
 
-        /** Benign control: a REAL same-origin refresh the browser must honour. */
-        benignRefresh() {
+        /** A static `refresh` whose content is reactive — likewise withheld. */
+        reactiveContentRefresh() {
+          const [content, setContent] = signal("0;url=" + PROTECTED);
+          head = Head({ meta: [{ "http-equiv": "refresh", content: () => content() }] });
+          const before = snapshot();
+          setContent("0;url=" + PROTECTED + "?second");
+          return { before, after: snapshot() };
+        },
+
+        /** A reactive refresh that later becomes an ordinary description meta. */
+        reactiveRefreshThenOrdinary() {
+          const [equiv, setEquiv] = signal("refresh");
+          head = Head({ meta: [{ "http-equiv": () => equiv(), content: "0;url=" + PROTECTED }] });
+          const before = snapshot();
+          setEquiv("x-ua-compatible");
+          const ordinary = document.head.querySelector('meta[http-equiv="x-ua-compatible"]');
+          return {
+            before,
+            after: snapshot(),
+            ordinaryPublished: ordinary !== null,
+            ordinaryContent: ordinary ? ordinary.getAttribute("content") : null,
+          };
+        },
+
+        /** A fully static, forbidden directive. Never inserted. */
+        staticForbiddenRefresh() {
+          head = Head({
+            meta: [{ "http-equiv": "refresh", content: "0;url=javascript:window.__XSS=1" }],
+          });
+          return snapshot();
+        },
+
+        /**
+         * A fully static, MALFORMED directive whose first assignment points at a
+         * protected local path.
+         *
+         * A relative path is a perfectly legal refresh destination, so this is
+         * not a protocol question — it is the conservative rule for ambiguous
+         * syntax. Two competing `url=` assignments have no single defensible
+         * reading, so the whole directive is dropped. A permissive implementation
+         * that took the first would navigate, and the interceptor would see it.
+         */
+        staticMalformedRefresh() {
+          head = Head({
+            meta: [{ "http-equiv": "refresh", content: "0;url=" + PROTECTED + ";url=javascript:window.__XSS=1" }],
+          });
+          return snapshot();
+        },
+
+        /** A duplicate-casing entry — rejected as a whole on every path. */
+        duplicateCasingRefresh() {
+          head = Head({
+            meta: [{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", content: "0;url=" + PROTECTED }],
+          });
+          return snapshot();
+        },
+
+        /**
+         * The CONTROL, and the per-test navigation guard: a fully static, safe,
+         * same-origin refresh the browser must honour.
+         *
+         * Used two ways. On its own it proves the probe can observe a refresh at
+         * all. Inside a negative test it proves the engine acted on a refresh
+         * during that very page instance — so the protected path's request count
+         * of zero means "was never scheduled", not merely "has not happened yet".
+         */
+        staticSafeRefresh(tag) {
           head = Head({
             meta: [
               {
                 "http-equiv": "refresh",
-                content: "0;url=/examples/meta-refresh-security-browser.html?arrived=1",
+                content: "0;url=/examples/meta-refresh-security-browser.html?arrived=" + tag,
               },
             ],
           });
@@ -111,15 +230,8 @@
         xss() {
           return window.__XSS === true;
         },
-        cleanup() {
-          if (head) dispose(head);
-          head = null;
-          for (const m of Array.from(document.head.querySelectorAll("meta[http-equiv]"))) m.remove();
-          return true;
-        },
       };
 
-      window.__XSS = false;
       window.__t = api;
       window.__ready = true;
     </script>

@@ -219,13 +219,106 @@ ever approved.
 
 Security decisions are properties of the whole entry, so the whole entry is the
 unit of work: one effect per entry resolves every attribute, folds duplicate
-casings, validates the assembled snapshot, and only then reconciles the element.
-A snapshot that fails validation **detaches** the element rather than blanking an
-attribute — a detached element must never be counted as an active directive, and
-a partially-cleared one is still live markup.
+casings, and validates the assembled snapshot. A snapshot that fails validation
+**withdraws** the element rather than blanking an attribute — a partially cleared
+element is still live markup.
 
-Client, `renderToDocument`, and router SSR all call the same policy, so the same
-input receives the same verdict on both sides.
+### Publication is a swap, not a reconciliation
+
+Validating a whole snapshot is not enough if the snapshot is then applied to a
+**connected** element one attribute at a time. Reconciling
+
+```text
+http-equiv="x-custom"  content="0;url=javascript:alert(1)"   (old, connected)
+```
+
+into the entirely valid
+
+```text
+http-equiv="refresh"   content="5;url=/safe"                 (new, approved)
+```
+
+writes `http-equiv="refresh"` while the element still carries the old content. For
+the duration of one `setAttribute` the document contains a live
+`<meta http-equiv="refresh" content="0;url=javascript:alert(1)">` — a pair no
+snapshot ever approved, existing only because two safe states were interpolated
+through the DOM. Reordering the writes moves the hole rather than closing it:
+**attribute order is not a security mechanism.**
+
+So an accepted snapshot is materialised on a *fresh* element while it is
+detached, every attribute is set there, and it is published with a single
+`replaceWith()` (or `appendChild()` when nothing is attached yet). Every
+intermediate state is unobservable because it never touches the document. The
+managed-element reference is updated in the same step, so disposal always removes
+the element that is live and never leaks the one it replaced.
+
+### Native refresh directives must be static
+
+A browser processes a meta refresh when the element is **inserted**: the document
+records that it will declaratively refresh and schedules the navigation right
+there. Removing or replacing the element afterwards is not a defined cancellation
+mechanism — see the
+[HTML refresh processing model](https://html.spec.whatwg.org/multipage/semantics.html#attr-meta-http-equiv-refresh).
+
+That makes "reactive refresh" a promise a framework cannot keep. Once a reactive
+entry has published `http-equiv="refresh"`, a later state change that ought to
+withdraw it has nothing left to withdraw; the navigation already belongs to the
+browser, and a test asserting "the element is gone" is measuring the wrong thing.
+The same applies to a safe-to-safe change: the first destination stays scheduled.
+
+The contract is therefore the narrow, honest one:
+
+> A meta entry containing reactive attributes must never publish a snapshot whose
+> effective `http-equiv` value is `refresh`.
+
+This is a *publication* rule, not a parse rule. The snapshot is still parsed and
+still refused outright if the directive is dangerous; a reactive entry whose
+snapshot happens to be a perfectly safe refresh is withheld **anyway**, because
+the question is reversibility rather than safety. Concretely:
+
+- a reactive `http-equiv` flipping to `refresh` inserts nothing;
+- a static `refresh` with reactive `content` inserts nothing, on first render or
+  after;
+- a reactive entry that later resolves to an ordinary non-refresh meta publishes
+  that ordinary entry normally;
+- fully static refresh directives are unaffected — safe ones are emitted, and
+  forbidden or ambiguous ones are dropped as before;
+- every other reactive meta entry — description, keywords, Open Graph, non-refresh
+  `http-equiv` — behaves exactly as it always did.
+
+No framework navigation timer stands in for the withheld directive. Scheduling a
+redirect the developer did not ask the *framework* to own would be a larger
+promise than the one being withdrawn.
+
+### One pipeline, one order
+
+A shared policy function is not the same thing as a shared decision. All three
+paths already called one policy and still disagreed, because they called it at
+different points in their own pipelines:
+
+```text
+client:  filter unsafe names  →  resolve values     →  check duplicates
+server:  check duplicates     →  filter unsafe names →  sanitize values
+```
+
+So `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
+by the client — which dropped both event handlers as unsafe names and then saw no
+duplicate — and rejected by both servers, which saw the duplicate in the raw
+record. Same rule, same function, opposite outcomes.
+
+`planMetaEntry` fixes the order in one place for all three:
+
+1. reject duplicate case-insensitive names, on the **raw authored names**
+2. drop names this target may not emit
+3. resolve values (invoking reactive getters on the client)
+4. sanitize values
+5. validate the **complete effective snapshot** — what is judged is what is committed
+6. publish or serialize
+
+Only steps 2–4 are parameterized per target. `Head()`, `renderToDocument`, and
+`renderRouteToDocument` supply their own name filter and value sanitizer and
+share everything else, so the same input receives the same verdict — and, for
+accepted entries, the same effective attributes — on all three.
 
 ## Security is a postcondition, not a promise about this write
 

@@ -82,33 +82,37 @@ describe("Head (coverage2)", () => {
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
-  it("removes the whole entry when reactive content becomes a dangerous refresh url", () => {
+  it("never publishes a native refresh from an entry with reactive content", () => {
     const [content, setContent] = signal("5;url=https://ok");
     Head({
       meta: [{ "http-equiv": "refresh", content: () => content() }],
     });
-    expect(document.head.querySelector('meta[http-equiv="refresh"]')?.getAttribute("content")).toBe("5;url=https://ok");
 
-    setContent("0;url=javascript:alert(1)");
-
-    // The entry is now DETACHED, not merely blanked. Blanking `content` while
-    // leaving `http-equiv="refresh"` in the head was the previous mitigation;
-    // entries are now committed and withdrawn as a whole, so a snapshot that
-    // fails validation leaves nothing live at all.
+    // A browser schedules a meta refresh when the element is INSERTED; removing
+    // the element afterwards is not a defined way to cancel it. So a reactive
+    // entry never publishes one at all — not when the value is safe, and not
+    // when it later turns dangerous. Withdrawing something already handed to the
+    // browser is not a mitigation the framework can actually perform.
     expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
 
-    // …and it comes back when the value is safe again.
+    setContent("0;url=javascript:alert(1)");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
+
     setContent("7;url=/next");
-    expect(document.head.querySelector('meta[http-equiv="refresh"]')?.getAttribute("content")).toBe("7;url=/next");
+    expect(document.head.querySelector('meta[http-equiv="refresh"]')).toBeNull();
   });
 
   it("writes reactive non-refresh meta content normally", () => {
     const [desc, setDesc] = signal("hello");
     Head({ meta: [{ name: "description", content: () => desc() }] });
-    const meta = document.head.querySelector('meta[name="description"]');
-    expect(meta?.getAttribute("content")).toBe("hello");
+    expect(document.head.querySelector('meta[name="description"]')?.getAttribute("content")).toBe("hello");
+
     setDesc("world");
-    expect(meta?.getAttribute("content")).toBe("world");
+    // Re-queried rather than held: an accepted snapshot is materialised on a
+    // FRESH element and swapped in with one operation, so a connected element is
+    // never mutated attribute-by-attribute. The head still holds exactly one.
+    expect(document.head.querySelectorAll('meta[name="description"]')).toHaveLength(1);
+    expect(document.head.querySelector('meta[name="description"]')?.getAttribute("content")).toBe("world");
   });
 
   it("treats data: refresh url as dangerous", () => {

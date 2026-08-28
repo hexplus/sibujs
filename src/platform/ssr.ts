@@ -30,7 +30,7 @@
 import { isDev } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
-import { isForbiddenMetaEntry } from "../utils/metaRefresh";
+import { isForbiddenMetaEntry, type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
 import {
   isEventHandlerAttr,
   isHtmlContentAttribute,
@@ -559,6 +559,41 @@ export function isDangerousMetaRefresh(metaProps: Record<string, string>): boole
 }
 
 /**
+ * The server's half of the shared meta pipeline.
+ *
+ * Names and values are filtered and sanitized exactly as `buildAttrString`
+ * would, but `planMetaEntry` decides the ORDER — raw duplicate names first, the
+ * refresh verdict last, on the effective post-sanitization snapshot. Running the
+ * duplicate check and the refresh check at different points is how the server
+ * and `Head()` came to disagree about `{ name, content, onload, ONLOAD }`: the
+ * client filtered the handlers away and then saw no duplicate, while the server
+ * checked the raw record and rejected the whole entry.
+ *
+ * Server-rendered values are plain strings, so `isReactiveValue` is absent and
+ * the static-only refresh rule never fires here — a static refresh directive is
+ * exactly what SSR is expected to be able to emit.
+ */
+const SSR_META_POLICY: MetaEntryPolicy<string> = {
+  isEmittableName: (name) =>
+    isSafeAttrName(name) && !isEventHandlerAttr(name) && !isForbiddenSsrAttr(name.toLowerCase()),
+  resolveValue: (_name, value) => String(value),
+  sanitizeValue: (name, value) => {
+    const lower = name.toLowerCase();
+    if (!isPolicyAttr(lower)) return value;
+    const safe = sanitizeSsrAttributeValue(lower, value);
+    return safe ? safe : null;
+  },
+};
+
+/** Serialize one `<meta>` entry, or `""` when the shared policy refuses it. */
+function renderMetaTag(attrs: Record<string, string>): string {
+  const plan = planMetaEntry(attrs, SSR_META_POLICY);
+  if (plan.kind === "drop" || plan.attributes.size === 0) return "";
+  const pairs = Array.from(plan.attributes, ([name, value]) => `${name}="${escapeAttr(value)}"`).join(" ");
+  return `<meta ${pairs} />`;
+}
+
+/**
  * Renders a component to a full HTML document string.
  *
  * `headExtra` requires a `TrustedHTML` value created via `trustHTML()`.
@@ -591,16 +626,10 @@ export function renderToDocument(
     content = ssrErrorComment(err);
   }
 
-  const metaTags = (options.meta || [])
-    .map((attrs) => {
-      // Drop any dangerous `<meta http-equiv="refresh" content="0;url=javascript:...">`
-      // entry before it reaches the attribute builder.
-      if (isDangerousMetaRefresh(attrs)) return "";
-      const pairs = buildAttrString(attrs);
-      return pairs ? `<meta ${pairs} />` : "";
-    })
-    .filter(Boolean)
-    .join("\n    ");
+  // Names filtered, values sanitized, duplicate casings rejected, and dangerous
+  // `<meta http-equiv="refresh" content="0;url=javascript:...">` entries dropped
+  // — all by the one shared pipeline the client also runs.
+  const metaTags = (options.meta || []).map(renderMetaTag).filter(Boolean).join("\n    ");
 
   const linkTags = (options.links || [])
     .map((attrs) => {

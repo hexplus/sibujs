@@ -13,8 +13,9 @@
 //  - `serializeRouteState` escapes `<`, `>`, `&`, `U+2028`, `U+2029` and
 //    supports an optional `nonce` for strict-CSP compatibility.
 
-import { escapeScriptJson, isDangerousMetaRefresh, renderToString, type TrustedHTML } from "../platform/ssr";
+import { escapeScriptJson, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "../utils/guards";
+import { type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
 import { isHtmlContentAttribute } from "../utils/sanitize";
 import type { RouteDef } from "./router";
 import { __getNavigationEpoch, createRouter } from "./router";
@@ -410,18 +411,11 @@ export function renderRouteToDocument(
   const { html, state } = renderRouteToString(url, routes, options);
   const opts = options || {};
 
-  // Build meta tags — keys validated, values URL-sanitized when applicable,
-  // and dangerous `http-equiv="refresh"` directives dropped entirely (matching
-  // renderToDocument; without this a meta-refresh javascript: URL would slip
-  // through on the router document path).
-  const metaTags = (opts.meta || [])
-    .filter((attrs) => !isDangerousMetaRefresh(attrs))
-    .map((attrs) => {
-      const pairs = buildSafeAttrString(attrs);
-      return pairs ? `<meta ${pairs} />` : "";
-    })
-    .filter(Boolean)
-    .join("\n    ");
+  // The SAME shared pipeline `renderToDocument` and `Head()` run: raw duplicate
+  // case-insensitive names rejected first, then name filtering and value
+  // sanitization, and only then the meta-refresh verdict — on the effective
+  // snapshot, so what is validated is what is serialized.
+  const metaTags = (opts.meta || []).map(renderMetaTag).filter(Boolean).join("\n    ");
 
   // Build link tags
   const linkTags = (opts.links || [])
@@ -641,6 +635,31 @@ function sanitizeUrlLocal(url: string): string {
     return "";
   }
   return trimmed;
+}
+
+/**
+ * Router SSR's half of the shared meta pipeline.
+ *
+ * Mirrors `buildSafeAttrString`'s name filter and URL sanitization, but hands
+ * the ORDER of the checks to `planMetaEntry` so this path cannot drift from
+ * `renderToDocument` or from the client.
+ */
+const ROUTER_META_POLICY: MetaEntryPolicy<string> = {
+  isEmittableName: (name) => isSafeAttrName(name) && !isEventHandlerAttr(name) && !isHtmlContentAttribute(name),
+  resolveValue: (_name, value) => String(value),
+  sanitizeValue: (name, value) => {
+    if (!URL_ATTRS.has(name.toLowerCase())) return value;
+    const safe = sanitizeUrlLocal(value);
+    return safe ? safe : null;
+  },
+};
+
+/** Serialize one `<meta>` entry, or `""` when the shared policy refuses it. */
+function renderMetaTag(attrs: Record<string, string>): string {
+  const plan = planMetaEntry(attrs, ROUTER_META_POLICY);
+  if (plan.kind === "drop" || plan.attributes.size === 0) return "";
+  const pairs = Array.from(plan.attributes, ([name, value]) => `${name}="${escapeAttrLocal(value)}"`).join(" ");
+  return `<meta ${pairs} />`;
 }
 
 /** Build a validated `key="value"` pair string. */

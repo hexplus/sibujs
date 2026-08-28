@@ -33,15 +33,55 @@ This project follows [Semantic Versioning](https://semver.org/).
   effect per reactive *attribute* meant each write was judged alone, so a
   reactive `http-equiv` flipping to `"refresh"` could activate static `content`
   that had been accepted only because the entry was not a refresh at the time.
-  There is now one effect per entry: it resolves every attribute, validates the
-  assembled snapshot, and only then reconciles the element — and a snapshot that
-  fails validation detaches the element rather than blanking one attribute.
+  There is now one effect per entry: it resolves every attribute and validates
+  the assembled snapshot — and a snapshot that fails validation withdraws the
+  element rather than blanking one attribute.
+
+- **`Head()` meta publication is a swap, not a reconciliation.** Validating the
+  whole snapshot was not enough while the snapshot was then applied to a
+  *connected* element one attribute at a time. Updating an entry from
+  `http-equiv="x-custom"` + a forbidden `content` to an entirely valid
+  `http-equiv="refresh"` + `content="5;url=/safe"` wrote the new `http-equiv`
+  while the old content was still in place, so the document briefly held a live
+  `<meta http-equiv="refresh" content="0;url=javascript:…">` that no snapshot ever
+  approved. Reordering the writes would only move the hole — attribute order is
+  not a security mechanism. An accepted snapshot is now materialised on a fresh
+  element while detached and published with a single `replaceWith()`, and the
+  managed-element reference is updated in the same step so disposal never leaks a
+  replaced node.
+
+- **Native meta-refresh directives managed by client-side `Head()` must be
+  static.** A browser processes a refresh when the element is *inserted*, and
+  removing or replacing it afterwards is not a defined way to cancel the
+  scheduled navigation. A reactive entry therefore never publishes a snapshot
+  whose effective `http-equiv` is `refresh` — even when the destination is
+  allowed, because what cannot be withdrawn must not be handed over. This is a
+  publication rule, not a parse rule: the snapshot is still parsed and still
+  refused outright when the directive is dangerous.
+
+  **Behaviour change:** `Head({ meta: [{ "http-equiv": "refresh", content: () => …
+  }] })` and the reactive-`http-equiv` equivalent no longer insert a refresh
+  element. Fully static refresh directives are unaffected, and every other
+  reactive meta entry — description, keywords, Open Graph, non-refresh
+  `http-equiv` — behaves exactly as before. Documentation no longer claims that
+  detaching an inserted refresh cancels its navigation.
 
 - **Duplicate case-insensitive attribute names in a meta entry are rejected.**
   `{ "http-equiv": "x-custom", "HTTP-EQUIV": "refresh", … }` is legal
   JavaScript; a first-match lookup validated one spelling while the DOM committed
   the other. Rejection was chosen over last-write-wins because it removes the
   class of bug rather than re-parameterising it.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` run one meta
+  pipeline in one order.** Sharing a policy function was not the same as sharing
+  a decision: the client filtered unsafe attribute names *before* checking for
+  duplicates while the servers checked the raw record first, so
+  `{ name: "description", content: "ok", onload: "a", ONLOAD: "b" }` was emitted
+  by the client and dropped by both servers. `planMetaEntry` now fixes the order
+  for all three — raw duplicate names, name filtering, value resolution,
+  sanitization, then the refresh verdict on the effective snapshot — so the value
+  inspected by the policy is exactly the value committed, and the three paths
+  agree on whether an entry exists and on its effective attributes.
 
 - **`srcdoc` is refused by every generic attribute API, and omitted by SSR.**
   The shared attribute policy classified attributes into event handlers, URLs,

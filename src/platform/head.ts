@@ -1,7 +1,7 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
-import { normalizeMetaAttributes, resolveMetaRefreshPolicy } from "../utils/metaRefresh";
+import { type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
 import { isEventHandlerAttr, sanitizeUrl } from "../utils/sanitize";
 
 // ============================================================================
@@ -20,8 +20,8 @@ import { isEventHandlerAttr, sanitizeUrl } from "../utils/sanitize";
 // it through `sanitizeUrl` would strip legitimate whitespace. The one
 // truly dangerous `content` form — `<meta http-equiv="refresh"
 // content="0;url=javascript:...">` — is filtered separately by
-// `resolveMetaRefreshPolicy()` — the shared client/SSR policy — which parses
-// the directive structurally instead of substring-matching it.
+// `planMetaEntry()` — the shared client/SSR policy — which parses the directive
+// structurally instead of substring-matching it.
 const HEAD_URL_ATTRS = new Set(["href", "src"]);
 function sanitizeHeadAttr(key: string, value: string): string {
   if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);
@@ -52,13 +52,32 @@ function escapeScriptJsonLocal(json: string): string {
 }
 
 /**
+ * How `Head()` turns an authored meta entry into DOM attributes.
+ *
+ * Only the target-specific steps live here; `planMetaEntry` fixes the ORDER —
+ * raw duplicate names, then name filtering, then resolution, then sanitization,
+ * then validation of the complete effective snapshot — so that the client,
+ * `renderToDocument`, and router SSR provably reach the same verdict on the same
+ * entry. Doing the duplicate check after the client's name filter is exactly how
+ * they came to disagree.
+ */
+const CLIENT_META_POLICY: MetaEntryPolicy<string | (() => string)> = {
+  isEmittableName: isSafeHeadAttr,
+  resolveValue: (_name, value) => (typeof value === "function" ? String(value()) : String(value)),
+  // `sanitizeHeadAttr` is applied BEFORE validation, so the value the refresh
+  // policy inspects is byte-for-byte the value that reaches the element.
+  sanitizeValue: (name, value) => sanitizeHeadAttr(name, value),
+  isReactiveValue: (value) => typeof value === "function",
+};
+
+/**
  * Render ONE meta entry, transactionally.
  *
  * WHY ONE EFFECT PER ENTRY
  * ------------------------
- * The previous implementation created one effect per reactive ATTRIBUTE, so
- * every write was judged on its own. That lets the combination become dangerous
- * while no individual write ever looks wrong:
+ * An earlier implementation created one effect per reactive ATTRIBUTE, so every
+ * write was judged on its own. That lets the combination become dangerous while
+ * no individual write ever looks wrong:
  *
  *     { "http-equiv": () => equiv(), content: "0;url=javascript:alert(1)" }
  *
@@ -68,79 +87,100 @@ function escapeScriptJsonLocal(json: string): string {
  * a live redirect that nothing ever approved.
  *
  * Security decisions are properties of the WHOLE entry, so the whole entry is
- * the unit of work: one effect resolves every attribute, validates the assembled
- * snapshot, and only then reconciles the element. Nothing is committed on the
- * strength of a verdict about a different snapshot.
+ * the unit of work: one effect resolves every attribute and `planMetaEntry`
+ * judges the assembled snapshot.
  *
- * Returns a teardown that stops the effect and removes the element.
+ * WHY THE ELEMENT IS BUILT DETACHED AND SWAPPED IN
+ * -----------------------------------------------
+ * Validating a whole snapshot is not enough if the snapshot is then applied to a
+ * CONNECTED element one attribute at a time. Reconciling
+ *
+ *     http-equiv="x-custom"  content="0;url=javascript:alert(1)"   (old, connected)
+ *
+ * into the perfectly valid
+ *
+ *     http-equiv="refresh"   content="5;url=/safe"                 (new, approved)
+ *
+ * writes `http-equiv="refresh"` while the element still carries the old content,
+ * so for the duration of one `setAttribute` the document contains a live
+ * `<meta http-equiv="refresh" content="0;url=javascript:alert(1)">`. Nothing
+ * approved that pair; it exists only because two safe states were interpolated
+ * through the DOM. Ordering the writes differently would only move the hole —
+ * attribute order is not a security mechanism.
+ *
+ * So an accepted snapshot is materialised on a FRESH element while it is
+ * detached, and published with a single `replaceWith()` (or `appendChild()` when
+ * nothing is attached yet). Every intermediate state is unobservable because it
+ * never touches the document.
+ *
+ * Returns a teardown that stops the effect and removes the published element.
  */
 function applyMetaEntry(
   metaProps: Record<string, string | (() => string)>,
   managedElements: HTMLElement[],
 ): () => void {
-  const el = document.createElement("meta");
-  let attached = false;
+  /** The element currently published for this entry, if any. */
+  let current: HTMLMetaElement | null = null;
 
-  const attach = (): void => {
-    if (attached) return;
-    document.head.appendChild(el);
-    managedElements.push(el);
-    attached = true;
+  /** Withdraw the entry entirely: nothing in the document, nothing counted. */
+  const retract = (): void => {
+    if (!current) return;
+    const index = managedElements.indexOf(current);
+    if (index !== -1) managedElements.splice(index, 1);
+    current.remove();
+    current = null;
   };
 
-  const detach = (): void => {
-    if (!attached) return;
-    el.remove();
-    const index = managedElements.indexOf(el);
-    if (index !== -1) managedElements.splice(index, 1);
-    attached = false;
+  /** Is `attributes` already exactly what is published? */
+  const alreadyPublished = (attributes: ReadonlyMap<string, string>): boolean => {
+    if (!current || current.attributes.length !== attributes.size) return false;
+    for (const [name, value] of attributes) {
+      if (current.getAttribute(name) !== value) return false;
+    }
+    return true;
+  };
+
+  /** Publish an approved snapshot in ONE DOM operation. */
+  const publish = (attributes: ReadonlyMap<string, string>): void => {
+    if (alreadyPublished(attributes)) return;
+
+    const next = document.createElement("meta");
+    for (const [name, value] of attributes) next.setAttribute(name, value);
+
+    const index = current ? managedElements.indexOf(current) : -1;
+    if (current?.parentNode) {
+      current.replaceWith(next);
+    } else {
+      // Never attached, or removed from under us — either way there is nothing
+      // to swap, so append.
+      current?.remove();
+      document.head.appendChild(next);
+    }
+
+    // Update the managed reference in the same step, so disposal always removes
+    // the element that is actually live and never leaks the one it replaced.
+    if (index !== -1) managedElements[index] = next;
+    else managedElements.push(next);
+    current = next;
   };
 
   const stopEffect = effect(() => {
-    // 1. Resolve EVERY attribute — static and reactive — into one snapshot.
-    //    Reading all getters here is also what subscribes this single effect to
-    //    all of them, so any change re-runs the whole validation.
-    const resolved: Record<string, string> = {};
-    for (const [key, value] of Object.entries(metaProps)) {
-      if (!isSafeHeadAttr(key)) continue;
-      resolved[key] = typeof value === "function" ? String((value as () => string)()) : String(value);
-    }
-
-    // 2. Fold case-insensitive duplicates. `null` means the entry carries two
-    //    spellings of one attribute, where the value validated would not be the
-    //    value the browser honours — so the entry is refused outright.
-    const normalized = normalizeMetaAttributes(resolved);
-    if (normalized === null) {
-      detach();
+    // Resolving every attribute here is also what subscribes this single effect
+    // to all of them, so any change re-runs the whole validation.
+    const plan = planMetaEntry(metaProps, CLIENT_META_POLICY);
+    if (plan.kind === "drop") {
+      // Withdraw rather than merely skipping the write: an element already in
+      // the head would otherwise stay live with its previous — now unapproved —
+      // attributes.
+      retract();
       return;
     }
-
-    // 3. Judge the assembled snapshot, never a partial one.
-    if (resolveMetaRefreshPolicy(normalized).kind === "forbidden") {
-      // Detach rather than merely skipping the write: an element already in the
-      // head would otherwise stay live with its previous — now unapproved —
-      // attributes, and a detached element must not be counted as active.
-      detach();
-      return;
-    }
-
-    // 4. Reconcile from the validated snapshot: drop attributes that no longer
-    //    exist, then write the ones that do. Append-only `setAttribute` would
-    //    strand a removed attribute on the element.
-    for (const existing of Array.from(el.attributes)) {
-      if (!(existing.name in resolved)) el.removeAttribute(existing.name);
-    }
-    for (const [key, value] of Object.entries(resolved)) {
-      const safe = sanitizeHeadAttr(key, value);
-      if (el.getAttribute(key) !== safe) el.setAttribute(key, safe);
-    }
-
-    attach();
+    publish(plan.attributes);
   });
 
   return () => {
     stopEffect();
-    detach();
+    retract();
   };
 }
 
@@ -158,10 +198,22 @@ interface HeadProps {
  * META SECURITY: each meta entry is committed TRANSACTIONALLY. All of its
  * attributes — static and reactive — are resolved into one snapshot, duplicate
  * case-insensitive names are rejected, and the assembled snapshot is validated
- * against the shared meta-refresh policy before anything reaches the DOM. A
- * snapshot that fails validation detaches the element entirely rather than
- * blanking an attribute, so a dangerous `http-equiv`/`content` pair can never be
- * live. See `utils/metaRefresh.ts`; the same policy governs SSR.
+ * against the shared meta-refresh policy before anything reaches the DOM. An
+ * approved snapshot is then materialised on a fresh `<meta>` element while it is
+ * still detached and swapped in with a single `replaceWith()`, so no partially
+ * updated element is ever connected. A snapshot that fails validation withdraws
+ * the element entirely. See `utils/metaRefresh.ts`; the same policy governs SSR.
+ *
+ * NATIVE REFRESH DIRECTIVES MUST BE STATIC. A browser processes a meta refresh
+ * when the element is INSERTED — it records the pending navigation there and
+ * then, and removing or replacing the element afterwards is not a defined way to
+ * cancel it. `Head()` therefore never publishes a snapshot whose effective
+ * `http-equiv` is `refresh` from an entry that contains any reactive attribute,
+ * even when the destination is allowed: what cannot be withdrawn must not be
+ * handed over. Static refresh directives work as before, and every other
+ * reactive meta entry — description, keywords, Open Graph, non-refresh
+ * `http-equiv` — is unaffected.
+ *
  * Supports dynamic title, meta tags, link tags, and structured data.
  * Each instance tracks its own elements and effects for independent cleanup.
  */
