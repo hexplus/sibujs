@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { wakeLock } from "../src/browser/wakeLock";
+import { setRuntimeErrorHandler } from "../src/core/errors";
 
 class FakeSentinel extends EventTarget {
   released = false;
@@ -147,18 +148,34 @@ describe("wakeLock (coverage2)", () => {
     expect(sentinel.releaseCalls).toBe(1);
   });
 
-  it("dispose handles release rejection (catch + warn)", async () => {
+  it("dispose reports a release rejection through the runtime error pipeline", async () => {
+    // This used to assert a bare `console.warn`, which meant an application's
+    // configured error handler — and any ErrorBoundary — never saw a failed wake
+    // lock release. Routing it through `reportError` is what every other
+    // contained async failure in the framework does, and it is strictly more
+    // observable: the assertion below proves the application can actually
+    // receive it, which a console spy never did.
     const sentinel = new FakeSentinel();
+    const boom = new Error("release failed");
     sentinel.release = async () => {
-      throw new Error("release failed");
+      throw boom;
     };
     installApi({ request: vi.fn(async () => sentinel) });
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const lock = wakeLock();
-    await lock.request();
-    lock.dispose();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(warn).toHaveBeenCalledWith("[SibuJS wakeLock] release failed:", expect.any(Error));
+
+    const reported: Array<{ error: unknown; phase: string; name?: string }> = [];
+    const previous = setRuntimeErrorHandler((error, ctx) => {
+      reported.push({ error, phase: ctx.phase, name: ctx.name });
+    });
+    try {
+      const lock = wakeLock();
+      await lock.request();
+      expect(() => lock.dispose()).not.toThrow();
+      await Promise.resolve();
+      await Promise.resolve();
+    } finally {
+      setRuntimeErrorHandler(previous);
+    }
+
+    expect(reported).toEqual([{ error: boom, phase: "async", name: "wakeLock(dispose release)" }]);
   });
 });

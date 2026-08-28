@@ -3,6 +3,7 @@
  * Provides configurable caching, preloading, retry logic, and loading orchestration.
  */
 
+import { reportError } from "../core/errors";
 import { dispose } from "../core/rendering/dispose";
 import { sanitizeUrl } from "../utils/sanitize";
 
@@ -48,6 +49,44 @@ interface CacheEntry<T> {
 
 /**
  * Central registry for managing dynamic chunks with caching and lifecycle callbacks.
+ *
+ * INVALIDATION IS A PUBLICATION BARRIER
+ * ------------------------------------
+ * `invalidate(id)` and `clear()` used to delete cache entries and leave the
+ * `pending` map untouched, so an in-flight load that started *before* the
+ * invalidation still ran its `.then` afterwards and wrote the now-stale value
+ * back into the cache. The sequence
+ *
+ *     load("a") starts → clear() → old load resolves → cache.set("a", stale)
+ *
+ * left `has("a") === true` holding data the caller had explicitly discarded.
+ * The same load also ran `pending.delete(id)` unconditionally, so a *newer*
+ * pending entry for the same id was removed by its predecessor's settlement.
+ * And because the stale promise stayed in `pending`, a `load(id, freshLoader)`
+ * issued after the invalidation deduplicated against it: the new loader was
+ * never called and the caller received the stale value.
+ *
+ * OWNERSHIP IS THE PENDING ENTRY ITSELF. Each load creates an entry object and
+ * installs it in `pending`; that object *is* the load's claim on the key.
+ * `invalidate(id)` removes the key's entry and `clear()` removes all of them,
+ * which revokes the claim without needing a generation counter or any map that
+ * grows over time. On settlement a load re-reads `pending.get(id)` and only
+ * publishes or cleans up when it finds its own entry still there.
+ *
+ * Work started before an invalidation still resolves or rejects normally *for
+ * its original caller* — it simply cannot touch shared state any more. Nothing
+ * is cancelled: the loader API takes no abort signal, so no cancellation is
+ * claimed here.
+ *
+ * LIFECYCLE CALLBACKS ARE OBSERVERS
+ * ---------------------------------
+ * `onLoadStart` / `onLoadEnd` / `onLoadError` used to run inside the operation's
+ * control flow. `onLoadStart` ran before the loader, so a throwing one stopped
+ * the load from ever starting; `onLoadEnd` ran inside the `.then`, so a throwing
+ * one converted a cached success into a rejection *and* then delivered the
+ * observer's own error to `onLoadError`, leaving the caller told "failed" while
+ * the cache held the value. Every callback now runs through `notify`, which
+ * contains and reports the failure without letting it reach the operation.
  */
 export function createChunkRegistry(config: ChunkConfig = {}) {
   const {
@@ -61,9 +100,36 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
     onLoadError,
   } = config;
 
+  /**
+   * A load's claim on a key. Identity is the whole point: the object in the map
+   * is the owner, so removing it from the map revokes ownership.
+   */
+  interface PendingLoad {
+    promise: Promise<unknown>;
+  }
+
   const cache = new Map<string, CacheEntry<unknown>>();
-  const pending = new Map<string, Promise<unknown>>();
-  const preloaded = new Set<string>();
+  const pending = new Map<string, PendingLoad>();
+  /** id → the marker of the preload that requested it. See `preloadFn`. */
+  const preloaded = new Map<string, object>();
+
+  /**
+   * Run a user lifecycle callback as a pure observer.
+   *
+   * A callback exception must never change what the operation did: the loader
+   * still ran, the cache still holds what the loader returned, and the caller
+   * still gets the loader's own result or error. The failure is reported through
+   * the runtime error pipeline (boundary → configured handler → console) rather
+   * than swallowed, and `reportError` is documented never to throw, so this is
+   * safe to call from inside a `.then`/`.catch`.
+   */
+  function notify(name: string, run: () => void): void {
+    try {
+      run();
+    } catch (err) {
+      reportError(err, { phase: "async", name: `chunkRegistry(${name})` });
+    }
+  }
 
   // True LRU eviction: drop the entry with the oldest lastAccess timestamp.
   // Loops while at-or-above max so concurrent loads can't grow the cache.
@@ -129,37 +195,92 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
       return cached.value as T;
     }
 
-    const pendingLoad = pending.get(id);
-    if (pendingLoad) return pendingLoad as Promise<T>;
+    // Same-generation callers deduplicate. An invalidated load is no longer in
+    // the map, so a post-invalidation caller starts fresh work instead of
+    // adopting work whose result was already discarded.
+    const existing = pending.get(id);
+    if (existing) return existing.promise as Promise<T>;
 
-    onLoadStart?.(id);
-    const loadPromise = loadWithRetry(id, loader)
-      .then((value) => {
-        evict();
-        const now = Date.now();
-        cache.set(id, { value, timestamp: now, lastAccess: now, accessCount: 1 });
-        pending.delete(id);
-        onLoadEnd?.(id);
-        return value;
-      })
-      .catch((err) => {
-        pending.delete(id);
-        const error = err instanceof Error ? err : new Error(String(err));
-        onLoadError?.(id, error);
-        throw error;
+    // OWNERSHIP IS INSTALLED BEFORE ANY USER CODE RUNS.
+    //
+    // `onLoadStart` used to fire before the pending entry existed, which opened
+    // a window where the operation had publicly started but owned nothing:
+    //
+    //   - `invalidate(id)` or `clear()` called from inside `onLoadStart` deleted
+    //     a key with no pending entry, and the load then installed itself and
+    //     published anyway — the invalidation was simply skipped;
+    //   - a reentrant `load(id, …)` from inside `onLoadStart` found no pending
+    //     entry, started a SECOND loader (which fired `onLoadStart` again, and
+    //     so on), and the outer `pending.set` then overwrote whatever ownership
+    //     the nested call had established.
+    //
+    // The entry therefore goes into the map first, backed by a deferred that is
+    // settled by the loader below. `onLoadStart` then runs against a registry in
+    // which this operation genuinely exists: invalidating from it revokes this
+    // load, and a reentrant same-key call finds the entry and shares it.
+    let resolveOuter!: (value: T) => void;
+    let rejectOuter!: (reason: unknown) => void;
+    const outcome = new Promise<T>((resolve, reject) => {
+      resolveOuter = resolve;
+      rejectOuter = reject;
+    });
+    const entry: PendingLoad = { promise: outcome as Promise<unknown> };
+    pending.set(id, entry);
+
+    /** Do we still own the key? Re-read every time — never cached. */
+    const owns = () => pending.get(id) === entry;
+
+    // Outside the promise chain: a throwing observer must not prevent the load.
+    notify("onLoadStart", () => onLoadStart?.(id));
+
+    void loadWithRetry(id, loader)
+      .then(
+        (value) => {
+          // Publish only while still the owner. A load superseded by invalidate()
+          // or clear() — including one invalidated from inside `onLoadStart` —
+          // resolves normally for its caller and touches nothing else; in
+          // particular it does not delete a newer pending entry.
+          if (owns()) {
+            pending.delete(id);
+            evict();
+            const now = Date.now();
+            cache.set(id, { value, timestamp: now, lastAccess: now, accessCount: 1 });
+          }
+          notify("onLoadEnd", () => onLoadEnd?.(id));
+          resolveOuter(value);
+        },
+        (err) => {
+          if (owns()) pending.delete(id);
+          const error = err instanceof Error ? err : new Error(String(err));
+          // Only genuine loader/timeout errors reach here — a callback's own
+          // exception is contained by `notify` and can never arrive as one.
+          notify("onLoadError", () => onLoadError?.(id, error));
+          rejectOuter(error);
+        },
+      )
+      // Nobody observes the promise this `.then` produces, so a throw from
+      // either handler would surface as an unhandled rejection rather than as a
+      // failure of the load. Neither handler throws today — `notify` contains
+      // callback exceptions and the resolvers cannot fail — but the caller's
+      // promise must not be left pending if that ever changes.
+      .catch((internal) => {
+        reportError(internal, { phase: "async", name: "chunkRegistry(settlement)" });
+        rejectOuter(internal);
       });
 
-    pending.set(id, loadPromise as Promise<unknown>);
-    return loadPromise;
+    return outcome;
   }
 
   function preloadFn<T>(id: string, loader: () => Promise<T>): void {
-    // `preloaded` is purely a "requested" guard to dedupe calls.
-    // On failure we clear it so future preload() calls can retry.
+    // `preloaded` is a "requested" guard to dedupe calls. On failure the marker
+    // is cleared so future preload() calls can retry — but only if it is still
+    // OUR marker, so a stale preload's late failure cannot cancel the guard a
+    // newer preload installed after an invalidation.
     if (cache.has(id) || pending.has(id) || preloaded.has(id)) return;
-    preloaded.add(id);
+    const marker = {};
+    preloaded.set(id, marker);
     loadFn(id, loader).catch(() => {
-      preloaded.delete(id);
+      if (preloaded.get(id) === marker) preloaded.delete(id);
     });
   }
 
@@ -198,23 +319,35 @@ export function createChunkRegistry(config: ChunkConfig = {}) {
     },
 
     /**
-     * Invalidate a cached chunk.
+     * Invalidate a cached chunk, and supersede any load still in flight for it.
+     *
+     * In-flight work is not cancelled — the loader API takes no abort signal, so
+     * claiming cancellation would be a lie. It is *superseded*: it still settles
+     * for whoever called `load()`, but it can no longer write to the cache, and
+     * a subsequent `load(id, …)` starts fresh work rather than adopting it.
      */
     invalidate(id: string): void {
       cache.delete(id);
       preloaded.delete(id);
+      pending.delete(id);
     },
 
     /**
-     * Clear all cached chunks.
+     * Clear all cached chunks, and supersede every load still in flight.
+     *
+     * Same barrier as `invalidate`, applied to every key at once.
      */
     clear(): void {
       cache.clear();
       preloaded.clear();
+      pending.clear();
     },
 
     /**
      * Get cache statistics.
+     *
+     * Describes currently OWNED state: superseded loads are already absent from
+     * `pending`, so the counts never include work whose result will be discarded.
      */
     stats(): {
       size: number;
