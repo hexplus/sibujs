@@ -10,6 +10,53 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **URL-attribute classification in `Head()` is case-insensitive.** `head.ts`
+  carried a private `new Set(["href", "src"])` and tested it against the
+  AUTHORED attribute spelling. HTML attribute names are ASCII case-insensitive,
+  so the browser reads `SRC` as `src` — but that lookup did not, and
+  `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
+  sanitization completely and appended a `<script>` a real browser fetched and
+  executed. Both SSR paths, which lower-cased first, refused the identical
+  value. Every classification — URL sinks, event handlers, `srcdoc`, duplicate
+  detection — now runs on one canonical, deliberately ASCII-only fold
+  (`canonicalAttrName`), because `String.prototype.toLowerCase` maps some
+  non-ASCII code points *into* ASCII letters and the HTML parser does not.
+
+- **Router SSR no longer carries its own URL sanitizer.** `sanitizeUrlLocal`
+  described itself as mirroring `utils/sanitize.ts` but was a BLOCKLIST of four
+  schemes where the canonical sanitizer is an ALLOWLIST, so router SSR emitted
+  `file:`, `about:`, `chrome:` and every custom scheme that `Head()` and
+  `renderToDocument` both refused. It is deleted; all three paths call the
+  canonical `sanitizeAttributeString`.
+
+- **A refused URL attribute is OMITTED, not published as `href=""`.** An empty
+  URL attribute resolves against the current document — `<link href="">`
+  references the page itself and `<script src="">` is a request, not a no-op —
+  so an empty substitute is a different document from an absent attribute. The
+  sanitization contract now distinguishes "accepted, possibly empty" from
+  "rejected"; an empty string remains a legitimate value for inert text
+  attributes like `content` and `id`. `setCanonical()` and `Head({ base })`
+  follow the same rule, and a rejected update clears any previously accepted
+  value rather than leaving a stale one standing.
+
+- **`srcdoc` is refused by `Head()` too.** The client preserved it while both
+  servers dropped it. The browser parses `srcdoc` as a nested HTML *document*,
+  so escaping is the wrong layer, and the rule now applies identically on all
+  three paths in every casing.
+
+- **An entry with no effective attributes is dropped everywhere.** The client
+  published an attribute-less `<meta>` where both servers emitted nothing. One
+  shared answer, decided at the shared planning layer.
+
+- **`Head()`, `renderToDocument()`, and `renderRouteToDocument()` share the
+  policy itself, not merely a policy function.** The pipeline used to take the
+  name filter and value sanitizer as parameters, so each target supplied its
+  own and the three diverged in four separate ways. Only value resolution — the
+  client has reactive getters, the servers do not — is parameterized now. The
+  planned attribute map is keyed by canonical names, so client DOM and server
+  HTML are exactly comparable; a table-driven parity suite asserts emitted
+  status, attribute count, names, and values across all three.
+
 - **Meta-refresh directives are structurally parsed, and client/SSR share one
   policy.** Dangerous destinations were detected by asking whether the
   lower-cased `content` contained `url=javascript:` (plus three sibling

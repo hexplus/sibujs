@@ -35,7 +35,7 @@
  * dropped; the benefit is that no unreadable directive is ever emitted.
  */
 
-import { sanitizeUrl, stripControlChars } from "./sanitize";
+import { canonicalAttrName, sanitizeUrl, stripControlChars } from "./sanitize";
 
 /**
  * The verdict on one meta entry.
@@ -165,11 +165,13 @@ export function resolveMetaRefreshPolicy(attributes: ReadonlyMap<string, string>
   // first or last one silently win. See `normalizeMetaAttributes`.
   const seen = new Set<string>();
   for (const [key, value] of attributes) {
-    const lower = key.toLowerCase();
-    if (seen.has(lower)) duplicateName = lower;
-    seen.add(lower);
-    if (lower === "http-equiv") httpEquiv = value;
-    else if (lower === "content") content = value;
+    // `canonicalAttrName`, not `toLowerCase()` — ONE fold across the framework,
+    // matching what the HTML parser actually does. See `utils/sanitize.ts`.
+    const canonical = canonicalAttrName(key);
+    if (seen.has(canonical)) duplicateName = canonical;
+    seen.add(canonical);
+    if (canonical === "http-equiv") httpEquiv = value;
+    else if (canonical === "content") content = value;
   }
 
   if (duplicateName !== undefined) {
@@ -210,9 +212,9 @@ export function normalizeMetaAttributes(props: Record<string, string>): Map<stri
   const out = new Map<string, string>();
   const seen = new Set<string>();
   for (const key of Object.keys(props)) {
-    const lower = key.toLowerCase();
-    if (seen.has(lower)) return null;
-    seen.add(lower);
+    const canonical = canonicalAttrName(key);
+    if (seen.has(canonical)) return null;
+    seen.add(canonical);
     out.set(key, props[key]);
   }
   return out;
@@ -228,116 +230,4 @@ export function isForbiddenMetaEntry(props: Record<string, string>): boolean {
   const normalized = normalizeMetaAttributes(props);
   if (normalized === null) return true;
   return resolveMetaRefreshPolicy(normalized).kind === "forbidden";
-}
-
-/**
- * The first attribute name that appears twice under case folding, or `null`.
- *
- * Operates on RAW authored names — before any filtering, resolution, or
- * sanitization — because that is the only point at which every path
- * (`Head()`, `renderToDocument`, router SSR) sees the same input. Filtering
- * first is what made them disagree: the client dropped `onload`/`ONLOAD` as
- * event handlers and then saw no duplicate, while the server checked the raw
- * record and rejected the entry. One rule has to be applied at one place.
- */
-export function findDuplicateAttributeName(names: Iterable<string>): string | null {
-  const seen = new Set<string>();
-  for (const name of names) {
-    const lower = name.toLowerCase();
-    if (seen.has(lower)) return lower;
-    seen.add(lower);
-  }
-  return null;
-}
-
-/**
- * How one rendering target turns an authored meta entry into emittable
- * attributes. Only the target-specific steps are parameterized; the ORDER and
- * the security verdict are fixed by `planMetaEntry`.
- */
-export interface MetaEntryPolicy<V> {
-  /** May this attribute name be emitted at all by this target? */
-  isEmittableName(name: string): boolean;
-  /** Coerce an authored value to its string form (invoking getters on the client). */
-  resolveValue(name: string, value: V): string;
-  /** Final value as it will be committed. Return `null` to drop the attribute. */
-  sanitizeValue?(name: string, value: string): string | null;
-  /** Does this authored value change over time? Only the client has these. */
-  isReactiveValue?(value: V): boolean;
-}
-
-export type MetaEntryPlan =
-  | { kind: "drop"; reason: string }
-  | { kind: "publish"; attributes: Map<string, string>; refresh: MetaRefreshDecision };
-
-/**
- * Plan ONE meta entry: the single pipeline every rendering target runs.
- *
- *   1. reject duplicate case-insensitive names, on the RAW authored names
- *   2. drop names this target may not emit
- *   3. resolve values (invoking reactive getters)
- *   4. sanitize values
- *   5. validate the COMPLETE EFFECTIVE snapshot — exactly what will be committed
- *   6. hand the caller an attribute map to publish or serialize
- *
- * Steps 1 and 5 are the two that used to be done at different points on the
- * client and the server, so the same entry could be accepted by one and refused
- * by the other. Fixing the order in one function is what makes the three paths
- * provably agree.
- *
- * NATIVE REFRESH DIRECTIVES MUST BE STATIC
- * ----------------------------------------
- * A native meta refresh is processed when the element is INSERTED: the document
- * records that it will declaratively refresh and schedules the navigation. See
- * https://html.spec.whatwg.org/multipage/semantics.html#attr-meta-http-equiv-refresh
- *
- * Removing or replacing the element afterwards is not a defined cancellation
- * mechanism. So a framework cannot honestly offer "reactive refresh": once a
- * reactive entry has published `http-equiv="refresh"`, a later state change that
- * should withdraw it has nothing to withdraw — the navigation already belongs to
- * the browser. The only defensible contract is to never hand it over:
- *
- *   > A meta entry containing reactive attributes must never publish a snapshot
- *   > whose effective `http-equiv` value is `refresh`.
- *
- * This is a *publication* rule, not a parse rule: the snapshot is still parsed
- * and still refused if the directive is dangerous. A reactive entry whose
- * snapshot happens to be a perfectly safe refresh is withheld anyway, because
- * safety is not the question — reversibility is. Static refresh directives are
- * unaffected, and every other reactive meta entry (description, keywords, Open
- * Graph, non-refresh `http-equiv`) behaves normally.
- */
-export function planMetaEntry<V>(props: Record<string, V>, policy: MetaEntryPolicy<V>): MetaEntryPlan {
-  // 1 — raw names, before anything is filtered away or resolved.
-  const rawNames = Object.keys(props);
-  const duplicate = findDuplicateAttributeName(rawNames);
-  if (duplicate !== null) {
-    return { kind: "drop", reason: `duplicate case-insensitive attribute ${JSON.stringify(duplicate)}` };
-  }
-
-  // 2/3/4 — emittable names only, resolved and then sanitized.
-  const attributes = new Map<string, string>();
-  let reactive = false;
-  for (const name of rawNames) {
-    if (!Object.hasOwn(props, name)) continue;
-    if (!policy.isEmittableName(name)) continue;
-    const authored = props[name];
-    // Reactivity is recorded BEFORE sanitization: a getter whose value the
-    // sanitizer happens to reject is still a subscription, so the entry can
-    // still be republished later.
-    if (policy.isReactiveValue?.(authored)) reactive = true;
-    const resolved = policy.resolveValue(name, authored);
-    const sanitized = policy.sanitizeValue ? policy.sanitizeValue(name, resolved) : resolved;
-    if (sanitized === null) continue;
-    attributes.set(name, sanitized);
-  }
-
-  // 5 — judge the assembled snapshot, never a partial or pre-sanitization one.
-  const refresh = resolveMetaRefreshPolicy(attributes);
-  if (refresh.kind === "forbidden") return { kind: "drop", reason: refresh.reason };
-  if (reactive && (refresh.kind === "allowed" || refresh.kind === "delay-only")) {
-    return { kind: "drop", reason: "a reactive meta entry may not publish a native refresh directive" };
-  }
-
-  return { kind: "publish", attributes, refresh };
 }

@@ -30,21 +30,27 @@
 import { isDev } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
-import { isForbiddenMetaEntry, type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
+import { serializeHeadEntry } from "../utils/headEntry";
+import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import {
   isEventHandlerAttr,
   isHtmlContentAttribute,
-  sanitizeSrcset,
-  sanitizeStyleAttribute,
+  isPolicyAttribute,
+  sanitizeAttributeString,
   sanitizeUrl,
 } from "../utils/sanitize";
 
 /**
- * Attribute names whose SSR value carries a security policy. Anything outside
- * this set is emitted as-is (after HTML escaping).
+ * Attribute names whose SSR value carries a security policy. Anything else is
+ * emitted as-is (after HTML escaping).
+ *
+ * Delegated to `utils/sanitize.ts`. This used to be a private set that happened
+ * to differ from the canonical one — it carried `manifest` and lacked
+ * `formtarget` — so "the SSR policy" and "the client policy" were two different
+ * claims about the same attribute names.
  */
 function isPolicyAttr(lowerName: string): boolean {
-  return lowerName === "style" || URL_ATTRS.has(lowerName);
+  return isPolicyAttribute(lowerName);
 }
 
 /**
@@ -69,34 +75,20 @@ function isForbiddenSsrAttr(lowerName: string): boolean {
  * Sanitize ONE attribute value for SSR emission. Returns `""` when the
  * attribute must be dropped entirely.
  *
- * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES. There are three
- * attribute serializers — `renderToString`, the `renderToStream` generator, and
- * `buildAttrString` (which feeds `renderToDocument`'s `<meta>`, `<link>`, and
- * `<body>` attributes). Each previously carried its own inline rules, and each
- * covered URLs only. `style` was therefore emitted verbatim by all three, while
- * the client's `tagFactory` filtered it — so the identical component was safe
- * in the browser and an exfiltration vector from the server, `<body style="…">`
- * included. Rendering target is not a security boundary; the policy has to be
- * one function that every serializer calls.
+ * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES — and, since this
+ * pass, not a separate policy at all. There are three attribute serializers
+ * (`renderToString`, the `renderToStream` generator, and `buildAttrString`), and
+ * each once carried its own inline rules covering URLs only, so `style` was
+ * emitted verbatim by all three while the client's `tagFactory` filtered it.
+ * Rendering target is not a security boundary.
  *
- * `srcset` is a comma/space-separated candidate list, not a single URL — running
- * it through `sanitizeUrl` returns the whole string unchanged (its scheme scan
- * fails on the list), letting blocked schemes survive. It goes through the
- * candidate parser instead, matching client-side behaviour.
- *
- * `style` is a declaration list, so `sanitizeStyleAttribute` filters it
- * per-declaration: safe declarations survive, dangerous ones are dropped. When
- * nothing survives the result is `""` and the caller drops the attribute rather
- * than emitting a `style=""` that advertises styling the element no longer has.
- *
- * Called BEFORE `escapeAttr`: sanitization reads and re-serializes CSS, so
- * escaping first would feed it `&quot;` entities and hand back text that has to
- * be escaped again.
+ * The rules themselves — `srcset` parsed as a candidate list rather than a
+ * single URL, `style` filtered per declaration, single-URL sinks through the
+ * protocol allowlist — now live in `sanitizeAttributeString`, the same authority
+ * the client writers use, so the two cannot drift.
  */
 function sanitizeSsrAttributeValue(lowerName: string, value: string): string {
-  if (lowerName === "style") return sanitizeStyleAttribute(value);
-  if (lowerName === "srcset") return sanitizeSrcset(value);
-  return sanitizeUrl(value);
+  return sanitizeAttributeString(lowerName, value);
 }
 
 const _isDev = isDev();
@@ -107,27 +99,6 @@ const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
 function isSafeAttrName(name: string): boolean {
   return SAFE_ATTR_NAME.test(name);
 }
-
-/**
- * Attribute names whose value is a URL and therefore require
- * `sanitizeUrl()` before emission. Missing any of these would allow a
- * `javascript:` / `data:` / `vbscript:` / `blob:` URI to reach the browser
- * as raw HTML.
- */
-const URL_ATTRS = new Set([
-  "href",
-  "src",
-  "action",
-  "formaction",
-  "cite",
-  "poster",
-  "background",
-  "srcset",
-  "ping",
-  "manifest",
-  "data",
-  "xlink:href",
-]);
 
 /** Format an SSR error as an HTML comment. In production, omits the message to prevent information leakage. */
 function ssrErrorComment(err: unknown): string {
@@ -559,41 +530,6 @@ export function isDangerousMetaRefresh(metaProps: Record<string, string>): boole
 }
 
 /**
- * The server's half of the shared meta pipeline.
- *
- * Names and values are filtered and sanitized exactly as `buildAttrString`
- * would, but `planMetaEntry` decides the ORDER — raw duplicate names first, the
- * refresh verdict last, on the effective post-sanitization snapshot. Running the
- * duplicate check and the refresh check at different points is how the server
- * and `Head()` came to disagree about `{ name, content, onload, ONLOAD }`: the
- * client filtered the handlers away and then saw no duplicate, while the server
- * checked the raw record and rejected the whole entry.
- *
- * Server-rendered values are plain strings, so `isReactiveValue` is absent and
- * the static-only refresh rule never fires here — a static refresh directive is
- * exactly what SSR is expected to be able to emit.
- */
-const SSR_META_POLICY: MetaEntryPolicy<string> = {
-  isEmittableName: (name) =>
-    isSafeAttrName(name) && !isEventHandlerAttr(name) && !isForbiddenSsrAttr(name.toLowerCase()),
-  resolveValue: (_name, value) => String(value),
-  sanitizeValue: (name, value) => {
-    const lower = name.toLowerCase();
-    if (!isPolicyAttr(lower)) return value;
-    const safe = sanitizeSsrAttributeValue(lower, value);
-    return safe ? safe : null;
-  },
-};
-
-/** Serialize one `<meta>` entry, or `""` when the shared policy refuses it. */
-function renderMetaTag(attrs: Record<string, string>): string {
-  const plan = planMetaEntry(attrs, SSR_META_POLICY);
-  if (plan.kind === "drop" || plan.attributes.size === 0) return "";
-  const pairs = Array.from(plan.attributes, ([name, value]) => `${name}="${escapeAttr(value)}"`).join(" ");
-  return `<meta ${pairs} />`;
-}
-
-/**
  * Renders a component to a full HTML document string.
  *
  * `headExtra` requires a `TrustedHTML` value created via `trustHTML()`.
@@ -629,13 +565,13 @@ export function renderToDocument(
   // Names filtered, values sanitized, duplicate casings rejected, and dangerous
   // `<meta http-equiv="refresh" content="0;url=javascript:...">` entries dropped
   // — all by the one shared pipeline the client also runs.
-  const metaTags = (options.meta || []).map(renderMetaTag).filter(Boolean).join("\n    ");
+  const metaTags = (options.meta || [])
+    .map((attrs) => serializeHeadEntry("meta", attrs))
+    .filter(Boolean)
+    .join("\n    ");
 
   const linkTags = (options.links || [])
-    .map((attrs) => {
-      const pairs = buildAttrString(attrs);
-      return pairs ? `<link ${pairs} />` : "";
-    })
+    .map((attrs) => serializeHeadEntry("link", attrs))
     .filter(Boolean)
     .join("\n    ");
 

@@ -15,8 +15,8 @@
 
 import { escapeScriptJson, renderToString, type TrustedHTML } from "../platform/ssr";
 import { isUnsafeKey } from "../utils/guards";
-import { type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
-import { isHtmlContentAttribute } from "../utils/sanitize";
+import { serializeHeadEntry } from "../utils/headEntry";
+import { sanitizeUrl } from "../utils/sanitize";
 import type { RouteDef } from "./router";
 import { __getNavigationEpoch, createRouter } from "./router";
 
@@ -415,21 +415,21 @@ export function renderRouteToDocument(
   // case-insensitive names rejected first, then name filtering and value
   // sanitization, and only then the meta-refresh verdict — on the effective
   // snapshot, so what is validated is what is serialized.
-  const metaTags = (opts.meta || []).map(renderMetaTag).filter(Boolean).join("\n    ");
-
-  // Build link tags
-  const linkTags = (opts.links || [])
-    .map((attrs) => {
-      const pairs = buildSafeAttrString(attrs);
-      return pairs ? `<link ${pairs} />` : "";
-    })
+  const metaTags = (opts.meta || [])
+    .map((attrs) => serializeHeadEntry("meta", attrs))
     .filter(Boolean)
     .join("\n    ");
 
-  // Build script tags (external scripts) — src is URL-sanitized.
+  const linkTags = (opts.links || [])
+    .map((attrs) => serializeHeadEntry("link", attrs))
+    .filter(Boolean)
+    .join("\n    ");
+
+  // Build script tags (external scripts) — `src` goes through the CANONICAL
+  // sanitizer, not a local blocklist.
   const scriptTags = (opts.scripts || [])
     .map((src) => {
-      const safe = sanitizeUrlLocal(String(src));
+      const safe = sanitizeUrl(String(src));
       if (!safe) return "";
       return `<script src="${escapeAttrLocal(safe)}"></script>`;
     })
@@ -589,100 +589,19 @@ export function createSSRRouter(routes: SSRRouteDef[]): {
 }
 
 // ============================================================================
-// INTERNAL HELPERS — mirrored from platform/ssr.ts to keep routerSSR
-// self-contained. They must stay in sync with the master implementations.
+// INTERNAL HELPERS
+//
+// What remains here is HTML text escaping, and nothing else. This block used to
+// hold a private copy of the whole attribute policy — a name regex, an
+// event-handler test, a URL-attribute set, and a `sanitizeUrlLocal` that
+// BLOCKLISTED four schemes where the canonical sanitizer ALLOWLISTS five — under
+// a comment promising it stayed "in sync with the master implementations". It
+// did not: router SSR emitted `file:`, `about:`, `chrome:` and every custom
+// scheme that `Head()` and `renderToDocument` both refused.
+//
+// A comment is not a mechanism. The policy now lives in `utils/headEntry.ts` and
+// this module imports it.
 // ============================================================================
-
-const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
-
-function isSafeAttrName(name: string): boolean {
-  return SAFE_ATTR_NAME.test(name);
-}
-
-function isEventHandlerAttr(name: string): boolean {
-  if (name.length < 3) return false;
-  const lower = name.toLowerCase();
-  return lower[0] === "o" && lower[1] === "n" && lower.charCodeAt(2) >= 97 && lower.charCodeAt(2) <= 122;
-}
-
-const URL_ATTRS = new Set([
-  "href",
-  "src",
-  "action",
-  "formaction",
-  "cite",
-  "poster",
-  "background",
-  "srcset",
-  "ping",
-  "manifest",
-  "data",
-  "xlink:href",
-]);
-
-/** Minimal URL sanitizer local to this module. Mirrors `utils/sanitize.ts`. */
-function sanitizeUrlLocal(url: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping control chars to prevent protocol bypass
-  const trimmed = url.replace(/[\x00-\x20\x7f-\x9f]+/g, "").trim();
-  if (!trimmed) return "";
-  const lower = trimmed.toLowerCase();
-  if (
-    lower.startsWith("javascript:") ||
-    lower.startsWith("data:") ||
-    lower.startsWith("vbscript:") ||
-    lower.startsWith("blob:")
-  ) {
-    return "";
-  }
-  return trimmed;
-}
-
-/**
- * Router SSR's half of the shared meta pipeline.
- *
- * Mirrors `buildSafeAttrString`'s name filter and URL sanitization, but hands
- * the ORDER of the checks to `planMetaEntry` so this path cannot drift from
- * `renderToDocument` or from the client.
- */
-const ROUTER_META_POLICY: MetaEntryPolicy<string> = {
-  isEmittableName: (name) => isSafeAttrName(name) && !isEventHandlerAttr(name) && !isHtmlContentAttribute(name),
-  resolveValue: (_name, value) => String(value),
-  sanitizeValue: (name, value) => {
-    if (!URL_ATTRS.has(name.toLowerCase())) return value;
-    const safe = sanitizeUrlLocal(value);
-    return safe ? safe : null;
-  },
-};
-
-/** Serialize one `<meta>` entry, or `""` when the shared policy refuses it. */
-function renderMetaTag(attrs: Record<string, string>): string {
-  const plan = planMetaEntry(attrs, ROUTER_META_POLICY);
-  if (plan.kind === "drop" || plan.attributes.size === 0) return "";
-  const pairs = Array.from(plan.attributes, ([name, value]) => `${name}="${escapeAttrLocal(value)}"`).join(" ");
-  return `<meta ${pairs} />`;
-}
-
-/** Build a validated `key="value"` pair string. */
-function buildSafeAttrString(attrs: Record<string, string>): string {
-  const out: string[] = [];
-  for (const rawKey of Object.keys(attrs)) {
-    if (!Object.hasOwn(attrs, rawKey)) continue;
-    if (!isSafeAttrName(rawKey)) continue;
-    if (isEventHandlerAttr(rawKey)) continue;
-    // `srcdoc` is parsed as a nested HTML document, so escaping it is the wrong
-    // layer — it is omitted here exactly as in the main SSR serializers. The
-    // rule itself is shared so the two cannot drift.
-    if (isHtmlContentAttribute(rawKey)) continue;
-    const lowerKey = rawKey.toLowerCase();
-    let value = String(attrs[rawKey]);
-    if (URL_ATTRS.has(lowerKey)) {
-      value = sanitizeUrlLocal(value);
-      if (!value) continue;
-    }
-    out.push(`${rawKey}="${escapeAttrLocal(value)}"`);
-  }
-  return out.join(" ");
-}
 
 function escapeHtmlLocal(str: string): string {
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

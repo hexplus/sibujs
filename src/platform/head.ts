@@ -1,41 +1,38 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
-import { type MetaEntryPolicy, planMetaEntry } from "../utils/metaRefresh";
-import { isEventHandlerAttr, sanitizeUrl } from "../utils/sanitize";
+import {
+  type HeadValueResolver,
+  planHeadElementEntry,
+  planMetaEntry,
+  STATIC_VALUE_RESOLVER as STATIC_HEAD_RESOLVER,
+} from "../utils/headEntry";
+import { sanitizeUrl } from "../utils/sanitize";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
 // ============================================================================
 //
-// Security: all URL-bearing attributes (href/src, and meta `content`
-// when it carries a URL like og:image) are routed through `sanitizeUrl`
-// to block `javascript:` / `data:` / `vbscript:` / `blob:` URIs. The base
-// tag's `href` is also sanitized — overlooking it previously meant an
-// attacker-controlled base href could rewrite every relative URL on the
-// page to a javascript: URI.
+// Security: every URL-bearing attribute is routed through the CANONICAL
+// `sanitizeUrl` protocol allowlist — `http:`, `https:`, `mailto:`, `tel:`,
+// `ftp:`, and relative URLs — and a value it refuses is OMITTED rather than
+// published as an empty substitute. The `<base>` tag's `href` is sanitized too:
+// overlooking it previously meant an attacker-controlled base href could rewrite
+// every relative URL on the page into a javascript: URI.
 
-// Only `href` and `src` are treated as URL slots. `content` is free text
-// for most meta tags (description, keywords, og:title, etc.) and running
-// it through `sanitizeUrl` would strip legitimate whitespace. The one
-// truly dangerous `content` form — `<meta http-equiv="refresh"
-// content="0;url=javascript:...">` — is filtered separately by
-// `planMetaEntry()` — the shared client/SSR policy — which parses the directive
-// structurally instead of substring-matching it.
-const HEAD_URL_ATTRS = new Set(["href", "src"]);
-function sanitizeHeadAttr(key: string, value: string): string {
-  if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);
-  return value;
-}
-
-/** Strict attribute-name validation — blocks injection via crafted keys. */
-const SAFE_HEAD_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
-
-function isSafeHeadAttr(name: string): boolean {
-  if (!SAFE_HEAD_ATTR_NAME.test(name)) return false;
-  if (isEventHandlerAttr(name)) return false;
-  return true;
-}
+// `content` is deliberately NOT a URL slot: it is free text for most meta tags
+// (description, keywords, og:title, …) and running it through `sanitizeUrl`
+// would strip legitimate whitespace. The one truly dangerous `content` form —
+// `<meta http-equiv="refresh" content="0;url=javascript:...">` — is filtered by
+// `planMetaEntry()`, which parses the directive structurally instead of
+// substring-matching it.
+//
+// Every other classification — which names are URL sinks, which are event
+// handlers, which the browser parses as nested HTML — lives in
+// `utils/headEntry.ts` and is keyed on the CANONICAL (ASCII-lower-cased)
+// attribute name. `head.ts` used to carry a private `Set(["href", "src"])` and
+// test it against the authored spelling, so `Head({ script: [{ SRC: "data:…" }] })`
+// skipped sanitization entirely while both SSR paths refused the same value.
 
 /**
  * Escape a JSON string for safe embedding inside a `<script>` tag. Matches
@@ -52,21 +49,17 @@ function escapeScriptJsonLocal(json: string): string {
 }
 
 /**
- * How `Head()` turns an authored meta entry into DOM attributes.
+ * How `Head()` turns an authored value into a string.
  *
- * Only the target-specific steps live here; `planMetaEntry` fixes the ORDER —
- * raw duplicate names, then name filtering, then resolution, then sanitization,
- * then validation of the complete effective snapshot — so that the client,
- * `renderToDocument`, and router SSR provably reach the same verdict on the same
- * entry. Doing the duplicate check after the client's name filter is exactly how
- * they came to disagree.
+ * This is the ONLY thing `Head()` contributes to the shared pipeline — the
+ * client has reactive getters to invoke and the servers do not, and that is the
+ * entire difference between them. Name canonicalization, eligibility, URL
+ * sanitization, duplicate detection, the empty-entry rule, and the meta-refresh
+ * verdict all live in `utils/headEntry.ts`, so the three rendering paths have
+ * nothing left to disagree about.
  */
-const CLIENT_META_POLICY: MetaEntryPolicy<string | (() => string)> = {
-  isEmittableName: isSafeHeadAttr,
+const CLIENT_RESOLVER: HeadValueResolver<string | (() => string)> = {
   resolveValue: (_name, value) => (typeof value === "function" ? String(value()) : String(value)),
-  // `sanitizeHeadAttr` is applied BEFORE validation, so the value the refresh
-  // policy inspects is byte-for-byte the value that reaches the element.
-  sanitizeValue: (name, value) => sanitizeHeadAttr(name, value),
   isReactiveValue: (value) => typeof value === "function",
 };
 
@@ -167,7 +160,7 @@ function applyMetaEntry(
   const stopEffect = effect(() => {
     // Resolving every attribute here is also what subscribes this single effect
     // to all of them, so any change re-runs the whole validation.
-    const plan = planMetaEntry(metaProps, CLIENT_META_POLICY);
+    const plan = planMetaEntry(metaProps, CLIENT_RESOLVER);
     if (plan.kind === "drop") {
       // Withdraw rather than merely skipping the write: an element already in
       // the head would otherwise stay live with its previous — now unapproved —
@@ -267,29 +260,23 @@ export function Head(props: HeadProps): Comment {
       }
     }
 
-    // Link tags — keys validated, URL attributes sanitized.
-    if (props.link) {
-      for (const linkProps of props.link) {
-        const el = document.createElement("link");
-        for (const [key, value] of Object.entries(linkProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          el.setAttribute(key, sanitizeHeadAttr(key, value));
-        }
-        document.head.appendChild(el);
-        managedElements.push(el);
-      }
-    }
-
-    // Script tags — same validation posture. Note: inline script bodies
-    // are never written here; only the `src` attribute is used, and it
-    // passes through `sanitizeUrl`.
-    if (props.script) {
-      for (const scriptProps of props.script) {
-        const el = document.createElement("script");
-        for (const [key, value] of Object.entries(scriptProps)) {
-          if (!isSafeHeadAttr(key)) continue;
-          el.setAttribute(key, sanitizeHeadAttr(key, value));
-        }
+    // Link and script tags — the SAME shared plan the meta entries and both SSR
+    // paths run, so `HREF`/`SRC` are classified on the canonical name and a
+    // refused URL is omitted rather than published as `href=""`. Built fully
+    // while detached, then appended, so no partially-populated element is ever
+    // connected.
+    //
+    // Inline script bodies are never written here; only attributes are.
+    for (const [tag, entries] of [
+      ["link", props.link],
+      ["script", props.script],
+    ] as const) {
+      if (!entries) continue;
+      for (const entryProps of entries) {
+        const plan = planHeadElementEntry(entryProps, STATIC_HEAD_RESOLVER);
+        if (plan.kind === "drop") continue;
+        const el = document.createElement(tag);
+        for (const [name, value] of plan.attributes) el.setAttribute(name, value);
         document.head.appendChild(el);
         managedElements.push(el);
       }
@@ -360,5 +347,12 @@ export function setCanonical(url: string): void {
     link.rel = "canonical";
     document.head.appendChild(link);
   }
-  link.href = sanitizeUrl(url);
+  // A refused URL is OMITTED, never published as `href=""`. The two are not the
+  // same document: an empty URL attribute resolves against the current page, so
+  // `<link rel="canonical" href="">` declares the page canonical to itself,
+  // which is a claim nobody made. Any previously accepted value is cleared too,
+  // so a rejected update cannot leave a stale canonical standing.
+  const safe = sanitizeUrl(url);
+  if (safe) link.setAttribute("href", safe);
+  else link.removeAttribute("href");
 }

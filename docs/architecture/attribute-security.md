@@ -290,6 +290,59 @@ No framework navigation timer stands in for the withheld directive. Scheduling a
 redirect the developer did not ask the *framework* to own would be a larger
 promise than the one being withdrawn.
 
+### Attribute names are canonicalized once, then never re-derived
+
+HTML attribute names are ASCII case-insensitive: the parser reads `SRC` as
+`src`. Every security classification therefore has to run on a canonical name,
+and `head.ts` did not — it carried a private, case-SENSITIVE set:
+
+```ts
+const HEAD_URL_ATTRS = new Set(["href", "src"]);
+if (HEAD_URL_ATTRS.has(key)) return sanitizeUrl(value);   // `SRC` misses
+```
+
+so `Head({ script: [{ SRC: "data:text/javascript,…" }] })` skipped URL
+sanitization completely and appended a `<script>` the browser fetched and ran,
+while both SSR paths — which lower-cased first — refused the identical value.
+`isUrlAttribute()` in `utils/sanitize.ts` already carried a comment warning about
+exactly this mistake. `head.ts` simply was not calling it.
+
+There is now one fold, `canonicalAttrName()`, and it is deliberately **ASCII
+only**. `String.prototype.toLowerCase` maps some non-ASCII code points *into*
+ASCII letters — U+212A KELVIN SIGN becomes `k` — which would make the framework
+and the browser disagree about what an attribute is called. The parser
+lower-cases exactly `A`–`Z`, so the fold does too. URL sinks, event handlers,
+`srcdoc`, and duplicate detection all consult that one string.
+
+### A refused value is omitted, never emptied
+
+`href=""` is not "no href". An empty URL attribute resolves against the current
+document, so `<link href="">` references the page itself and `<script src="">`
+is a request rather than a no-op. Publishing an empty substitute for a refused
+URL is a different document from publishing nothing.
+
+The sanitization contract therefore returns `string | null`, and `null` means
+*omit this attribute*. An empty string is only ever a rejection for a **policy
+sink** (a URL attribute, `style`, `srcset`); for inert text like `content` or
+`id` it is a perfectly legitimate value and is committed as authored.
+
+When nothing survives, the entry itself is dropped — one shared answer rather
+than three. The client used to publish an attribute-less `<meta>` where both
+servers emitted nothing at all.
+
+### One URL policy, not three
+
+Router SSR carried a `sanitizeUrlLocal` described in its own comment as
+mirroring `utils/sanitize.ts`. It did not mirror it: the canonical sanitizer is
+an **allowlist** (`http:`, `https:`, `mailto:`, `tel:`, `ftp:`, plus relative
+URLs), while the local copy was a **blocklist** of four schemes. Router SSR
+therefore emitted `file:`, `about:`, `chrome:` and every custom scheme that
+`Head()` and `renderToDocument` both refused.
+
+A comment is not a mechanism. All three paths now call `sanitizeAttributeString`
+— the same authority the tag factory and the reactive bindings use — so `<head>`
+cannot hold a value the rest of the framework would reject.
+
 ### One pipeline, one order
 
 A shared policy function is not the same thing as a shared decision. All three
@@ -306,19 +359,33 @@ by the client — which dropped both event handlers as unsafe names and then saw
 duplicate — and rejected by both servers, which saw the duplicate in the raw
 record. Same rule, same function, opposite outcomes.
 
-`planMetaEntry` fixes the order in one place for all three:
+`planMetaEntry` / `planHeadElementEntry` (`utils/headEntry.ts`) fix the order in
+one place for all three:
 
 1. reject duplicate case-insensitive names, on the **raw authored names**
-2. drop names this target may not emit
-3. resolve values (invoking reactive getters on the client)
-4. sanitize values
-5. validate the **complete effective snapshot** — what is judged is what is committed
-6. publish or serialize
+2. canonicalize each name
+3. drop names that may not be emitted (malformed, `on*`, `srcdoc`)
+4. resolve values — the ONE step that differs, since only the client has getters
+5. sanitize values, **omitting** rejected ones rather than emptying them
+6. drop the entry when nothing effective remains
+7. for `<meta>`, validate the complete effective snapshot against the
+   meta-refresh policy — what is judged is what is committed
 
-Only steps 2–4 are parameterized per target. `Head()`, `renderToDocument`, and
-`renderRouteToDocument` supply their own name filter and value sanitizer and
-share everything else, so the same input receives the same verdict — and, for
-accepted entries, the same effective attributes — on all three.
+An earlier version of this pipeline took the name filter and the value sanitizer
+as *parameters*, so each target supplied its own. That is a shared function, not
+a shared decision, and the three promptly diverged in four separate ways — the
+case-sensitive URL set, the router's scheme blocklist, `srcdoc` kept on the
+client and dropped by both servers, and refused URLs emptied on the client and
+omitted by the servers. **Only value resolution is parameterized now.** There is
+nothing left for the three paths to disagree about, and the attribute map they
+produce is keyed by canonical names, so client DOM and server HTML are directly
+comparable rather than merely equivalent.
+
+`tests/security-meta-refresh-parity.test.ts` drives one table through all three
+and asserts exact equality — emitted-or-not, attribute count, canonical names,
+and values — against a pinned expectation *and* against each other. Comparing
+only to each other would let a row they all get wrong pass; comparing only to an
+expectation would let drift between them pass.
 
 ## Security is a postcondition, not a promise about this write
 

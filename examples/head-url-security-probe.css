@@ -1,0 +1,2 @@
+/* Positive control: proves a stylesheet Head() accepts really is applied. */
+body { background-color: rgb(1, 2, 3); }
