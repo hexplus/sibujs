@@ -284,40 +284,45 @@ describe("bookkeeping is bounded and consistent", () => {
     expect(list.items()).toEqual([0, -100, 70]);
   });
 
-  it("reports pending() as true to a subscriber woken by the optimistic publish", async () => {
-    // Found in self-review. `begin()` used to run after `publish()`, so an
-    // effect woken by the optimistic mutation saw `pending() === false` for a
-    // mutation that was, at that very moment, in flight.
+  it("publishes pending and items as ONE coherent commit (add)", async () => {
+    // Originally written as "every items-change run sees pending() === true",
+    // which was over-specified: it encoded the OLD two-phase publication, where
+    // `items` was written before the operation settled and `pending` fell to
+    // false in a separate, later notification. The real invariant is stronger
+    // and is what is asserted now — at every single observation, `pending()` and
+    // `items()` describe the SAME commit. A subscriber can never see the
+    // optimistic list alongside an idle flag, nor the confirmed list alongside a
+    // busy one.
     const list = optimisticList<number>([1]);
-    const seen: boolean[] = [];
+    const seen: Array<{ items: number[]; pending: boolean }> = [];
     const stop = effect(() => {
-      list.items();
-      // Untracked: subscribing to `pending` as well would re-run this effect
-      // when the operation settles, and that run legitimately reports `false`.
-      // The claim under test is narrower — every run caused by an ITEMS change
-      // must see an in-flight list.
-      seen.push(untracked(() => list.pending()));
+      const current = list.items();
+      // Untracked so the effect subscribes to `items` alone; otherwise it would
+      // also re-run on the `pending` signal and the sequence would not describe
+      // items-driven observations.
+      seen.push({ items: current, pending: untracked(() => list.pending()) });
     });
 
     const add = gate<number>();
     const adding = list.add(2, () => add.promise);
     add.resolve(20);
     await adding;
-
     stop();
-    // First entry is the initial run (idle); the optimistic publish and the
-    // confirmation must both report an in-flight list.
-    expect(seen[0]).toBe(false);
-    expect(seen.slice(1).every(Boolean), `pending() was false during a publish: ${seen.join(",")}`).toBe(true);
+
+    expect(seen).toEqual([
+      { items: [1], pending: false },
+      { items: [1, 2], pending: true },
+      { items: [1, 20], pending: false },
+    ]);
     expect(list.items()).toEqual([1, 20]);
   });
 
-  it("reports pending() as true during a remove and an update publish too", async () => {
+  it("publishes pending and items as ONE coherent commit (update then failed remove)", async () => {
     const list = optimisticList([{ id: 1, value: "a" }]);
-    const seen: boolean[] = [];
+    const seen: Array<{ values: string[]; pending: boolean }> = [];
     const stop = effect(() => {
-      list.items();
-      seen.push(untracked(() => list.pending()));
+      const values = list.items().map((i) => i.value);
+      seen.push({ values, pending: untracked(() => list.pending()) });
     });
 
     const u = gate<{ id: number; value: string }>();
@@ -338,9 +343,44 @@ describe("bookkeeping is bounded and consistent", () => {
     await removing;
     stop();
 
-    expect(seen[0]).toBe(false);
-    expect(seen.slice(1).every(Boolean), `pending() was false during a publish: ${seen.join(",")}`).toBe(true);
-    expect(list.items()).toEqual([{ id: 1, value: "B" }]);
+    expect(seen).toEqual([
+      // initial
+      { values: ["a"], pending: false },
+      // optimistic update — one operation in flight
+      { values: ["b"], pending: true },
+      // the remove hides the row — two operations in flight
+      { values: [], pending: true },
+      // the failed remove restores it carrying the CONFIRMED value, and it is
+      // the last operation, so the same commit reports an idle list
+      { values: ["B"], pending: false },
+    ]);
+    expect(list.pending()).toBe(false);
+  });
+
+  it("a subscriber to pending() alone sees a fully committed list", async () => {
+    const list = optimisticList([1, 2, 3]);
+    const observed: Array<{ pending: boolean; items: number[] }> = [];
+    const stop = effect(() => {
+      const p = list.pending();
+      observed.push({ pending: p, items: untracked(() => list.items()) });
+    });
+
+    const r = gate<void>();
+    const removing = list.remove(
+      (v) => v === 2,
+      () => r.promise,
+    );
+    r.resolve();
+    await removing;
+    stop();
+
+    // The first `pending: true` observation already shows the row removed —
+    // never the pre-operation list.
+    expect(observed).toEqual([
+      { pending: false, items: [1, 2, 3] },
+      { pending: true, items: [1, 3] },
+      { pending: false, items: [1, 3] },
+    ]);
   });
 });
 

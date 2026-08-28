@@ -1,4 +1,5 @@
 import { signal } from "../core/signals/signal";
+import { batch } from "../reactivity/batch";
 
 // ============================================================================
 // OPTIMISTIC UPDATES
@@ -146,18 +147,69 @@ export function optimistic<T>(initialValue: T): {
 // place relative to the rows that are actually still there — no historical array
 // and no absolute positions.
 
+//
+// PREPARE → COMMIT → PUBLISH
+// --------------------------
+// Setting `pending` notifies subscribers SYNCHRONOUSLY, and a subscriber may
+// call straight back into this list. An earlier version published in the middle
+// of its own mutation, so the operation that woke the subscriber was only half
+// applied when the subscriber's operation ran — and then finished applying a
+// plan computed before the subscriber existed:
+//
+//     remove computes `kept` · begin() · effect wakes and add()s a row
+//       · remove resumes and assigns `visible = kept`   → the new row is erased
+//
+//     older update claims a row · begin() · effect wakes and update()s the same
+//       row · older update resumes and assigns its own owner
+//         → the older operation steals ownership back from the newer one
+//
+// Preparation is also where user code can throw. `{ ...row.value, ...patch }`
+// executes the patch's property getters, and doing that after the inflight slot
+// was taken leaked `pending()` as true forever.
+//
+// So every operation runs in three strictly ordered phases:
+//
+//   PREPARE  runs all user-controlled work — predicates, patch getters — and
+//            computes the complete mutation. It touches no framework state, so
+//            a throw here leaves the list exactly as it was.
+//   COMMIT   applies visibility, ownership and values. No user code runs here,
+//            and structural changes are recomputed from the LIVE list rather
+//            than a snapshot, so even a reentrant predicate cannot be undone.
+//   PUBLISH  writes `pending` and `items` inside one `batch`, so they are
+//            observed together and only once the operation is fully committed.
+//
+// By the time any subscriber runs, the outer operation has no work left to do
+// but await its own promise.
+//
+// COMPLEXITY
+// ----------
+// Membership is a boolean on the row, not a scan of the visible array. The
+// previous `visible.includes(id)` inside loops over matched rows made broad
+// operations quadratic — a 20,000-row failed remove took 8.3 seconds. Rows are
+// restored by merging two already-sorted runs rather than splicing one at a
+// time. For `n` visible rows and `k` affected rows: membership O(1), reference
+// release O(k), broad update O(n + k), bulk restoration O(n + k), publication
+// O(n).
+
 /** One tracked row. Never exposed; `items()` projects `value`. */
 interface Row<T> {
   /** Stable identity, independent of value and of visibility. */
   readonly id: number;
   /**
-   * Monotonic ordering token. Allocated once and never reused, so `visible`
+   * Monotonic ordering token. Allocated once and never reused, so `order`
    * sorted by key is an invariant maintained by construction: `add` appends the
-   * largest key, removal preserves relative order, and restoration is an ordered
-   * insert.
+   * largest key, removal preserves relative order, and restoration merges two
+   * already-sorted runs.
    */
   readonly key: number;
   value: T;
+  /**
+   * Is this row currently on screen?
+   *
+   * Kept in lockstep with `order`, and the ONLY membership test used. Scanning
+   * `order` per affected row is what made broad operations quadratic.
+   */
+  visible: boolean;
   /**
    * How many in-flight operations may still settle against this row.
    *
@@ -195,19 +247,20 @@ interface Row<T> {
  *   - a failed `remove` makes its rows visible again, in their correct relative
  *     order and carrying whatever value they hold NOW, not the value they held
  *     when they were taken out;
- *   - a successful `remove` retires its rows; the records are dropped once the
- *     list goes idle and nothing can reference them;
+ *   - a successful `remove` retires its rows; each record is dropped as soon as
+ *     its last holder settles;
  *   - a failed `update` restores only the rows it still owns, including their
  *     previous owner;
  *   - a successful `update` publishes only to the rows it still owns.
  *
  * Operations on disjoint rows are completely independent, and no operation can
  * revert, overwrite or resurrect work it did not do. Where two operations touch
- * the same row, the later one wins: it claims the row, and the earlier one's
- * settlement — success or failure — becomes a no-op for that row.
+ * the same row, the later one wins — including when the later one was started
+ * by a reactive subscriber woken by the earlier one.
  *
  * `pending()` is true while any operation is unsettled and becomes false exactly
- * when the last one settles, in any settlement order.
+ * when the last one settles, in any settlement order. It is always published in
+ * the same batch as `items()`, so a subscriber never sees one without the other.
  *
  * @example
  * ```ts
@@ -246,79 +299,119 @@ export function optimisticList<T>(initialValue: T[]): {
    */
   const records = new Map<number, Row<T>>();
 
-  /**
-   * The ids currently on screen, in display order.
-   *
-   * Always sorted by `key`. That invariant is what makes restoration an ordered
-   * insert rather than a guess at an absolute position.
-   */
-  let visible: number[] = [];
+  /** The ids currently on screen, in display order — always sorted by key. */
+  let order: number[] = [];
 
   for (const value of initialValue) {
-    const row: Row<T> = { id: nextRowId++, key: nextKey++, value, refs: 0, owner: 0 };
+    const row: Row<T> = { id: nextRowId++, key: nextKey++, value, visible: true, refs: 0, owner: 0 };
     records.set(row.id, row);
-    visible.push(row.id);
+    order.push(row.id);
   }
 
-  const [items, setItems] = signal<T[]>(visible.map((id) => (records.get(id) as Row<T>).value));
+  const [items, setItems] = signal<T[]>(order.map((id) => (records.get(id) as Row<T>).value));
   const [pending, setPending] = signal(false);
   let inflight = 0;
 
   /**
-   * Rows whose creating `add` failed, so they must never come back.
+   * Rows that must never be shown again, whatever any rollback decides.
    *
    * A `remove` records the rows it took out so it can reinstate them if the
-   * deletion fails. If one of those rows belonged to an `add` that then failed,
-   * reinstating it would resurrect an item that was never persisted — a failed
-   * operation's artifact reappearing by way of a second operation's rollback.
+   * deletion fails, and that rollback must not undo a fact established by a
+   * different operation. Two things establish such a fact:
    *
-   * Bounded by construction: it can only hold ids while other operations are in
-   * flight, and `settle()` empties it the moment the list goes idle.
+   *   - a creating `add` FAILED, so the row was never persisted. Reinstating it
+   *     would put a phantom item on screen.
+   *   - a `remove` SUCCEEDED, so the deletion is confirmed. A second remove that
+   *     also matched the row — reachable when a predicate re-enters the list and
+   *     removes a row the outer predicate is still scanning for — must not bring
+   *     it back when it fails.
+   *
+   * Bounded by construction: an entry is dropped with its row the moment the
+   * row's last holder settles, and `settle()` empties the set at idle.
    */
-  const revokedRowIds = new Set<number>();
+  const retiredRowIds = new Set<number>();
 
-  /** Republish the public projection. Called after every visible change. */
-  function publish(): void {
-    setItems(visible.map((id) => (records.get(id) as Row<T>).value));
+  function project(): T[] {
+    const out: T[] = new Array(order.length);
+    for (let i = 0; i < order.length; i++) out[i] = (records.get(order[i]) as Row<T>).value;
+    return out;
   }
 
-  /** Insert `id` into `visible` at the position its ordering key implies. */
-  function insertByKey(id: number): void {
-    const key = (records.get(id) as Row<T>).key;
-    let at = visible.length;
-    for (let i = 0; i < visible.length; i++) {
-      if ((records.get(visible[i]) as Row<T>).key > key) {
-        at = i;
-        break;
+  /**
+   * Apply an internal mutation and publish the result as ONE observable commit.
+   *
+   * `mutate` runs to completion before any subscriber is notified, because
+   * `batch` defers notification until the outermost batch exits. That is what
+   * makes the operation fully committed by the time reentrant application code
+   * can run, and what stops a subscriber observing `pending` changed while
+   * `items` still shows the pre-operation list, or the reverse.
+   *
+   * `mutate` returns whether the visible projection changed; `items` is only
+   * republished when it did, so an operation that touches nothing on screen
+   * does not force a re-render.
+   *
+   * No user-controlled code may run inside `mutate` — that is the whole point.
+   */
+  function commit(mutate: () => boolean): void {
+    batch(() => {
+      let visibleChanged = false;
+      try {
+        visibleChanged = mutate();
+      } finally {
+        setPending(inflight > 0);
+        if (visibleChanged) setItems(project());
       }
-    }
-    visible = [...visible.slice(0, at), id, ...visible.slice(at)];
+    });
   }
 
+  /** Take a row off screen. Keeps `visible` and `order` in lockstep. */
   function hide(id: number): boolean {
-    const at = visible.indexOf(id);
-    if (at === -1) return false;
-    visible = [...visible.slice(0, at), ...visible.slice(at + 1)];
+    const row = records.get(id);
+    if (!row || !row.visible) return false;
+    row.visible = false;
+    order = order.filter((x) => x !== id);
     return true;
   }
 
   /**
-   * Mark an operation in flight.
+   * Put eligible rows back on screen, in one pass.
    *
-   * Deliberately SEPARATE from allocating the operation id, and deliberately
-   * called only after the synchronous optimistic mutation has succeeded. A
-   * user-supplied `predicate` runs during that mutation and may throw; if the
-   * inflight count had already been incremented, that throw would propagate to
-   * the caller with no `finally` to undo it and `pending()` would stay true
-   * forever. Nothing between here and the `try` can throw.
+   * `ids` was collected by scanning `order`, which is key-sorted, so the
+   * eligible subset is key-sorted too and the result is a merge of two sorted
+   * runs — O(n + k). Restoring one row at a time (scan, slice, insert, repeat)
+   * is quadratic, which is what made a 20,000-row failed remove take seconds.
    */
-  function begin(): void {
-    inflight++;
-    setPending(true);
+  function restore(ids: readonly number[]): boolean {
+    const restorable: number[] = [];
+    for (const id of ids) {
+      const row = records.get(id);
+      // Already back (another failed remove reinstated it), retired by a failed
+      // `add` or a successful `remove`, or dropped entirely — either way this
+      // operation must not insert it.
+      if (!row || row.visible || retiredRowIds.has(id)) continue;
+      restorable.push(id);
+    }
+    if (restorable.length === 0) return false;
+
+    const merged: number[] = new Array(order.length + restorable.length);
+    let i = 0;
+    let j = 0;
+    let w = 0;
+    while (i < order.length && j < restorable.length) {
+      const a = (records.get(order[i]) as Row<T>).key;
+      const b = (records.get(restorable[j]) as Row<T>).key;
+      merged[w++] = a <= b ? order[i++] : restorable[j++];
+    }
+    while (i < order.length) merged[w++] = order[i++];
+    while (j < restorable.length) merged[w++] = restorable[j++];
+
+    for (const id of restorable) (records.get(id) as Row<T>).visible = true;
+    order = merged;
+    return true;
   }
 
   /** Claim the right to settle against these rows later. */
-  function retain(ids: Iterable<number>): void {
+  function retain(ids: readonly number[]): void {
     for (const id of ids) {
       const row = records.get(id);
       if (row) row.refs++;
@@ -332,21 +425,22 @@ export function optimisticList<T>(initialValue: T[]): {
    * reference to it: at that point no settlement can address it and no rollback
    * can reinstate it, so both its record and any revocation for it are dead
    * weight. This is what bounds the two structures under sustained load rather
-   * than only at moments of idleness.
+   * than only at moments of idleness. O(k) — membership is a flag, not a scan.
    */
-  function release(ids: Iterable<number>): void {
+  function release(ids: readonly number[]): void {
     for (const id of ids) {
       const row = records.get(id);
       if (!row) continue;
       row.refs--;
-      if (row.refs <= 0 && !visible.includes(id)) {
+      if (row.refs <= 0 && !row.visible) {
         records.delete(id);
-        revokedRowIds.delete(id);
+        retiredRowIds.delete(id);
       }
     }
   }
 
-  function settle(heldIds: Iterable<number>): void {
+  /** Release what an operation held and drop its inflight slot. */
+  function settle(heldIds: readonly number[]): void {
     release(heldIds);
     inflight--;
     if (inflight <= 0) {
@@ -355,91 +449,109 @@ export function optimisticList<T>(initialValue: T[]): {
       // settles; this catches anything an unforeseen path left behind, and keeps
       // the invariant "idle means `records` holds exactly what is on screen"
       // true by construction rather than by argument.
-      revokedRowIds.clear();
-      if (records.size !== visible.length) {
-        const live = new Set(visible);
-        for (const id of records.keys()) {
-          if (!live.has(id)) records.delete(id);
+      retiredRowIds.clear();
+      if (records.size !== order.length) {
+        for (const [id, row] of records) {
+          if (!row.visible) records.delete(id);
         }
       }
-      setPending(false);
     }
   }
 
   async function add(item: T, asyncAction: () => Promise<T>): Promise<void> {
     const opId = ++nextOpId;
-    const row: Row<T> = { id: nextRowId++, key: nextKey++, value: item, refs: 1, owner: opId };
-    records.set(row.id, row);
-    visible = [...visible, row.id];
-    // `begin()` precedes `publish()` so a subscriber woken by the publication
-    // observes `pending() === true`. Nothing here can throw, so there is no
-    // risk of leaking the inflight slot (see `begin`).
-    begin();
-    publish();
+    // PREPARE — nothing user-controlled, nothing observable yet.
+    const row: Row<T> = { id: nextRowId++, key: nextKey++, value: item, visible: false, refs: 1, owner: opId };
 
+    // COMMIT + PUBLISH.
+    commit(() => {
+      records.set(row.id, row);
+      row.visible = true;
+      order = [...order, row.id];
+      inflight++;
+      return true;
+    });
+    // Fully committed. Subscribers have run; anything they started is live.
+
+    let result: T | undefined;
+    let failed = false;
     try {
-      const result = await asyncAction();
-      // Addressed through `records`, so a row a pending `remove` has hidden is
-      // still reachable and the confirmed value is not lost. Publish only if no
-      // later operation has claimed the value.
-      const current = records.get(row.id);
-      if (current && current.owner === opId) {
-        current.value = result;
-        if (visible.includes(row.id)) publish();
-      }
+      result = await asyncAction();
     } catch {
-      // Existence is owned by this add. Revoke first: a concurrent `remove` may
-      // already have recorded this row for a possible rollback, and reinstating
-      // a row whose insert failed would put a phantom item back on screen.
-      revokedRowIds.add(row.id);
-      if (hide(row.id)) publish();
-    } finally {
-      settle([row.id]);
+      failed = true;
     }
+
+    commit(() => {
+      try {
+        if (failed) {
+          // Existence is owned by this add. Revoke first: a concurrent `remove`
+          // may already have recorded this row for a possible rollback, and
+          // reinstating a row whose insert failed would put a phantom item back
+          // on screen.
+          retiredRowIds.add(row.id);
+          return hide(row.id);
+        }
+        // Addressed through `records`, so a row a pending `remove` has hidden is
+        // still reachable and the confirmed value is not lost. Publish only if
+        // no later operation has claimed the value.
+        const current = records.get(row.id);
+        if (!current || current.owner !== opId) return false;
+        current.value = result as T;
+        return current.visible;
+      } finally {
+        settle([row.id]);
+      }
+    });
   }
 
   async function remove(predicate: (item: T) => boolean, asyncAction: () => Promise<void>): Promise<void> {
-    // Record only the IDS taken out — never their values. A rollback reinstates
-    // the row as it stands at that moment, which is what lets an `add` or
-    // `update` that settled while the row was hidden still be reflected.
-    // `predicate` is user code and may throw, which is why this runs BEFORE
-    // `begin()`.
-    const removedIds: number[] = [];
-    const kept: number[] = [];
-    for (const id of visible) {
-      if (predicate((records.get(id) as Row<T>).value)) removedIds.push(id);
-      else kept.push(id);
-    }
-    // Claim the rows before publishing, so a subscriber woken by the
-    // publication cannot see a row retired out from under this operation.
-    retain(removedIds);
-    begin();
-    if (removedIds.length > 0) {
-      visible = kept;
-      publish();
+    // PREPARE — `predicate` is user code and may throw, or may even re-enter
+    // this list. Only IDS are recorded, never values: a rollback reinstates the
+    // row as it stands at that moment, which is what lets an `add` or `update`
+    // that settled while the row was hidden still be reflected.
+    const matchedIds: number[] = [];
+    for (const id of order) {
+      if (predicate((records.get(id) as Row<T>).value)) matchedIds.push(id);
     }
 
+    commit(() => {
+      retain(matchedIds);
+      inflight++;
+      if (matchedIds.length === 0) return false;
+      const removing = new Set(matchedIds);
+      for (const id of matchedIds) {
+        const row = records.get(id);
+        if (row) row.visible = false;
+      }
+      // Recomputed from the LIVE order rather than a snapshot taken during
+      // preparation, so a row a reentrant predicate added is not erased here.
+      order = order.filter((id) => !removing.has(id));
+      return true;
+    });
+
+    let failed = false;
     try {
       await asyncAction();
     } catch {
-      // Reinstate by ordering key, so each row returns to its place relative to
-      // the rows that are actually still present. Anything added, changed or
-      // successfully removed since is left alone — a failing remove has no claim
-      // on it.
-      let restored = false;
-      for (const id of removedIds) {
-        // Already back (another failed remove reinstated it), revoked by a
-        // failed `add`, or purged — either way this operation must not insert it.
-        if (visible.includes(id)) continue;
-        if (revokedRowIds.has(id)) continue;
-        if (!records.has(id)) continue;
-        insertByKey(id);
-        restored = true;
-      }
-      if (restored) publish();
-    } finally {
-      settle(removedIds);
+      failed = true;
     }
+
+    commit(() => {
+      try {
+        if (!failed) {
+          // The deletion is confirmed. Retiring the rows stops any OTHER
+          // operation that also matched them — reachable when a predicate
+          // re-enters the list — from reinstating them through its own rollback.
+          for (const id of matchedIds) retiredRowIds.add(id);
+          return false;
+        }
+        // Anything added, changed or successfully removed since is left alone —
+        // a failing remove has no claim on it.
+        return restore(matchedIds);
+      } finally {
+        settle(matchedIds);
+      }
+    });
   }
 
   async function updateItem(
@@ -448,50 +560,64 @@ export function optimisticList<T>(initialValue: T[]): {
     asyncAction: () => Promise<T>,
   ): Promise<void> {
     const opId = ++nextOpId;
-    // Claim each matching row and remember what it held, so a rollback restores
-    // that row alone — including its previous owner, so an even older
-    // operation's claim is not silently transferred to this one. `predicate` is
-    // user code and may throw, so the whole claim phase runs BEFORE `begin()`
-    // and mutates nothing until it has completed.
-    const matched: Array<{ row: Row<T>; previousValue: T; previousOwner: number }> = [];
-    for (const id of visible) {
+    // PREPARE — both the predicate AND the patch spread run here. Object spread
+    // executes the patch's property getters, so this is user code that can
+    // throw; doing it after the inflight slot was taken leaked `pending()` as
+    // true forever. Nothing is mutated, retained or counted until every row has
+    // been prepared successfully.
+    const prepared: Array<{ row: Row<T>; previousValue: T; previousOwner: number; nextValue: T }> = [];
+    for (const id of order) {
       const row = records.get(id) as Row<T>;
       if (!predicate(row.value)) continue;
-      matched.push({ row, previousValue: row.value, previousOwner: row.owner });
+      const nextValue = { ...row.value, ...patch } as T;
+      prepared.push({ row, previousValue: row.value, previousOwner: row.owner, nextValue });
     }
-    const matchedIds = matched.map((m) => m.row.id);
-    retain(matchedIds);
-    begin();
-    for (const { row } of matched) {
-      row.value = { ...row.value, ...patch } as T;
-      row.owner = opId;
-    }
-    if (matched.length > 0) publish();
+    const preparedIds = prepared.map((p) => p.row.id);
 
+    commit(() => {
+      retain(preparedIds);
+      inflight++;
+      let visibleChanged = false;
+      for (const p of prepared) {
+        p.row.value = p.nextValue;
+        p.row.owner = opId;
+        if (p.row.visible) visibleChanged = true;
+      }
+      return visibleChanged;
+    });
+    // Fully committed. A subscriber woken here may claim these rows, and this
+    // operation will not take them back.
+
+    let result: T | undefined;
+    let failed = false;
     try {
-      const result = await asyncAction();
-      let touchedVisible = false;
-      for (const { row } of matched) {
-        // Still ours? A later operation may have claimed this row since. The row
-        // is addressed directly, so a row hidden by a pending `remove` still
-        // receives its confirmed value.
-        if (row.owner !== opId) continue;
-        row.value = result;
-        if (visible.includes(row.id)) touchedVisible = true;
-      }
-      if (touchedVisible) publish();
+      result = await asyncAction();
     } catch {
-      let touchedVisible = false;
-      for (const { row, previousValue, previousOwner } of matched) {
-        if (row.owner !== opId) continue;
-        row.value = previousValue;
-        row.owner = previousOwner;
-        if (visible.includes(row.id)) touchedVisible = true;
-      }
-      if (touchedVisible) publish();
-    } finally {
-      settle(matchedIds);
+      failed = true;
     }
+
+    commit(() => {
+      try {
+        let visibleChanged = false;
+        for (const p of prepared) {
+          // Still ours? A later operation — possibly one a subscriber started
+          // during this operation's own publication — may have claimed the row.
+          // The row is addressed directly, so a row hidden by a pending `remove`
+          // still receives its confirmed value.
+          if (p.row.owner !== opId) continue;
+          if (failed) {
+            p.row.value = p.previousValue;
+            p.row.owner = p.previousOwner;
+          } else {
+            p.row.value = result as T;
+          }
+          if (p.row.visible) visibleChanged = true;
+        }
+        return visibleChanged;
+      } finally {
+        settle(preparedIds);
+      }
+    });
   }
 
   return {

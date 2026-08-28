@@ -23,6 +23,25 @@ This project follows [Semantic Versioning](https://semver.org/).
   it holds now. Records are retired by reference counting as their last holder
   settles, so nothing accumulates.
 
+  Each operation runs in three ordered phases. PREPARE executes all
+  user-controlled work — predicates, and the patch spread that runs a patch's
+  property getters — and mutates nothing, so a throw there leaves the list
+  untouched and idle rather than leaking `pending()` as true. COMMIT applies the
+  change with no user code running and recomputes structural changes from the
+  live list. PUBLISH writes `pending` and `items` in one batch, so a subscriber
+  never sees one without the other and the operation is fully committed before
+  any reentrant call it wakes can run. A reactive subscriber may therefore start
+  an operation from inside another one: the outer operation can no longer erase
+  the row the subscriber added, and an older update can no longer reclaim
+  ownership of a row a newer reentrant update has taken.
+
+  Broad operations are no longer quadratic. Row visibility is a flag rather than
+  a scan of the visible array, and bulk restoration merges two already-sorted
+  runs instead of reinserting rows one at a time. For `n` visible and `k`
+  affected rows: membership O(1), reference release O(k), broad update O(n + k),
+  bulk restoration O(n + k), publication O(n). A 20,000-row failed remove went
+  from 8,300 ms to 13 ms on the development machine.
+
 - **A failed `remove` restores rows in the correct relative order.** Rollback
   reinserted rows at their old ABSOLUTE index, so a concurrent successful removal
   of an earlier row displaced them — removing `B`,`D` from `["A","B","C","D"]`
