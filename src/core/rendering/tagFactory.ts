@@ -1,7 +1,7 @@
 import { devWarn, isDev } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { track } from "../../reactivity/track";
+import { reactiveBinding } from "../../reactivity/track";
 import { isEventHandlerAttr, sanitizeCSSValue, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
@@ -92,15 +92,28 @@ function toKebab(prop: string): string {
   return cached;
 }
 
+// Reactive class/style getters are DOM bindings, so they are registered with
+// `reactiveBinding(commit, el)` rather than a bare `track(commit)`. Both create
+// the same self-retracking subscriber — `track(commit)` delegates straight to
+// `reactiveBinding(commit)` — but only the two-argument form stamps the owning
+// node on it. Without that node, a getter that throws on a LATER scheduled run
+// is reported from the drain with `node: undefined`, so `reportError` has no
+// DOM position to dispatch from, no enclosing `ErrorBoundary` can be found, and
+// the failure skips straight past the boundary to the global handler/console —
+// unlike every other reactive attribute, which goes through `bindAttribute`.
+//
+// `track`'s second parameter is an explicit SUBSCRIBER, not an owner node, so
+// it is not the right seam here.
+
 function applyStyle(el: Element, style: TagProps["style"]) {
   // A whole style STRING is a declaration list and gets the same per-property
   // policy the object form below already applies. Writing it raw made the
   // string form a security escape hatch from the object form — identical
   // authoring intent with two different policies.
   if (typeof style === "function") {
-    const teardown = track(() => {
+    const teardown = reactiveBinding(() => {
       el.setAttribute("style", sanitizeStyleAttribute(String((style as () => string)())));
-    });
+    }, el);
     registerDisposer(el, teardown);
     return;
   }
@@ -116,9 +129,9 @@ function applyStyle(el: Element, style: TagProps["style"]) {
     const name = toKebab(prop);
     if (typeof val === "function") {
       const getter = val as () => string | number;
-      const teardown = track(() => {
+      const teardown = reactiveBinding(() => {
         htmlEl.style.setProperty(name, sanitizeCSSValue(String(getter())));
-      });
+      }, el);
       registerDisposer(el, teardown);
     } else {
       htmlEl.style.setProperty(name, sanitizeCSSValue(String(val)));
@@ -133,9 +146,9 @@ function applyClass(el: Element, cls: TagProps["class"]) {
   }
 
   if (typeof cls === "function") {
-    const teardown = track(() => {
+    const teardown = reactiveBinding(() => {
       el.setAttribute("class", (cls as () => string)());
-    });
+    }, el);
     registerDisposer(el, teardown);
     return;
   }
@@ -163,7 +176,7 @@ function applyClass(el: Element, cls: TagProps["class"]) {
       }
       el.setAttribute("class", r);
     };
-    const teardown = track(update);
+    const teardown = reactiveBinding(update, el);
     registerDisposer(el, teardown);
   } else {
     el.setAttribute("class", result);
