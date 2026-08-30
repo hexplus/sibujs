@@ -7,6 +7,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.0.1] — 2026-08-29
+
+An error-routing fix for reactive `class` and `style` bindings. No breaking changes.
+
+### Fixed
+
+- **A reactive `class` or `style` getter that throws on a later update now reaches the enclosing `ErrorBoundary`** — `tagFactory` registered all four reactive forms (`class: () => …`, `class: { active: () => … }`, `style: () => …` and `style: { color: () => … }`) with a bare one-argument `track(commit)`. That builds the correct self-retracking binding and correctly labels its failures `phase: "binding"`, but it supplies no owner node, so the subscriber carried `node: undefined`. When such a getter then threw on a scheduled re-run, the runtime reported the failure with no DOM position to work from: the boundary-propagation event had nowhere to dispatch from, no enclosing `ErrorBoundary` could be located, and the error skipped the boundary entirely — falling straight through to the configured runtime error handler, or `console.error` when none was installed. Every other reactive attribute is bound through `bindAttribute`, which passes the element, so `class` and `style` were the only reactive props whose scheduled failures a boundary could never catch.
+
+  All four now bind through `reactiveBinding(commit, el)` and report the element they belong to, so a boundary above the failing element claims the error and renders its fallback. An error that no boundary claims still falls through to the handler and then the console exactly as before — carrying a DOM node does not make a failure disappear. Class and style sanitization, disposal and cleanup registration, batching and scheduling, per-run dependency tracking, and synchronous initial-render semantics are all unchanged.
+
+---
+
 ## [4.0.0] — 2026-08-28
 
 SibuJS 4.0 is a stability release. The public API is the 3.x API: nothing was
