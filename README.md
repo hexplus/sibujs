@@ -1,6 +1,6 @@
 # SibuJS
 
-A lightweight, function-based frontend framework with fine-grained reactivity, direct DOM rendering, and zero compilation. **No Virtual DOM. No magic.**
+A function-based frontend framework with fine-grained reactivity, direct DOM rendering, and zero compilation. **No Virtual DOM. No magic.**
 
 [NPM](https://www.npmjs.com/package/sibujs) · [License](https://github.com/hexplus/sibujs/blob/main/LICENSE)
 
