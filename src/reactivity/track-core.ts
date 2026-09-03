@@ -566,7 +566,32 @@ export function reactiveBinding(commit: () => void, ownerNode?: unknown): () => 
   subscriber._errorNode = ownerNode;
 
   // Initial run establishes the first dependency set (guarded, see above).
-  run();
+  //
+  // It is wrapped because a commit that reads a signal and THEN throws would
+  // otherwise leave a subscriber nobody can reach: `retrack` has already linked
+  // the edge, but the throw escapes before the disposer below exists, so no
+  // caller ever receives one. The binding is then a zombie — the next write to
+  // that signal re-runs the commit and mutates DOM belonging to a construction
+  // that failed. For `enhance()` that silently broke the documented transaction
+  // ("a failed setup claims nothing"): its rollback drains a teardown list the
+  // binding was never added to.
+  //
+  // Unwinding here is what makes "the binding was never created" true rather
+  // than merely intended. The subscriber is marked disposed first, so anything
+  // already queued for it in the current drain is skipped by the guard above;
+  // the owner node is dropped so a failed binding cannot retain a DOM subtree;
+  // and the edges go through the same `cleanup()` every disposal uses, so there
+  // is exactly one place that knows how to unlink a subscriber. The original
+  // error is rethrown untouched — the caller's `catch` must see what its own
+  // code threw, not a framework wrapper.
+  try {
+    run();
+  } catch (err) {
+    subscriber._disposed = true;
+    subscriber._errorNode = undefined;
+    cleanup(subscriber);
+    throw err;
+  }
 
   return (
     subscriber._dispose ??

@@ -17,6 +17,9 @@ dist/
 # Tests
 coverage/
 *.test.ts.snap
+# Playwright's run state, rewritten on every browser-test run. Nothing in it is
+# an input to anything — it exists so `--last-failed` can re-run failures.
+test-results/
 
 # OS
 .DS_Store
