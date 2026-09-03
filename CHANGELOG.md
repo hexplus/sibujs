@@ -7,12 +7,12 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.1.0] — 2026-09-03
 
 Progressive-enhancement ergonomics, driven by building a complete chess
-application as a single enhanced island. Two additive public APIs, one
-error-routing fix, and the documentation the pattern was missing. No breaking
-changes.
+application as a single enhanced island. Two additive public APIs, two
+correctness fixes, and the documentation the pattern was missing. No breaking
+changes — a minor release because the public surface grew.
 
 ### Added
 
@@ -85,6 +85,28 @@ changes.
   in the runtime. An error no boundary claims still falls through to the handler
   and then the console exactly as before. Server-side behaviour is unchanged:
   bindings created during SSR remain inert, as they were under `effect()`.
+
+- **A reactive binding whose FIRST evaluation throws no longer survives as a
+  zombie.** `reactiveBinding()` ran its initial commit before it constructed or
+  returned the disposer. A commit that read a signal and then threw had already
+  been linked to that signal by `retrack()`, but the throw escaped before any
+  disposer existed — so no caller could ever hold one. For `enhance()` that
+  silently voided the documented transaction guarantee: the setup error was
+  caught and the enhancement rolled back, yet the failing binding was never in
+  the teardown list to roll back. The next write to that signal re-ran the
+  commit and mutated DOM belonging to an enhancement that had already been
+  abandoned.
+
+  The initial run now unwinds on failure: the subscriber is marked disposed (so
+  anything already queued for it in the current drain is skipped), its owner
+  node is dropped so a failed binding cannot retain a DOM subtree, its edges are
+  released through the same `cleanup()` every disposal uses, and the original
+  error object is rethrown untouched. A failed enhancement now leaves zero live
+  subscriptions, mutates nothing afterwards, and leaves the root enhanceable
+  again — which is what "a failed setup claims nothing" always promised.
+  Successful bindings, later re-runs, later failures routed through the error
+  pipeline, reentrancy protection, disposal idempotence and SSR inertness are
+  all unchanged.
 
 ### Documentation
 

@@ -13,7 +13,7 @@ Severities: **P0** critical · **P1** high · **P2** medium · **P3** low
 
 | | |
 |---|---|
-| Package | `sibujs@4.0.1` |
+| Package | `sibujs@4.0.1` (this work released as `4.1.0`) |
 | Node | v24.19.0 · npm 11 · Windows 11 (win32-x64) |
 | Vitest | 3.2.7 · jsdom 26 |
 | Playwright | 1.61.1 — Chromium, Firefox, WebKit installed |
