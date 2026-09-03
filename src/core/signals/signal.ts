@@ -162,3 +162,117 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
 
   return [get as Accessor<T>, set];
 }
+
+// ---------------------------------------------------------------------------
+// external() — reactive integration with state SibuJS does not own.
+//
+// SibuJS tracks reads of ITS OWN signals. A `Chess` instance, a `<canvas>`
+// scene graph, a CodeMirror document, a WebSocket-owned cache — all keep their
+// state in objects the runtime never sees written. Nothing can be tracked, so
+// nothing can be invalidated.
+//
+// The honest primitive for that is a reactive token with NO value: consumers
+// declare "I read from this engine" (`track()`), and the code that mutated the
+// engine declares "the engine changed" (`invalidate()`). Dependency tracking
+// and invalidation are separated, which is precisely the property an external
+// engine breaks.
+//
+// It deliberately does NOT proxy, clone, deep-compare or otherwise observe the
+// external object. That is not a limitation to be engineered away later: a
+// generic mechanism that could detect arbitrary third-party mutation does not
+// exist without owning the data, and pretending otherwise produces silent
+// staleness rather than an explicit call site.
+//
+// WHY IT LIVES IN THIS FILE rather than one of its own: the build splits `dist`
+// into shared chunks, and a module reachable only from the root entry lands in
+// the large index-only chunk together with `enhance`, `mountIslands`, `mount`
+// and `each`. Importing it would then drag the whole island runtime into a page
+// that only wanted to make a canvas reactive — 77 KB instead of 12 KB, measured.
+// `signal.ts` is in the small chunk every entry point shares, so defining the
+// primitive beside the signal it is built from is what keeps it independently
+// tree-shakeable. `tests/treeshaking-islands.test.ts` pins that.
+// ---------------------------------------------------------------------------
+
+/**
+ * A valueless reactive token standing in for state SibuJS does not own.
+ *
+ * See {@link external}.
+ */
+export interface ExternalSource {
+  /**
+   * Declare, from inside a reactive computation, that it reads the external
+   * state this source represents. Call it in the same places you would read a
+   * signal — the top of a binding getter, a `derived()` body, an `effect()`.
+   *
+   * Outside a tracking context it is a no-op, exactly like reading a signal.
+   */
+  track(): void;
+  /**
+   * Declare that the external state changed. Every consumer that called
+   * {@link ExternalSource.track} is invalidated.
+   *
+   * Participates in `batch()` like any signal write: inside a batch, consumers
+   * are notified once when the outermost batch flushes.
+   */
+  invalidate(): void;
+}
+
+/**
+ * Create a reactive source for state that lives outside SibuJS — a domain
+ * engine, a media element, a canvas scene, an editor document, a cache a
+ * socket writes into.
+ *
+ * The pattern is two lines: `track()` where you read, `invalidate()` after you
+ * mutate.
+ *
+ * ```ts
+ * import { Chess } from "chess.js";
+ * import { external } from "sibujs";
+ *
+ * const game = new Chess();      // owns the rules and the mutable state
+ * const moved = external();      // owns "something changed"
+ *
+ * ctx.text("@status", () => {
+ *   moved.track();               // this binding reads the engine
+ *   return game.isCheckmate() ? "Checkmate" : `${game.turn()} to move`;
+ * });
+ *
+ * game.move({ from: "e2", to: "e4" });
+ * moved.invalidate();            // every consumer above re-reads
+ * ```
+ *
+ * **One source is one invalidation domain.** Every consumer of a source
+ * re-runs on every `invalidate()`, so the granularity of your updates is
+ * exactly the granularity of your sources: one for a whole engine is the
+ * cheapest to write, several (`board`, `clock`, `history`) let an update touch
+ * only what it affects. See `docs/architecture/external-state.md` for the
+ * trade-offs and when subdividing is worth it.
+ *
+ * Ownership, disposal and error routing are the consumer's, not the source's:
+ * a disposed binding or effect is never invalidated, and a consumer that
+ * throws is reported through the normal runtime error pipeline with its own
+ * phase and node.
+ *
+ * @param options `name` labels the source in devtools (development only).
+ */
+export function external(options?: { name?: string }): ExternalSource {
+  // Implemented on top of `signal` rather than against the reactive core
+  // directly, so batching, the notification drain, version-based
+  // stabilization, duplicate-runtime coordination and devtools all behave
+  // identically to every other reactive source with no second implementation
+  // of those invariants to keep in step.
+  //
+  // The counter is an implementation detail and is never handed out: `track()`
+  // returns void, so no consumer can come to depend on the number, and there
+  // is no "revision" for application code to thread through its own state.
+  const [version, bump] = signal(0, options?.name ? { name: options.name } : undefined);
+
+  return {
+    track(): void {
+      version();
+    },
+    invalidate(): void {
+      bump((n) => n + 1);
+    },
+  };
+}

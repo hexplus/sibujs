@@ -7,6 +7,113 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+Progressive-enhancement ergonomics, driven by building a complete chess
+application as a single enhanced island. Two additive public APIs, one
+error-routing fix, and the documentation the pattern was missing. No breaking
+changes.
+
+### Added
+
+- **`external()` — reactive integration with state SibuJS does not own.** A
+  domain engine, a canvas scene graph, an editor document, a cache a socket
+  writes into: the runtime cannot see writes into objects it does not own, and
+  now says so with a primitive instead of leaving every application to invent a
+  revision counter. `source.track()` inside a getter declares "this reads the
+  outside world"; `source.invalidate()` at the mutation site publishes the
+  change. Tracking and invalidation are separate calls because they genuinely
+  happen in different places.
+
+  It never proxies, clones or diffs your object — it holds no reference to it.
+  `invalidate()` is a signal write, so it participates in `batch()`, works
+  inside `derived()` and `effect()`, respects consumer ownership (a disposed
+  binding, effect or island is never invalidated), and routes a throwing
+  consumer through the ordinary error pipeline with that consumer's own phase
+  and node. It costs ~60 bytes gzipped on top of `signal` + `effect` and
+  tree-shakes out when unused.
+
+  One source is one invalidation domain; several sources give a feature
+  independent update rates. See `docs/architecture/external-state.md` for the
+  four state architectures, their costs, and how to profile invalidation
+  fan-out.
+
+  It is defined in `src/core/signals/signal.ts` rather than a module of its own,
+  and deliberately so: the build splits `dist/` into shared chunks, and a module
+  reachable only from the root entry lands in the index-only chunk beside
+  `enhance`, `mountIslands`, `mount` and `each`. Importing it from `"sibujs"`
+  would then have pulled the whole island runtime into a page that only wanted
+  to make a canvas reactive — 77 KB instead of 9 KB, measured across esbuild,
+  Rollup, Vite and webpack.
+
+- **`ctx.each(target, describe)` — repeated enhancement bindings.** A board, a
+  table, a keyboard, a legend: many elements the server already rendered, each
+  needing several bindings. The callback receives the element and its index and
+  returns a descriptor (`text`, `attr`, `class`, `show`, `on`, `cleanup`); every
+  field is committed through the matching `ctx.*` helper, so ownership,
+  disposal, attribute sanitization, write elision and error metadata are the
+  same objects as the hand-written loop.
+
+  It is sugar and deliberately nothing more: no expression parsing, no
+  interpolation, no `eval`, no new DOM, no node moved or replaced. Targets may
+  be a `@ref`/CSS selector or any iterable of elements; zero matches is a silent
+  no-op; a descriptor mistake throws in development naming the element index and
+  the offending key, inside `setup`, so the enhancement transaction rolls back.
+  Anything the descriptor does not cover — `model`, listener options, a nested
+  `enhance` — is written imperatively in the same callback, which receives the
+  element.
+
+  Measured at +9% setup cost for 64 elements × 4 bindings in a production build,
+  and identical at update time.
+
+### Fixed
+
+- **An `enhance()` binding that throws on a later update now reaches the
+  enclosing `ErrorBoundary`.** Every reactive helper on `EnhanceContext`
+  (`text`, `attr`, `classed`, `show`, `model`) created its binding with
+  `effect()`. An effect subscriber is stamped `phase: "effect"` and deliberately
+  carries no owner node, because a generic effect has no DOM position. So when
+  such a binding threw on a scheduled re-run — the only path where the
+  notification drain, rather than the caller, reports the failure — it was
+  reported as an effect with `node: undefined`. Since a boundary is located from
+  the failing node, that branch was unreachable for every progressive-
+  enhancement binding on the page, and the error fell straight through to the
+  configured runtime handler or the console.
+
+  All five now bind through `reactiveBinding(commit, el)` and report
+  `phase: "binding"` with the element they own, matching every other DOM binding
+  in the runtime. An error no boundary claims still falls through to the handler
+  and then the console exactly as before. Server-side behaviour is unchanged:
+  bindings created during SSR remain inert, as they were under `effect()`.
+
+### Documentation
+
+- `docs/islands.md` rewritten as the complete guide: the `EnhanceContext`,
+  repeated enhancement, external mutable state, `enhance()` vs `mount()` and how
+  to combine them in one feature, feature-local state, granular vs broad
+  invalidation, lifecycle and cleanup, accessible conditional UI, performance
+  profiling, an architecture decision table, and a table of common mistakes with
+  their fixes.
+- `docs/architecture/external-state.md` — four state architectures compared on
+  complexity, runtime cost, memory, granularity and integration effort, with
+  measurements on a 64-cell grid and how to profile invalidation fan-out.
+- `docs/interop.md` — nine rules for running islands inside a page another
+  framework owns, with two implementations verified in Chromium, Firefox and
+  WebKit.
+- `examples/chess/` — a complete chess game as an enhanced island: 64
+  server-rendered squares, `ctx.each`, `external()` invalidation, per-square
+  signals for the interaction hot path, a mounted move-history region, keyboard
+  grid navigation, an accessible promotion dialog, two independent boards, and a
+  deliberately broken island beside them. The rules come from `chess.js`, which
+  is an example/development dependency only and is not reachable from any
+  package entry point.
+- `examples/interop-host.html` — a host framework that owns the page and swaps
+  its content on client-side navigation, including the failure mode you get from
+  skipping the disposer.
+
+---
+---
+
 ## [4.0.1] — 2026-08-29
 
 An error-routing fix for reactive `class` and `style` bindings. No breaking changes.

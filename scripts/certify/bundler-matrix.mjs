@@ -32,7 +32,7 @@ if (!workdirArg || !tarballArg) {
 const WORK = resolve(workdirArg);
 const TARBALL = resolve(tarballArg);
 
-const PROBES = ["core-minimal", "data-only", "router-only"];
+const PROBES = ["core-minimal", "data-only", "router-only", "external-only", "islands-only"];
 
 // Markers proving a subsystem is present in bundled output. Each is a string
 // that only that subsystem emits, checked against the *minified* production
@@ -61,6 +61,12 @@ const EXPECTED_SUBSYSTEMS = {
   "core-minimal": [],
   "data-only": ["query"],
   "router-only": ["router"],
+  // `external()` is a core signal primitive. A page integrating a canvas or an
+  // editor with it must not be charged for the island runtime.
+  "external-only": [],
+  // The progressive-enhancement entry point brings the island registry and
+  // nothing else — this is the claim "adopt one widget at a time" rests on.
+  "islands-only": ["islands"],
 };
 
 const run = (cmd, args, opts = {}) =>

@@ -13,14 +13,15 @@
 // and ties every binding to disposal — so static content never re-paints.
 // ---------------------------------------------------------------------------
 
-import { isDev } from "../core/dev";
+import { devAssert, isDev } from "../core/dev";
 import {
   MAX_DRAIN_TEARDOWNS,
   registerDisposer,
   reportDrainRunaway,
   unregisterDisposer,
 } from "../core/rendering/dispose";
-import { effect } from "../core/signals/effect";
+import { isSSR } from "../core/ssr-context";
+import { reactiveBinding } from "../reactivity/track";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /** Attribute marking a root that *currently* owns an active enhancement.
@@ -83,6 +84,41 @@ function drainTeardowns(teardowns: Array<() => void>, label: string): void {
   }
 }
 
+/** Event handlers for {@link EachBindings}, typed per event name. */
+export type EachEventBindings = {
+  [K in keyof HTMLElementEventMap]?: (event: HTMLElementEventMap[K], el: HTMLElement) => void;
+};
+
+/**
+ * What {@link EnhanceContext.each} attaches to one element.
+ *
+ * Every field maps one-to-one onto an existing `ctx.*` helper and is committed
+ * through it — this is a shorthand for calls you could write by hand, not a
+ * template language and not a second binding engine. There is no expression
+ * parsing, no string interpolation and no `eval`: every value is a plain
+ * function you wrote, so it stays CSP-safe and fully type-checked.
+ *
+ * Anything not covered here (two-way `model()`, listener options, a nested
+ * `enhance`) is written imperatively in the same callback — it receives the
+ * element, so `ctx.model(el, …)` beside a returned descriptor is normal.
+ */
+export interface EachBindings {
+  /** Reactive `textContent` — same as `ctx.text(el, value)`. */
+  text?: () => unknown;
+  /** Reactive attributes by name — same as `ctx.attr(el, name, value)`. */
+  attr?: Record<string, () => unknown>;
+  /** Reactive class toggles by class name — same as `ctx.classed(el, name, on)`. */
+  class?: Record<string, () => boolean>;
+  /** Reactive visibility — same as `ctx.show(el, when)`. */
+  show?: () => boolean;
+  /** Event listeners by event name — same as `ctx.on(el, event, handler)`. */
+  on?: EachEventBindings;
+  /** Per-element teardown, run with the rest of the enhancement's cleanups. */
+  cleanup?: () => void;
+}
+
+const EACH_KEYS = ["text", "attr", "class", "show", "on", "cleanup"] as const;
+
 /**
  * Helpers handed to an `enhance` setup. Every binding is fine-grained (its own
  * effect) and auto-disposed when the root element (or the returned dispose) is
@@ -118,6 +154,47 @@ export interface EnhanceContext {
   show(target: string | Element | null, when: () => boolean): void;
   /** Two-way bind a form control to a `[get, set]` signal tuple. */
   model<T>(target: string | Element, state: readonly [() => T, (value: T) => void], options?: { event?: string }): void;
+  /**
+   * Bind a set of elements the server already rendered — a board, a table, a
+   * keyboard, a timeline, a legend — one descriptor at a time.
+   *
+   * The callback receives each element and its index and returns what to
+   * attach; every field is committed through the matching `ctx.*` helper, so
+   * ownership, disposal, write elision, attribute sanitization and error
+   * routing are byte-for-byte the same as writing the calls out by hand. No
+   * element is created, replaced, moved or re-parented — node identity is
+   * preserved, which is the entire point of enhancing existing markup.
+   *
+   * ```ts
+   * ctx.each<HTMLButtonElement>("@square", (el) => {
+   *   const square = el.dataset.square as Square;
+   *   return {
+   *     text: () => pieceAt(square),
+   *     class: { selected: () => selected() === square },
+   *     attr: { "aria-label": () => describe(square) },
+   *     on: { click: () => choose(square) },
+   *   };
+   * });
+   * ```
+   *
+   * The callback may also return nothing and wire the element imperatively —
+   * `ctx.model(el, …)`, `ctx.on(el, "click", h, { passive: true })` — for the
+   * cases the descriptor deliberately does not cover.
+   *
+   * Zero matches is a silent no-op. Calling `each` twice over the same
+   * elements creates two independent sets of bindings, exactly as calling
+   * `ctx.text()` twice on one node does; the helper is sugar over those calls
+   * and does not track what a previous call attached.
+   *
+   * @param target A `@ref`/CSS selector resolved with {@link EnhanceContext.refs},
+   *   or any iterable of elements (an array, a `NodeList`, an `HTMLCollection`).
+   * @param describe Called once per element, in document order.
+   */
+  each<T extends Element = HTMLElement>(
+    target: string | Iterable<Element>,
+    // biome-ignore lint/suspicious/noConfusingVoidType: intentional "a descriptor, or nothing" return — the callback may wire the element imperatively instead. Mirrors EnhanceSetup.
+    describe: (element: T, index: number) => EachBindings | void,
+  ): void;
   /** Register arbitrary teardown to run on disposal. */
   cleanup(fn: () => void): void;
 }
@@ -139,6 +216,30 @@ function resolveTarget(root: HTMLElement, target: string | Element | null): HTML
   } catch {
     return null;
   }
+}
+
+/**
+ * Create one fine-grained binding for a node.
+ *
+ * Every reactive helper on the {@link EnhanceContext} goes through here, so
+ * enhancement bindings are indistinguishable from the runtime's other DOM
+ * bindings (`bindTextNode`, `bindAttribute`, the tag factory's class/style
+ * writers): the subscriber is stamped `_errorPhase: "binding"` and carries the
+ * node it owns.
+ *
+ * That metadata is only ever read on the failure path, and it is the whole
+ * reason this is not a plain `effect()`. A binding that throws on a LATER run
+ * is reported by the notification drain, which has no other way to know it was
+ * looking at a DOM binding or which node it belonged to — and `reportError()`
+ * offers a node's enclosing `ErrorBoundary` first refusal, so an enhancement
+ * binding with no node could never reach a boundary at all.
+ *
+ * SSR parity with `effect()` is deliberate: side effects do not run on the
+ * server, so a binding created during SSR is inert and its disposer is a no-op.
+ */
+function bindNode(el: HTMLElement, commit: () => void): () => void {
+  if (isSSR()) return () => {};
+  return reactiveBinding(commit, el);
 }
 
 function readControlValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): unknown {
@@ -164,6 +265,69 @@ function writeControlValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAr
   }
   const next = value == null ? "" : String(value);
   if (el.value !== next) el.value = next;
+}
+
+/**
+ * Commit one {@link EachBindings} descriptor through the ordinary context
+ * helpers.
+ *
+ * Routing everything back through `ctx` is what keeps `each` sugar rather than
+ * a second implementation: there is no binding path here that `ctx.text` /
+ * `ctx.attr` / `ctx.classed` / `ctx.show` / `ctx.on` do not already own, so
+ * error metadata, sanitization, write elision and teardown registration cannot
+ * drift between the two ways of writing the same thing.
+ *
+ * Shape mistakes are caught in development with the element's index and the
+ * offending key, because a descriptor is data and a typo in it would otherwise
+ * fail silently (an unknown key) or as an opaque `x is not a function` on a
+ * later drain (a value that is not a getter). The assertion throws inside
+ * `setup`, so `enhance`'s transaction rolls the whole enhancement back — the
+ * element is left exactly as the server sent it.
+ */
+function applyEachBindings(ctx: EnhanceContext, el: HTMLElement, spec: EachBindings, index: number): void {
+  const where = `ctx.each[${index}]`;
+  if (isDev()) {
+    for (const key of Object.keys(spec)) {
+      devAssert(
+        (EACH_KEYS as readonly string[]).includes(key),
+        `${where}: unknown binding "${key}". Expected one of: ${EACH_KEYS.join(", ")}.`,
+      );
+    }
+  }
+
+  if (spec.text !== undefined) {
+    devAssert(typeof spec.text === "function", `${where}: "text" must be a function returning the value.`);
+    ctx.text(el, spec.text);
+  }
+  if (spec.attr !== undefined) {
+    for (const name of Object.keys(spec.attr)) {
+      const value = spec.attr[name];
+      devAssert(typeof value === "function", `${where}: attr["${name}"] must be a function returning the value.`);
+      ctx.attr(el, name, value);
+    }
+  }
+  if (spec.class !== undefined) {
+    for (const name of Object.keys(spec.class)) {
+      const on = spec.class[name];
+      devAssert(typeof on === "function", `${where}: class["${name}"] must be a function returning a boolean.`);
+      ctx.classed(el, name, on);
+    }
+  }
+  if (spec.show !== undefined) {
+    devAssert(typeof spec.show === "function", `${where}: "show" must be a function returning a boolean.`);
+    ctx.show(el, spec.show);
+  }
+  if (spec.on !== undefined) {
+    for (const event of Object.keys(spec.on) as Array<keyof HTMLElementEventMap>) {
+      const handler = spec.on[event];
+      devAssert(typeof handler === "function", `${where}: on["${String(event)}"] must be a function.`);
+      ctx.on(el, event, handler as (e: HTMLElementEventMap[typeof event], el: HTMLElement) => void);
+    }
+  }
+  if (spec.cleanup !== undefined) {
+    devAssert(typeof spec.cleanup === "function", `${where}: "cleanup" must be a function.`);
+    ctx.cleanup(spec.cleanup);
+  }
 }
 
 /**
@@ -266,7 +430,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     text: (t, value) => {
       bind(t, (el) => {
         teardowns.push(
-          effect(() => {
+          bindNode(el, () => {
             const v = value();
             const next = v == null ? "" : String(v);
             // Skip no-op writes: when the value already matches the server
@@ -280,7 +444,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     attr: (t, name, value) => {
       bind(t, (el) => {
         teardowns.push(
-          effect(() => {
+          bindNode(el, () => {
             const v = value();
             // null/undefined removes the attribute; everything else (including
             // booleans) is serialized literally — so `aria-expanded` reads
@@ -314,7 +478,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     classed: (t, name, on) => {
       bind(t, (el) => {
         teardowns.push(
-          effect(() => {
+          bindNode(el, () => {
             el.classList.toggle(name, Boolean(on()));
           }),
         );
@@ -328,7 +492,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
         // `style.display` alone could not override a server `hidden` attribute.
         const prevHidden = el.hidden;
         teardowns.push(
-          effect(() => {
+          bindNode(el, () => {
             el.hidden = !when();
           }),
         );
@@ -349,7 +513,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
             : "input");
         // Signal → control (writeControlValue skips no-op writes internally).
         teardowns.push(
-          effect(() => {
+          bindNode(el, () => {
             writeControlValue(control, get());
           }),
         );
@@ -358,6 +522,19 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
         control.addEventListener(evt, onInput);
         teardowns.push(() => control.removeEventListener(evt, onInput));
       });
+    },
+    each: (target_, describe) => {
+      devAssert(typeof describe === "function", "ctx.each: second argument must be a function.");
+      const elements =
+        typeof target_ === "string" ? ctx.refs<HTMLElement>(target_) : (Array.from(target_) as HTMLElement[]);
+      // Zero matches is a legitimate state (an empty list, a table with no
+      // rows), so it is a silent no-op rather than a warning.
+      for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        const spec = describe(el as never, i);
+        if (spec == null) continue;
+        applyEachBindings(ctx, el, spec, i);
+      }
     },
     cleanup: (fn) => {
       teardowns.push(fn);
