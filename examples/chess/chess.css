@@ -1,0 +1,312 @@
+/* Chess reference example — presentation only.
+   Every highlight is driven by ONE attribute per square (`data-marks`), written
+   by one signal per square. Adding a highlight is a CSS rule, not another
+   binding. */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f6f6f4;
+  --fg: #1b1b1a;
+  --line: #d8d6d0;
+  --light-sq: #eeead9;
+  --dark-sq: #b3907a;
+  --accent: #2f6f4e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17181a;
+    --fg: #eceded;
+    --line: #33363a;
+    --light-sq: #7d7566;
+    --dark-sq: #4c4036;
+    --accent: #7fd0a4;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: 2rem 1rem 4rem;
+}
+
+h1 {
+  font-size: 1.7rem;
+  margin: 0 0 0.75rem;
+}
+
+.lede {
+  max-width: 46rem;
+  color: color-mix(in srgb, var(--fg) 78%, transparent);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+
+.boards {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  margin-top: 2rem;
+}
+
+.game {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--bg) 88%, white);
+  position: relative;
+}
+
+.game-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  margin: 0 0 0.75rem;
+}
+
+.status {
+  margin: 0;
+  font-weight: 600;
+}
+
+.clock {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in srgb, var(--fg) 65%, transparent);
+}
+
+/* --- the board ---------------------------------------------------------- */
+
+.board {
+  display: grid;
+  grid-template-rows: repeat(8, 1fr);
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.rank {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+}
+
+/* Flipping rotates the board and counter-rotates each square, so the pieces
+   stay upright. No node is moved, so every binding and the focus position
+   survive a flip. */
+.board.flipped {
+  transform: rotate(180deg);
+}
+
+.board.flipped .sq {
+  transform: rotate(180deg);
+}
+
+.sq {
+  all: unset;
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1;
+  cursor: pointer;
+  font-size: clamp(1.4rem, 5vw, 2.1rem);
+  line-height: 1;
+  position: relative;
+}
+
+.sq.light {
+  background: var(--light-sq);
+}
+
+.sq.dark {
+  background: var(--dark-sq);
+}
+
+.sq:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+  z-index: 2;
+}
+
+.piece {
+  pointer-events: none;
+  color: #16130f;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* Highlights — one attribute, many rules. */
+.sq[data-marks~="selected"] {
+  box-shadow: inset 0 0 0 4px var(--accent);
+}
+
+.sq[data-marks~="last"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 214, 102, 0.38);
+  pointer-events: none;
+}
+
+.sq[data-marks~="legal"]::before {
+  content: "";
+  width: 26%;
+  height: 26%;
+  border-radius: 50%;
+  background: rgba(20, 20, 20, 0.35);
+  position: absolute;
+}
+
+.sq[data-marks~="capture"]::before {
+  content: "";
+  position: absolute;
+  inset: 8%;
+  border: 4px solid rgba(190, 40, 40, 0.6);
+  border-radius: 50%;
+}
+
+.sq[data-marks~="check"] {
+  background: #c2452f;
+}
+
+/* --- trays, controls, history ------------------------------------------- */
+
+.trays {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0.85rem 0 0;
+  font-size: 0.9rem;
+}
+
+.trays p {
+  margin: 0;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+}
+
+.tray {
+  font-size: 1.1rem;
+}
+
+.controls {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.85rem 0;
+  flex-wrap: wrap;
+}
+
+.controls button,
+.promotion button {
+  font: inherit;
+  padding: 0.35rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: inherit;
+  cursor: pointer;
+}
+
+.controls button:hover,
+.promotion button:hover {
+  border-color: var(--accent);
+}
+
+.history-slot {
+  border-top: 1px solid var(--line);
+  padding-top: 0.75rem;
+  min-height: 4rem;
+  max-height: 12rem;
+  overflow-y: auto;
+}
+
+.moves {
+  /* The rows carry their own move numbers, so the list marker would print a
+     second one. */
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.move {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+}
+
+.empty,
+.no-js {
+  margin: 0;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  font-size: 0.9rem;
+}
+
+/* --- promotion dialog ---------------------------------------------------- */
+
+.promotion {
+  position: absolute;
+  inset: 12% 8% auto;
+  background: var(--bg);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  z-index: 5;
+  animation: promotion-in 140ms ease-out;
+}
+
+.promotion h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.promotion p {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+}
+
+.promotion-choices {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.promotion .link {
+  all: unset;
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 0.85rem;
+}
+
+@keyframes promotion-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+/* The only animation in the example, and it opts out for anyone who asked. */
+@media (prefers-reduced-motion: reduce) {
+  .promotion {
+    animation: none;
+  }
+}
+
+.broken {
+  margin-top: 2rem;
+  border-style: dashed;
+}

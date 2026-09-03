@@ -147,6 +147,10 @@ The lean core: reactivity, rendering, and components. Everything below imports f
 ### Islands & Progressive Enhancement
 - **`enhance` / `enhanceAll`** — attach fine-grained reactivity to existing server-rendered HTML with no build step (the third rendering mode alongside `mount` and `hydrate`).
 - **`island` / `registerIsland` / `hydrateIslands`** — hydrate isolated interactive regions on demand.
+- **`ctx.each`** — bind many elements the server already rendered (a board, a table, a keyboard) from one descriptor, with no new DOM.
+- **`external`** — reactive integration with state SibuJS does not own: a domain engine, a canvas, an editor, a socket cache. `track()` where you read, `invalidate()` where you mutate.
+
+Guides: [islands & progressive enhancement](docs/islands.md) · [external mutable state and update granularity](docs/architecture/external-state.md) · [running islands inside another framework's page](docs/interop.md). Reference application: [`examples/chess/`](examples/chess/).
 
 ---
 

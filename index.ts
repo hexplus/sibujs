@@ -71,7 +71,9 @@ export * from "./src/core/signals/deepSignal";
 export * from "./src/core/signals/derived";
 export * from "./src/core/signals/effect";
 export * from "./src/core/signals/ref";
-// Signals — state & reactivity
+// Signals — state & reactivity. `signal.ts` also carries `external()`: reactive
+// integration with state SibuJS does not own (domain engines, media elements,
+// editors, sockets), where invalidation is explicit rather than pretended.
 export * from "./src/core/signals/signal";
 export * from "./src/core/signals/store";
 export * from "./src/core/signals/watch";

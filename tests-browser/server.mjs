@@ -19,7 +19,11 @@ const TYPES = {
 
 createServer(async (req, res) => {
   try {
-    const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+    let urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+    // Directory index. Without it `/examples/chess/` reads a directory and
+    // answers 404 — the "site not found" failure mode that makes a perfectly
+    // good build look broken the first time somebody opens it.
+    if (urlPath.endsWith("/")) urlPath += "index.html";
     const filePath = normalize(join(root, urlPath));
     // Path-traversal guard — never serve outside the package root.
     if (filePath !== root && !filePath.startsWith(root + sep)) {

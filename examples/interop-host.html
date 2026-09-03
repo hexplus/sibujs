@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SibuJS islands inside a host framework</title>
+    <style>
+      body { font: 15px/1.55 system-ui, sans-serif; max-width: 46rem; margin: 2rem auto; padding: 0 1rem; }
+      nav { display: flex; gap: 0.5rem; margin: 1rem 0; }
+      button { font: inherit; padding: 0.35rem 0.8rem; border-radius: 8px; border: 1px solid #ccc; cursor: pointer; }
+      .card { border: 1px solid #ddd; border-radius: 10px; padding: 1rem; }
+      .meta { color: #666; font-size: 0.9rem; }
+      output { font-weight: 700; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <h1>Islands inside a page someone else owns</h1>
+    <p>
+      <code>#app</code> below is owned by a "host framework" — a deliberately tiny
+      client-side router that re-renders the whole region on navigation, the way a
+      component framework does. SibuJS never touches anything outside the island
+      root, and the host never renders inside it.
+    </p>
+    <p class="meta">
+      The counter at the top right of the page is a SECOND island, mounted from a
+      different scope, to prove the two disposers do not adopt each other's work.
+    </p>
+
+    <div class="card" data-sibu-island="sidebar">
+      <p>Sidebar island (never re-rendered by the host): <output data-ref="n">0</output></p>
+      <button data-ref="inc">+1</button>
+    </div>
+
+    <nav>
+      <button data-ref="go-home" id="go-home">Home</button>
+      <button data-ref="go-widget" id="go-widget">Widget page</button>
+      <button id="leak-nav">Navigate WITHOUT disposing (the bug)</button>
+    </nav>
+
+    <div id="app"></div>
+
+    <p class="meta">
+      Activations: <span id="activations">0</span> ·
+      Live cleanups outstanding: <span id="live">0</span>
+    </p>
+
+    <script type="module">
+      import { mountIslands, registerIsland, signal } from "../dist/index.js";
+
+      // --- instrumentation the test reads ---------------------------------
+      let activations = 0;
+      let live = 0;
+      const report = () => {
+        document.getElementById("activations").textContent = String(activations);
+        document.getElementById("live").textContent = String(live);
+      };
+
+      // --- islands ---------------------------------------------------------
+      registerIsland("sidebar", (ctx) => {
+        const [n, setN] = signal(0);
+        ctx.text("@n", () => n());
+        ctx.on("@inc", "click", () => setN((v) => v + 1));
+      });
+
+      registerIsland("widget", (ctx) => {
+        // Feature-local state: created here, so every instance is independent
+        // and nothing survives disposal.
+        activations++;
+        live++;
+        const [n, setN] = signal(0);
+        ctx.text("@n", () => n());
+        ctx.on("@inc", "click", () => setN((v) => v + 1));
+
+        // A resource only ctx.cleanup() can release — the thing rule 2 exists for.
+        const timer = setInterval(() => setN((v) => v + 100), 1_000_000);
+        ctx.cleanup(() => {
+          clearInterval(timer);
+          live--;
+          report();
+        });
+        report();
+      });
+
+      // --- the "host framework" -------------------------------------------
+      //
+      // It owns #app and rewrites it on navigation. Its ONLY obligations to
+      // SibuJS are the two lines marked below: dispose before replacing the
+      // markup, mount after rendering it.
+      const app = document.getElementById("app");
+
+      const PAGES = {
+        home: `<div class="card"><h2>Home</h2><p>No islands on this page.</p></div>`,
+        widget: `
+          <div class="card" data-sibu-island="widget">
+            <h2>Widget page</h2>
+            <p>Island counter: <output data-ref="n">0</output></p>
+            <button data-ref="inc">+1</button>
+          </div>`,
+      };
+
+      let disposeApp = () => {};
+
+      function navigate(page, { dispose = true } = {}) {
+        if (dispose) disposeApp(); // ← rule 2 + rule 6: dispose BEFORE the swap
+        app.innerHTML = PAGES[page];
+        // ← rule 3 + rule 5: mount AFTER rendering, scoped to the host's region
+        disposeApp = mountIslands(app);
+      }
+
+      document.getElementById("go-home").addEventListener("click", () => navigate("home"));
+      document.getElementById("go-widget").addEventListener("click", () => navigate("widget"));
+      // The same navigation with the disposer skipped, so the failure mode is
+      // demonstrable rather than theoretical: the island's cleanup never runs.
+      document.getElementById("leak-nav").addEventListener("click", () => navigate("home", { dispose: false }));
+
+      // The sidebar island lives outside #app and is mounted from its own scope.
+      const disposePage = mountIslands(document);
+
+      navigate("home");
+      report();
+
+      window.hostExample = {
+        navigate,
+        disposePage,
+        counts: () => ({ activations, live }),
+      };
+    </script>
+  </body>
+</html>
