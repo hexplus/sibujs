@@ -7,6 +7,141 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.4.0] — 2026-09-07
+
+### Added — `cdn.full.global.js`, patterns for no-build pages
+
+A `<script>` tag resolves no specifiers, so a no-build page could not reach
+`sibujs/patterns` at all: `machine` and its siblings were unavailable to the
+audience islands are most often used by. They now ship in a second CDN bundle,
+a superset of the default one, under the same `Sibu` global with the namespace
+kept as `Sibu.patterns`. Core is spread last so it wins any collision. New
+export paths: `sibujs/cdn-full` and `sibujs/cdn-full-dev`.
+
+A separate artifact rather than a merge, and that is the whole point. Merging
+patterns into `cdn.global.js` charged every no-build page +13.0% gzip for code
+it never calls — measured, reviewed, and reverted before release. Pages that
+want `machine` ask for it by URL; pages that want `signal` are not billed for
+it.
+
+**Size, measured.** The default bundle came out of this smaller than it went
+in, because it also lost esbuild's `globalName` wrapper (below):
+
+| bundle | before | after |
+| --- | --- | --- |
+| `cdn.global.js` | 80,202 B raw / 26,330 B gzip | 76,490 B / 26,118 B (−4.6% / −0.8%) |
+| `cdn.dev.global.js` | — / 30,199 B gzip | 85,526 B / 30,005 B (−0.6%) |
+| `cdn.full.global.js` | — | 85,972 B / 29,605 B |
+| `cdn.full.dev.global.js` | — | 95,539 B / 33,661 B |
+
+Gzip figures are `zlib` level 9, which is what the budget test asserts — the
+default level is not reproducible across zlib builds.
+
+Nothing changes for ESM/CJS consumers — their entry points are untouched and
+still tree-shake per import.
+
+### Fixed — `validateProps` and `assertType` ran in production browsers
+
+`patterns/contracts.ts` decided dev-vs-production by reading
+`process.env.NODE_ENV` directly. That is not a `define` target, so no bundler
+could fold it, and `process` does not exist in a browser at all — which the
+guards read as *development*:
+
+- `validateProps()` performed full validation and emitted `console.warn` on
+  every production page, and its message text shipped in the bundle.
+- `assertType()` threw instead of returning early, in exactly the builds its
+  own doc comment promised it would be a no-op.
+
+Both now gate on `DEV`, the foldable flag the rest of the framework uses, with
+the warning built inside the guarded branch so the string folds away with it.
+Behaviour for ESM/CJS consumers who define `__SIBU_DEV__` is unchanged; a
+browser build that defines nothing now treats itself as production, matching
+every other diagnostic in the library.
+
+This surfaced only because `patterns` briefly became a CDN artifact. It had
+been latent for as long as `contracts.ts` existed, invisible while the module
+was reachable only through a bundler that set `NODE_ENV`.
+
+`tests/dist-artifacts.test.ts` now executes the published IIFEs and asserts the
+behaviour rather than grepping for strings: `validateProps` warns in the
+development bundle and neither validates nor warns in the production one, and
+`assertType` throws in one and is a no-op in the other. The hand-maintained
+marker list missed this for a full release, which is the argument for testing
+what the bytes DO.
+
+### Fixed — the contract diagnostics are now actually stripped, not just silenced
+
+The first pass at the fix above gated on the imported `DEV` const. That made the
+behaviour correct — nothing warned, nothing threw — while leaving the code in the
+bundle: esbuild folded `DEV` to `!1` and emitted `if (!1) { … }`, because a
+cross-module const is substituted AFTER dead-code elimination has run. The
+assertion body and the `[SibuJS Contract]` message shipped behind a condition
+that could never be true.
+
+Both gates now lead with a bare `__SIBU_DEV__`, which is a `define` target and
+is therefore substituted early, before elimination — the shape `devWarn` has
+always used, and the same ordering `src/core/dev.ts` documents. The dead blocks
+are gone from the artifact.
+
+Note for anyone auditing this: `"… is required"` and `"… must be one of:"` DO
+appear in the production bundle and must. They are the return values of the
+exported `validators.required` and `validators.oneOf`, which run in production
+by design. Only `[SibuJS Contract]` and the prop-validation warning are
+diagnostics, and only those are asserted absent.
+
+`tests/dist-artifacts.test.ts` and `tests-browser/cdn-full.spec.ts` both pass a
+SPY validator to `validateProps` and assert it is never invoked in the
+production bundle, with the development bundle as the positive control. "It did
+not warn" would also pass for a branch that ran and stayed quiet.
+
+Getting that residue out took two attempts. The first moved validation into a
+second pass over the schema — free of validation-only allocations in
+production, but it reordered
+USER CALLBACKS: defaults and validators are both supplied by the caller, and
+running every default before any validator means a later property's factory no
+longer observes what an earlier property's validator wrote. Schema entries are
+processed in insertion order and each property is finished — normalize, default,
+validate — before the next begins, so `validateProps` now branches into two
+whole loops, one per mode, instead of splitting the work into two passes.
+
+The same reasoning caught one more. Normalizing a shorthand schema entry into
+`{ type: def }` is validation-only work, and it was still happening in
+production because both modes shared a helper that did it — which is also
+exactly where such an allocation hides from a test that reads
+`validateProps.toString()`. The two paths are now written out separately and
+the production loop skips shorthand entries outright: a bare validator carries
+no default, so that mode has nothing to do with it. Production is now the props
+copy, one loop over the schema entries, and the defaults it applies — the two
+allocations the work itself requires, and no validation-only ones.
+
+One residue outlived the first two passes. `validateProps` collected its
+findings in an `errors` array declared above the loop that fills it — outside
+the guard — so the validation branch stripped cleanly while the allocation in
+front of it did not, leaving `let r = []` on every production call, forever
+unread. The array is declared inside the guarded loop, so the whole development path
+folds together. The production
+function is `{...props}` plus the defaults loop and nothing else, and a test
+asserts the shipped function contains no array literal at all.
+
+### Fixed — the CDN builds no longer take esbuild’s `globalName`
+
+`globalName: "Sibu"` makes esbuild emit `var Sibu = (() => { … })()`, and that
+assignment runs AFTER the module body. `cdn.ts` installs its object from inside
+the body, so the wrapper overwrote it with the module’s own export namespace.
+Harmless while the two matched; silently wrong the moment they did not, which
+is what happened the first time a bundle merged anything in.
+
+Both entry points now assign `globalThis.Sibu` themselves and the config sets
+no `globalName`. The bundles self-register in a worker as a result, and are
+~3.7 KB smaller for losing the wrapper.
+
+A first version of the test missed this because it ran the IIFE against a
+`window` stand-in that was not the context’s global, so the two assignments
+landed in different slots. It now runs with `window === globalThis`, as a
+browser has it.
+
+---
+
 ## [4.3.0] — 2026-09-07
 
 Two defects where a value of the right *shape* was judged by the wrong test, so

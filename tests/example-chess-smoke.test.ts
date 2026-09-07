@@ -65,6 +65,115 @@ function moduleSpecifiers(source: string): string[] {
   return out;
 }
 
+/**
+ * Strip HTML comments before any markup is inspected.
+ *
+ * A commented-out tag is not markup. Without this, a document whose runtime
+ * <script> has been commented out still reports the runtime as present — the
+ * same class of false positive as matching a filename in prose, one level up.
+ */
+function withoutHtmlComments(html: string): string {
+  return html.replace(/<!--[\s\S]*?-->/g, "");
+}
+
+/**
+ * The `src` of every LIVE classic script in a document, in source order.
+ *
+ * Attribute-level and comment-free, not substring: `html.indexOf("cdn.global.js")`
+ * once matched the explanatory comment above the tag and reported a passing test
+ * while the page loaded a different artifact entirely.
+ *
+ * Module scripts are excluded so the runtime tag and the island can be told
+ * apart, and so `type="module"` written on the CDN tag would fail rather than
+ * quietly change its loading semantics.
+ */
+function classicScriptSources(html: string): string[] {
+  const source = withoutHtmlComments(html);
+  return [...source.matchAll(/<script\b([^>]*)>/gi)]
+    .filter((match) => !/\btype\s*=\s*["']module["']/i.test(match[1]))
+    .map((match) => match[1].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1])
+    .filter((src): src is string => src !== undefined);
+}
+
+/**
+ * The index of the first LIVE script tag whose `src` is exactly `src`, or -1.
+ *
+ * Indices come from the comment-stripped string, so callers must compare only
+ * indices produced by this function — mixing one with an offset taken from the
+ * original HTML would compare positions in two different documents.
+ */
+function scriptTagIndex(html: string, src: string): number {
+  const source = withoutHtmlComments(html);
+  for (const match of source.matchAll(/<script\b[^>]*>/gi)) {
+    const found = match[0].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+    if (found === src) return match.index ?? -1;
+  }
+  return -1;
+}
+
+const FULL_CDN_SRC = "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js";
+const CORE_CDN_SRC = "https://unpkg.com/sibujs@latest/dist/cdn.global.js";
+
+// ---------------------------------------------------------------------------
+// The extractors themselves, against synthetic documents.
+//
+// These need no server and no build, so they run on every checkout — which
+// matters, because every false positive found in this file so far has been in
+// the extraction, not in the page.
+// ---------------------------------------------------------------------------
+describe("script tag extraction", () => {
+  const island = '<script type="module" src="./chess-island.js"></script>';
+
+  it("finds a live classic script", () => {
+    const live = `<script src="${FULL_CDN_SRC}"></script>${island}`;
+    expect(classicScriptSources(live)).toContain(FULL_CDN_SRC);
+    expect(scriptTagIndex(live, FULL_CDN_SRC)).toBeGreaterThan(-1);
+  });
+
+  it("ignores a script commented out across several lines", () => {
+    const multiline = `
+  <!--
+    <script src="${FULL_CDN_SRC}"></script>
+  -->
+  ${island}
+`;
+    expect(classicScriptSources(multiline)).not.toContain(FULL_CDN_SRC);
+    expect(scriptTagIndex(multiline, FULL_CDN_SRC)).toBe(-1);
+  });
+
+  it("ignores a script commented out on one line", () => {
+    const singleLine = `
+  <!-- <script src="${FULL_CDN_SRC}"></script> -->
+  ${island}
+`;
+    expect(classicScriptSources(singleLine)).not.toContain(FULL_CDN_SRC);
+    expect(scriptTagIndex(singleLine, FULL_CDN_SRC)).toBe(-1);
+  });
+
+  it("ignores a filename mentioned in ordinary comment prose", () => {
+    const prose = `<!-- use cdn.full.global.js, not cdn.global.js -->${island}`;
+    expect(classicScriptSources(prose)).toEqual([]);
+    expect(scriptTagIndex(prose, FULL_CDN_SRC)).toBe(-1);
+  });
+
+  it("excludes module scripts from the classic list", () => {
+    expect(classicScriptSources(island)).toEqual([]);
+  });
+
+  it("detects a live core-only tag, which the page assertion then rejects", () => {
+    const core = `<script src="${CORE_CDN_SRC}"></script>${island}`;
+    expect(classicScriptSources(core)).toEqual([CORE_CDN_SRC]);
+  });
+
+  it("orders a live runtime tag before the island, and a commented one not at all", () => {
+    const live = `<script src="${FULL_CDN_SRC}"></script>${island}`;
+    expect(scriptTagIndex(live, FULL_CDN_SRC)).toBeLessThan(scriptTagIndex(live, "./chess-island.js"));
+
+    const commented = `<!-- <script src="${FULL_CDN_SRC}"></script> -->${island}`;
+    expect(scriptTagIndex(commented, FULL_CDN_SRC)).toBe(-1);
+  });
+});
+
 describe.skipIf(!distBuilt || !vendorBuilt)("chess example — production output is servable", () => {
   it("serves the directory URL as the example page", async () => {
     // The classic deployment failure: `/examples/chess/` resolving to a
@@ -125,11 +234,56 @@ describe.skipIf(!distBuilt || !vendorBuilt)("chess example — production output
     }
 
     expect(failures).toEqual([]);
-    // The graph really was walked: the island, the vendored engine and the
-    // package's own entry points.
-    expect(seen.size).toBeGreaterThan(3);
+    // The graph really was walked: the island and the vendored engine.
+    expect(seen.size).toBeGreaterThan(1);
     expect([...seen].some((u) => u.endsWith("/vendor/chess.js"))).toBe(true);
-    expect([...seen].some((u) => u.includes("/dist/index.js"))).toBe(true);
+
+    // And the framework is NOT in it. The example takes SibuJS from the
+    // <script> tag in index.html, so its module graph is the island plus the
+    // engine and nothing else. An import of `../../dist/*` reappearing here
+    // would mean the example silently needs `npm run build` again — a build
+    // step in the one demo whose whole subject is that islands need none.
+    expect([...seen].some((u) => u.includes("/dist/"))).toBe(false);
+  }, 30_000);
+
+  it("loads the FULL runtime bundle from a real script tag, not the core-only one", async () => {
+    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
+    const sources = classicScriptSources(html);
+
+    // The island destructures `machine`, which lives in the patterns half of
+    // the library. The core-only bundle would install `Sibu` and leave
+    // `machine` undefined — a failure well away from the tag that caused it.
+    expect(sources, `classic scripts were: ${JSON.stringify(sources)}`).toContain(FULL_CDN_SRC);
+    expect(sources).not.toContain(CORE_CDN_SRC);
+  }, 30_000);
+
+  it("puts the runtime tag ahead of the deferred island module", async () => {
+    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
+
+    // Positions of the real TAGS, not of filename substrings found anywhere.
+    const runtime = scriptTagIndex(html, FULL_CDN_SRC);
+    const island = scriptTagIndex(html, "./chess-island.js");
+
+    expect(runtime, "no classic script loads the full CDN bundle").toBeGreaterThan(-1);
+    expect(island, "no module script loads the island").toBeGreaterThan(-1);
+    // The island is a module and therefore deferred, so a classic script
+    // anywhere in the document beats it — but ordering them the way a reader
+    // would write them keeps the example honest.
+    expect(runtime).toBeLessThan(island);
+  }, 30_000);
+
+  it("tells a reader who is missing the runtime to load the FULL bundle", async () => {
+    // The guard throws when `globalThis.Sibu` is absent. Naming the core-only
+    // bundle there sends the reader to a file that installs `Sibu` and still
+    // leaves `machine` undefined, so the error would be followed by a second,
+    // stranger failure.
+    const source = await (await fetch(`${BASE}/examples/chess/chess-island.js`)).text();
+
+    // Scoped to the throw, so an explanatory comment elsewhere cannot satisfy
+    // it: everything between `new Error(` and its closing paren.
+    const thrown = source.slice(source.indexOf("new Error("), source.indexOf("chess example] SibuJS") + 400);
+    expect(thrown).toContain("cdn.full.global.js");
+    expect(thrown.replace(/cdn\.full\.global\.js/g, "")).not.toContain("cdn.global.js");
   }, 30_000);
 
   it("does not 404 on the vendored engine, whose build step is easy to forget", async () => {

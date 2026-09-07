@@ -179,6 +179,41 @@ describe("validators", () => {
 // ===========================================================================
 
 describe("validateProps", () => {
+  it("interleaves per-property: each default and validation run before the next key", () => {
+    // Defaults and validators are USER CALLBACKS, so the order they run in is
+    // observable whenever either touches outside state. Schema entries are
+    // processed in insertion order, and each property is finished — normalize,
+    // default, validate — before the next one starts.
+    //
+    // Splitting this into "all defaults, then all validators" silently reorders
+    // those callbacks: `b`'s factory would read `state` before `a`'s validator
+    // had set it.
+    const order: string[] = [];
+    let state = 0;
+
+    const result = validateProps<{ a: number; b: number }>(
+      { a: 1 },
+      {
+        a: {
+          validator: () => {
+            order.push("validate a");
+            state = 1;
+            return true;
+          },
+        },
+        b: {
+          default: () => {
+            order.push("default b");
+            return state;
+          },
+        },
+      },
+    );
+
+    expect(order).toEqual(["validate a", "default b"]);
+    expect(result.b).toBe(1);
+  });
+
   it("should pass through valid props unchanged", () => {
     const schema: PropSchema<{ name: string; age: number }> = {
       name: { type: validators.string },

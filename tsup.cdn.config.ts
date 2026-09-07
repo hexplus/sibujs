@@ -33,9 +33,21 @@ const { version } = JSON.parse(readFileSync(new URL("./package.json", import.met
   version: string;
 };
 
+// NO `globalName`, deliberately — and this is a trap worth naming, because
+// adding it back looks like an obvious improvement.
+//
+// `globalName: "Sibu"` makes esbuild emit `var Sibu = (() => { … })()`, and
+// that assignment lands AFTER the module body has finished. `cdn.ts` installs a
+// MERGED object (core + patterns + ui) from inside the body, so the wrapper
+// would immediately overwrite it with the module's own export namespace —
+// which is `export * from "./index"` and therefore core only. The merge would
+// vanish with no error, no warning, and a bundle that still defines `Sibu`.
+//
+// `cdn.ts` assigns the global itself instead. `tests/dist-artifacts.test.ts`
+// executes the built IIFE in a context where `window === globalThis`, the way a
+// browser has it, and asserts the merged surface survives.
 const shared = {
   format: ["iife"] as const,
-  globalName: "Sibu",
   outDir: "dist",
   dts: false,
   minify: true,
@@ -56,6 +68,25 @@ export default defineConfig([
   {
     ...shared,
     entry: { "cdn.dev": "cdn.ts" },
+    define: {
+      __SIBU_DEV__: "true",
+      __SIBU_VERSION__: JSON.stringify(version),
+    },
+  },
+  // core + patterns, for no-build pages that want `machine`. A separate file so
+  // the default bundle above keeps its byte budget: patterns cost +13% gzip,
+  // and most pages never call any of it.
+  {
+    ...shared,
+    entry: { "cdn.full": "cdn.full.ts" },
+    define: {
+      __SIBU_DEV__: "false",
+      __SIBU_VERSION__: JSON.stringify(version),
+    },
+  },
+  {
+    ...shared,
+    entry: { "cdn.full.dev": "cdn.full.ts" },
     define: {
       __SIBU_DEV__: "true",
       __SIBU_VERSION__: JSON.stringify(version),

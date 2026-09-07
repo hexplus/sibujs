@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
@@ -27,10 +30,89 @@ const TO_PROMOTION: Array<[string, string]> = [
   ["b7", "b6"],
 ];
 
+// The example page loads SibuJS from unpkg, which is right for a demo someone
+// opens from a checkout and wrong for this suite twice over: it would make
+// these tests depend on a network service, and it would run the LAST PUBLISHED
+// release instead of the working tree — so a regression in `dist/` would sail
+// through green. Every request for the CDN tag is answered with the local
+// build, which is the code under test.
+// The spec is ESM, so `__dirname` does not exist here.
+const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
+
+/** The exact artifact the example is expected to request, and only this one. */
+const EXPECTED_CDN = "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js";
+
+/** The four CDN artifacts this package publishes. Anything else is a mistake. */
+const ALLOWED_CDN_FILES = new Set(["cdn.global.js", "cdn.dev.global.js", "cdn.full.global.js", "cdn.full.dev.global.js"]);
+
 test.beforeEach(async ({ page }) => {
+  // EVERY CDN request is recorded, not just the last one. A scalar would let a
+  // page that downloads two runtimes pass whenever the expected one happened to
+  // come second — which is precisely the bundle-size regression this project
+  // spent a release avoiding.
+  //
+  // Each is answered with the local build of the SAME NAME, for two reasons:
+  //
+  //   1. the suite tests the working tree. Left alone the example fetches
+  //      `@latest` from unpkg, so these tests would exercise the last published
+  //      release and a regression in `dist/` would sail through green;
+  //   2. the artifact is pinned. The example needs `machine`, which only the
+  //      full bundle carries — a silent switch to `cdn.global.js` would install
+  //      `Sibu` and leave `machine` undefined, failing far from the cause.
+  const requestedCdnUrls: string[] = [];
+
+  await page.route("**unpkg.com/**/cdn*.global.js", async (route) => {
+    const requestedUrl = route.request().url();
+    requestedCdnUrls.push(requestedUrl);
+
+    // The filename becomes a filesystem path, so it is checked against a fixed
+    // set rather than trusted: a URL this glob matched is still not proof of a
+    // name this repository builds.
+    const filename = new URL(requestedUrl).pathname.split("/").pop();
+    if (!filename || !ALLOWED_CDN_FILES.has(filename)) {
+      throw new Error(`Unexpected CDN artifact request: ${requestedUrl}`);
+    }
+
+    await route.fulfill({
+      status: 200,
+      contentType: "text/javascript; charset=utf-8",
+      body: readFileSync(resolve(DIST, filename), "utf8"),
+    });
+  });
+
   await page.goto(PAGE);
+
+  // The WHOLE collection, exactly. `toContain` would accept a second runtime
+  // alongside the right one; `toEqual` accepts one request and no others, which
+  // separates all four artifacts and rejects duplicates.
+  expect(
+    requestedCdnUrls,
+    "the chess example must request exactly one CDN runtime: the full production artifact",
+  ).toEqual([EXPECTED_CDN]);
   await expect(page.locator(`${board(1)}[data-sibu-enhanced="true"]`)).toHaveCount(1);
 });
+
+/**
+ * Assert that a square holds a given piece, of a given colour.
+ *
+ * Both sides render the SAME solid glyph and are told apart by `data-side`,
+ * which is what the stylesheet colours. The outline set (♙♘♗♖♕♔) used to
+ * mark white, but those glyphs are hollow — they show the square underneath, so
+ * a white piece only looked white on a pale square. Asserting the glyph alone
+ * would no longer distinguish a white knight from a black one, which is exactly
+ * what the promotion test turns on, so both halves are checked.
+ */
+async function expectPiece(
+  page: import("@playwright/test").Page,
+  n: 1 | 2,
+  sq: string,
+  side: "w" | "b",
+  glyph: string,
+) {
+  const piece = page.locator(`${square(n, sq)} .piece`);
+  await expect(piece).toHaveText(glyph);
+  await expect(piece).toHaveAttribute("data-side", side);
+}
 
 /**
  * Play the fixture moves that get a test to an interesting position.
@@ -59,7 +141,7 @@ test("a mouse move updates only the squares involved, and keeps every node", asy
   await expect(page.locator(square(1, "e4"))).toHaveAttribute("data-marks", "legal");
 
   await page.click(square(1, "e4"));
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
   await expect(page.locator(`${square(1, "e2")} .piece`)).toHaveText("");
   await expect(page.locator(`${board(1)} [data-ref="status"]`)).toContainText("Black to move");
 
@@ -90,7 +172,7 @@ test("keyboard: arrows navigate the grid and Enter/Space play the move", async (
   await expect(page.locator(square(1, "d2"))).toHaveAttribute("data-marks", "selected");
   await page.locator(square(1, "d4")).focus();
   await page.keyboard.press(" ");
-  await expect(page.locator(`${square(1, "d4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "d4", "w", "♟");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`)).toHaveText(["1. d4"]);
 });
 
@@ -123,7 +205,7 @@ test("focus is preserved across a reactive update", async ({ page }) => {
     b.querySelector<HTMLButtonElement>('[data-square="e2"]')?.click();
     b.querySelector<HTMLButtonElement>('[data-square="e4"]')?.click();
   });
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
   await expect(page.locator(square(1, "g1"))).toBeFocused();
 });
 
@@ -176,7 +258,7 @@ test("promotion: Escape cancels, commits nothing and restores focus to the board
   await expect(dialog).toBeHidden();
   await expect(page.locator(square(1, "g8"))).toBeFocused();
   // Nothing was played: the pawn is still on h7 and the move list is unchanged.
-  await expect(page.locator(`${square(1, "h7")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "h7", "w", "♟");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`)).toHaveCount(4);
 });
 
@@ -190,7 +272,7 @@ test("promotion: choosing a piece commits exactly one move and returns focus", a
 
   await expect(dialog).toBeHidden();
   await expect(page.locator(square(1, "g8"))).toBeFocused();
-  await expect(page.locator(`${square(1, "g8")} .piece`)).toHaveText("♘");
+  await expectPiece(page, 1, "g8", "w", "♞");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`).last()).toHaveText("5. hxg8=N");
 });
 
@@ -225,7 +307,7 @@ test("a broken island beside them changes nothing", async ({ page }) => {
   await expect(page.locator('[data-sibu-island="broken"]')).not.toHaveAttribute("data-sibu-enhanced", "true");
   await page.click(square(1, "e2"));
   await page.click(square(1, "e4"));
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
 });
 
 test("disposing the island stops it and leaves the server markup in place", async ({ page }) => {

@@ -4,15 +4,16 @@ A complete chess game built as an **enhanced island**: the 64 squares are server
 HTML, SibuJS attaches bindings to them, and no square is ever rebuilt.
 
 ```bash
-npm ci
-npm run build                 # the package's own dist/ (the example imports it directly)
-npm run example:chess:build   # vendors chess.js into ./vendor/chess.js
 npm run example:serve         # → http://localhost:5099/examples/chess/
 ```
 
-`npm run example:chess:build` is only needed once, or after bumping `chess.js` —
-`vendor/chess.js` is committed so a fresh clone can serve the example with just
-a `npm run build`.
+That is the whole setup. The runtime comes from a `<script>` tag pointing at
+the CDN, and `vendor/chess.js` is committed, so the example does **not** need
+the package built — a fresh clone serves it as-is. A static server is the only
+requirement, because ES modules do not load over `file://`.
+
+`npm run example:chess:build` re-vendors `chess.js` into `./vendor/`, and is
+only needed after bumping the engine.
 
 ---
 

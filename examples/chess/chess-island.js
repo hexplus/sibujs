@@ -1,10 +1,12 @@
 // ---------------------------------------------------------------------------
 // Chess — the SibuJS islands reference application.
 //
-// No build step for this file: it is loaded as a plain ES module and imports
-// the package's own `dist/` entry points. The only thing that was bundled is
-// the third-party rules engine (`vendor/chess.js`, see
-// `scripts/build-example-chess.mjs`).
+// No build step anywhere in this example. It is a plain ES module, the runtime
+// arrives from a <script> tag pointing at the CDN, and the only thing ever
+// bundled is the third-party rules engine (`vendor/chess.js`, see
+// `scripts/build-example-chess.mjs`), which is committed. Serve the directory
+// and it runs — which is the claim islands make, so the demo should not need a
+// toolchain to prove it.
 //
 // THE ARCHITECTURAL BOUNDARY THIS EXISTS TO SHOW
 // ----------------------------------------------
@@ -32,27 +34,106 @@
 // docs/architecture/external-state.md explains when each is worth it.
 // ---------------------------------------------------------------------------
 
-import {
-  batch,
-  div,
-  dispose,
-  each,
-  external,
-  li,
-  mount,
-  mountIslands,
-  ol,
-  p,
-  registerIsland,
-  signal,
-  when,
-} from "../../dist/index.js";
-import { machine } from "../../dist/patterns.js";
-import { createDialogAria, createFocusManager } from "../../dist/ui.js";
 import { Chess, SQUARES } from "./vendor/chess.js";
 
+// ---------------------------------------------------------------------------
+// SibuJS comes from the <script> tag in index.html, not from an import.
+//
+// This example used to import `../../dist/index.js`, which meant it only ran
+// after `npm run build` inside a framework checkout — a build step in the one
+// demo whose entire subject is that islands need no build step. It now reads
+// the same global a reader would use on their own page, so the example is the
+// thing it documents: server HTML, one script tag, no toolchain.
+//
+// The tag is a classic script and this file is a module, so the runtime is
+// always installed before this line runs — modules are deferred, classic
+// scripts in the document are not.
+// ---------------------------------------------------------------------------
+const Sibu = globalThis.Sibu;
+if (!Sibu) {
+  throw new Error(
+    "[chess example] SibuJS is not on the page. index.html must load " +
+      "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js before this module.",
+  );
+}
+const { batch, div, dispose, each, external, li, machine, mount, mountIslands, ol, p, registerIsland, signal, when } =
+  Sibu;
+
+// ---------------------------------------------------------------------------
+// Three helpers, written out here rather than imported.
+//
+// `createDialogAria` and `createFocusManager` are written out here rather than
+// imported. They live in `sibujs/ui`, a bundler-only entry point — a <script>
+// tag resolves no specifiers, so there is no way to reach them from a page like
+// this one.
+//
+// `machine` is NOT in this list: it comes from `Sibu` above, because the page
+// loads `cdn.full.global.js`, the bundle that carries `sibujs/patterns`. That
+// is the point of loading the full artifact here rather than copying a reduced
+// state machine into the example.
+//
+// The two below are a dozen lines each, which is the part worth taking away:
+// with a bundler, import them; without one, write them.
+// ---------------------------------------------------------------------------
+
+/** Per-page counter behind the generated ARIA ids. */
+let ariaIds = 0;
+
+/**
+ * Give a dialog element its ARIA contract.
+ *
+ * The ids are generated rather than written into the server HTML, so two
+ * boards on one page cannot collide on `aria-labelledby`.
+ *
+ * @param element - The dialog element.
+ * @returns The ids to assign to the title and description elements.
+ */
+function createDialogAria(element) {
+  const n = ++ariaIds;
+  const titleId = `dialog-title-${n}`;
+  const descriptionId = `dialog-desc-${n}`;
+  element.setAttribute("role", "dialog");
+  element.setAttribute("aria-modal", "true");
+  element.setAttribute("aria-labelledby", titleId);
+  element.setAttribute("aria-describedby", descriptionId);
+  if (!element.hasAttribute("tabindex")) element.setAttribute("tabindex", "-1");
+  return { titleId, descriptionId };
+}
+
+const FOCUSABLE =
+  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+
+/**
+ * Track the focusable children of a container.
+ *
+ * Queried on each call rather than cached: the promotion dialog's buttons are
+ * rendered by a binding, so a list captured once would go stale.
+ *
+ * @param container - The element to scope the search to.
+ * @returns `items()` in document order, and `focusFirst()`.
+ */
+function createFocusManager(container) {
+  const items = () => Array.from(container.querySelectorAll(FOCUSABLE));
+  return {
+    items,
+    focusFirst() {
+      const all = items();
+      if (all.length > 0) all[0].focus();
+    },
+  };
+}
+
+// SOLID glyphs for both sides, coloured by `data-side` in CSS rather than by
+// picking a different character per colour.
+//
+// The outline set (♙♘♗♖♕♔) is the conventional choice for white, but those
+// glyphs are hollow: what shows inside them is the square underneath. A white
+// piece therefore only looks white when it happens to be standing on a pale
+// square, and on this board it read as a blue-filled outline — the two sides
+// became hard to tell apart at a glance. Filled glyphs take a real fill colour,
+// so a white piece is white on every square.
 const GLYPH = {
-  wp: "♙", wn: "♘", wb: "♗", wr: "♖", wq: "♕", wk: "♔",
+  wp: "♟", wn: "♞", wb: "♝", wr: "♜", wq: "♛", wk: "♚",
   bp: "♟", bn: "♞", bb: "♝", br: "♜", bq: "♛", bk: "♚",
 };
 const NAME = { p: "pawn", n: "knight", b: "bishop", r: "rook", q: "queen", k: "king" };
@@ -243,11 +324,19 @@ function createChessFeature() {
     return piece ? GLYPH[`${piece.color}${piece.type}`] : "";
   }
 
+  /** "w" / "b" for the piece on `sq`, or "" when the square is empty. */
+  function sideOn(sq) {
+    position.track();
+    const piece = game.get(sq);
+    return piece ? piece.color : "";
+  }
+
   return {
     marks,
     selected,
     flipped,
     setFlipped,
+    sideOn,
     message,
     targets: () => targets,
     selectSquare,
@@ -306,7 +395,7 @@ function setupChess(ctx) {
   const dialogDesc = ctx.ref("@promotion-desc");
   // Ids are generated, not written in the server HTML, so two boards on one
   // page cannot collide on `aria-labelledby`.
-  const dialogAria = createDialogAria(dialogEl, { modal: true });
+  const dialogAria = createDialogAria(dialogEl);
   dialogTitle.id = dialogAria.titleId;
   dialogDesc.id = dialogAria.descriptionId;
   const dialogFocus = createFocusManager(dialogEl);
@@ -437,7 +526,13 @@ function setupChess(ctx) {
   // `aria-label` and the glyph never fight over the same text content.
   ctx.each("@piece", (pieceEl) => {
     const sq = pieceEl.closest("[data-square]").dataset.square;
-    return { text: () => feature.glyphFor(sq) };
+    return {
+      text: () => feature.glyphFor(sq),
+      // Which side owns the piece, as an attribute the stylesheet can select on.
+      // Same shape as every other binding here: one signal read, one attribute
+      // written, no second source of truth.
+      attr: { "data-side": () => feature.sideOn(sq) },
+    };
   });
 
   // -- keyboard navigation ---------------------------------------------------
@@ -512,6 +607,17 @@ function setupChess(ctx) {
   ctx.text("@clock", feature.clockText);
   ctx.text("@captured-w", () => feature.capturedBy("w"));
   ctx.text("@captured-b", () => feature.capturedBy("b"));
+  // A tray holds either piece glyphs or the word "none". The two need different
+  // treatment — the glyphs are outlined so a captured white piece is
+  // distinguishable from a black one, and that outline has no business being
+  // drawn around a word. The attribute lets the stylesheet tell them apart.
+  //
+  // `ctx.attr` serializes a boolean literally, so this writes "true"/"false"
+  // rather than adding and removing the attribute. The stylesheet therefore
+  // matches on the VALUE: `[data-empty]` alone would match both states, which
+  // silently suppressed the outline on real pieces too.
+  ctx.attr("@captured-w", "data-empty", () => feature.capturedBy("w") === "none");
+  ctx.attr("@captured-b", "data-empty", () => feature.capturedBy("b") === "none");
   ctx.classed("@board", "flipped", feature.flipped);
 
   ctx.on("@undo", "click", () => {

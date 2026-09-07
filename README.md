@@ -226,10 +226,29 @@ Either way, the API is on `window.Sibu`:
 Develop against `cdn.dev.global.js` and swap the one line to ship. The runtime
 behaviour is identical; only the warnings differ.
 
-A bundled app needs neither file — import from `"sibujs"` and let your bundler
-define `__SIBU_DEV__` per build (the Vite and webpack plugins in `sibujs/build`
-do this for you). The two CDN files exist because a `<script>` tag has no
-bundler to make that choice.
+### Patterns on the CDN
+
+A `<script>` tag resolves no specifiers, so a no-build page cannot reach
+`sibujs/patterns` — `machine` and its siblings were simply unavailable. They
+ship in a second bundle, which is a superset of the one above:
+
+```html
+<script src="https://unpkg.com/sibujs@latest/dist/cdn.full.global.js"></script>
+<script>
+  const { signal, machine } = window.Sibu;   // Sibu.patterns is also there
+</script>
+```
+
+Load **one or the other**, never both. It is a separate file rather than a
+merge so the default bundle keeps its byte budget: patterns costs ~13% gzip,
+and most pages never call any of it. `cdn.full.dev.global.js` is the
+development counterpart, and both are reachable as `sibujs/cdn-full` and
+`sibujs/cdn-full-dev`.
+
+A bundled app needs neither file — import from `"sibujs"` and let your
+bundler define `__SIBU_DEV__` per build (the Vite and webpack plugins in
+`sibujs/build` do this for you). The two CDN files exist because a `<script>`
+tag has no bundler to make that choice.
 
 ---
 
