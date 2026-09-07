@@ -317,9 +317,16 @@ describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
     //
     // Asserted against the SHIPPED function rather than the source, because
     // this is a property of what the minifier emitted, not of what was written.
+    //
+    // Reading `toString()` only sees this function's own body, so it is only a
+    // sufficient guard while both paths are inlined here. A shared helper hid a
+    // `{ type: def }` normalization from exactly this assertion once — hence
+    // the second check, and the comment in `contracts.ts` saying why the
+    // duplication there is deliberate.
     const Sibu = loadCdnGlobal(FULL_CDN);
     const source = (Sibu.validateProps as unknown as () => void).toString();
-    expect(source, `production validateProps still allocates: ${source}`).not.toMatch(/\[\s*\]/);
+    expect(source, `production validateProps allocates an array: ${source}`).not.toMatch(/\[\s*\]/);
+    expect(source, `production validateProps normalizes for validation: ${source}`).not.toContain("type:");
   });
 
   it("assertType is a no-op in production and throws in development", () => {

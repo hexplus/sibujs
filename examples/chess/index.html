@@ -260,10 +260,12 @@
       </section>
     </main>
 
-    <!-- The runtime, from the CDN. A classic script, so it runs before the
-         deferred module below. Swap in cdn.dev.global.js to get SibuJS's
-         warnings while working on the example. -->
-    <script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
+    <!-- The runtime, from the CDN. `cdn.full.global.js` rather than
+         `cdn.global.js` because this island uses `machine`, which lives in the
+         patterns half of the library; the default bundle is core only. A
+         classic script, so it runs before the deferred module below. Swap in
+         cdn.full.dev.global.js for SibuJS's warnings while working on it. -->
+    <script src="https://unpkg.com/sibujs@latest/dist/cdn.full.global.js"></script>
     <script type="module" src="./chess-island.js"></script>
   </body>
 </html>

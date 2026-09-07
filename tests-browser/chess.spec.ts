@@ -37,16 +37,20 @@ const TO_PROMOTION: Array<[string, string]> = [
 // through green. Every request for the CDN tag is answered with the local
 // build, which is the code under test.
 // The spec is ESM, so `__dirname` does not exist here.
-const LOCAL_CDN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cdn.global.js");
+const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
 test.beforeEach(async ({ page }) => {
-  await page.route("**unpkg.com/**/cdn.global.js", (route) =>
+  // Matches whichever CDN artifact the page asks for and answers with the
+  // local build of the same name, so switching the example's <script> tag does
+  // not silently start testing a published release again.
+  await page.route("**unpkg.com/**/cdn*.global.js", (route) => {
+    const file = route.request().url().split("/").pop() as string;
     route.fulfill({
       status: 200,
       contentType: "text/javascript; charset=utf-8",
-      body: readFileSync(LOCAL_CDN, "utf8"),
-    }),
-  );
+      body: readFileSync(resolve(DIST, file), "utf8"),
+    });
+  });
   await page.goto(PAGE);
   await expect(page.locator(`${board(1)}[data-sibu-enhanced="true"]`)).toHaveCount(1);
 });

@@ -112,51 +112,45 @@ export type PropSchema<Props> = {
 // ─── validateProps ──────────────────────────────────────────────────────────
 
 /**
- * Validate props against a schema. Returns validated props with defaults applied.
- * In production builds validation is skipped and only defaults are applied, so the
- * returned value is the same either way — only the checking disappears.
- */
-/**
- * Normalize one schema entry and apply its default, returning the normalized
- * definition.
+ * Validate props against a schema, returning the props with defaults applied.
  *
- * A module-level function rather than a closure inside `validateProps`: a
- * closure would be allocated on every call, which is the cost this whole
- * arrangement exists to avoid.
+ * Defaults are production behaviour; the checking is development-only and is
+ * compiled out of production builds. The two are not interchangeable when the
+ * schema's callbacks touch outside state: a validator that runs in development
+ * and not in production can leave a later property's default factory reading
+ * different state. Keep defaults and validators free of side effects if the
+ * two modes must agree exactly.
  *
- * @param result - The props object being built, mutated in place.
- * @param key - The property being settled.
- * @param def - Its schema entry, in either the shorthand or object form.
- * @returns The normalized definition, for the caller to validate against.
+ * @param props - The props to validate. Not mutated.
+ * @param schema - Per-property definitions, in either the shorthand
+ *   (a bare {@link Validator}) or object form.
+ * @returns A new object: the props, plus any defaults that applied.
  */
-function applyDefault(result: Record<string, unknown>, key: string, def: unknown): PropDef {
-  const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
-  if (result[key] == null && propDef.default !== undefined) {
-    result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
-  }
-  return propDef;
-}
-
 export function validateProps<Props extends object>(props: Partial<Props>, schema: PropSchema<Props>): Props {
   const result = { ...props } as Record<string, unknown>;
 
-  // TWO LOOPS, one per mode — not one loop with a guard inside it, and not two
-  // passes over the same schema.
+  // TWO WHOLE LOOPS, one per mode, with no shared helper between them.
   //
-  // Ordering is observable. Defaults and validators are user callbacks that may
-  // read or write outside state, so each property must be finished — normalize,
-  // default, validate — before the next one starts. Running every default and
-  // then every validator reorders those calls: a later property's factory would
-  // observe state an earlier property's validator had not yet written.
+  // Ordering is observable: defaults and validators are user callbacks that may
+  // read or write outside state, so each property is finished — normalize,
+  // default, validate — before the next begins. Running all defaults and then
+  // all validators would reorder those calls.
   //
-  // The `errors` array must be declared INSIDE the guarded branch. Hoisted
-  // above a shared loop it outlived the fold as a dead `[]`, allocated on every
-  // production call and never read.
+  // Everything development-only lives inside the branch, INCLUDING the `errors`
+  // array and the normalization. Both leaked out of production once: the array
+  // by being hoisted above a shared loop, the normalization by living in a
+  // helper both branches called. A shared helper is also where an allocation
+  // hides from a test that reads `validateProps.toString()`, which is why the
+  // duplication below is deliberate.
   if (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) {
     const errors: string[] = [];
 
     for (const [key, def] of Object.entries(schema)) {
-      const propDef = applyDefault(result, key, def);
+      const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
+
+      if (result[key] == null && propDef.default !== undefined) {
+        result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
+      }
 
       if (propDef.required && result[key] == null) {
         errors.push(`Prop '${key}' is required`);
@@ -183,8 +177,19 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
     return result as Props;
   }
 
-  // Production: defaults only, in the same order, allocating nothing extra.
-  for (const [key, def] of Object.entries(schema)) applyDefault(result, key, def);
+  // Production: defaults only, in the same order, allocating nothing.
+  for (const [key, def] of Object.entries(schema)) {
+    // The shorthand form IS a bare validator, so it carries no default and
+    // there is nothing to do. Normalizing it to `{ type: def }` would allocate
+    // an object per entry for validation that does not run here.
+    if (typeof def === "function") continue;
+
+    const fallback = (def as PropDef).default;
+    if (result[key] == null && fallback !== undefined) {
+      result[key] = typeof fallback === "function" ? (fallback as () => unknown)() : fallback;
+    }
+  }
+
   return result as Props;
 }
 

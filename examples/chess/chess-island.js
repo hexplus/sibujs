@@ -56,57 +56,25 @@ if (!Sibu) {
       "https://unpkg.com/sibujs@latest/dist/cdn.global.js before this module.",
   );
 }
-const { batch, div, dispose, each, external, li, mount, mountIslands, ol, p, registerIsland, signal, when } = Sibu;
+const { batch, div, dispose, each, external, li, machine, mount, mountIslands, ol, p, registerIsland, signal, when } =
+  Sibu;
 
 // ---------------------------------------------------------------------------
 // Three helpers, written out here rather than imported.
 //
-// All three are behind entry points a <script> tag cannot resolve.
-// `createDialogAria` and `createFocusManager` live in `sibujs/ui`, which is
-// bundler-only and stays that way.
+// `createDialogAria` and `createFocusManager` are written out here rather than
+// imported. They live in `sibujs/ui`, a bundler-only entry point — a <script>
+// tag resolves no specifiers, so there is no way to reach them from a page like
+// this one.
 //
-// `machine` is the temporary one. It lives in `sibujs/patterns`, which ships on
-// the CDN from 4.4.0 — in `cdn.full.global.js`, not the default bundle above,
-// because charging every no-build page ~13% gzip for patterns it never calls
-// was the wrong trade. This page cannot point at that file yet: it loads
-// `@latest`, and the full bundle does not exist on unpkg until 4.4.0 publishes.
+// `machine` is NOT in this list: it comes from `Sibu` above, because the page
+// loads `cdn.full.global.js`, the bundle that carries `sibujs/patterns`. That
+// is the point of loading the full artifact here rather than copying a reduced
+// state machine into the example.
 //
-// TODO after that release: switch the tag above to `cdn.full.global.js` and
-// take `machine` from `Sibu` with the rest. Copying a reduced version of a
-// supported API is the wrong thing to show a reader for any longer than it has
-// to be. `tests-browser/cdn-full.spec.ts` covers the real artifact meanwhile.
-//
-// Reaching for a bundle to fill the gap would be a mistake worth naming:
-// bundling those entry points beside a CDN runtime puts a second copy of the
-// framework on the page. Reactivity still works — later copies delegate to the
-// first through a global registry — but it is a large download for nothing.
-//
-// They cost a dozen lines each, which is the part worth taking away: with a
-// bundler, import them; without one, write them.
+// The two below are a dozen lines each, which is the part worth taking away:
+// with a bundler, import them; without one, write them.
 // ---------------------------------------------------------------------------
-
-/**
- * A state machine over the transitions each state declares.
- *
- * An event a state does not declare is ignored. That is the whole value: it
- * makes "commit exactly once" a property of the state rather than of a flag
- * somebody has to remember to reset. `matches` reads a signal, so any binding
- * that calls it re-runs on every transition.
- *
- * @param config - `initial` state name and a `states` map of `{ on: { EVENT:
- *   targetState } }`.
- * @returns `matches(name)` and `send(event)`.
- */
-function machine({ initial, states }) {
-  const [state, setState] = signal(initial);
-  return {
-    matches: (name) => state() === name,
-    send: (event) => {
-      const next = states[state()]?.on?.[event];
-      if (next) setState(next);
-    },
-  };
-}
 
 /** Per-page counter behind the generated ARIA ids. */
 let ariaIds = 0;

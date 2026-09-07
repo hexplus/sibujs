@@ -29,10 +29,13 @@ in, because it also lost esbuild's `globalName` wrapper (below):
 
 | bundle | before | after |
 | --- | --- | --- |
-| `cdn.global.js` | 80,202 B raw / 26,330 B gzip | 76,490 B / 26,149 B (−4.6% / −0.7%) |
-| `cdn.dev.global.js` | — / 30,199 B gzip | 85,526 B / 30,034 B (−0.5%) |
-| `cdn.full.global.js` | — | 86,298 B / 29,758 B |
-| `cdn.full.dev.global.js` | — | 95,406 B / 33,662 B |
+| `cdn.global.js` | 80,202 B raw / 26,330 B gzip | 76,490 B / 26,118 B (−4.6% / −0.8%) |
+| `cdn.dev.global.js` | — / 30,199 B gzip | 85,526 B / 30,005 B (−0.6%) |
+| `cdn.full.global.js` | — | 85,972 B / 29,605 B |
+| `cdn.full.dev.global.js` | — | 95,539 B / 33,661 B |
+
+Gzip figures are `zlib` level 9, which is what the budget test asserts — the
+default level is not reproducible across zlib builds.
 
 Nothing changes for ESM/CJS consumers — their entry points are untouched and
 still tree-shake per import.
@@ -99,6 +102,15 @@ longer observes what an earlier property's validator wrote. Schema entries are
 processed in insertion order and each property is finished — normalize, default,
 validate — before the next begins, so `validateProps` now branches into two
 whole loops, one per mode, instead of splitting the work into two passes.
+
+The same reasoning caught one more. Normalizing a shorthand schema entry into
+`{ type: def }` is validation-only work, and it was still happening in
+production because both modes shared a helper that did it — which is also
+exactly where such an allocation hides from a test that reads
+`validateProps.toString()`. The two paths are now written out separately and
+the production loop skips shorthand entries outright: a bare validator carries
+no default, so that mode has nothing to do with it. Production is now the props
+spread, one loop, and no allocation at all.
 
 One residue outlived the first two passes. `validateProps` collected its
 findings in an `errors` array declared above the loop that fills it — outside
