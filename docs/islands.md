@@ -754,6 +754,11 @@ No npm, no transpile — one HTML file:
 </script>
 ```
 
+> **Development vs production.** The snippet above loads the production bundle,
+> where development warnings are compiled out. While building, load
+> `dist/cdn.dev.global.js` instead — same runtime, warnings on — and switch back
+> to `dist/cdn.global.js` to ship. See the CDN section of the README.
+
 A complete, runnable version (multiple islands and strategies) lives in
 [`examples/islands.html`](../examples/islands.html).
 

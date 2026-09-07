@@ -329,9 +329,14 @@ function describeElement(el: Element | undefined): string {
 const warnedDeclarations = new Set<string>();
 // A page with pathological churn (a blocked value derived from a signal that
 // takes thousands of distinct values) must not turn this cache into a leak.
-// Past the cap warnings keep printing — noisy beats silent — but nothing more
-// is retained.
+// Past the cap reporting STOPS, after one notice saying so. An earlier version
+// of this comment claimed warnings should keep printing past the cap because
+// "noisy beats silent" — but combined with no longer inserting keys, that made
+// every declaration after the hundredth warn on every recomputation, which is
+// the unbounded flood the cache exists to prevent rather than a considered
+// trade-off.
 const MAX_WARNED_DECLARATIONS = 100;
+let declarationCapAnnounced = false;
 
 function warnDroppedDeclaration(value: string, reason: number, ctx?: StyleSanitizerContext): void {
   // EVERYTHING — the dedupe bookkeeping included — happens inside the callback.
@@ -362,7 +367,19 @@ function warnDroppedDeclaration(value: string, reason: number, ctx?: StyleSaniti
     const where = describeElement(ctx?.element);
     const key = `${where}|${declaration}`;
     if (warnedDeclarations.has(key)) return "";
-    if (warnedDeclarations.size < MAX_WARNED_DECLARATIONS) warnedDeclarations.add(key);
+    // See `MAX_WARNED_DECLARATIONS`: reaching the cap must suppress, not just
+    // stop remembering, or a reactive style recomputing per frame reports its
+    // blocked value on every frame once the cache is full.
+    if (warnedDeclarations.size >= MAX_WARNED_DECLARATIONS) {
+      if (declarationCapAnnounced) return "";
+      declarationCapAnnounced = true;
+      return (
+        `${MAX_WARNED_DECLARATIONS} distinct dropped style declarations have been reported; suppressing further ` +
+        "ones for the rest of this session so they cannot flood the console. The declarations are still dropped — " +
+        "only the reporting stops. Fix the reported ones and reload to see any that remain."
+      );
+    }
+    warnedDeclarations.add(key);
     return (
       `style declaration "${declaration}" was dropped by the style sanitizer on ${where} — ` +
       `${reasons[reason]}. The element renders without it, which usually looks like a missing image ` +

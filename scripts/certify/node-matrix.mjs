@@ -264,7 +264,12 @@ for (const target of WANT) {
     // so a newly added entry cannot silently escape the matrix (§11).
     const pkgPath = join(consumer, "node_modules", "sibujs", "package.json");
     const subpaths = Object.keys(JSON.parse(readFileSync(pkgPath, "utf8")).exports ?? {});
-    const importable = subpaths.filter((s) => s !== "./cdn" && s !== "./package.json");
+    // `./cdn*` are IIFE global builds with no ESM/CJS shape to import, so
+    // they are resolve-only here. Prefix match keeps the production and
+    // development bundles in step without hard-coding each name.
+    const importable = subpaths.filter(
+      (s) => s !== "./package.json" && s !== "./cdn" && !s.startsWith("./cdn-"),
+    );
     const specs = importable.map((s) => (s === "." ? "sibujs" : `sibujs${s.slice(1)}`));
 
     writeFileSync(

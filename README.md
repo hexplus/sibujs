@@ -200,12 +200,28 @@ Utilities for testing components and reactivity.
 ### `sibujs/cdn` — Script-tag bundle
 Self-registering IIFE build exposing `window.Sibu`, for use without a bundler.
 
+There are two builds, and which one you load decides whether you get
+development warnings. They are not interchangeable:
+
 ```html
+<!-- Development — every diagnostic is live -->
+<script src="https://unpkg.com/sibujs@latest/dist/cdn.dev.global.js"></script>
+
+<!-- Production — diagnostics are compiled out, not merely disabled -->
 <script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
+
 <script>
   const { signal, effect, div, mount } = window.Sibu;
 </script>
 ```
+
+Develop against `cdn.dev.global.js` and ship `cdn.global.js`. The runtime
+behaviour is identical; only the warnings differ.
+
+A bundled app needs neither file — import from `"sibujs"` and let your bundler
+define `__SIBU_DEV__` per build (the Vite and webpack plugins in `sibujs/build`
+do this for you). The two CDN files exist because a `<script>` tag has no
+bundler to make that choice.
 
 ---
 

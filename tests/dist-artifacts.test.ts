@@ -41,6 +41,7 @@ const DIAGNOSTIC_MARKERS = {
   "ambiguous focus identity": "several elements in the rebuilt subtree",
   "when()/match() element-branch reuse": "branch was given as an element",
   "duplicate reactive runtime": "Multiple instances of the reactive runtime",
+  "warning cap notice": "suppressing further",
 } as const;
 
 // `dist/` only exists after `npm run build`. Skipping locally keeps a plain

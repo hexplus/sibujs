@@ -128,6 +128,12 @@ breaking changes.
   new rule measures 0% on the same 131-string corpus, and a repeated mistake is
   reported once per tag and string rather than once per element.
 
+  Both de-duplication caches are bounded at 100 distinct entries, and reaching
+  that bound stops reporting rather than merely stopping remembering — the
+  latter would let every mistake after the hundredth warn on every render, which
+  is the flood the cache exists to prevent. The suppression announces itself
+  once, so nothing goes quiet without saying so.
+
   The cost, stated plainly: single-token class lists no longer warn.
   `div("space-y-6")` and `div("truncate")` pass silently, where the first used
   to be caught. A single hyphen-and-digit token is not distinguishable from an

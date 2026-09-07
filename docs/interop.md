@@ -142,6 +142,11 @@ competing for the DOM, so rules 1–5 are all you need:
 No build step, no bundler, no npm. Emit the markup from whatever templating
 language you already use; the `data-ref` attributes are just attributes.
 
+> **Development vs production.** The snippet above loads the production bundle,
+> where development warnings are compiled out. While building, load
+> `dist/cdn.dev.global.js` instead — same runtime, warnings on — and switch back
+> to `dist/cdn.global.js` to ship. See the CDN section of the README.
+
 **Per-host notes:**
 
 - **Django / Rails / Laravel** — render the island in a partial/template so the

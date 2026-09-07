@@ -61,6 +61,10 @@ export interface TagProps {
 // callback, so in production this is an unreferenced empty Set.
 const warnedLoneStrings = new Set<string>();
 const MAX_WARNED_LONE_STRINGS = 100;
+// Whether the "reporting has stopped" notice has already been printed. See the
+// cap handling at the call site for why reaching the cap must SUPPRESS rather
+// than merely stop remembering.
+let loneStringCapAnnounced = false;
 
 // Cache for camelCase → kebab-case conversions
 const kebabCache = new Map<string, string>();
@@ -339,7 +343,28 @@ export const tagFactory = (tag: string, ns?: string) => {
         // One mistake reported once, however many elements repeat it.
         const key = `${tag}|${first}`;
         if (warnedLoneStrings.has(key)) return "";
-        if (warnedLoneStrings.size < MAX_WARNED_LONE_STRINGS) warnedLoneStrings.add(key);
+
+        // Past the cap, STOP REPORTING — do not merely stop remembering.
+        //
+        // The cache previously kept returning the message while refusing to
+        // insert new keys, which made `has(key)` permanently false for every
+        // mistake after the hundredth. Those warned on every single render,
+        // forever: the exact per-element flood this cache exists to prevent,
+        // just postponed until a page was busy enough to hit the cap.
+        //
+        // Going quiet risks hiding a real mistake, so the silence announces
+        // itself once. A developer who sees it knows to fix what has already
+        // been reported and look again.
+        if (warnedLoneStrings.size >= MAX_WARNED_LONE_STRINGS) {
+          if (loneStringCapAnnounced) return "";
+          loneStringCapAnnounced = true;
+          return (
+            `tagFactory: ${MAX_WARNED_LONE_STRINGS} distinct lone-string class warnings have been reported; ` +
+            "suppressing further ones for the rest of this session so they cannot flood the console. " +
+            "Fix the reported ones and reload to see any that remain."
+          );
+        }
+        warnedLoneStrings.add(key);
 
         return (
           `tagFactory: lone string "${first}" looks like a class list but is being rendered as TEXT. ` +
