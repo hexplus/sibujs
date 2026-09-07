@@ -425,8 +425,8 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     return true;
   };
 
-  const bind = (target_: string | Element | null, fn: (el: HTMLElement) => void): void => {
-    if (isClosed("bind")) return;
+  const bind = (method: string, target_: string | Element | null, fn: (el: HTMLElement) => void): void => {
+    if (isClosed(method)) return;
     const el = resolveTarget(root, target_);
     if (!el) {
       if (typeof console !== "undefined") {
@@ -449,14 +449,14 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       }
     },
     on: (t, event, handler, options) => {
-      bind(t, (el) => {
+      bind("on", t, (el) => {
         const wrapped = (e: Event) => handler(e as never, el);
         el.addEventListener(event, wrapped as EventListener, options);
         teardowns.push(() => el.removeEventListener(event, wrapped as EventListener, options));
       });
     },
     text: (t, value) => {
-      bind(t, (el) => {
+      bind("text", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             const v = value();
@@ -470,7 +470,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     attr: (t, name, value) => {
-      bind(t, (el) => {
+      bind("attr", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             const v = value();
@@ -504,7 +504,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     classed: (t, name, on) => {
-      bind(t, (el) => {
+      bind("classed", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             el.classList.toggle(name, Boolean(on()));
@@ -513,7 +513,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     show: (t, when) => {
-      bind(t, (el) => {
+      bind("show", t, (el) => {
         // Toggle the standard `hidden` property — this both reveals an element
         // the server rendered with the `hidden` attribute (the common
         // progressive-enhancement case) and hides one that wasn't. Using
@@ -530,7 +530,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     model: (t, state, options) => {
-      bind(t, (el) => {
+      bind("model", t, (el) => {
         const control = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
         const [get, set] = state;
         const evt =
@@ -624,9 +624,10 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       throw new Error(
         (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV)
           ? "[SibuJS enhance] the setup returned a promise, so its work did not complete inside the enhancement " +
-              "transaction. If it is a lazy import, register it as lazyIsland(() => import(…)) — an unwrapped loader " +
-              "is called as a setup, so its module is never loaded. If it is an async setup, make it synchronous: " +
-              "bindings registered after an await escape both the rollback and the disposer."
+              "transaction. If it is a lazy import, register it as lazyIsland(() => import(…)): an unwrapped loader " +
+              "is called as a setup, so its module is fetched but the setup it resolves to is discarded. If it is " +
+              "an async setup, make it synchronous — this enhancement has been rolled back, and ctx registrations " +
+              "made after this point are ignored."
           : "[SibuJS enhance] setup returned a promise",
       );
     }

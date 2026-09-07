@@ -127,6 +127,30 @@ describe("a rolled-back enhancement refuses later registrations", () => {
     expect(clicks).toBe(0);
   });
 
+  it("names the public method the consumer called, not the private plumbing", async () => {
+    // Every binding helper routes through one internal `bind()`. Reporting that
+    // name would send the reader looking for a `ctx.bind()` that does not
+    // exist, so the caller's own name is threaded through.
+    document.body.innerHTML = `<div id="r"><span data-ref="t">server</span></div>`;
+    const root = document.getElementById("r") as HTMLElement;
+
+    expect(() =>
+      enhance(root, (async (ctx: import("../src/platform/enhance").EnhanceContext) => {
+        await Promise.resolve();
+        ctx.text("@t", () => "x");
+        ctx.attr("@t", "data-y", () => "1");
+        ctx.cleanup(() => {});
+      }) as never),
+    ).toThrow();
+
+    await flush();
+    const messages = warn.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(messages).toContain("ctx.text()");
+    expect(messages).toContain("ctx.attr()");
+    expect(messages).toContain("ctx.cleanup()");
+    expect(messages).not.toContain("ctx.bind()");
+  });
+
   it("says so in dev rather than dropping the registration silently", async () => {
     document.body.innerHTML = `<div id="r"></div>`;
     const root = document.getElementById("r") as HTMLElement;
