@@ -7,6 +7,54 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.4.0] — 2026-09-07
+
+### Added — `patterns` on the CDN bundle
+
+`cdn.ts` re-exported `./index` and nothing else, which left the no-build story
+quietly incomplete. Islands are the feature most often reached for WITHOUT a
+bundler — one script tag, server HTML, done — but an island that wanted
+`machine` could not have it: it lives in the `sibujs/patterns` entry point, and
+a `<script>` tag resolves no specifiers. The gap was invisible from inside a
+bundled app, where every entry point resolves.
+
+`window.Sibu` now merges `patterns`, with core spread last so core wins any
+collision, and the namespace kept reachable as `Sibu.patterns`.
+
+**Size, measured** — the growth is `patterns` alone:
+
+| bundle | before | after |
+| --- | --- | --- |
+| `cdn.global.js` | 78.3 KB raw / 25.7 KB gzip | 84.5 KB raw / 29.1 KB gzip |
+| `cdn.dev.global.js` | 87.1 KB raw / 29.5 KB gzip | 93.3 KB raw / 32.9 KB gzip |
+
+Nothing changes for ESM/CJS consumers — their entry points are untouched and
+still tree-shake per import.
+
+`tests/dist-artifacts.test.ts` executes the published IIFE and asserts the
+merged surface and the collision precedence — `machine` present, `dialog` and
+`form` still the element tag factories — so a spread order edited "for
+tidiness" fails the build rather than the user’s page.
+
+### Fixed — the CDN builds no longer take esbuild’s `globalName`
+
+Found while verifying the above in a real browser, after a first version of the
+test had passed against it. `globalName: "Sibu"` makes esbuild emit
+`var Sibu = (() => { … })()`, and that assignment runs AFTER the module body.
+`cdn.ts` installs its merged object from inside the body, so the wrapper
+overwrote it with the module’s own export namespace — core only. The merge
+disappeared with no error and a bundle that still defined `Sibu`.
+
+`cdn.ts` now assigns `globalThis.Sibu` itself and the config sets no
+`globalName`. The bundles also self-register in a worker as a result, and are
+smaller for losing the wrapper.
+
+The first test missed this because it ran the IIFE against a `window` stand-in
+that was not the context’s global, so the two assignments landed in different
+slots. It now runs with `window === globalThis`, as a browser has it.
+
+---
+
 ## [4.3.0] — 2026-09-07
 
 Two defects where a value of the right *shape* was judged by the wrong test, so

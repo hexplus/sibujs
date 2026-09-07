@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { createContext, runInContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -106,5 +107,85 @@ describe.skipIf(!built && !onCI)("published CDN artifacts", () => {
     // artifact a CDN bundle at all.
     const source = readFileSync(PROD_CDN, "utf8");
     expect(source).toContain("Sibu");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What each CDN global actually carries, and where the boundary sits.
+//
+// `cdn.ts` used to re-export `./index` and nothing else, which made the
+// no-build story quietly incomplete: islands are sold as "one script tag, no
+// bundler", but an island reaching for `machine` found it missing, because it
+// lives in the `sibujs/patterns` entry point that only a bundler can resolve.
+//
+// `sibujs/ui` is deliberately NOT in that bundle. It is the framework's
+// UI-behaviour layer — forms, a11y primitives, virtual lists, transitions —
+// which most pages never touch, and it stays bundler-only. These tests pin that
+// boundary from the core side so a future merge has to be deliberate. These tests pin the boundary in both directions: the
+// helpers that belong in core are present, and the ui surface is absent.
+//
+// They execute the published IIFEs and inspect the objects installed, rather
+// than grepping for names — a string can survive minification while the export
+// it belongs to does not.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run a published CDN bundle and return the global object it installs.
+ *
+ * The context object IS the global and `window` points back at it, matching a
+ * browser where `window === globalThis`. That equivalence is the entire point:
+ * an IIFE built with esbuild's `globalName` emits `var Sibu = <the module's
+ * export namespace>` AFTER the module body has run. Against a separate `window`
+ * stand-in the two land in different slots, so the test passes while the browser
+ * gets the namespace instead of what the body installed — which is exactly the
+ * bug this shape was written to catch.
+ */
+function loadCdnGlobal(file: string): Record<string, unknown> {
+  const context = createContext({ console }) as Record<string, unknown>;
+  context.window = context;
+  runInContext(readFileSync(file, "utf8"), context);
+  return context.Sibu as Record<string, unknown>;
+}
+
+describe.skipIf(!built && !onCI)("the core CDN global", () => {
+  it("self-registers an object on window", () => {
+    expect(typeof loadCdnGlobal(PROD_CDN)).toBe("object");
+  });
+
+  it("carries the patterns helpers a no-build island cannot otherwise reach", () => {
+    const Sibu = loadCdnGlobal(PROD_CDN);
+    expect(typeof Sibu.machine).toBe("function");
+    expect(typeof (Sibu.patterns as Record<string, unknown>).machine).toBe("function");
+  });
+
+  it("does NOT carry the ui behaviour layer", () => {
+    // The boundary, asserted from the core side: merging `sibujs/ui` in would
+    // make every no-build consumer download forms, virtual lists and
+    // transitions to get `signal`.
+    const Sibu = loadCdnGlobal(PROD_CDN);
+    expect(Sibu.createDialogAria).toBeUndefined();
+    expect(Sibu.createFocusManager).toBeUndefined();
+    expect(Sibu.ui).toBeUndefined();
+  });
+
+  it("keeps `dialog` and `form` as the element tag factories", async () => {
+    // `sibujs/ui` exports its own `dialog` and `form`, and they are NOT the tag
+    // factories of the same name. Keeping the bundles apart is what stops that
+    // ambiguity reaching `Sibu`; if the two are ever merged, this fails.
+    //
+    // Identified by arity rather than by calling them: a tag factory needs a
+    // DOM, and identity comparison is meaningless across a separate bundle.
+    // Minification preserves parameter count.
+    const Sibu = loadCdnGlobal(PROD_CDN);
+    const core = (await import("../dist/index.js")) as unknown as Record<string, () => void>;
+    const ui = (await import("../dist/ui.js")) as unknown as Record<string, () => void>;
+
+    // The premise this test rests on, asserted rather than assumed.
+    expect(ui.dialog).not.toBe(core.dialog);
+    expect(core.dialog.length).not.toBe(ui.dialog.length);
+    expect(core.form.length).not.toBe(ui.form.length);
+
+    expect((Sibu.dialog as () => void).length).toBe(core.dialog.length);
+    expect((Sibu.form as () => void).length).toBe(core.form.length);
   });
 });

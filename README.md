@@ -226,10 +226,15 @@ Either way, the API is on `window.Sibu`:
 Develop against `cdn.dev.global.js` and swap the one line to ship. The runtime
 behaviour is identical; only the warnings differ.
 
-A bundled app needs neither file — import from `"sibujs"` and let your bundler
-define `__SIBU_DEV__` per build (the Vite and webpack plugins in `sibujs/build`
-do this for you). The two CDN files exist because a `<script>` tag has no
-bundler to make that choice.
+`window.Sibu` also carries the `sibujs/patterns` surface — `machine` and its
+siblings — because a `<script>` tag resolves no specifiers and a no-build page
+had no other way to reach it. The namespace stays available as
+`Sibu.patterns`.
+
+A bundled app needs neither file — import from `"sibujs"` and let your
+bundler define `__SIBU_DEV__` per build (the Vite and webpack plugins in
+`sibujs/build` do this for you). The two CDN files exist because a `<script>`
+tag has no bundler to make that choice.
 
 ---
 

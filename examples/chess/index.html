@@ -10,17 +10,8 @@
     <main>
       <h1>Chess as a reactive island</h1>
       <p class="lede">
-        Every square below is <strong>server HTML</strong>. It is in the page before a
-        line of JavaScript runs, and SibuJS never rebuilds it — it attaches bindings to
-        the 64 buttons that are already there. The move list underneath is the opposite
-        case: the server cannot know how many rows there will be, so that one region is
-        <code>mount()</code>ed. One island owns both.
-      </p>
-      <p class="lede">
-        The rules come from <code>chess.js</code>. SibuJS owns the DOM, the reactivity and
-        the lifecycle; it does not know what a knight is. Read
-        <a href="./chess-island.js"><code>chess-island.js</code></a> — that file is the
-        whole application.
+        Every square is server HTML — already in the page before any JavaScript runs, and
+        never rebuilt. SibuJS only attaches bindings to the buttons that are already there.
       </p>
 
       <div class="boards">
@@ -32,24 +23,24 @@
 
         <div class="board" data-ref="board" role="grid" aria-label="Board one, 8 by 8 grid">
           <div class="rank" role="row">
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a8" data-marks="" tabindex="0" aria-label="a8, Black rook"><span class="piece" data-ref="piece">♜</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b8" data-marks="" tabindex="-1" aria-label="b8, Black knight"><span class="piece" data-ref="piece">♞</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c8" data-marks="" tabindex="-1" aria-label="c8, Black bishop"><span class="piece" data-ref="piece">♝</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d8" data-marks="" tabindex="-1" aria-label="d8, Black queen"><span class="piece" data-ref="piece">♛</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e8" data-marks="" tabindex="-1" aria-label="e8, Black king"><span class="piece" data-ref="piece">♚</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f8" data-marks="" tabindex="-1" aria-label="f8, Black bishop"><span class="piece" data-ref="piece">♝</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g8" data-marks="" tabindex="-1" aria-label="g8, Black knight"><span class="piece" data-ref="piece">♞</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h8" data-marks="" tabindex="-1" aria-label="h8, Black rook"><span class="piece" data-ref="piece">♜</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a8" data-marks="" tabindex="0" aria-label="a8, Black rook"><span class="piece" data-ref="piece" data-side="b">♜</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b8" data-marks="" tabindex="-1" aria-label="b8, Black knight"><span class="piece" data-ref="piece" data-side="b">♞</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c8" data-marks="" tabindex="-1" aria-label="c8, Black bishop"><span class="piece" data-ref="piece" data-side="b">♝</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d8" data-marks="" tabindex="-1" aria-label="d8, Black queen"><span class="piece" data-ref="piece" data-side="b">♛</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e8" data-marks="" tabindex="-1" aria-label="e8, Black king"><span class="piece" data-ref="piece" data-side="b">♚</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f8" data-marks="" tabindex="-1" aria-label="f8, Black bishop"><span class="piece" data-ref="piece" data-side="b">♝</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g8" data-marks="" tabindex="-1" aria-label="g8, Black knight"><span class="piece" data-ref="piece" data-side="b">♞</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h8" data-marks="" tabindex="-1" aria-label="h8, Black rook"><span class="piece" data-ref="piece" data-side="b">♜</span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a7" data-marks="" tabindex="-1" aria-label="a7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b7" data-marks="" tabindex="-1" aria-label="b7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c7" data-marks="" tabindex="-1" aria-label="c7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d7" data-marks="" tabindex="-1" aria-label="d7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e7" data-marks="" tabindex="-1" aria-label="e7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f7" data-marks="" tabindex="-1" aria-label="f7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g7" data-marks="" tabindex="-1" aria-label="g7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h7" data-marks="" tabindex="-1" aria-label="h7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a7" data-marks="" tabindex="-1" aria-label="a7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b7" data-marks="" tabindex="-1" aria-label="b7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c7" data-marks="" tabindex="-1" aria-label="c7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d7" data-marks="" tabindex="-1" aria-label="d7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e7" data-marks="" tabindex="-1" aria-label="e7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f7" data-marks="" tabindex="-1" aria-label="f7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g7" data-marks="" tabindex="-1" aria-label="g7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h7" data-marks="" tabindex="-1" aria-label="h7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
           </div>
           <div class="rank" role="row">
             <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a6" data-marks="" tabindex="-1" aria-label="a6, empty"><span class="piece" data-ref="piece"></span></button>
@@ -92,30 +83,30 @@
             <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h3" data-marks="" tabindex="-1" aria-label="h3, empty"><span class="piece" data-ref="piece"></span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a2" data-marks="" tabindex="-1" aria-label="a2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b2" data-marks="" tabindex="-1" aria-label="b2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c2" data-marks="" tabindex="-1" aria-label="c2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d2" data-marks="" tabindex="-1" aria-label="d2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e2" data-marks="" tabindex="-1" aria-label="e2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f2" data-marks="" tabindex="-1" aria-label="f2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g2" data-marks="" tabindex="-1" aria-label="g2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h2" data-marks="" tabindex="-1" aria-label="h2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a2" data-marks="" tabindex="-1" aria-label="a2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b2" data-marks="" tabindex="-1" aria-label="b2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c2" data-marks="" tabindex="-1" aria-label="c2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d2" data-marks="" tabindex="-1" aria-label="d2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e2" data-marks="" tabindex="-1" aria-label="e2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f2" data-marks="" tabindex="-1" aria-label="f2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g2" data-marks="" tabindex="-1" aria-label="g2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h2" data-marks="" tabindex="-1" aria-label="h2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a1" data-marks="" tabindex="-1" aria-label="a1, White rook"><span class="piece" data-ref="piece">♖</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b1" data-marks="" tabindex="-1" aria-label="b1, White knight"><span class="piece" data-ref="piece">♘</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c1" data-marks="" tabindex="-1" aria-label="c1, White bishop"><span class="piece" data-ref="piece">♗</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d1" data-marks="" tabindex="-1" aria-label="d1, White queen"><span class="piece" data-ref="piece">♕</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e1" data-marks="" tabindex="-1" aria-label="e1, White king"><span class="piece" data-ref="piece">♔</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f1" data-marks="" tabindex="-1" aria-label="f1, White bishop"><span class="piece" data-ref="piece">♗</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g1" data-marks="" tabindex="-1" aria-label="g1, White knight"><span class="piece" data-ref="piece">♘</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h1" data-marks="" tabindex="-1" aria-label="h1, White rook"><span class="piece" data-ref="piece">♖</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a1" data-marks="" tabindex="-1" aria-label="a1, White rook"><span class="piece" data-ref="piece" data-side="w">♜</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b1" data-marks="" tabindex="-1" aria-label="b1, White knight"><span class="piece" data-ref="piece" data-side="w">♞</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c1" data-marks="" tabindex="-1" aria-label="c1, White bishop"><span class="piece" data-ref="piece" data-side="w">♝</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d1" data-marks="" tabindex="-1" aria-label="d1, White queen"><span class="piece" data-ref="piece" data-side="w">♛</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e1" data-marks="" tabindex="-1" aria-label="e1, White king"><span class="piece" data-ref="piece" data-side="w">♚</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f1" data-marks="" tabindex="-1" aria-label="f1, White bishop"><span class="piece" data-ref="piece" data-side="w">♝</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g1" data-marks="" tabindex="-1" aria-label="g1, White knight"><span class="piece" data-ref="piece" data-side="w">♞</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h1" data-marks="" tabindex="-1" aria-label="h1, White rook"><span class="piece" data-ref="piece" data-side="w">♜</span></button>
           </div>
         </div>
 
         <div class="trays">
-          <p><b>Taken by White</b> <span class="tray" data-ref="captured-w">none</span></p>
-          <p><b>Taken by Black</b> <span class="tray" data-ref="captured-b">none</span></p>
+          <p><b>Taken by White</b> <span class="tray" data-ref="captured-w" data-empty="true">none</span></p>
+          <p><b>Taken by Black</b> <span class="tray" data-ref="captured-b" data-empty="true">none</span></p>
         </div>
 
         <div class="controls">
@@ -149,24 +140,24 @@
 
         <div class="board" data-ref="board" role="grid" aria-label="Board two, 8 by 8 grid">
           <div class="rank" role="row">
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a8" data-marks="" tabindex="0" aria-label="a8, Black rook"><span class="piece" data-ref="piece">♜</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b8" data-marks="" tabindex="-1" aria-label="b8, Black knight"><span class="piece" data-ref="piece">♞</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c8" data-marks="" tabindex="-1" aria-label="c8, Black bishop"><span class="piece" data-ref="piece">♝</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d8" data-marks="" tabindex="-1" aria-label="d8, Black queen"><span class="piece" data-ref="piece">♛</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e8" data-marks="" tabindex="-1" aria-label="e8, Black king"><span class="piece" data-ref="piece">♚</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f8" data-marks="" tabindex="-1" aria-label="f8, Black bishop"><span class="piece" data-ref="piece">♝</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g8" data-marks="" tabindex="-1" aria-label="g8, Black knight"><span class="piece" data-ref="piece">♞</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h8" data-marks="" tabindex="-1" aria-label="h8, Black rook"><span class="piece" data-ref="piece">♜</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a8" data-marks="" tabindex="0" aria-label="a8, Black rook"><span class="piece" data-ref="piece" data-side="b">♜</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b8" data-marks="" tabindex="-1" aria-label="b8, Black knight"><span class="piece" data-ref="piece" data-side="b">♞</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c8" data-marks="" tabindex="-1" aria-label="c8, Black bishop"><span class="piece" data-ref="piece" data-side="b">♝</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d8" data-marks="" tabindex="-1" aria-label="d8, Black queen"><span class="piece" data-ref="piece" data-side="b">♛</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e8" data-marks="" tabindex="-1" aria-label="e8, Black king"><span class="piece" data-ref="piece" data-side="b">♚</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f8" data-marks="" tabindex="-1" aria-label="f8, Black bishop"><span class="piece" data-ref="piece" data-side="b">♝</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g8" data-marks="" tabindex="-1" aria-label="g8, Black knight"><span class="piece" data-ref="piece" data-side="b">♞</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h8" data-marks="" tabindex="-1" aria-label="h8, Black rook"><span class="piece" data-ref="piece" data-side="b">♜</span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a7" data-marks="" tabindex="-1" aria-label="a7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b7" data-marks="" tabindex="-1" aria-label="b7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c7" data-marks="" tabindex="-1" aria-label="c7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d7" data-marks="" tabindex="-1" aria-label="d7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e7" data-marks="" tabindex="-1" aria-label="e7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f7" data-marks="" tabindex="-1" aria-label="f7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g7" data-marks="" tabindex="-1" aria-label="g7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h7" data-marks="" tabindex="-1" aria-label="h7, Black pawn"><span class="piece" data-ref="piece">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a7" data-marks="" tabindex="-1" aria-label="a7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b7" data-marks="" tabindex="-1" aria-label="b7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c7" data-marks="" tabindex="-1" aria-label="c7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d7" data-marks="" tabindex="-1" aria-label="d7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e7" data-marks="" tabindex="-1" aria-label="e7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f7" data-marks="" tabindex="-1" aria-label="f7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g7" data-marks="" tabindex="-1" aria-label="g7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h7" data-marks="" tabindex="-1" aria-label="h7, Black pawn"><span class="piece" data-ref="piece" data-side="b">♟</span></button>
           </div>
           <div class="rank" role="row">
             <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a6" data-marks="" tabindex="-1" aria-label="a6, empty"><span class="piece" data-ref="piece"></span></button>
@@ -209,30 +200,30 @@
             <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h3" data-marks="" tabindex="-1" aria-label="h3, empty"><span class="piece" data-ref="piece"></span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a2" data-marks="" tabindex="-1" aria-label="a2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b2" data-marks="" tabindex="-1" aria-label="b2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c2" data-marks="" tabindex="-1" aria-label="c2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d2" data-marks="" tabindex="-1" aria-label="d2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e2" data-marks="" tabindex="-1" aria-label="e2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f2" data-marks="" tabindex="-1" aria-label="f2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g2" data-marks="" tabindex="-1" aria-label="g2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h2" data-marks="" tabindex="-1" aria-label="h2, White pawn"><span class="piece" data-ref="piece">♙</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="a2" data-marks="" tabindex="-1" aria-label="a2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="b2" data-marks="" tabindex="-1" aria-label="b2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="c2" data-marks="" tabindex="-1" aria-label="c2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="d2" data-marks="" tabindex="-1" aria-label="d2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="e2" data-marks="" tabindex="-1" aria-label="e2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="f2" data-marks="" tabindex="-1" aria-label="f2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="g2" data-marks="" tabindex="-1" aria-label="g2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="h2" data-marks="" tabindex="-1" aria-label="h2, White pawn"><span class="piece" data-ref="piece" data-side="w">♟</span></button>
           </div>
           <div class="rank" role="row">
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a1" data-marks="" tabindex="-1" aria-label="a1, White rook"><span class="piece" data-ref="piece">♖</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b1" data-marks="" tabindex="-1" aria-label="b1, White knight"><span class="piece" data-ref="piece">♘</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c1" data-marks="" tabindex="-1" aria-label="c1, White bishop"><span class="piece" data-ref="piece">♗</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d1" data-marks="" tabindex="-1" aria-label="d1, White queen"><span class="piece" data-ref="piece">♕</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e1" data-marks="" tabindex="-1" aria-label="e1, White king"><span class="piece" data-ref="piece">♔</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f1" data-marks="" tabindex="-1" aria-label="f1, White bishop"><span class="piece" data-ref="piece">♗</span></button>
-            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g1" data-marks="" tabindex="-1" aria-label="g1, White knight"><span class="piece" data-ref="piece">♘</span></button>
-            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h1" data-marks="" tabindex="-1" aria-label="h1, White rook"><span class="piece" data-ref="piece">♖</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="a1" data-marks="" tabindex="-1" aria-label="a1, White rook"><span class="piece" data-ref="piece" data-side="w">♜</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="b1" data-marks="" tabindex="-1" aria-label="b1, White knight"><span class="piece" data-ref="piece" data-side="w">♞</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="c1" data-marks="" tabindex="-1" aria-label="c1, White bishop"><span class="piece" data-ref="piece" data-side="w">♝</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="d1" data-marks="" tabindex="-1" aria-label="d1, White queen"><span class="piece" data-ref="piece" data-side="w">♛</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="e1" data-marks="" tabindex="-1" aria-label="e1, White king"><span class="piece" data-ref="piece" data-side="w">♚</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="f1" data-marks="" tabindex="-1" aria-label="f1, White bishop"><span class="piece" data-ref="piece" data-side="w">♝</span></button>
+            <button type="button" class="sq dark" role="gridcell" data-ref="square" data-square="g1" data-marks="" tabindex="-1" aria-label="g1, White knight"><span class="piece" data-ref="piece" data-side="w">♞</span></button>
+            <button type="button" class="sq light" role="gridcell" data-ref="square" data-square="h1" data-marks="" tabindex="-1" aria-label="h1, White rook"><span class="piece" data-ref="piece" data-side="w">♜</span></button>
           </div>
         </div>
 
         <div class="trays">
-          <p><b>Taken by White</b> <span class="tray" data-ref="captured-w">none</span></p>
-          <p><b>Taken by Black</b> <span class="tray" data-ref="captured-b">none</span></p>
+          <p><b>Taken by White</b> <span class="tray" data-ref="captured-w" data-empty="true">none</span></p>
+          <p><b>Taken by Black</b> <span class="tray" data-ref="captured-b" data-empty="true">none</span></p>
         </div>
 
         <div class="controls">

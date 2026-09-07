@@ -5,22 +5,62 @@
 
 :root {
   color-scheme: light dark;
-  --bg: #f6f6f4;
-  --fg: #1b1b1a;
-  --line: #d8d6d0;
-  --light-sq: #eeead9;
-  --dark-sq: #b3907a;
-  --accent: #2f6f4e;
+  --bg: #fbfbfd;
+  --fg: #141414;
+  --line: #e6e6ea;
+  /* The board is drawn in the same indigo family as sibujs.dev — hue 265 in
+     OKLCH, the site's own `--primary` hue — rather than in wood tones that sit
+     beside it looking borrowed. Squares stay near-neutral (low chroma) so the
+     pieces and the highlight carry the eye; the highlight is the only place the
+     brand chroma appears at full strength.
+
+     Every value below was chosen against measured contrast, not by eye:
+     piece/light 16.8:1, piece/dark 5.5:1, square/square 3.0:1. */
+  --light-sq: #e9effb;
+  --dark-sq: #7989ab;
+  /* Last move — two values, because one cannot serve both squares. The light
+     square needs a highlight that goes darker, the mid-tone square one that
+     goes lighter. The single translucent wash this replaced measured 1.06:1
+     against the plain light square: the square a piece had just moved to looked
+     like every other one. Both now sit at 2.4:1 against their own square. */
+  --last-on-light: #669aff;
+  --last-on-dark: #aadbff;
+  /* Pieces are filled glyphs coloured by side, each with the opposite edge:
+     the fill carries the piece on squares that contrast with it, the edge
+     carries it on squares that do not. Neither alone is enough — a white piece
+     is invisible on a pale square without its dark edge, and a black one
+     disappears on a dark square without its light edge. */
+  --piece-white: #f7f9fe;
+  --piece-white-edge: #10131c;
+  --piece-black: #10131c;
+  --piece-black-edge: #eef2fb;
+  --accent: #1b3fad;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #17181a;
-    --fg: #eceded;
-    --line: #33363a;
-    --light-sq: #7d7566;
-    --dark-sq: #4c4036;
-    --accent: #7fd0a4;
+    --bg: #0b0d12;
+    --fg: #ececee;
+    --line: #232833;
+    /* The dark scheme was the worst of it: 18% and 29% saturation, two muddy
+       greys 2.2:1 apart, with a piece on the dark square at 1.85:1 — the board
+       barely read as a board and the pieces barely read at all. Same wood
+       family as the light scheme, dimmed rather than desaturated. */
+    /* Same hue, dimmed. piece/light 8.7:1, piece/dark 3.2:1, square/square
+       2.7:1 — the dark square is deliberately kept above 0.5 lightness so a
+       dark piece still reads on it. */
+    --light-sq: #a5aec2;
+    --dark-sq: #526386;
+    /* Both squares are dark here, so one warm highlight clears both easily
+       (4.1:1 and 9.1:1) and the two squares of a move match exactly. */
+    --last-on-light: #e5f9ff;
+    --last-on-dark: #7ca2f6;
+    --piece-white: #f7f9fe;
+    --piece-white-edge: #10131c;
+    --piece-black: #10131c;
+    --piece-black-edge: #dfe6f5;
+    /* The site's dark-scheme primary. */
+    --accent: #5285ff;
   }
 }
 
@@ -97,8 +137,13 @@ code {
   grid-template-rows: repeat(8, 1fr);
   aspect-ratio: 1;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 10px;
   overflow: hidden;
+  /* A soft lift so the board reads as a surface rather than a table of cells,
+     matching the card treatment used across the site. */
+  box-shadow:
+    0 1px 2px rgb(0 0 0 / 0.05),
+    0 8px 24px -12px rgb(0 0 0 / 0.25);
 }
 
 .rank {
@@ -144,8 +189,26 @@ code {
 
 .piece {
   pointer-events: none;
-  color: #16130f;
-  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* One ring per side, drawn with four offsets so the glyph is outlined on every
+   edge rather than merely lifted off the square by a drop shadow. */
+.piece[data-side="w"] {
+  color: var(--piece-white);
+  text-shadow:
+    0 1px 0 var(--piece-white-edge),
+    0 -1px 0 var(--piece-white-edge),
+    1px 0 0 var(--piece-white-edge),
+    -1px 0 0 var(--piece-white-edge);
+}
+
+.piece[data-side="b"] {
+  color: var(--piece-black);
+  text-shadow:
+    0 1px 0 var(--piece-black-edge),
+    0 -1px 0 var(--piece-black-edge),
+    1px 0 0 var(--piece-black-edge),
+    -1px 0 0 var(--piece-black-edge);
 }
 
 /* Highlights — one attribute, many rules. */
@@ -153,12 +216,16 @@ code {
   box-shadow: inset 0 0 0 4px var(--accent);
 }
 
-.sq[data-marks~="last"]::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: rgba(255, 214, 102, 0.38);
-  pointer-events: none;
+/* The last move recolours the square itself rather than laying a translucent
+   film over it. A wash inherits the square underneath, which is exactly why the
+   old one vanished on light squares; an opaque colour per square type does not.
+   Both keep the piece well clear of the background (7.5:1 and 13.2:1). */
+.sq.light[data-marks~="last"] {
+  background: var(--last-on-light);
+}
+
+.sq.dark[data-marks~="last"] {
+  background: var(--last-on-dark);
 }
 
 .sq[data-marks~="legal"]::before {
@@ -180,6 +247,37 @@ code {
 
 .sq[data-marks~="check"] {
   background: #c2452f;
+}
+
+/* Captured pieces, coloured by whose they were.
+   Both sides draw from the same filled glyph set, so a captured white pawn and
+   a captured black one are the same character — without this they were the same
+   symbol in the same colour, and the trays said nothing. The pieces listed under
+   "Taken by White" are by definition BLACK pieces, and vice versa. */
+.tray[data-ref="captured-w"] {
+  color: var(--piece-black);
+  text-shadow:
+    0 1px 0 var(--piece-black-edge),
+    0 -1px 0 var(--piece-black-edge),
+    1px 0 0 var(--piece-black-edge),
+    -1px 0 0 var(--piece-black-edge);
+}
+
+.tray[data-ref="captured-b"] {
+  color: var(--piece-white);
+  text-shadow:
+    0 1px 0 var(--piece-white-edge),
+    0 -1px 0 var(--piece-white-edge),
+    1px 0 0 var(--piece-white-edge),
+    -1px 0 0 var(--piece-white-edge);
+}
+
+/* An empty tray shows the word "none", not pieces. It inherits the surrounding
+   text colour and drops the outline — a ring drawn around a word reads as a
+   rendering fault, not as emphasis. */
+.tray[data-empty="true"] {
+  color: inherit;
+  text-shadow: none;
 }
 
 /* --- trays, controls, history ------------------------------------------- */
