@@ -14,6 +14,19 @@
 
 import { DEV, devWarn } from "../core/dev";
 
+declare const __SIBU_DEV__: boolean | undefined;
+
+// The gate is written INLINE at both call sites below, not hoisted into a
+// const, and it leads with the BARE `__SIBU_DEV__`.
+//
+// Only a bare identifier is a `define` target, and a define is substituted
+// early — before dead-code elimination runs. The imported `DEV` const is
+// inlined LATE: esbuild folded it to `!1` and then left `if (!1) { … }`
+// standing, so the whole assertion body and its message shipped in the
+// production CDN bundle behind a condition that could never be true. `devWarn`
+// has used this shape for the same reason; `tests/dist-artifacts.test.ts` now
+// asserts the result on the published bytes.
+
 // ─── Type Validators ────────────────────────────────────────────────────────
 
 /** Validator function: returns true if valid, or an error message string. */
@@ -115,33 +128,38 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
       result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
     }
 
-    if (!DEV) continue; // folds to `continue`, dropping every check below
+    // The checks live INSIDE `if (DEV)`, not behind an early `continue`.
+    //
+    // `DEV` folds either way — that is not the issue. The issue is what esbuild
+    // does afterwards: `if (!false) continue` becomes `continue`, and the
+    // statements below it are merely UNREACHABLE, not removed. The whole
+    // validation branch and every diagnostic string in it rode into the
+    // production bundle behind a `continue`. A wrapping `if (false) { … }` is
+    // a dead BLOCK, which does get dropped.
+    if (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) {
+      // Check required
+      if (propDef.required && result[key] == null) {
+        errors.push(`Prop '${key}' is required`);
+      } else if (result[key] != null) {
+        // Type validation
+        if (propDef.type) {
+          const typeResult = propDef.type(result[key], key);
+          if (typeResult !== true) errors.push(typeResult);
+        }
 
-    // Check required
-    if (propDef.required && result[key] == null) {
-      errors.push(`Prop '${key}' is required`);
-      continue;
-    }
-
-    if (result[key] == null) continue;
-
-    // Type validation
-    if (propDef.type) {
-      const typeResult = propDef.type(result[key], key);
-      if (typeResult !== true) errors.push(typeResult);
-    }
-
-    // Custom validator
-    if (propDef.validator) {
-      const validResult = propDef.validator(result[key], key);
-      if (validResult !== true) errors.push(validResult);
+        // Custom validator
+        if (propDef.validator) {
+          const validResult = propDef.validator(result[key], key);
+          if (validResult !== true) errors.push(validResult);
+        }
+      }
     }
   }
 
   // `DEV &&` comes first so the template literal sits inside the folded branch.
   // A bare `devWarn(...)` would still evaluate its argument, leaving the message
   // text in the bundle even though it could never print.
-  if (DEV && errors.length > 0) {
+  if ((typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) && errors.length > 0) {
     devWarn(`Prop validation errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
   }
 
@@ -174,10 +192,14 @@ export function defineStrictComponent<Props extends object>(config: {
  * only when `process` existed, so in a browser it fell through and threw.
  */
 export function assertType<T>(value: unknown, validator: Validator<T>, label?: string): asserts value is T {
-  if (!DEV) return;
-  const result = validator(value as T, label || "value");
-  if (result !== true) {
-    throw new TypeError(`[SibuJS Contract] ${result}`);
+  // Wrapped rather than an early `return` for the same reason as the loop
+  // above: code after an unconditional return is unreachable, not deleted, so
+  // the assertion body and its message shipped in production.
+  if (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) {
+    const result = validator(value as T, label || "value");
+    if (result !== true) {
+      throw new TypeError(`[SibuJS Contract] ${result}`);
+    }
   }
 }
 

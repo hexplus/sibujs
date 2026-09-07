@@ -66,6 +66,31 @@ development bundle and neither validates nor warns in the production one, and
 marker list missed this for a full release, which is the argument for testing
 what the bytes DO.
 
+### Fixed — the contract diagnostics are now actually stripped, not just silenced
+
+The first pass at the fix above gated on the imported `DEV` const. That made the
+behaviour correct — nothing warned, nothing threw — while leaving the code in the
+bundle: esbuild folded `DEV` to `!1` and emitted `if (!1) { … }`, because a
+cross-module const is substituted AFTER dead-code elimination has run. The
+assertion body and the `[SibuJS Contract]` message shipped behind a condition
+that could never be true.
+
+Both gates now lead with a bare `__SIBU_DEV__`, which is a `define` target and
+is therefore substituted early, before elimination — the shape `devWarn` has
+always used, and the same ordering `src/core/dev.ts` documents. The dead blocks
+are gone from the artifact.
+
+Note for anyone auditing this: `"… is required"` and `"… must be one of:"` DO
+appear in the production bundle and must. They are the return values of the
+exported `validators.required` and `validators.oneOf`, which run in production
+by design. Only `[SibuJS Contract]` and the prop-validation warning are
+diagnostics, and only those are asserted absent.
+
+`tests/dist-artifacts.test.ts` and `tests-browser/cdn-full.spec.ts` both pass a
+SPY validator to `validateProps` and assert it is never invoked in the
+production bundle, with the development bundle as the positive control. "It did
+not warn" would also pass for a branch that ran and stayed quiet.
+
 ### Fixed — the CDN builds no longer take esbuild’s `globalName`
 
 `globalName: "Sibu"` makes esbuild emit `var Sibu = (() => { … })()`, and that

@@ -5,6 +5,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { createContext, runInContext } from "node:vm";
+import { gzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -57,7 +58,16 @@ const DIAGNOSTIC_MARKERS = {
 // is hand-maintained; the behavioural tests below are the real guard.
 const PATTERNS_DIAGNOSTIC_MARKERS = {
   "prop validation errors": "Prop validation errors",
+  // The assertion body, which survived the first fix: gating on the imported
+  // `DEV` const folded the condition to `!1` but left `if (!1) { … }` standing,
+  // because the const is substituted after dead-code elimination has run.
+  "contract assertion": "[SibuJS Contract]",
 } as const;
+
+// NOT markers, and worth saying so: `validators.required` and `validators.oneOf`
+// build the strings "… is required" and "… must be one of:" as their RETURN
+// VALUES. They are exported API that runs in production, so those strings must
+// ship. Asserting their absence would be asserting the library is broken.
 
 // `dist/` only exists after `npm run build`. Skipping locally keeps a plain
 // `vitest` run working on a fresh clone; on CI a missing artifact is a failure,
@@ -177,11 +187,20 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     expect(Sibu.createDialogAria).toBeUndefined();
   });
 
-  it("stays within its byte budget", () => {
+  it("stays within its byte budget, over the wire and on disk", () => {
     // 80,202 B raw / 26,330 B gzip was the size before patterns was merged in
-    // and then split back out. The default bundle must not drift above it
+    // and then split back out. The default bundle must not drift above that
     // without someone deciding to; a review caught exactly that drift once.
-    expect(statSync(PROD_CDN).size).toBeLessThanOrEqual(80_202);
+    //
+    // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
+    // bytes that compress badly can push the transfer size up while the file
+    // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
+    // 2% tolerance absorbs differences between zlib builds rather than real
+    // growth — it is far tighter than the 13% regression this guards against.
+    const raw = statSync(PROD_CDN).size;
+    const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_330 * 1.02));
   });
 });
 
@@ -262,6 +281,33 @@ describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
     );
 
     expect(warnings.join(" ")).toContain("Prop validation errors");
+  });
+
+  it("validateProps does not invoke validators at all in production", () => {
+    // Stronger than "it did not warn": a spy proves the validation branch never
+    // ran, rather than running silently. Silence would still mean the work and
+    // the code were shipped.
+    const calls = { prod: 0, dev: 0 };
+    const spy = (where: "prod" | "dev") => () => {
+      calls[where] += 1;
+      return "always invalid" as const;
+    };
+
+    const run = (file: string, where: "prod" | "dev") => {
+      const Sibu = loadCdnGlobal(file);
+      (Sibu.validateProps as unknown as (p: object, s: object) => unknown)(
+        { n: 1 },
+        { n: { type: spy(where), required: true } },
+      );
+    };
+
+    run(FULL_CDN, "prod");
+    run(FULL_DEV_CDN, "dev");
+
+    expect(calls.prod, "a validator ran in the production bundle").toBe(0);
+    // The positive control: without it, a `validateProps` that silently did
+    // nothing anywhere would pass the assertion above.
+    expect(calls.dev, "no validator ran in the development bundle").toBeGreaterThan(0);
   });
 
   it("assertType is a no-op in production and throws in development", () => {

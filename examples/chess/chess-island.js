@@ -63,10 +63,18 @@ const { batch, div, dispose, each, external, li, mount, mountIslands, ol, p, reg
 //
 // All three are behind entry points a <script> tag cannot resolve.
 // `createDialogAria` and `createFocusManager` live in `sibujs/ui`, which is
-// bundler-only. `machine` lives in `sibujs/patterns`, which ships on the CDN
-// from 4.4.0 — but in `cdn.full.global.js`, not the default bundle this page
-// loads, because charging every no-build page ~13% gzip for patterns it never
-// calls was the wrong trade.
+// bundler-only and stays that way.
+//
+// `machine` is the temporary one. It lives in `sibujs/patterns`, which ships on
+// the CDN from 4.4.0 — in `cdn.full.global.js`, not the default bundle above,
+// because charging every no-build page ~13% gzip for patterns it never calls
+// was the wrong trade. This page cannot point at that file yet: it loads
+// `@latest`, and the full bundle does not exist on unpkg until 4.4.0 publishes.
+//
+// TODO after that release: switch the tag above to `cdn.full.global.js` and
+// take `machine` from `Sibu` with the rest. Copying a reduced version of a
+// supported API is the wrong thing to show a reader for any longer than it has
+// to be. `tests-browser/cdn-full.spec.ts` covers the real artifact meanwhile.
 //
 // Reaching for a bundle to fill the gap would be a mistake worth naming:
 // bundling those entry points beside a CDN runtime puts a second copy of the
