@@ -91,6 +91,24 @@ SPY validator to `validateProps` and assert it is never invoked in the
 production bundle, with the development bundle as the positive control. "It did
 not warn" would also pass for a branch that ran and stayed quiet.
 
+Getting that residue out took two attempts. The first moved validation into a
+second pass over the schema — allocation-free in production, but it reordered
+USER CALLBACKS: defaults and validators are both supplied by the caller, and
+running every default before any validator means a later property's factory no
+longer observes what an earlier property's validator wrote. Schema entries are
+processed in insertion order and each property is finished — normalize, default,
+validate — before the next begins, so `validateProps` now branches into two
+whole loops, one per mode, instead of splitting the work into two passes.
+
+One residue outlived the first two passes. `validateProps` collected its
+findings in an `errors` array declared above the loop that fills it — outside
+the guard — so the validation branch stripped cleanly while the allocation in
+front of it did not, leaving `let r = []` on every production call, forever
+unread. The array is declared inside the guarded loop, so the whole development path
+folds together. The production
+function is `{...props}` plus the defaults loop and nothing else, and a test
+asserts the shipped function contains no array literal at all.
+
 ### Fixed — the CDN builds no longer take esbuild’s `globalName`
 
 `globalName: "Sibu"` makes esbuild emit `var Sibu = (() => { … })()`, and that
