@@ -118,49 +118,53 @@ export type PropSchema<Props> = {
  */
 export function validateProps<Props extends object>(props: Partial<Props>, schema: PropSchema<Props>): Props {
   const result = { ...props } as Record<string, unknown>;
-  const errors: string[] = [];
 
+  // Applying defaults is production behaviour: the object handed back has to
+  // be the same either way. Only the checking is development-only.
   for (const [key, def] of Object.entries(schema)) {
     const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
-
-    // Apply defaults
     if (result[key] == null && propDef.default !== undefined) {
       result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
     }
-
-    // The checks live INSIDE `if (DEV)`, not behind an early `continue`.
-    //
-    // `DEV` folds either way — that is not the issue. The issue is what esbuild
-    // does afterwards: `if (!false) continue` becomes `continue`, and the
-    // statements below it are merely UNREACHABLE, not removed. The whole
-    // validation branch and every diagnostic string in it rode into the
-    // production bundle behind a `continue`. A wrapping `if (false) { … }` is
-    // a dead BLOCK, which does get dropped.
-    if (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) {
-      // Check required
-      if (propDef.required && result[key] == null) {
-        errors.push(`Prop '${key}' is required`);
-      } else if (result[key] != null) {
-        // Type validation
-        if (propDef.type) {
-          const typeResult = propDef.type(result[key], key);
-          if (typeResult !== true) errors.push(typeResult);
-        }
-
-        // Custom validator
-        if (propDef.validator) {
-          const validResult = propDef.validator(result[key], key);
-          if (validResult !== true) errors.push(validResult);
-        }
-      }
-    }
   }
 
-  // `DEV &&` comes first so the template literal sits inside the folded branch.
-  // A bare `devWarn(...)` would still evaluate its argument, leaving the message
-  // text in the bundle even though it could never print.
-  if ((typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) && errors.length > 0) {
-    devWarn(`Prop validation errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+  // A SECOND pass, so that everything development-only — the `errors` array
+  // included — sits inside one foldable branch.
+  //
+  // Sharing a single loop meant declaring `errors` above it, outside the
+  // guard, where it survived as a dead `[]` allocated on every production
+  // call. The branch stripped cleanly; the allocation in front of it did not.
+  //
+  // Defaults are all applied by the time this runs, so a second pass observes
+  // exactly what the interleaved one did: each check only ever reads its own
+  // key, so the order the two concerns run in cannot change a verdict.
+  if (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV) {
+    const errors: string[] = [];
+
+    for (const [key, def] of Object.entries(schema)) {
+      const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
+
+      if (propDef.required && result[key] == null) {
+        errors.push(`Prop '${key}' is required`);
+        continue;
+      }
+
+      if (result[key] == null) continue;
+
+      if (propDef.type) {
+        const typeResult = propDef.type(result[key], key);
+        if (typeResult !== true) errors.push(typeResult);
+      }
+
+      if (propDef.validator) {
+        const validResult = propDef.validator(result[key], key);
+        if (validResult !== true) errors.push(validResult);
+      }
+    }
+
+    if (errors.length > 0) {
+      devWarn(`Prop validation errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+    }
   }
 
   return result as Props;

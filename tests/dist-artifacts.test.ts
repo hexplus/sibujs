@@ -310,6 +310,18 @@ describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
     expect(calls.dev, "no validator ran in the development bundle").toBeGreaterThan(0);
   });
 
+  it("validateProps allocates nothing for the development path in production", () => {
+    // The dev-only `errors` array used to be declared above the loop that fills
+    // it, which is outside the foldable branch — so the branch stripped cleanly
+    // and left `let r = []` allocated on every production call, forever unread.
+    //
+    // Asserted against the SHIPPED function rather than the source, because
+    // this is a property of what the minifier emitted, not of what was written.
+    const Sibu = loadCdnGlobal(FULL_CDN);
+    const source = (Sibu.validateProps as unknown as () => void).toString();
+    expect(source, `production validateProps still allocates: ${source}`).not.toMatch(/\[\s*\]/);
+  });
+
   it("assertType is a no-op in production and throws in development", () => {
     const call = (file: string) => {
       const Sibu = loadCdnGlobal(file);
