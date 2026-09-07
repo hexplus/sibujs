@@ -42,22 +42,36 @@ const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 /** The exact artifact the example is expected to request, and only this one. */
 const EXPECTED_CDN = "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js";
 
+/** The four CDN artifacts this package publishes. Anything else is a mistake. */
+const ALLOWED_CDN_FILES = new Set(["cdn.global.js", "cdn.dev.global.js", "cdn.full.global.js", "cdn.full.dev.global.js"]);
+
 test.beforeEach(async ({ page }) => {
-  // Every CDN request the page makes is recorded and answered with the local
-  // build of the SAME NAME. Two things depend on this:
+  // EVERY CDN request is recorded, not just the last one. A scalar would let a
+  // page that downloads two runtimes pass whenever the expected one happened to
+  // come second — which is precisely the bundle-size regression this project
+  // spent a release avoiding.
   //
-  //   1. the suite tests the working tree. Left alone, the example fetches
-  //      `@latest` from unpkg and these tests would exercise the last published
-  //      release, so a regression in `dist/` would sail through green;
+  // Each is answered with the local build of the SAME NAME, for two reasons:
+  //
+  //   1. the suite tests the working tree. Left alone the example fetches
+  //      `@latest` from unpkg, so these tests would exercise the last published
+  //      release and a regression in `dist/` would sail through green;
   //   2. the artifact is pinned. The example needs `machine`, which only the
   //      full bundle carries — a silent switch to `cdn.global.js` would install
   //      `Sibu` and leave `machine` undefined, failing far from the cause.
-  let requestedCdnUrl: string | undefined;
+  const requestedCdnUrls: string[] = [];
 
   await page.route("**unpkg.com/**/cdn*.global.js", async (route) => {
-    requestedCdnUrl = route.request().url();
-    const filename = new URL(requestedCdnUrl).pathname.split("/").pop();
-    if (!filename) throw new Error(`Unable to resolve CDN filename from ${requestedCdnUrl}`);
+    const requestedUrl = route.request().url();
+    requestedCdnUrls.push(requestedUrl);
+
+    // The filename becomes a filesystem path, so it is checked against a fixed
+    // set rather than trusted: a URL this glob matched is still not proof of a
+    // name this repository builds.
+    const filename = new URL(requestedUrl).pathname.split("/").pop();
+    if (!filename || !ALLOWED_CDN_FILES.has(filename)) {
+      throw new Error(`Unexpected CDN artifact request: ${requestedUrl}`);
+    }
 
     await route.fulfill({
       status: 200,
@@ -68,8 +82,13 @@ test.beforeEach(async ({ page }) => {
 
   await page.goto(PAGE);
 
-  // Exact, so it separates all four artifacts: core vs full, prod vs dev.
-  expect(requestedCdnUrl, "the example requested an unexpected CDN artifact").toBe(EXPECTED_CDN);
+  // The WHOLE collection, exactly. `toContain` would accept a second runtime
+  // alongside the right one; `toEqual` accepts one request and no others, which
+  // separates all four artifacts and rejects duplicates.
+  expect(
+    requestedCdnUrls,
+    "the chess example must request exactly one CDN runtime: the full production artifact",
+  ).toEqual([EXPECTED_CDN]);
   await expect(page.locator(`${board(1)}[data-sibu-enhanced="true"]`)).toHaveCount(1);
 });
 
