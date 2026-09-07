@@ -32,15 +32,36 @@ breaking changes.
 
   | gzipped, minified, `__SIBU_DEV__: false` | 4.1.0 | 4.2.0 |
   | --- | --- | --- |
-  | `sibujs` | 26,895 | **25,907** |
-  | `sibujs/plugins` | 28,877 | **28,665** |
-  | `sibujs/ui` | 16,462 | **16,106** |
-  | application exercising every warning below | 33,658 | **33,030** |
+  | `sibujs` | 26,895 | **25,836** |
+  | `sibujs/plugins` | 28,877 | **28,615** |
+  | `sibujs/ui` | 16,462 | **16,112** |
+  | `dist/cdn.global.js` | 27,289 | **26,201** |
+  | application exercising every warning below | 33,658 | **32,958** |
 
   `tests/treeshaking-dev-diagnostics.test.ts` bundles for real and fails if any
-  diagnostic string survives, so this cannot silently regress again. Development
-  builds grow, which is where the diagnostics are supposed to be: the same
-  application is 53,009 bytes gzipped with `__SIBU_DEV__: true`.
+  diagnostic string survives, and `tests/dist-artifacts.test.ts` asserts the
+  same thing against the built `dist/` files — the source-level test could not
+  see the CDN bundle, which is exactly where the leak hid. Development builds
+  grow, which is where the diagnostics are supposed to be: the same application
+  is 53,079 bytes gzipped with `__SIBU_DEV__: true`.
+
+- **The CDN bundle shipped every diagnostic and could not be stripped.** The
+  CDN build applied no `__SIBU_DEV__` define at all, and a
+  `<script src="…/cdn.global.js">` consumer has no bundler to fold it later —
+  the published bytes are what runs. Worse, with no define and no `process` in
+  a browser the dev gate resolves to `false` at runtime, so those thousands of
+  bytes of warning text were downloaded and parsed to never print.
+
+  `dist/cdn.global.js` is now built with `__SIBU_DEV__: false` and contains no
+  diagnostic text at all.
+
+### Added
+
+- **`dist/cdn.dev.global.js`** — a development CDN bundle, exported as
+  `sibujs/cdn-dev`. Stripping the production CDN would otherwise have left
+  no-build users with no diagnostics at all; loading this file instead turns
+  every warning on without a build step, which is the point of having them in a
+  no-build workflow. Use `dist/cdn.global.js` in production.
 
 - **`RouterLink` ignored a reactive `class`.** Tag factories honour a getter or
   a `{ name: condition }` map; `RouterLink` read the prop with
@@ -94,6 +115,26 @@ breaking changes.
   A re-attached element keeps its own reactive bindings: the directive did not
   create it and does not tear it down. Development warns on the reuse, because
   the node also brings back whatever state it accumulated while detached.
+
+- **The lone-string class warning is narrower, and reports once.** It now
+  requires two or more whitespace-separated tokens with at least two
+  utility-shaped, where before any single token carrying a hyphen, colon, slash
+  or digit was enough.
+
+  The old rule flagged the identifiers applications legitimately render as text
+  — `item-0`, `home-content`, `user-42`, `v4.1.0`, `src/index.ts`,
+  `https://example.com`, `N/A` — at a measured 29.8% false-positive rate, and a
+  list rendering `item-0` through `item-999` produced a thousand warnings. The
+  new rule measures 0% on the same 131-string corpus, and a repeated mistake is
+  reported once per tag and string rather than once per element.
+
+  The cost, stated plainly: single-token class lists no longer warn.
+  `div("space-y-6")` and `div("truncate")` pass silently, where the first used
+  to be caught. A single hyphen-and-digit token is not distinguishable from an
+  identifier, and a warning developers learn to ignore protects nobody. The
+  multi-token form remains both the originally reported bug and the dominant
+  real-world shape. Measurements live in
+  `tests/lone-string-heuristic-rate.test.ts`.
 
 - **Sanitizer entry points take an optional context.** `sanitizeCSSValue`,
   `sanitizeStyleAttribute` and `sanitizeAttributeString` accept an optional

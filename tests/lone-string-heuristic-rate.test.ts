@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { div } from "../src/core/rendering/html";
+import { div, p, span } from "../src/core/rendering/html";
 
 // ---------------------------------------------------------------------------
 // The lone-string class heuristic, measured rather than asserted.
@@ -9,13 +9,22 @@ import { div } from "../src/core/rendering/html";
 // treats the same string as a class. The shorthand is ergonomic and stays; the
 // mistake is made detectable with a dev warning instead.
 //
-// A heuristic is only honest if its error rate is known, so this file pins both
-// directions on a representative corpus. It is a RATE test: the thresholds have
-// headroom, and the specific known-wrong strings are listed so a future change
-// to the heuristic shows up as a changed list rather than a silent drift.
+// A heuristic is only honest if its error rate is known on a REALISTIC corpus.
+// The first version of this file measured 3.3% false positives and was wrong —
+// not arithmetically, but because the corpus was all prose. Real applications
+// pass identifiers (`item-0`, `home-content`, `user-42`), versions, paths and
+// URLs as ordinary text, and the original rule flagged every one of them. On a
+// corpus containing those the true rate was 29.8%, and a list rendering
+// `item-0` through `item-999` produced a thousand warnings.
 //
-// Measured at the time of writing: 3.3% false positives (4/123 prose strings),
-// 2.4% false negatives (1/41 class lists).
+// The rule now requires TWO OR MORE tokens with at least two utility-shaped,
+// which takes measured false positives to zero: every one of those identifiers
+// is a single token, and hyphenated English carries only one utility-shaped
+// token per phrase. The cost is single-token class lists — `div("space-y-6")`
+// no longer warns — and that trade is deliberate and recorded below.
+//
+// This is a RATE test with headroom, and the exact misses are listed so a
+// change to the heuristic surfaces as a changed list rather than silent drift.
 // ---------------------------------------------------------------------------
 
 let warn: ReturnType<typeof vi.spyOn>;
@@ -27,16 +36,22 @@ afterEach(() => {
   warn.mockRestore();
 });
 
-/** Does a lone-string `div(s)` trip the class-list warning? */
+/**
+ * Does a lone-string `div(s)` trip the class-list warning?
+ *
+ * Each corpus string is distinct, so the runtime's de-duplication (one warning
+ * per tag+string) never fires within a single sweep. Re-checking a string
+ * already used in a sweep needs a different tag — see the reported-case test.
+ */
 function flags(s: string): boolean {
   warn.mockClear();
   div(s);
   return warn.mock.calls.some((c) => String(c[0]).includes("looks like a class list"));
 }
 
-// Strings a developer legitimately passes as a lone text child: labels, button
-// captions, counts, units, dates, error copy, and non-English content.
+// Text a developer legitimately passes as a lone text child.
 const TEXT = [
+  // prose, labels, button captions
   "Hello world",
   "Submit",
   "Cancel",
@@ -55,31 +70,8 @@ const TEXT = [
   "Search",
   "Filter",
   "Sort by",
-  "3 items selected",
-  "12 unread",
-  "Page 1 of 20",
-  "99+",
-  "42",
-  "0",
-  "1,234 followers",
-  "$19.99",
-  "€1.500,00",
-  "12:30",
-  "2026-09-06",
-  "3.14159",
-  "v4.1.0",
-  "100%",
-  "50 MB",
-  "Are you sure?",
-  "This action cannot be undone.",
-  "Your changes have been saved.",
-  "An unexpected error occurred. Please try again later.",
-  "Drag files here or click to upload",
-  "Powered by SibuJS",
-  "All rights reserved",
   "Read more",
   "Show less",
-  "Learn more →",
   "Back to top",
   "Next",
   "Previous",
@@ -101,6 +93,91 @@ const TEXT = [
   "Postal code",
   "Country",
   "Date of birth",
+  "Are you sure?",
+  "This action cannot be undone.",
+  "Your changes have been saved.",
+  "An unexpected error occurred. Please try again later.",
+  "Drag files here or click to upload",
+  "Powered by SibuJS",
+  "All rights reserved",
+  "Select an option",
+  "Choose a file",
+  "Nothing here yet",
+  "Get started",
+  "Offline",
+  "Reconnecting…",
+  "Updated just now",
+  "Last updated 3 minutes ago",
+  // counts, money, dates, versions
+  "3 items selected",
+  "12 unread",
+  "Page 1 of 20",
+  "99+",
+  "42",
+  "0",
+  "1,234 followers",
+  "$19.99",
+  "€1.500,00",
+  "12:30",
+  "2026-09-06",
+  "3.14159",
+  "v4.1.0",
+  "100%",
+  "50 MB",
+  "OK",
+  "Yes",
+  "No",
+  "Done",
+  "N/A",
+  "—",
+  "…",
+  // identifiers, keys, paths, URLs — absent from the original corpus, and the
+  // reason its 3.3% figure was not the operational rate
+  "item-0",
+  "item-1",
+  "item-999",
+  "home-content",
+  "main-nav",
+  "user-42",
+  "row-7",
+  "tab-2",
+  "step-3",
+  "https://example.com",
+  "http://localhost:3000",
+  "user@example.com",
+  "README.md",
+  "package.json",
+  "src/index.ts",
+  "dist/cdn.global.js",
+  "GET /api/users",
+  "500 Internal Server Error",
+  "404 Not Found",
+  // hyphenated English, both as phrases and as lone labels
+  "e-mail address",
+  "state-of-the-art design",
+  "up-to-date now",
+  "well-known issues",
+  "opt-in only",
+  "read-only field",
+  "built-in support",
+  "end-to-end tests",
+  "real-time updates",
+  "drag-and-drop here",
+  "end-to-end",
+  "state-of-the-art",
+  "up-to-date",
+  "drag-and-drop",
+  "out-of-stock",
+  "one-to-one",
+  "read-only",
+  "well-known",
+  "built-in",
+  "real-time",
+  "opt-in",
+  "sign-in",
+  "follow-up",
+  "check-in",
+  // non-English
   "Iniciar sesión",
   "Cerrar sesión",
   "Guardar cambios",
@@ -111,58 +188,9 @@ const TEXT = [
   "S'inscrire",
   "Zurück",
   "Weiter",
-  "user@example.com",
-  "https://example.com",
-  "README.md",
-  "package.json",
-  "src/index.ts",
-  "GET /api/users",
-  "500 Internal Server Error",
-  "404 Not Found",
-  "on",
-  "off",
-  "true",
-  "false",
-  "null",
-  "N/A",
-  "—",
-  "…",
-  "OK",
-  "Yes",
-  "No",
-  "Done",
-  "Close",
-  "Open",
-  "Apply",
-  "Reset",
-  "Clear",
-  "Continue",
-  "Item",
-  "Items",
-  "User",
-  "Users",
-  "Order",
-  "Orders",
-  "Invoice",
-  "Report",
-  "TODO",
-  "WIP",
-  "Beta",
-  "New",
-  "Pro",
-  "Free",
-  "Trial expired",
-  "Last updated 3 minutes ago",
-  "Updated just now",
-  "Offline",
-  "Reconnecting…",
-  "Select an option",
-  "Choose a file",
-  "Nothing here yet",
-  "Get started",
 ];
 
-// Strings that are really a className, passed by mistake.
+// Strings that really are a className, passed by mistake.
 const CLASSES = [
   "mb-3 aspect-video w-full",
   "space-y-6",
@@ -207,33 +235,71 @@ const CLASSES = [
   "z-10",
 ];
 
-// The heuristic keys off "every token is class-shaped AND at least one carries a
-// hyphen/colon/slash/digit". These four prose strings satisfy that by accident.
-const KNOWN_FALSE_POSITIVES = ["v4.1.0", "https://example.com", "src/index.ts", "N/A"];
-// A single-word utility class has no hyphen, colon, slash or digit, so it is
-// indistinguishable from the word "truncate" used as a label.
-const KNOWN_FALSE_NEGATIVES = ["truncate"];
+// Every miss is a single token, or a pair carrying only ONE utility-shaped
+// token ("btn btn-primary", "sticky top-0"). Accepted in exchange for a zero
+// false-positive rate; a warning that cries wolf protects nobody.
+const KNOWN_FALSE_NEGATIVES = [
+  "space-y-6",
+  "w-1/2",
+  "mt-4",
+  "min-h-screen",
+  "btn btn-primary",
+  "card card-body",
+  "col-md-6",
+  "sr-only",
+  "animate-pulse",
+  "overflow-x-auto",
+  "border-t-2",
+  "opacity-50",
+  "dark:bg-slate-900",
+  "text-2xl",
+  "gap-x-8",
+  "truncate",
+  "sticky top-0",
+  "list-none",
+  "leading-6",
+  "-mt-px",
+  "z-10",
+];
 
 describe("lone-string class heuristic: measured error rate", () => {
-  it("has a false-positive rate at or below 5% on prose", () => {
+  it("flags no prose, identifier, path, URL or version in the corpus", () => {
     const wrong = TEXT.filter(flags);
-    expect(wrong).toEqual(KNOWN_FALSE_POSITIVES);
-    expect(wrong.length / TEXT.length).toBeLessThanOrEqual(0.05);
+    expect(wrong).toEqual([]);
   });
 
-  it("has a false-negative rate at or below 10% on real class lists", () => {
+  it("has a false-negative rate at or below 55% on real class lists", () => {
     const missed = CLASSES.filter((s) => !flags(s));
     expect(missed).toEqual(KNOWN_FALSE_NEGATIVES);
-    expect(missed.length / CLASSES.length).toBeLessThanOrEqual(0.1);
+    expect(missed.length / CLASSES.length).toBeLessThanOrEqual(0.55);
   });
 
   it("catches the exact string from the original report", () => {
-    expect(flags("mb-3 aspect-video w-full")).toBe(true);
+    // A different tag than the corpus sweep used, so the tag+string
+    // de-duplication key is fresh and this asserts against a real warning.
+    warn.mockClear();
+    span("mb-3 aspect-video w-full");
+    expect(warn.mock.calls.map((c) => String(c[0])).join("\n")).toContain("looks like a class list");
+  });
+
+  it("does not flood: one warning per repeated mistake, not one per element", () => {
+    // The failure this replaced: a list of 1,000 rows produced 1,000 warnings.
+    warn.mockClear();
+    for (let i = 0; i < 500; i++) p("grid grid-cols-3 gap-4");
+    const hits = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("looks like a class list"));
+    expect(hits).toHaveLength(1);
+  });
+
+  it("still reports a DIFFERENT mistaken class string", () => {
+    warn.mockClear();
+    p("flex items-center gap-2");
+    const hits = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("looks like a class list"));
+    expect(hits).toHaveLength(1);
   });
 
   it("never changes behaviour — a flagged string is still rendered as text", () => {
-    const el = div("mb-3 aspect-video w-full");
-    expect(el.textContent).toBe("mb-3 aspect-video w-full");
+    const el = div("px-4 py-2");
+    expect(el.textContent).toBe("px-4 py-2");
     expect(el.getAttribute("class")).toBeNull();
   });
 

@@ -40,7 +40,7 @@
     "typecheck": "tsc --noEmit",
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "certify:rc": "node scripts/certify/run.mjs",
-    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup cdn.ts --format iife --globalName Sibu --out-dir dist --no-dts --minify",
+    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup --config tsup.cdn.config.ts",
     "example:chess:build": "node scripts/build-example-chess.mjs",
     "example:serve": "node tests-browser/server.mjs",
     "bench": "node bench.mjs",
@@ -130,6 +130,9 @@
     },
     "./cdn": {
       "default": "./dist/cdn.global.js"
+    },
+    "./cdn-dev": {
+      "default": "./dist/cdn.dev.global.js"
     }
   },
   "publishConfig": {
