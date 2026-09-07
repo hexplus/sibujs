@@ -45,6 +45,12 @@ export interface FormReturn<T extends object> {
 // BUILT-IN VALIDATORS
 // ============================================================================
 
+/**
+ * Require a non-empty value. Rejects `null`, `undefined`, `""` and `[]`.
+ *
+ * @param message Overrides the default message.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function required(message = "This field is required"): ValidatorFn<unknown> {
   return (value: unknown) => {
     if (value == null || value === "" || (Array.isArray(value) && value.length === 0)) {
@@ -54,6 +60,14 @@ export function required(message = "This field is required"): ValidatorFn<unknow
   };
 }
 
+/**
+ * Require a minimum string length. An empty value passes — pair with
+ * {@link required} when the field is mandatory.
+ *
+ * @param min Minimum number of characters.
+ * @param message Overrides the default message.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function minLength(min: number, message?: string): ValidatorFn<string> {
   return (value: string) => {
     if (value && value.length < min) {
@@ -63,6 +77,13 @@ export function minLength(min: number, message?: string): ValidatorFn<string> {
   };
 }
 
+/**
+ * Require a maximum string length. An empty value passes.
+ *
+ * @param max Maximum number of characters.
+ * @param message Overrides the default message.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function maxLength(max: number, message?: string): ValidatorFn<string> {
   return (value: string) => {
     if (value && value.length > max) {
@@ -72,6 +93,13 @@ export function maxLength(max: number, message?: string): ValidatorFn<string> {
   };
 }
 
+/**
+ * Require the value to match a regular expression. An empty value passes.
+ *
+ * @param regex Pattern the value must satisfy.
+ * @param message Message used on failure.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function matchesPattern(regex: RegExp, message = "Invalid format"): ValidatorFn<string> {
   return (value: string) => {
     if (value && !regex.test(value)) {
@@ -81,10 +109,24 @@ export function matchesPattern(regex: RegExp, message = "Invalid format"): Valid
   };
 }
 
+/**
+ * Require a syntactically plausible email address. Deliberately permissive —
+ * the only authoritative check is sending mail to it. An empty value passes.
+ *
+ * @param message Message used on failure.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function email(message = "Invalid email address"): ValidatorFn<string> {
   return matchesPattern(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, message);
 }
 
+/**
+ * Require a numeric value to be at least `minVal`. `null`/`undefined` passes.
+ *
+ * @param minVal Inclusive lower bound.
+ * @param message Overrides the default message.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function min(minVal: number, message?: string): ValidatorFn<number> {
   return (value: number) => {
     if (value != null && value < minVal) {
@@ -94,6 +136,13 @@ export function min(minVal: number, message?: string): ValidatorFn<number> {
   };
 }
 
+/**
+ * Require a numeric value to be at most `maxVal`. `null`/`undefined` passes.
+ *
+ * @param maxVal Inclusive upper bound.
+ * @param message Overrides the default message.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function max(maxVal: number, message?: string): ValidatorFn<number> {
   return (value: number) => {
     if (value != null && value > maxVal) {
@@ -103,6 +152,13 @@ export function max(maxVal: number, message?: string): ValidatorFn<number> {
   };
 }
 
+/**
+ * Build a validator from an arbitrary predicate.
+ *
+ * @param fn Returns `true` when the value is acceptable.
+ * @param message Message used when `fn` returns `false`.
+ * @returns A validator returning the message on failure, `null` on success.
+ */
 export function custom<T>(fn: (value: T) => boolean, message: string): ValidatorFn<T> {
   return (value: T) => (fn(value) ? null : message);
 }

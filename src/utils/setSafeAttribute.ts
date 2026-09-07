@@ -25,10 +25,8 @@
  * guarantees every writer runs the existing one.
  */
 
-import { devWarn, isDev } from "../core/dev";
+import { DEV, devWarn } from "../core/dev";
 import { isEventHandlerAttr, isHtmlContentAttribute, sanitizeAttributeString } from "./sanitize";
-
-const _isDev = isDev();
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -129,7 +127,7 @@ export function setSafeAttribute(
   const localName = ns ? name.slice(name.indexOf(":") + 1) : name;
 
   if (isEventHandlerAttr(name)) {
-    if (_isDev) {
+    if (DEV) {
       devWarn(
         `${options.label ?? "setSafeAttribute"}: refusing to set event-handler attribute "${name}". ` +
           `Its value would be evaluated as JavaScript. Use on:{ ${name.slice(2)}: fn } instead.`,
@@ -154,7 +152,7 @@ export function setSafeAttribute(
   }
 
   if (isHtmlContentAttribute(name)) {
-    if (_isDev) {
+    if (DEV) {
       devWarn(
         `${options.label ?? "setSafeAttribute"}: refusing to set "${name}". The browser parses this ` +
           "attribute as a nested HTML document, so a generic string value cannot be made safe — " +
@@ -199,7 +197,7 @@ export function setSafeAttribute(
   // `sanitizeAttributeString` keys off the attribute NAME, and the URL set it
   // consults already contains `xlink:href` — so the prefixed name is passed in
   // whole even though the write itself uses the local name plus a namespace.
-  const safe = sanitizeAttributeString(name, str);
+  const safe = sanitizeAttributeString(name, str, { element: el });
 
   // No-op check on the SANITIZED result, never on the caller's raw input.
   //

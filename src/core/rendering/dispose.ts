@@ -1,4 +1,4 @@
-import { devWarn, isDev } from "../dev";
+import { DEV, devWarn } from "../dev";
 import { reportError } from "../errors";
 
 const elementDisposers = new WeakMap<Node, Array<() => void>>();
@@ -41,8 +41,6 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 }
 
 // Dev-mode only: track active bindings to detect orphans.
-// In production, _isDev is false and the counter is never touched.
-const _isDev = isDev();
 let activeBindingCount = 0;
 
 /**
@@ -56,7 +54,7 @@ export function registerDisposer(node: Node, teardown: () => void): void {
     elementDisposers.set(node, disposers);
   }
   disposers.push(teardown);
-  if (_isDev) activeBindingCount++;
+  if (DEV) activeBindingCount++;
 }
 
 /**
@@ -75,7 +73,7 @@ export function unregisterDisposer(node: Node, teardown: () => void): void {
   const index = disposers.indexOf(teardown);
   if (index === -1) return;
   disposers.splice(index, 1);
-  if (_isDev) activeBindingCount--;
+  if (DEV) activeBindingCount--;
   if (disposers.length === 0) elementDisposers.delete(node);
 }
 
@@ -128,7 +126,7 @@ export function dispose(node: Node): void {
         // re-run these or land in an infinite cycle.
         const snapshot = pending.slice();
         elementDisposers.delete(current);
-        if (_isDev) activeBindingCount -= snapshot.length;
+        if (DEV) activeBindingCount -= snapshot.length;
 
         for (let i = 0; i < snapshot.length; i++) {
           if (executed >= MAX_DRAIN_TEARDOWNS) {
@@ -140,7 +138,7 @@ export function dispose(node: Node): void {
             const rest = snapshot.slice(i);
             const added = elementDisposers.get(current);
             elementDisposers.set(current, added ? rest.concat(added) : rest);
-            if (_isDev) activeBindingCount += rest.length;
+            if (DEV) activeBindingCount += rest.length;
             reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
             runaway = true;
             break;
@@ -202,10 +200,12 @@ export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void
 /**
  * Check for potential binding leaks. Returns the number of active DOM bindings.
  * In dev mode, logs a warning if the count exceeds the threshold.
- * In production, _isDev is false so the counter is always 0.
+ * In production, DEV is false so the counter is always 0.
+ *
+ * @returns Diagnostic counts of nodes still holding registered disposers.
  */
 export function checkLeaks(warnThreshold = 0): number {
-  if (!_isDev) return 0;
+  if (!DEV) return 0;
   if (warnThreshold > 0 && activeBindingCount > warnThreshold) {
     devWarn(
       `checkLeaks: ${activeBindingCount} active DOM bindings detected. ` +

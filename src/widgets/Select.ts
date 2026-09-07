@@ -15,6 +15,14 @@ export interface SelectOptions<T> {
   isDisabled?: (item: T) => boolean;
 }
 
+/**
+ * Selection state for a list — single or multiple, with keyboard-friendly
+ * helpers. Headless: it owns state, not markup.
+ *
+ * @param options Item list, selection mode, and comparison strategy.
+ * @returns A handle exposing `selectedItem`/`selectedItems` accessors and the
+ * `select`, `deselect`, `toggle` and `clear` operations.
+ */
 export function select<T>(options: SelectOptions<T>): {
   selectedItems: () => T[];
   selectedItem: () => T | null;

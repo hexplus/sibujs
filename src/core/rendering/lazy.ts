@@ -40,6 +40,15 @@ function dispatchPropagate(node: Element, error: Error): void {
   });
 }
 
+/**
+ * Read and CLEAR an error stashed on a node by an async boundary.
+ *
+ * Consuming is the point: an error handed to one boundary must not also reach
+ * an outer one, so this is deliberately not a plain getter.
+ *
+ * @param node Element the error was stashed on.
+ * @returns The pending error, or `undefined` when there is none.
+ */
 export function takePendingError(node: Element): Error | undefined {
   const rec = node as unknown as Record<string, unknown>;
   const err = rec[PENDING_ERROR];
@@ -138,6 +147,18 @@ export interface SuspenseProps {
   fallback: () => HTMLElement;
 }
 
+/**
+ * Render `fallback` until the async `nodes` factory resolves, then swap it for
+ * the resolved content.
+ *
+ * @param props `nodes` is the async content factory; `fallback` builds the
+ * placeholder shown while it is pending.
+ * @returns The live container element, already holding the fallback.
+ *
+ * TRAP — the swap REPLACES the container's children, so focus and selection in
+ * the fallback are discarded. That is usually harmless (a spinner rarely holds
+ * focus) but matters for a skeleton form; see the note on `when`.
+ */
 export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
   const container = div({ class: "sibu-suspense" }) as HTMLElement;
 

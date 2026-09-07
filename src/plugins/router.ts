@@ -1,5 +1,6 @@
 import { devWarn, isDev } from "../core/dev";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
+import { resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
@@ -1827,6 +1828,15 @@ function normalizeRoutes(routes: RouteDef[]): RouteDef[] {
   });
 }
 
+/**
+ * Create the global router and make it the one `route()`, `navigate()` and
+ * `RouterLink` talk to. Any previously created router is destroyed first.
+ *
+ * @param routesOrOptions Either the route table, or the options object when
+ * routes are supplied later via {@link setRoutes}.
+ * @param options Router options when the first argument is the route table.
+ * @returns The created router instance.
+ */
 export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, options: RouterOptions = {}): SibuRouter {
   if (_routerRef.current) {
     _routerRef.current.destroy();
@@ -1858,11 +1868,24 @@ export function setRoutes(routes: RouteDef[]): void {
 // COMPATIBILITY API (uses global router instance)
 // ============================================================================
 
+/**
+ * Read the current route as a plain snapshot.
+ *
+ * @returns The active {@link RouteContext} (path, params, query, hash).
+ * @throws If no router has been created yet.
+ */
 export function route(): RouteContext {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.currentRoute;
 }
 
+/**
+ * Handle onto the global router's navigation surface.
+ *
+ * @returns An object exposing the current route plus `push`, `replace`, `go`,
+ * `back`, `forward` and the three guard registrars.
+ * @throws If no router has been created yet.
+ */
 export function router() {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
@@ -1881,6 +1904,16 @@ export function router() {
   };
 }
 
+/**
+ * Navigate to a target, running every registered guard.
+ *
+ * @param to Path string or location descriptor.
+ * @param options `replace` swaps the current history entry instead of pushing;
+ * `state` is stored on the history entry.
+ * @returns A promise for the {@link NavigationResult} — resolved even when a
+ * guard cancels, so the outcome must be inspected rather than assumed.
+ * @throws If no router has been created yet.
+ */
 export function navigate(
   to: NavigationTarget,
   options?: { replace?: boolean; state?: unknown },
@@ -1889,41 +1922,82 @@ export function navigate(
   return _routerRef.current.navigate(to, options);
 }
 
+/**
+ * Navigate by pushing a new history entry.
+ *
+ * @param to Path string or location descriptor.
+ * @returns A promise for the {@link NavigationResult}.
+ */
 export function push(to: NavigationTarget): Promise<NavigationResult> {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.push(to);
 }
 
+/**
+ * Navigate by replacing the current history entry.
+ *
+ * @param to Path string or location descriptor.
+ * @returns A promise for the {@link NavigationResult}.
+ */
 export function replace(to: NavigationTarget): Promise<NavigationResult> {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.replace(to);
 }
 
+/**
+ * Move through history by a relative offset, as `history.go` does.
+ *
+ * @param delta Number of entries to move; negative goes back.
+ * @returns Nothing — history moves asynchronously, so nothing is awaited here.
+ */
 export function go(delta: number): void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   _routerRef.current.go(delta);
 }
 
+/** Go back one history entry. Equivalent to `go(-1)`. */
 export function back(): void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   _routerRef.current.back();
 }
 
+/** Go forward one history entry. Equivalent to `go(1)`. */
 export function forward(): void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   _routerRef.current.forward();
 }
 
+/**
+ * Register a guard that runs before every navigation is confirmed.
+ *
+ * @param guard Called with the target and current routes; return `false` to
+ * cancel, or a target to redirect.
+ * @returns An unregister function.
+ */
 export function beforeEach(guard: NavigationGuard): () => void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.beforeEach(guard);
 }
 
+/**
+ * Register a guard that runs after `beforeEach` and after async components have
+ * resolved, but before the route commits.
+ *
+ * @param guard Called with the target and current routes.
+ * @returns An unregister function.
+ */
 export function beforeResolve(guard: NavigationGuard): () => void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.beforeResolve(guard);
 }
 
+/**
+ * Register a hook that runs after every confirmed navigation. It cannot cancel
+ * or redirect — by the time it runs the route has already committed.
+ *
+ * @param hook Called with the new and previous routes.
+ * @returns An unregister function.
+ */
 export function afterEach(hook: (to: RouteContext, from: RouteContext) => void): () => void {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
   return _routerRef.current.afterEach(hook);
@@ -1936,6 +2010,18 @@ export function afterEach(hook: (to: RouteContext, from: RouteContext) => void):
 // Registry of Route cleanup functions for destroyRouter
 const routeCleanups: (() => void)[] = [];
 
+/**
+ * The route outlet: renders whichever component matches the current route, and
+ * swaps it on every navigation.
+ *
+ * @returns A Comment anchor that manages the matched component. Like every
+ * factory here it hands back a live node the caller can insert directly.
+ *
+ * TRAP — a navigation REBUILDS the outlet's subtree, so focus and selection
+ * inside the outgoing route are discarded. The runtime restores focus when the
+ * incoming route contains an element with the same `id`, `name` or
+ * `data-focus-key`, and warns in dev when it cannot.
+ */
 export function Route(): Node {
   const anchor = document.createComment("route-outlet");
   let currentNode: Node | null = null;
@@ -2510,7 +2596,12 @@ export function RouterLink(
   // Children pass positionally (the framework-wide convention); `nodes` is kept
   // only as a deprecated fallback for existing callers.
   const content = children !== undefined ? children : nodes;
-  const baseClass = typeof classAttr === "string" ? classAttr : "";
+  // A `class` prop is resolved with the SAME rules the tag factories use, so a
+  // getter or a conditional map works here exactly as it does on a `div`.
+  // Reading it with `typeof classAttr === "string"` meant a reactive class fell
+  // through to `""` — the attribute was never written and nothing said so.
+  // Resolution happens inside the active-class effect below, which is what
+  // makes a getter reactive rather than merely accepted.
 
   const routeGetter = _routerRef.current.routeGetter;
   const rawHref = _routerRef.current["resolvePath"](to);
@@ -2574,7 +2665,7 @@ export function RouterLink(
       if (exactActiveClass) classes.push(exactActiveClass);
       else if (options.linkExactActiveClass) classes.push(options.linkExactActiveClass);
     }
-    link.className = [baseClass, ...classes].filter(Boolean).join(" ");
+    link.className = [resolveClassValue(classAttr as TagProps["class"]), ...classes].filter(Boolean).join(" ");
   });
   registerDisposer(link, effectCleanup);
 
@@ -2597,7 +2688,7 @@ export function RouterLink(
         // Inline style is a CSS-injection sink (url() exfiltration, legacy
         // expression()/behavior). Uses the shared declaration-list sanitizer so
         // one dangerous declaration no longer discards the safe ones with it.
-        link.setAttribute(key, sanitizeStyleAttribute(str));
+        link.setAttribute(key, sanitizeStyleAttribute(str, { element: link }));
       } else {
         link.setAttribute(key, str);
       }
@@ -2867,6 +2958,13 @@ export function __getNavigationEpoch(): number {
   return _routerRef.current?.navigationEpoch ?? -1;
 }
 
+/**
+ * Whether a named route is registered.
+ *
+ * @param name The route's `name`.
+ * @returns `true` when a route with that name exists; `false` when it does not,
+ * and also when no router has been created yet.
+ */
 export function hasRoute(name: string): boolean {
   if (!_routerRef.current) return false;
   return _routerRef.current["matcher"].findByName(name) !== null;

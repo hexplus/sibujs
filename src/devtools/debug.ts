@@ -159,6 +159,13 @@ export function runCleanups(component: string): void {
   }
 }
 
+/**
+ * Report components that still hold registered cleanups, i.e. that were never
+ * disposed. A development aid — it observes only what `debug.ts` tracked.
+ *
+ * @returns A map of component name to the number of outstanding cleanups.
+ * Empty when nothing is leaking.
+ */
 export function checkLeaks(): Record<string, number> {
   const leaks: Record<string, number> = {};
   for (const [component, cleanups] of trackedCleanups) {

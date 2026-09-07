@@ -1,4 +1,4 @@
-import { devWarn, isDev } from "../core/dev";
+import { DEV, devWarn } from "../core/dev";
 import * as core from "./track-core";
 
 // ---------------------------------------------------------------------------
@@ -31,8 +31,6 @@ import * as core from "./track-core";
 // so mixed-version pages that are still layout-compatible keep sharing. Keep it
 // in lockstep with batch.ts's sibling registry key.
 // ---------------------------------------------------------------------------
-
-const _isDev = isDev();
 
 // Build version stamped onto the registry. Mirrors the `__SIBU_DEV__` define
 // pattern: the bundler may inline `__SIBU_VERSION__`; under the test runner /
@@ -77,14 +75,17 @@ function resolveReactiveApi(): ReactiveApi {
     // of the reactive runtime was loaded on this page. We delegate to the first
     // copy (reactivity keeps working), but the duplication is wasteful and a
     // sign of a bundler misconfig.
-    if (_isDev && !existing.__dupWarned) {
+    if (DEV && !existing.__dupWarned) {
       existing.__dupWarned = true;
       devWarn(
         "Multiple instances of the reactive runtime detected on this page " +
-          `(active: ${existing.version}, duplicate: ${_runtimeVersion}). Reactivity ` +
-          "still works — all copies share the first one — but de-duplicate sibujs in " +
-          "your bundler (e.g. Vite optimizeDeps.exclude: ['sibujs'] or " +
-          "resolve.dedupe: ['sibujs']).",
+          `(active: ${existing.version}, duplicate: ${_runtimeVersion}). Reactivity is NOT ` +
+          "broken and no bundler configuration is required: every copy routes through the " +
+          "first one via a global registry, so signal writes still reach subscribers " +
+          "registered by any copy. This is only a SIZE issue — the duplicate copy's bytes " +
+          "are downloaded and parsed for nothing. If you want them back, de-duplicate " +
+          "sibujs in your bundler (Vite: resolve.dedupe: ['sibujs']). Mismatched VERSIONS " +
+          "above are worth fixing regardless, since only the first one loaded is used.",
       );
     }
     return existing;

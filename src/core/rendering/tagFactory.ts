@@ -1,4 +1,4 @@
-import { devWarn, isDev } from "../../core/dev";
+import { DEV, devWarn } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { reactiveBinding } from "../../reactivity/track";
@@ -8,8 +8,6 @@ import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
-
-const _isDev = isDev();
 
 // Tag names that must never be created via tagFactory — they enable script
 // execution or arbitrary plugin loading regardless of attributes. The check
@@ -112,14 +110,14 @@ function applyStyle(el: Element, style: TagProps["style"]) {
   // authoring intent with two different policies.
   if (typeof style === "function") {
     const teardown = reactiveBinding(() => {
-      el.setAttribute("style", sanitizeStyleAttribute(String((style as () => string)())));
+      el.setAttribute("style", sanitizeStyleAttribute(String((style as () => string)()), { element: el }));
     }, el);
     registerDisposer(el, teardown);
     return;
   }
 
   if (typeof style === "string") {
-    el.setAttribute("style", sanitizeStyleAttribute(style));
+    el.setAttribute("style", sanitizeStyleAttribute(style, { element: el }));
     return;
   }
 
@@ -130,13 +128,40 @@ function applyStyle(el: Element, style: TagProps["style"]) {
     if (typeof val === "function") {
       const getter = val as () => string | number;
       const teardown = reactiveBinding(() => {
-        htmlEl.style.setProperty(name, sanitizeCSSValue(String(getter())));
+        htmlEl.style.setProperty(name, sanitizeCSSValue(String(getter()), { property: name, element: el }));
       }, el);
       registerDisposer(el, teardown);
     } else {
-      htmlEl.style.setProperty(name, sanitizeCSSValue(String(val)));
+      htmlEl.style.setProperty(name, sanitizeCSSValue(String(val), { property: name, element: el }));
     }
   }
+}
+
+/**
+ * Resolve any of the three `class` shapes a tag factory accepts — a string, a
+ * getter, or a `{ name: boolean | getter }` map — down to one class string.
+ *
+ * Call it INSIDE a reactive context to get a reactive result: it reads the
+ * getters it is given, so the enclosing effect subscribes to whatever they
+ * touch. Exported so components that build their own elements (`RouterLink`)
+ * honour exactly the shapes the tag factories do, instead of each re-deciding
+ * which forms it supports — that drift is what made a reactive `class` render
+ * as nothing on a `RouterLink` while working on every `div`.
+ *
+ * @param cls The `class` prop in any accepted shape.
+ * @returns The resolved class string; `""` when the prop is absent.
+ */
+export function resolveClassValue(cls: TagProps["class"]): string {
+  if (typeof cls === "string") return cls;
+  if (typeof cls === "function") return (cls as () => string)();
+  if (!cls) return "";
+  let out = "";
+  for (const name in cls) {
+    const val = (cls as Record<string, boolean | (() => boolean)>)[name];
+    const active = typeof val === "function" ? val() : val;
+    if (active) out = out ? `${out} ${name}` : name;
+  }
+  return out;
 }
 
 function applyClass(el: Element, cls: TagProps["class"]) {
@@ -290,7 +315,7 @@ export const tagFactory = (tag: string, ns?: string) => {
       // Lone string → text child (unchanged). Warn in dev if it looks like a
       // misplaced class list so a styled empty wrapper doesn't silently render
       // its class names as visible text.
-      if (_isDev && looksLikeClassList(first)) {
+      if (DEV && looksLikeClassList(first)) {
         devWarn(
           `tagFactory: lone string "${first}" looks like a class list but is being rendered as TEXT. ` +
             `For a class, use ${tag}({ class: "${first}" }) — or ${tag}("${first}", children) to set the class AND add children.`,
@@ -329,7 +354,7 @@ export const tagFactory = (tag: string, ns?: string) => {
       // DOM clobbering: an element with id="foo" becomes window.foo. If the
       // id value is user-controlled, it can shadow globals like `config`,
       // `location`, etc. Warn in dev so authors notice.
-      if (_isDev && typeof pId === "string" && CLOBBER_RISKY_IDS.has(pId.toLowerCase())) {
+      if (DEV && typeof pId === "string" && CLOBBER_RISKY_IDS.has(pId.toLowerCase())) {
         devWarn(
           `tagFactory: element id="${pId}" matches a common global and may cause DOM clobbering. Avoid setting ids from untrusted input.`,
         );
@@ -351,7 +376,7 @@ export const tagFactory = (tag: string, ns?: string) => {
         const handler = pOn[ev];
         if (typeof handler === "function") {
           el.addEventListener(ev, handler as EventListener);
-        } else if (_isDev) {
+        } else if (DEV) {
           devWarn(
             `tagFactory: on.${ev} handler is not a function (got ${typeof handler}). Event listener was not attached.`,
           );

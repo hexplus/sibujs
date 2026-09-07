@@ -1,8 +1,6 @@
-import { devWarn, isDev } from "../dev";
+import { DEV, devWarn } from "../dev";
 import { signal } from "../signals/signal";
 import { isSSR } from "../ssr-context";
-
-const _isDev = isDev();
 
 /**
  * Context API for SibuJS — a reactive global value that any component
@@ -72,7 +70,7 @@ export function context<T>(defaultValue: T): Context<T> {
   // surprise to anyone arriving from React/Vue/Solid. Rather than silently
   // producing cross-request data bleed, say so at the point of misuse.
   const warnIfSSR = (method: string): void => {
-    if (!_isDev || !isSSR()) return;
+    if (!DEV || !isSSR()) return;
     devWarn(
       `context.${method}() called during SSR. SibuJS context() is application-global — it is NOT ` +
         "isolated per request, so a concurrent request can observe this value. Do not use context() " +
@@ -113,7 +111,7 @@ export function context<T>(defaultValue: T): Context<T> {
         // with a promise-aware restore: because the value is global, that would
         // still not isolate overlapping async scopes, and would merely make the
         // hazard harder to see. See docs/architecture/context.md.
-        if (_isDev && result !== null && typeof (result as { then?: unknown })?.then === "function") {
+        if (DEV && result !== null && typeof (result as { then?: unknown })?.then === "function") {
           devWarn(
             "context.withContext() received an async callback. Scoping is synchronous only — the " +
               "previous value is restored as soon as the callback returns its promise, so anything " +

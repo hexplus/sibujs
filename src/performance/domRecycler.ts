@@ -2,11 +2,9 @@
 // DOM RECYCLING & RESOURCE PRELOADING
 // ============================================================================
 
-import { devWarn, isDev } from "../core/dev";
+import { DEV, devWarn } from "../core/dev";
 import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { sanitizeUrl } from "../utils/sanitize";
-
-const _isDev = isDev();
 
 /**
  * DOMPool manages a pool of reusable DOM elements to reduce GC pressure.
@@ -41,7 +39,7 @@ export class DOMPool {
    * is almost certainly a bug.
    */
   release(element: HTMLElement): void {
-    if (_isDev && element.isConnected) {
+    if (DEV && element.isConnected) {
       devWarn(
         "DOMPool.release() called on a still-connected element. Detach it from the DOM first (remove() / dispose()).",
       );

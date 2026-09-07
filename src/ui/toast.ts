@@ -25,6 +25,14 @@ export interface ToastInstance {
   dismissAll: () => void;
 }
 
+/**
+ * Create a toast queue.
+ *
+ * @param options `duration` in ms before auto-dismiss; `maxToasts` caps how
+ * many are shown at once.
+ * @returns A {@link ToastInstance} with `info`, `success`, `warning`, `error`,
+ * plus the reactive list to render.
+ */
 export function toast(options?: { duration?: number; maxToasts?: number }): ToastInstance {
   const duration = options?.duration ?? 3000;
   const maxToasts = options?.maxToasts ?? Infinity;
