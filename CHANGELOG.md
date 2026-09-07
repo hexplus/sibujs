@@ -10,32 +10,47 @@ This project follows [Semantic Versioning](https://semver.org/).
 ## [4.3.0] — 2026-09-07
 
 Two defects where a value of the right *shape* was judged by the wrong test, so
-the runtime confidently did the wrong thing. Minor rather than patch: one public
-type is deliberately narrowed and one previously-silent case now throws.
+the runtime confidently did the wrong thing and said nothing. Both predate 4.2:
+the `instanceof Promise` check dates to the first commit, the island
+registration union to the reactive-islands release.
 
 ### Fixed
 
 - **An island loader that was never wrapped in `lazyIsland()` was run as a
-  setup.** A setup and a loader are both plain functions, so nothing could tell
-  them apart before one was called. Invoked as a setup, the loader ignored its
-  `ctx`, returned an import promise nobody awaited, and its module was never
-  fetched — yet `enhance()` returned normally and the element was stamped
-  `data-sibu-enhanced="true"`. The marker claimed an enhancement whose real
-  setup had never run, which is the one thing the marker exists to be trusted
-  about.
+  setup.** A setup and a loader are both plain functions, so nothing can tell
+  them apart before one is called. Invoked as a setup, the loader ignored its
+  `ctx` and returned the import promise. The module *was* fetched — `import()`
+  ran — but nobody awaited it, so the setup it resolved to was discarded and
+  never ran. `enhance()` then returned normally and the element was stamped
+  `data-sibu-enhanced="true"`: a marker asserting an enhancement whose real
+  setup had never executed.
 
-  The guard lives in `enhance()` rather than in `mountIslands`, because
-  `enhance()` and `enhanceAll()` are public and are the most direct way to reach
-  the same defect. A setup returning a thenable now throws — before the commit
-  that records ownership and sets the marker, so the transaction rolls back and
-  leaves the root exactly as unenhanced as it started.
+  The guard lives in `enhance()`, not in `mountIslands`, because `enhance()` and
+  `enhanceAll()` are public and reach the same defect directly. A setup
+  returning a thenable now throws *before* the commit that records ownership and
+  sets the marker, so the transaction rolls back and the root is left exactly as
+  unenhanced as it started.
+
+- **A rolled-back enhancement could still be mutated afterwards.** Detecting the
+  thenable and unwinding was only half of it: the async setup keeps running
+  after its first `await`, still holding `ctx`, and could register listeners,
+  bindings and cleanups into an enhancement that no longer existed. The root
+  carried no marker and the disposer had already drained, so those registrations
+  could never be released. A setup that queued a microtask and then threw
+  synchronously escaped the same way.
+
+  The context is now closed once its transaction unwinds, and every mutating
+  method refuses afterwards with a dev warning rather than dropping the call in
+  silence. Closing happens *after* the teardowns drain, because a teardown may
+  legitimately register another cleanup while unwinding — documented behaviour
+  that still works. Disposal closes the context too.
 
 - **`Suspense` decided "is this async?" with `instanceof Promise`.** That asks
   which realm built the object, not what it can do. A promise from an iframe, a
   `vm` context, a worker bridge or a polyfill failed the test and was treated as
   a DOM node: `insertBefore` threw, the boundary rendered its error branch for
-  work that was about to succeed, and the element the promise went on to resolve
-  to was never inserted and never disposed — live reactive bindings attached to
+  work that was about to succeed, and the element the promise resolved to was
+  never inserted and never disposed — live reactive bindings attached to
   nothing.
 
   The check is now by shape (`typeof value.then === "function"`), which is what
@@ -43,37 +58,42 @@ type is deliberately narrowed and one previously-silent case now throws.
   test, so a custom element exposing a `then` method is still inserted rather
   than awaited.
 
+- **`Suspense` dropped a fallback element from another realm.** The async check
+  was made realm-agnostic; the fallback check was not, so `instanceof
+  HTMLElement` silently discarded it and the boundary rendered nothing at all
+  while its promise stayed pending. Both now use the same `nodeType` test.
+
 ### Changed
-
-- **`registerIsland` no longer accepts an unwrapped loader.** `lazyIsland()`
-  returns a branded `LazyIslandLoader`, and `IslandRegistration` accepts only
-  that or an inline `EnhanceSetup`. This is the compile-time half of the fix
-  above: the mistake is now a type error instead of a silent runtime failure.
-
-  **Migration:** wrap the loader — `registerIsland("chart", lazyIsland(() =>
-  import("./chart.js")))`. Code that annotates a variable as `IslandLoader`
-  before passing it discards the brand and must wrap at the call site, or widen
-  the annotation to `LazyIslandLoader`. The brand is a phantom string-keyed
-  property rather than a `unique symbol`, so it stays assignable across
-  duplicate copies of the package in one dependency tree — the same scenario the
-  runtime registry already shares through `Symbol.for`.
 
 - **An `async` enhancement setup now throws instead of half-working.**
   Previously everything before its first `await` was registered and everything
-  after it escaped the transaction — outside the rollback, outside the disposer,
-  and after the commit. It was never supported (`EnhanceSetup` returns
-  `void | (() => void)`); it simply failed quietly. Make the setup synchronous
-  and do async work inside an effect or a lifecycle hook.
+  after it escaped the transaction. It was never supported — `EnhanceSetup`
+  returns `void | (() => void)` — it simply failed quietly. Make the setup
+  synchronous and do async work inside an effect or a lifecycle hook.
 
 - **`Suspense`'s props match what it accepts.** `nodes` is typed
   `() => HTMLElement | PromiseLike<HTMLElement>`, so the cross-realm and
   thenable values the fix exists for no longer need a cast; `fallback` is typed
   `(() => HTMLElement) | HTMLElement`, which the runtime already handled.
 
-The guard's error is thrown in production as well as development — a check that
-stops a broken enhancement being reported as successful cannot be
+### Added
+
+- **`LazyIslandLoader`** — the branded type `lazyIsland()` returns, exported for
+  callers that want to be explicit.
+
+  `IslandRegistration` deliberately still accepts an *unbranded* loader.
+  Requiring the brand would catch a forgotten `lazyIsland(...)` at compile time,
+  which is where a mistake is cheapest to find, but it rejects code that
+  compiles today — and this package's contract is that existing public API keeps
+  working, with a codemod for anything that cannot be widened. There is no
+  codemod infrastructure to ship one through, so the narrowing is not taken and
+  the runtime guard carries the fix instead. A test records that decision, so a
+  later tightening cannot happen by accident.
+
+The enhancement guard's error is thrown in production as well as development — a
+check that stops a broken enhancement being reported as successful cannot be
 development-only. Only its long explanation is compiled out, leaving a short
-message; `tests/dist-artifacts.test.ts` asserts both halves of that.
+message; `tests/dist-artifacts.test.ts` asserts both halves.
 
 ---
 

@@ -43,6 +43,8 @@ const DIAGNOSTIC_MARKERS = {
   "duplicate reactive runtime": "Multiple instances of the reactive runtime",
   "warning cap notice": "suppressing further",
   "thenable-setup explanation": "an unwrapped loader is called as a setup",
+  "post-rollback context use": "was called after this enhancement was rolled back",
+  "setup rejection explanation": "the promise returned by the setup also rejected",
 } as const;
 
 // `dist/` only exists after `npm run build`. Skipping locally keeps a plain

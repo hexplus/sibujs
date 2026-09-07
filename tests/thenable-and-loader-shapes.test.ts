@@ -47,18 +47,21 @@ const el = (...args: Parameters<typeof div>): HTMLElement => div(...args) as HTM
 const logged = () => [...warn.mock.calls, ...error.mock.calls].map((c) => c.map((a) => String(a)).join(" ")).join("\n");
 
 /**
- * Compile-time half of the island fix, checked by `npm run typecheck:tests`.
+ * Records that an unwrapped loader still COMPILES, deliberately.
  *
- * Never executed — its value is that `tsc` fails if the `@ts-expect-error`
- * stops being an error, i.e. if `IslandRegistration` ever readmits an unbranded
- * loader. The runtime tests below cover JS callers and casts that bypass this.
+ * Requiring `lazyIsland()` at the type level would catch the mistake earlier,
+ * but it rejects code that compiles today and there is no codemod to carry
+ * callers across — so the contract is left alone and the runtime guard in
+ * `enhance()` is what catches it, immediately and loudly. If this ever starts
+ * failing to compile, the public type was narrowed and that needs a codemod and
+ * a major version, not a silent tightening.
+ *
+ * Never executed; checked by `npm run typecheck:tests`.
  */
 function _islandRegistrationTypes(): void {
   const loader = () => Promise.resolve({ default: () => {} });
 
-  // @ts-expect-error — an unwrapped loader is not a valid registration
   registerIsland("compile-unwrapped", loader);
-
   registerIsland("compile-wrapped", lazyIsland(loader));
   registerIsland("compile-inline", () => {});
 }
@@ -207,6 +210,36 @@ describe("Suspense recognises async work by shape, not by realm", () => {
     resolveIt(el("done"));
     await flush();
     expect(host.textContent).toContain("done");
+  });
+
+  it("shows a fallback element built in another realm", async () => {
+    // The async check was made realm-agnostic first; the fallback check was
+    // not, so an element from an iframe or a second jsdom failed
+    // `instanceof HTMLElement` and was dropped in silence — the boundary
+    // rendered nothing at all while its promise stayed pending.
+    // @ts-expect-error — jsdom ships no types here; this is a test-only import.
+    const { JSDOM } = await import("jsdom");
+    const other = new JSDOM("<!doctype html><body></body>");
+    const foreignFallback = other.window.document.createElement("div");
+    foreignFallback.textContent = "foreign-loading";
+    expect(foreignFallback instanceof HTMLElement).toBe(false);
+    expect(foreignFallback.nodeType).toBe(1);
+
+    let resolveIt: (v: HTMLElement) => void = () => {};
+    const pending = new Promise<HTMLElement>((r) => {
+      resolveIt = r;
+    });
+
+    const host = div([Suspense({ nodes: () => pending, fallback: foreignFallback as unknown as HTMLElement })]);
+    document.body.appendChild(host);
+    await flush();
+
+    expect(host.textContent).toContain("foreign-loading");
+
+    resolveIt(el("done"));
+    await flush();
+    expect(host.textContent).toContain("done");
+    expect(host.textContent).not.toContain("foreign-loading");
   });
 
   it("still renders a synchronous element without a fallback flash", async () => {

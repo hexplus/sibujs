@@ -23,32 +23,36 @@ export type IslandLoader = () => Promise<EnhanceSetup | { default: EnhanceSetup 
 /**
  * A loader that has been through {@link lazyIsland}.
  *
- * The brand is what makes the distinction real. An inline setup and a loader
- * are both plain functions, so nothing at runtime can tell them apart before
- * one is called — and `registerIsland` used to accept a bare `IslandLoader`,
- * which meant a forgotten `lazyIsland(...)` type-checked and was then invoked
- * as a setup: it ignored its `ctx`, returned a promise nobody awaited, and the
- * island was marked enhanced although its real setup never ran.
+ * Exported for callers that want to be explicit about having wrapped one. It is
+ * NOT required by {@link IslandRegistration}, and that is deliberate.
  *
- * Requiring the brand moves that mistake to compile time. `EnhanceSetup`
- * returns `void | (() => void)`, so a promise-returning function is not
- * assignable to it — with the unbranded loader arm gone, an unwrapped loader
- * no longer satisfies `IslandRegistration` at all.
+ * Requiring the brand would catch a forgotten `lazyIsland(...)` at compile time,
+ * which is where a mistake is cheapest to find — but it also rejects code that
+ * compiles today, and this package's contract is that the existing public API
+ * keeps working, widening rather than replacing, with a codemod for anything
+ * that cannot be widened. There is no codemod infrastructure here to ship one
+ * through, so the narrowing is not taken: the mistake is caught at mount time
+ * instead, by the thenable guard in `enhance()`, which throws immediately with
+ * an actionable message and leaves the element unenhanced. Loud and instant at
+ * runtime beats a type error that arrives with a breaking change attached.
  *
  * The brand is a phantom STRING-keyed property, never a `unique symbol`. A
  * `unique symbol` has nominal identity per declaration, so two copies of this
  * package's `.d.ts` in one dependency tree would produce two incompatible
- * `LazyIslandLoader` types and `lazyIsland()` output from one copy would not
- * satisfy the other copy's `registerIsland`. That is not hypothetical here:
- * the registry is deliberately shared through `Symbol.for` precisely because
- * duplicate copies are expected. A structural brand stays assignable across
- * them. The property exists only in the type — the runtime marker is still the
- * global symbol below.
+ * types. That is not hypothetical: the registry is deliberately shared through
+ * `Symbol.for` precisely because duplicate copies are expected. The property
+ * exists only in the type — the runtime marker is the global symbol below.
  */
 export type LazyIslandLoader = IslandLoader & { readonly __sibujsLazyIsland: true };
 
-/** Either an inline setup, or a {@link lazyIsland}-branded loader. */
-export type IslandRegistration = EnhanceSetup | LazyIslandLoader;
+/**
+ * Either an inline setup, or a loader.
+ *
+ * Unchanged from 4.2: an unbranded `IslandLoader` is still accepted, so no
+ * previously-compiling code breaks. Wrapping with {@link lazyIsland} is what
+ * makes it *work* — see {@link LazyIslandLoader} for why this is not narrowed.
+ */
+export type IslandRegistration = EnhanceSetup | IslandLoader | LazyIslandLoader;
 
 /** Island ids appear in attribute selectors and registry lookups. */
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;

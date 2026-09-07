@@ -2840,7 +2840,12 @@ export function Suspense(props: {
       return;
     }
 
-    if (!(fallback instanceof HTMLElement)) return;
+    // Realm-agnostic, for the same reason the async check below is: an element
+    // from an iframe or another jsdom realm fails `instanceof HTMLElement`, and
+    // the fallback was then dropped in silence while the promise stayed
+    // pending — a boundary showing nothing at all. `nodeType === 1` is what
+    // "is an element" actually means, in any realm.
+    if (!fallback || (fallback as unknown as Node).nodeType !== 1) return;
 
     const parent = commitTarget(myGeneration);
     if (!parent) {
