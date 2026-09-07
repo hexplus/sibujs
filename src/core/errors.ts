@@ -110,6 +110,8 @@ function state(): RuntimeErrorState {
  * This is application/runtime-global state, NOT request-scoped: under SSR it is
  * shared by every concurrent request in the process. Install it once at startup
  * and derive any request-specific detail from the error/context instead.
+ *
+ * @returns The previously installed handler, so a caller can restore it.
  */
 export function setRuntimeErrorHandler(handler: RuntimeErrorHandler | null): RuntimeErrorHandler | null {
   const s = state();
@@ -118,7 +120,11 @@ export function setRuntimeErrorHandler(handler: RuntimeErrorHandler | null): Run
   return prev;
 }
 
-/** The currently installed runtime error handler, if any. */
+/**
+ * Read the currently installed runtime error handler.
+ *
+ * @returns The installed handler, or `null` when none is set.
+ */
 export function getRuntimeErrorHandler(): RuntimeErrorHandler | null {
   return state().handler;
 }

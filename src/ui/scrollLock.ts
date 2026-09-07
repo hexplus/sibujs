@@ -45,6 +45,12 @@ const _lock = globalSingleton(Symbol.for("sibujs.scrollLock.v1"), () => ({
   savedPaddingRight: null as string | null,
 }));
 
+/**
+ * Acquire a reference-counted lock on document scrolling, so nested overlays
+ * can each lock and unlock without one release re-enabling scroll for all.
+ *
+ * @returns A handle with `lock`, `unlock` and `isLocked`.
+ */
 export function scrollLock(): ScrollLockHandle {
   let owned = false;
 

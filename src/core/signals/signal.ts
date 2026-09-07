@@ -1,7 +1,7 @@
 import { enqueueBatchedSignal } from "../../reactivity/batch";
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { notifySubscribers, recordDependency } from "../../reactivity/track";
-import { isDev } from "../dev";
+import { DEV } from "../dev";
 
 // Phantom brand symbol — exists only in the type system, never at runtime.
 declare const __accessor: unique symbol;
@@ -35,15 +35,14 @@ export interface SignalOptions<T = unknown> {
 // and allows tests to set the hook after module load.
 const _g = globalThis as any;
 
-// Cache dev mode at module load — avoids checking on every signal write
-const _isDev = isDev();
-
 /**
  * signal creates a reactive signal that holds a value of type T.
  * Returns a tuple: [getter, setter].
  *
  * @param initial Initial value
  * @param options Optional config: `{ name: "count" }` for devtools labeling
+ * @returns A `[getter, setter]` tuple. Calling the getter inside a reactive
+ * context subscribes to the signal; the setter accepts a value or an updater.
  */
 export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T> {
   // Pre-initialize every internal field the reactivity core touches. This
@@ -84,7 +83,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
     _d: false,
     _validate: undefined,
   };
-  const debugName = _isDev ? options?.name : undefined;
+  const debugName = DEV ? options?.name : undefined;
   const equalsFn = options?.equals;
 
   // Debug name is pre-declared on the state shape so the hidden class stays
@@ -107,7 +106,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
   // giving them their own closure with no branch on `equalsFn` lets the JIT
   // inline it. Signals with custom equals pay the extra call, same as before.
   //
-  // Dev-mode devtools hook emission lives behind the cached `_isDev` so
+  // Dev-mode devtools hook emission lives behind the cached `DEV` so
   // production closures don't carry the branch either.
   // ---------------------------------------------------------------------------
   let set: SetState<T>;
@@ -119,7 +118,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
       if (equalsFn(prev, newValue)) return;
       state.value = newValue;
       state.__v++;
-      if (_isDev) {
+      if (DEV) {
         const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
         if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
       }
@@ -127,7 +126,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
         notifySubscribers(state as ReactiveSignal);
       }
     };
-  } else if (_isDev) {
+  } else if (DEV) {
     set = (next) => {
       const prev = state.value;
       const newValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
@@ -155,7 +154,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
     };
   }
 
-  if (_isDev) {
+  if (DEV) {
     const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
     if (hook) hook.emit("signal:create", { signal: state, name: debugName, getter: get, initial });
   }

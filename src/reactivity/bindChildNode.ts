@@ -1,10 +1,9 @@
-import { devWarn, isDev } from "../core/dev";
+import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
 import { dispose } from "../core/rendering/dispose";
+import { captureFocusWithin, restoreFocusWithin } from "../core/rendering/focusPreservation";
 import type { NodeChild } from "../core/rendering/types";
 import { reactiveBinding } from "./track";
-
-const _isDev = isDev();
 
 /**
  * Binds a reactive getter that returns NodeChild or NodeChild[] next to a placeholder comment.
@@ -32,6 +31,12 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
       return;
     }
 
+    // Snapshot focus BEFORE anything is detached — once a node is removed,
+    // `document.activeElement` has already fallen back to <body> and there is
+    // nothing left to identify. Returns null unless a field inside the subtree
+    // we are about to discard actually held focus.
+    const focused = captureFocusWithin(lastNodes);
+
     if (result == null || typeof result === "boolean") {
       // Remove and DISPOSE all previously inserted nodes. Once detached they
       // are no longer reachable by an ancestor dispose-walk, so without
@@ -43,6 +48,9 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
         if (node.parentNode) node.parentNode.removeChild(node);
       }
       lastNodes.length = 0;
+      // Nothing was rendered in their place, so there is no counterpart to
+      // restore to — this reports the loss rather than repairing it.
+      restoreFocusWithin(focused, lastNodes, "bindChildNode");
       return;
     }
 
@@ -64,8 +72,7 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
         if (item == null || typeof item === "boolean") continue;
         const node = item instanceof Node ? item : document.createTextNode(String(item));
         if (seen.has(node)) {
-          if (_isDev)
-            devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
+          if (DEV) devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
           continue;
         }
         seen.add(node);
@@ -111,6 +118,10 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
     }
 
     lastNodes = newNodes;
+
+    // Placement is finished, so the rebuilt counterpart (if any) exists and can
+    // be focused. A no-op unless the focused node was actually discarded.
+    restoreFocusWithin(focused, newNodes, "bindChildNode");
   }
 
   // Initial render and reactive subscription. `reactiveBinding` re-tracks

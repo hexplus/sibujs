@@ -1,12 +1,10 @@
-import { devWarn, isDev } from "../../core/dev";
+import { DEV, devWarn } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
-
-const _isDev = isDev();
 
 // Tags whose children are treated as raw text by the HTML parser and thus
 // cannot safely embed dynamic expressions.
@@ -428,7 +426,7 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         const fn = values[attr.idx];
         if (typeof fn === "function") {
           el.addEventListener(attr.name, fn as EventListener);
-        } else if (_isDev) {
+        } else if (DEV) {
           devWarn(
             `html: on:${attr.name} handler is not a function (got ${typeof fn}). Event listener was not attached.`,
           );
@@ -489,6 +487,9 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
  * Templates are parsed once per call site and cached. Subsequent calls at the
  * same source location skip parsing entirely and only replay the cached
  * structure with fresh expression values.
+ *
+ * @returns The live DOM node (or fragment) the template describes — not a
+ * string, and not a virtual node.
  */
 export function html(strings: TemplateStringsArray, ...values: unknown[]): Element {
   let tmpl = cache.get(strings);

@@ -43,8 +43,13 @@
       <p>Seconds on screen: <span class="count" data-ref="secs">0</span></p>
     </div>
 
-    <!-- The ONLY script tags on the page. In production, point src at the CDN:
-         https://unpkg.com/sibujs@latest/dist/cdn.global.js -->
+    <!-- The ONLY script tags on the page. Point src at the CDN to run this
+         without a local build:
+           production   https://unpkg.com/sibujs@latest/dist/cdn.global.js
+           development  https://unpkg.com/sibujs@latest/dist/cdn.dev.global.js
+         The two are identical at runtime; the development build additionally
+         emits SibuJS's warnings, which are compiled out of the production one.
+         Swap the local src below for ../dist/cdn.dev.global.js to see them. -->
     <script src="../dist/cdn.global.js"></script>
     <script>
       // Surface a load failure instead of failing silently. If you see this,

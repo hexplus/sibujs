@@ -1,12 +1,10 @@
 import { batch } from "../../reactivity/batch";
 import { track } from "../../reactivity/track";
-import { devAssert, devWarn, isDev } from "../dev";
+import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
 import { dispose, registerDisposer } from "./dispose";
 import type { NodeChild } from "./types";
-
-const _isDev = isDev();
 
 /**
  * Resolves a NodeChild to a real Node.
@@ -215,7 +213,7 @@ export function each<T>(
       // Duplicate keys collapse to a single node reference, so two array
       // positions would share one DOM node — one row silently vanishes and
       // order can drift. Warn loudly in dev (mirrors bindChildNode).
-      if (_isDev && keyIndexMap.has(newKeys[i])) {
+      if (DEV && keyIndexMap.has(newKeys[i])) {
         devWarn(
           `each: duplicate key "${String(newKeys[i])}" at index ${i} (first seen at ${keyIndexMap.get(newKeys[i])}). ` +
             "Keys must be unique — duplicates cause rows to be dropped or mis-ordered.",

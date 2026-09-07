@@ -190,6 +190,9 @@ function disposeEffect(ctx: EffectCtx): void {
  *   onCleanup(() => window.removeEventListener("resize", handler));
  * });
  * ```
+ *
+ * @returns A dispose function that stops the effect and releases its
+ * dependencies. Idempotent.
  */
 export function effect(effectFn: EffectBody | (() => void), options?: EffectOptions): () => void {
   devAssert(typeof effectFn === "function", "effect: argument must be a function.");

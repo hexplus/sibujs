@@ -4,6 +4,11 @@ import { dispose } from "./dispose";
 /**
  * Mounts a root component into a DOM element.
  * Supports both function components and pre-created HTMLElements.
+ *
+ * @param component Component function, or an already-built Element/Node.
+ * @param container Element to mount into.
+ * @returns `{ node, unmount }` — the live root node, and a teardown that
+ * disposes the tree and removes it.
  */
 export function mount(
   component: (() => Element) | Element | Node,

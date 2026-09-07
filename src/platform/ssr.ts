@@ -27,7 +27,7 @@
 //  - `hydrateIslands` / `hydrateProgressively` use `hasOwnProperty.call`
 //    to block prototype-pollution lookups on the islands map.
 
-import { isDev } from "../core/dev";
+import { DEV } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
 import { serializeHeadEntry } from "../utils/headEntry";
@@ -91,8 +91,6 @@ function sanitizeSsrAttributeValue(lowerName: string, value: string): string {
   return sanitizeAttributeString(lowerName, value);
 }
 
-const _isDev = isDev();
-
 /** Strict attribute-name validation. HTML5 allows more, but this subset is sufficient for real elements and keeps attackers from smuggling `"`, `>`, `=`, or whitespace. */
 const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
 
@@ -102,7 +100,7 @@ function isSafeAttrName(name: string): boolean {
 
 /** Format an SSR error as an HTML comment. In production, omits the message to prevent information leakage. */
 function ssrErrorComment(err: unknown): string {
-  if (_isDev) {
+  if (DEV) {
     const msg = escapeHtml(err instanceof Error ? err.message : String(err));
     return `<!--SSR error: ${safeCommentText(msg)}-->`;
   }
@@ -178,12 +176,12 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
   // escaping and would execute if injected data is present. Scripts and
   // styles must be added via `renderToDocument`'s dedicated options.
   if (tag === "script" || tag === "style") {
-    return _isDev ? `<!--ssr:${tag}-stripped-->` : "";
+    return DEV ? `<!--ssr:${tag}-stripped-->` : "";
   }
 
   // Defense-in-depth: reject tags with unexpected characters.
   if (!/^[a-z][a-z0-9-]*$/i.test(tag)) {
-    return _isDev ? "<!--ssr:invalid-tag-->" : "";
+    return DEV ? "<!--ssr:invalid-tag-->" : "";
   }
 
   let html = `<${tag}`;
@@ -287,7 +285,7 @@ export function hydrate(component: () => HTMLElement, container: HTMLElement, op
       const first = mismatches[0];
       if (options.onMismatch) {
         options.onMismatch(first);
-      } else if (_isDev) {
+      } else if (DEV) {
         console.warn(
           `[SibuJS hydration] ${first.message}\n  at ${first.path}\n  server: ${first.serverValue}\n  client: ${first.clientValue}`,
         );
@@ -643,12 +641,12 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
   const tag = element.tagName.toLowerCase();
 
   if (tag === "script" || tag === "style") {
-    if (_isDev) yield `<!--ssr:${tag}-stripped-->`;
+    if (DEV) yield `<!--ssr:${tag}-stripped-->`;
     return;
   }
 
   if (!/^[a-z][a-z0-9-]*$/i.test(tag)) {
-    if (_isDev) yield "<!--ssr:invalid-tag-->";
+    if (DEV) yield "<!--ssr:invalid-tag-->";
     return;
   }
 
@@ -926,7 +924,7 @@ export function ssrSuspense(props: {
       if (timer) clearTimeout(timer);
       // Emit the fallback HTML on timeout/error so the stream still
       // produces a deterministic swap payload instead of hanging.
-      if (_isDev) console.warn("[SibuJS SSR] ssrSuspense rejected:", err);
+      if (DEV) console.warn("[SibuJS SSR] ssrSuspense rejected:", err);
       return { id, html: fallbackHtml };
     },
   );
@@ -1065,7 +1063,7 @@ export function serializeState(
  */
 export function deserializeState<T = Record<string, unknown>>(validate?: (data: unknown) => data is T): T | undefined {
   if (typeof window === "undefined") return undefined;
-  if (_isDev && !validate) {
+  if (DEV && !validate) {
     console.warn(
       "[SibuJS SSR] deserializeState() called without a validate guard — tampered SSR payloads will not be detected.",
     );

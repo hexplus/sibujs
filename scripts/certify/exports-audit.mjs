@@ -124,13 +124,17 @@ for (const subpath of subpaths) {
   const entry = pkg.exports[subpath];
   const targets = typeof entry === "string" ? { default: entry } : entry;
 
-  // `./cdn` is an IIFE global build, not an ESM module — resolve-only.
+  // The `./cdn*` entries are IIFE global builds, not ESM modules —
+  // resolve-only. Matched by prefix so the production and development
+  // bundles are both covered without listing each one, and so a future
+  // variant does not fail the audit for being a global build.
+  const isGlobalBuild = subpath === "./cdn" || subpath.startsWith("./cdn-");
   const importable = Boolean(targets.import ?? targets.default?.endsWith(".js"));
 
   const timersBefore = timerLog.length;
   const readsBefore = listenerLog.length;
 
-  if (importable && subpath !== "./cdn") {
+  if (importable && !isGlobalBuild) {
     try {
       const ns = await import(spec);
       const named = Object.keys(ns).filter((k) => k !== "default");
@@ -191,7 +195,7 @@ for (const subpath of subpaths) {
   if (targets.types) {
     if (existsSync(resolve(PKG_DIR, targets.types))) pass(subpath, "types", targets.types);
     else fail(subpath, "types", `${targets.types} MISSING`);
-  } else if (subpath !== "./cdn") {
+  } else if (!isGlobalBuild) {
     fail(subpath, "types", "no `types` condition declared");
   } else {
     pass(subpath, "types", "n/a (global build)");

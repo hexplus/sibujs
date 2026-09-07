@@ -308,6 +308,13 @@ function drainAnnounceQueue(priority: "polite" | "assertive"): void {
   });
 }
 
+/**
+ * Announce a message to screen readers through a shared live region.
+ *
+ * @param message Text to announce.
+ * @param priority `"polite"` waits for a pause; `"assertive"` interrupts.
+ * @returns Nothing. A no-op without a DOM, so it is safe under SSR.
+ */
 export function announce(message: string, priority: "polite" | "assertive" = "polite"): void {
   if (typeof document === "undefined") return;
   announceQueues[priority].push(message);

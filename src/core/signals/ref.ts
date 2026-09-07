@@ -22,6 +22,13 @@ export interface Ref<T> {
 
 export function ref<T>(initial: T): Ref<T>;
 export function ref<T = undefined>(): Ref<T | undefined>;
+/**
+ * A reactive box: reading `.current` inside a reactive context subscribes to
+ * it, and assigning to it notifies.
+ *
+ * @param initial Optional initial value.
+ * @returns An object whose `current` property is a reactive getter/setter.
+ */
 export function ref<T>(initial?: T): Ref<T | undefined> {
   const [get, set] = signal<T | undefined>(initial);
   return {

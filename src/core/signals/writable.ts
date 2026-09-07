@@ -34,6 +34,8 @@ import type { Accessor } from "./signal";
  * lastName();              // "Smith"
  * fullName();              // "Jane Smith"
  * ```
+ *
+ * @returns A store handle with `subscribe`, `set` and `update`.
  */
 export function writable<T>(
   get: () => T,

@@ -1,3 +1,5 @@
+import { devWarnLazy } from "../core/dev";
+
 /**
  * Strip C0/C1 control characters and ASCII whitespace that browsers silently
  * ignore while parsing a URL/protocol (e.g. "java\tscript:" or a leading
@@ -250,13 +252,177 @@ function decodeCssEscapes(value: string): string {
 }
 
 /**
+ * Where a dropped declaration came from, so the dev warning can point at it.
+ *
+ * Every field is optional: the sanitizers are public and are called from
+ * contexts that know nothing about an element. More context means a more useful
+ * warning, never a different security decision.
+ */
+export interface StyleSanitizerContext {
+  /** The CSS property the value belongs to, e.g. `background-image`. */
+  property?: string;
+  /** The element the style was being applied to, for locating it on the page. */
+  element?: Element;
+}
+
+// The blocked constructs, in the order `sanitizeCSSValue` tests them.
+//
+// Needles and explanations live in SEPARATE arrays, indexed in lockstep, and
+// that separation is a size decision rather than a style one. The needles are
+// load-bearing in production; the explanations are dev-only prose. Pairing them
+// in one table made the prose reachable from the production code path — the
+// table is indexed by the live matcher — so ~600 bytes of English shipped to
+// every consumer to explain warnings production can never print. Split, the
+// reasons are referenced only from inside a `devWarnLazy` callback, which the
+// bundler drops whole, taking the array with it.
+//
+// KEEP THE NEEDLES ALIGNED WITH the `reasons` array in `warnDroppedDeclaration`.
+// `blockedCssReason` returns an index into both.
+const BLOCKED_CSS_NEEDLES = [
+  "url(",
+  "expression(",
+  "javascript:",
+  "vbscript:",
+  "-moz-binding",
+  "behavior:",
+  "@import",
+  "image-set(",
+  "filter:progid",
+] as const;
+
+/**
+ * Describe an element well enough to find it in a page full of similar ones.
+ * Dev-only: every caller is inside a {@link DEV} guard, so this and the strings
+ * it builds are eliminated from production builds.
+ */
+function describeElement(el: Element | undefined): string {
+  if (!el) return "an element";
+  let out = el.tagName.toLowerCase();
+  const id = el.getAttribute("id");
+  if (id) out += `#${id}`;
+  const cls = el.getAttribute("class");
+  if (cls) out += `.${cls.trim().split(/\s+/).slice(0, 3).join(".")}`;
+  return `<${out}>`;
+}
+
+/**
+ * Announce a dropped declaration, naming what went, from where, why, and what
+ * to do instead. Dev-only.
+ *
+ * The "what to do instead" half is not politeness — a silent drop taught
+ * consumers that the library was broken, because the honest alternative was
+ * never stated anywhere they would look. It is stated here, in the warning.
+ */
+// Declarations already announced, so a reactive style that recomputes on every
+// frame reports its blocked value ONCE instead of flooding the console with the
+// same ~700-character message.
+//
+// Keyed on ELEMENT + declaration, not declaration alone. The flooding case is
+// one element recomputing the same blocked value, which this still collapses;
+// but the same bad declaration on a different element is a different site in
+// the source, and the whole point of the warning is to say which element. A
+// declaration-only key would report the first `background-image` on the page
+// and silently swallow every other one.
+//
+// Dev-only: every write is inside a `DEV` guard, so the Set and its contents
+// are eliminated in production.
+const warnedDeclarations = new Set<string>();
+// A page with pathological churn (a blocked value derived from a signal that
+// takes thousands of distinct values) must not turn this cache into a leak.
+// Past the cap reporting STOPS, after one notice saying so. An earlier version
+// of this comment claimed warnings should keep printing past the cap because
+// "noisy beats silent" — but combined with no longer inserting keys, that made
+// every declaration after the hundredth warn on every recomputation, which is
+// the unbounded flood the cache exists to prevent rather than a considered
+// trade-off.
+const MAX_WARNED_DECLARATIONS = 100;
+let declarationCapAnnounced = false;
+
+function warnDroppedDeclaration(value: string, reason: number, ctx?: StyleSanitizerContext): void {
+  // EVERYTHING — the dedupe bookkeeping included — happens inside the callback.
+  // Hoisting even the key construction out to an `if (DEV)` block would put
+  // these string literals back on the production code path; see `devWarnLazy`.
+  devWarnLazy(() => {
+    // Declared HERE, inside the callback, and that placement is load-bearing.
+    //
+    // Tree-shaking decides what to keep from the module graph BEFORE the
+    // `__SIBU_DEV__` define folds this callback away, so any TOP-LEVEL binding
+    // the callback names — a `const REASONS = [...]`, or a function wrapping
+    // it — is already marked live by the time its last reference disappears,
+    // and ships. Only what is textually inside the callback dies with it.
+    // Re-allocating per warning is irrelevant: development only, and only when
+    // a declaration was actually dropped.
+    const reasons = [
+      "url() in an inline style is an exfiltration channel: the browser fetches it immediately and the URL's path or query can carry page data off-origin",
+      "expression() executes arbitrary script in legacy engines",
+      "the javascript: scheme executes script",
+      "the vbscript: scheme executes script",
+      "-moz-binding loads and runs remote XBL",
+      "behavior: loads and runs a remote HTC script",
+      "@import pulls in a remote stylesheet",
+      "image-set() fetches remote images, the same exfiltration channel as url()",
+      "filter:progid activates legacy scriptable filters",
+    ];
+    const declaration = ctx?.property ? `${ctx.property}: ${value}` : value;
+    const where = describeElement(ctx?.element);
+    const key = `${where}|${declaration}`;
+    if (warnedDeclarations.has(key)) return "";
+    // See `MAX_WARNED_DECLARATIONS`: reaching the cap must suppress, not just
+    // stop remembering, or a reactive style recomputing per frame reports its
+    // blocked value on every frame once the cache is full.
+    if (warnedDeclarations.size >= MAX_WARNED_DECLARATIONS) {
+      if (declarationCapAnnounced) return "";
+      declarationCapAnnounced = true;
+      return (
+        `${MAX_WARNED_DECLARATIONS} distinct dropped style declarations have been reported; suppressing further ` +
+        "ones for the rest of this session so they cannot flood the console. The declarations are still dropped — " +
+        "only the reporting stops. Fix the reported ones and reload to see any that remain."
+      );
+    }
+    warnedDeclarations.add(key);
+    return (
+      `style declaration "${declaration}" was dropped by the style sanitizer on ${where} — ` +
+      `${reasons[reason]}. The element renders without it, which usually looks like a missing image ` +
+      "rather than an error. Sanctioned alternatives: for a content image use an <img> element (or a <picture>); " +
+      "for decoration, put the rule in a stylesheet and set a class instead — stylesheet CSS is not sanitized, only " +
+      "inline style attributes are. If this declaration is not yours, it came from untrusted data and the drop just " +
+      "prevented an exfiltration."
+    );
+  });
+}
+
+/**
  * Sanitizes a CSS value to prevent data exfiltration via url(), expression(),
  * or other injection vectors. Strips url() and expression() calls entirely.
  *
+ * A dropped value is announced via `console.warn` in development, naming the
+ * property, the element and the reason — the drop used to be completely silent,
+ * which is how a blocked `background-image` reads as a rendering bug rather
+ * than a security decision. The warning and its strings are eliminated from
+ * production builds.
+ *
  * @param value CSS property value to sanitize
+ * @param context Optional property/element used only to enrich the dev warning.
+ * Passing it never changes the security decision.
  * @returns The sanitized value, or empty string if dangerous
  */
-export function sanitizeCSSValue(value: string): string {
+/**
+ * The security decision, with no reporting attached: which blocked construct
+ * does `value` contain, if any?
+ *
+ * Separated from `sanitizeCSSValue` so a caller that tests the same declaration
+ * twice — `sanitizeStyleAttribute` checks the value alone AND joined to its
+ * property name, because `behavior:` and `filter:progid` only match once the
+ * name is present — can decide ONCE whether to announce it. With the warning
+ * built into the check, one dropped declaration produced two identical console
+ * messages.
+ *
+ * @param value CSS value (or `property:value` pair) to judge.
+ * @returns Index into {@link BLOCKED_CSS_NEEDLES} of the construct that blocks
+ * it, or `-1` when the value is safe. An index rather than the reason text, so
+ * production never touches the prose.
+ */
+function blockedCssReason(value: string): number {
   // Fast path: every blocked construct is gated by one of `(` (url/expression/
   // image-set), `:` (javascript:/vbscript:/behavior:/filter:progid), or `@`
   // (@import) — and a CSS escape that could synthesize them requires `\`. A
@@ -264,7 +430,7 @@ export function sanitizeCSSValue(value: string): string {
   // skip the decode + lower-case + whitespace-strip allocations and the nine
   // substring scans. This is the overwhelmingly common case for style values
   // ("red", "14px", "#fff", "1px solid black", "flex").
-  if (!CSS_DANGER_GATE.test(value)) return value;
+  if (!CSS_DANGER_GATE.test(value)) return -1;
 
   // Normalize to what the CSS parser sees BEFORE looking for blocked tokens —
   // every escape production, not just the hex one. See `decodeCssEscapes`.
@@ -273,20 +439,21 @@ export function sanitizeCSSValue(value: string): string {
   // functional notation like `calc(…)`, `rgba(…)`, `var(…)`, gradients.
   const normalized = value.includes("\\") ? decodeCssEscapes(value) : value;
   const lower = normalized.toLowerCase().replace(/\s+/g, "");
-  if (
-    lower.includes("url(") ||
-    lower.includes("expression(") ||
-    lower.includes("javascript:") ||
-    lower.includes("vbscript:") ||
-    lower.includes("-moz-binding") ||
-    lower.includes("behavior:") ||
-    lower.includes("@import") ||
-    lower.includes("image-set(") ||
-    lower.includes("filter:progid")
-  ) {
-    return "";
+  // Scanning the table costs one pass over the same needles the inlined `||`
+  // chain tested, and it yields WHICH construct matched so the dev warning can
+  // name it. Only values that already passed CSS_DANGER_GATE get here, so this
+  // is off the hot path either way.
+  for (let i = 0; i < BLOCKED_CSS_NEEDLES.length; i++) {
+    if (lower.includes(BLOCKED_CSS_NEEDLES[i])) return i;
   }
-  return value;
+  return -1;
+}
+
+export function sanitizeCSSValue(value: string, context?: StyleSanitizerContext): string {
+  const reason = blockedCssReason(value);
+  if (reason === -1) return value;
+  warnDroppedDeclaration(value, reason, context);
+  return "";
 }
 
 /**
@@ -315,13 +482,25 @@ export function sanitizeCSSValue(value: string): string {
  * Without a DOM (SSR in a bare runtime) there is no parser available, so the
  * conservative all-or-nothing check applies: a list containing anything
  * dangerous is dropped entirely rather than partially trusted.
+ *
+ * Every dropped declaration is announced via `console.warn` in development —
+ * exactly one warning per declaration, naming the property, the value, the
+ * element and the reason. Production builds eliminate the warning entirely.
+ *
+ * @param cssText The whole `style` attribute value, a `;`-separated list.
+ * @param context Optional element used only to enrich the dev warning. It never
+ * changes which declarations survive.
+ * @returns The surviving declarations, re-joined. Safe declarations are kept
+ * even when a sibling declaration in the same list is dropped.
  */
-export function sanitizeStyleAttribute(cssText: string): string {
+export function sanitizeStyleAttribute(cssText: string, context?: StyleSanitizerContext): string {
   const input = String(cssText);
   if (input.trim() === "") return "";
 
   if (typeof document === "undefined") {
-    return sanitizeCSSValue(input) === "" ? "" : input;
+    // No parser: the list is judged as one value, so the warning necessarily
+    // names the whole list rather than a single declaration.
+    return sanitizeCSSValue(input, context) === "" ? "" : input;
   }
 
   const probe = document.createElement("div");
@@ -339,8 +518,16 @@ export function sanitizeStyleAttribute(cssText: string): string {
     // Check the value on its own AND joined to its property name: the danger
     // list contains property-qualified forms (`behavior:`, `filter:progid`)
     // that only match once the name is present.
-    if (sanitizeCSSValue(value) === "") continue;
-    if (sanitizeCSSValue(`${property}:${value}`) === "") continue;
+    //
+    // Both checks go through `blockedCssReason`, which does not report. One
+    // dropped declaration is one problem, so it is announced exactly once here
+    // regardless of which of the two checks caught it.
+    let reason = blockedCssReason(value);
+    if (reason === -1) reason = blockedCssReason(`${property}:${value}`);
+    if (reason !== -1) {
+      warnDroppedDeclaration(value, reason, { property, element: context?.element });
+      continue;
+    }
     const priority = probe.style.getPropertyPriority(property);
     declarations.push(`${property}: ${value}${priority ? ` !${priority}` : ""}`);
   }
@@ -536,7 +723,7 @@ export function isPolicyAttribute(name: string): boolean {
  * the reactive write paths (`bindAttribute` / `bindDynamic`) so the two can
  * never drift on which attribute gets which treatment.
  */
-export function sanitizeAttributeString(attr: string, value: string): string {
+export function sanitizeAttributeString(attr: string, value: string, context?: StyleSanitizerContext): string {
   const lower = attr.toLowerCase();
   if (lower === "srcset") return sanitizeSrcset(value);
   if (URL_ATTRIBUTES.has(lower)) return sanitizeUrl(value);
@@ -544,7 +731,7 @@ export function sanitizeAttributeString(attr: string, value: string): string {
   // VALUE trusted. Every generic writer (reactive bindings, html`` expressions,
   // prop spreads) funnels through here, so the declaration-list policy applies
   // to all of them rather than only to the tag factory.
-  if (lower === "style") return sanitizeStyleAttribute(value);
+  if (lower === "style") return sanitizeStyleAttribute(value, context);
   return value;
 }
 

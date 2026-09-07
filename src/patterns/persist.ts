@@ -68,6 +68,14 @@ export interface PersistOptions<T = unknown> {
   decrypt?: (value: string) => string;
 }
 
+/**
+ * A signal mirrored into persistent storage, rehydrated on creation.
+ *
+ * @param key Storage key.
+ * @param initial Value used when storage holds nothing (or holds junk).
+ * @param options Storage backend, serializer and version/migration settings.
+ * @returns A `[accessor, setter]` pair with the same shape as `signal`.
+ */
 export function persisted<T>(
   key: string,
   initial: T,

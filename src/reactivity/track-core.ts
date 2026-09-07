@@ -354,6 +354,16 @@ function depsChanged(sub: SubWithList): boolean {
 let suspendDepth = 0;
 let trackingSuspended = false;
 
+/**
+ * Stop recording dependency edges until the matching {@link resumeTracking}.
+ * Nestable — the depth is counted, so an inner pair does not resume early.
+ *
+ * Prefer {@link untracked}, which pairs the two calls for you even when the
+ * body throws. Reach for the raw pair only when the suspended region cannot be
+ * expressed as a single function.
+ *
+ * @returns Nothing.
+ */
 export function suspendTracking(): void {
   if (suspendDepth === 0) {
     // Capture the ACTUAL current subscriber (not null). Resume restores
@@ -366,6 +376,12 @@ export function suspendTracking(): void {
   suspendDepth++;
 }
 
+/**
+ * Undo one {@link suspendTracking}. Dependency recording resumes only when the
+ * outermost pair closes.
+ *
+ * @returns Nothing.
+ */
 export function resumeTracking(): void {
   suspendDepth--;
   if (suspendDepth === 0) {
@@ -380,6 +396,15 @@ export function isTrackingSuspended(): boolean {
   return trackingSuspended;
 }
 
+/**
+ * Run `fn` without recording anything it reads as a dependency.
+ *
+ * The suspension is released even if `fn` throws, which is the reason to prefer
+ * this over a manual suspend/resume pair.
+ *
+ * @param fn Function to run outside dependency tracking.
+ * @returns Whatever `fn` returns.
+ */
 export function untracked<T>(fn: () => T): T {
   suspendTracking();
   try {
@@ -717,12 +742,26 @@ let drainEpoch = 0;
 // see `drainQueue`. Cleared when the outermost drain completes.
 const quarantined = new Set<Subscriber>();
 
+/**
+ * Cap how many times one subscriber may re-run within a single drain before it
+ * is quarantined as a runaway cycle. A safety valve, not a tuning knob.
+ *
+ * @param n New limit; ignored unless finite and positive.
+ * @returns The previous limit, so a caller can restore it.
+ */
 export function setMaxSubscriberRepeats(n: number): number {
   const prev = maxSubscriberRepeats;
   if (Number.isFinite(n) && n > 0) maxSubscriberRepeats = Math.floor(n);
   return prev;
 }
 
+/**
+ * Cap how many passes one notification drain may make before giving up on a
+ * self-refeeding update cycle.
+ *
+ * @param n New limit; ignored unless finite and positive.
+ * @returns The previous limit, so a caller can restore it.
+ */
 export function setMaxDrainIterations(n: number): number {
   const prev = maxDrainIterations;
   if (Number.isFinite(n) && n > 0) maxDrainIterations = Math.floor(n);
@@ -806,6 +845,15 @@ function drainQueue(): void {
   }
 }
 
+/**
+ * Flush queued signal notifications, running every dirty subscriber.
+ *
+ * Re-entrant calls are ignored: a write performed from inside a subscriber adds
+ * to the queue the current drain is already working through, rather than
+ * starting a nested one.
+ *
+ * @returns Nothing.
+ */
 export function drainNotificationQueue(): void {
   if (notifyDepth > 0) return;
   notifyDepth++;
@@ -893,6 +941,12 @@ export function queueSignalNotification(signal: ReactiveSignal): void {
   }
 }
 
+/**
+ * Mark every subscriber of `signal` dirty and queue them for the next drain.
+ *
+ * @param signal The signal that changed.
+ * @returns Nothing.
+ */
 export function notifySubscribers(signal: ReactiveSignal) {
   const sig = signal as SignalWithList;
   const head = sig.subsHead;

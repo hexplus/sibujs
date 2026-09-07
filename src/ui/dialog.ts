@@ -61,6 +61,12 @@ function removeGlobalListenerIfIdle(): void {
   _dlg.listenerAttached = false;
 }
 
+/**
+ * Dialog open/close state with focus trapping and scroll locking wired in.
+ *
+ * @returns A handle exposing `open`, `close`, `toggle` and the reactive
+ * `isOpen` accessor.
+ */
 export function dialog(): {
   open: () => void;
   close: () => void;

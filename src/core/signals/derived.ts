@@ -31,6 +31,9 @@ import type { Accessor } from "./signal";
  * That keeps the cheap boolean dirty flag AND makes `equals` actually stop
  * propagation, with recomputation still fully lazy: `_validate` only ever runs
  * when an effect is genuinely about to observe the value.
+ *
+ * @returns An accessor for the computed value. It recomputes lazily on read
+ * after any dependency changes.
  */
 export function derived<T>(
   getter: () => T,

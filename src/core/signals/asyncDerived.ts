@@ -87,6 +87,9 @@ export interface AsyncDerivedContext {
  *   return r.json();
  * }, []);
  * ```
+ *
+ * @returns An accessor exposing the async result along with its loading and
+ * error state.
  */
 export function asyncDerived<T>(
   factory: (context: AsyncDerivedContext) => Promise<T>,

@@ -52,6 +52,14 @@ export interface ArrayActions<T> {
   clear(): void;
 }
 
+/**
+ * A signal holding an array, plus mutation helpers that write a NEW array each
+ * time so the signal actually notifies.
+ *
+ * @param initial Starting items; copied, so the caller's array is not aliased.
+ * @returns A `[accessor, actions]` pair — `actions` carries `push`, `remove`,
+ * `insert`, `move`, `clear` and friends.
+ */
 export function array<T>(initial: T[] = []): [Accessor<T[]>, ArrayActions<T>] {
   const [arr, setArr] = signal<T[]>([...initial]);
 
