@@ -7,6 +7,113 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.2.0] — 2026-09-06
+
+Making the runtime loud where it used to be quiet. Every item below is a case
+where the library did the wrong thing — or the right thing for an unstated
+reason — without saying so, and the cost was paid by whoever had to guess. Two
+widened signatures, one new runtime behaviour, four new development warnings,
+and a production bundle that is *smaller* than 4.1.0 despite all of them. No
+breaking changes.
+
+### Fixed
+
+- **Development diagnostics now actually compile out of production builds.**
+  They did not. The dev gate led with a `globalThis.__SIBU_DEV__` lookup, and a
+  member expression is not something a bundler can substitute or fold — so
+  nothing was ever eliminated and every warning string the library can emit
+  shipped to every consumer, to be tested at runtime and never printed.
+
+  The gate is now a statically foldable constant, and the warning helpers test
+  the build-time define inline so their bodies fold to nothing even in a
+  published `dist` chunk. A production consumer's bundle no longer contains the
+  diagnostics at all — so the core runtime is smaller than 4.1.0 despite
+  everything added below:
+
+  | gzipped, minified, `__SIBU_DEV__: false` | 4.1.0 | 4.2.0 |
+  | --- | --- | --- |
+  | `sibujs` | 26,895 | **25,907** |
+  | `sibujs/plugins` | 28,877 | **28,665** |
+  | `sibujs/ui` | 16,462 | **16,106** |
+  | application exercising every warning below | 33,658 | **33,030** |
+
+  `tests/treeshaking-dev-diagnostics.test.ts` bundles for real and fails if any
+  diagnostic string survives, so this cannot silently regress again. Development
+  builds grow, which is where the diagnostics are supposed to be: the same
+  application is 53,009 bytes gzipped with `__SIBU_DEV__: true`.
+
+- **`RouterLink` ignored a reactive `class`.** Tag factories honour a getter or
+  a `{ name: condition }` map; `RouterLink` read the prop with
+  `typeof classAttr === "string"`, so any other form fell through to `""` and
+  the attribute was simply never written — no error, no class, no clue. It now
+  resolves the prop through the same helper the tag factories use, inside the
+  effect that maintains active-link state, so a getter is genuinely reactive
+  rather than merely accepted.
+
+- **A focused field lost the caret on every reactive rebuild.** A block that
+  re-creates its children takes focus,
+  selection and IME state with it, so typing one character into an input inside
+  such a block ended the edit. Focus and the selection range are now restored
+  when the rebuilt subtree contains an element of re-establishable identity
+  (`data-focus-key`, `id`, or `name`), and the runtime warns in development when
+  it cannot.
+
+  It does not guess. A match must be unique — `name` is shared by every radio in
+  a group, and moving the caret to a sibling control is worse than losing it —
+  and focus is only restored when it was genuinely lost, never when the rebuild
+  moved it somewhere deliberately. An in-progress IME composition cannot be
+  preserved at all, because the composition belongs to the destroyed node; the
+  warning says so rather than implying otherwise.
+
+- **The style sanitizer dropped `url()` declarations in silence.** The guard is
+  correct and stays — `url()` in an inline style is an exfiltration channel —
+  but a blocked `background-image` reads as a rendering bug, not a security
+  decision, and images rendered as empty boxes across several renderers with
+  nothing in any console. Each dropped declaration is now announced in
+  development, naming the property, the value, the element, why it went, and the
+  sanctioned alternatives (`<img>` for content, a stylesheet class for
+  decoration — stylesheet CSS is not sanitized). Exactly one warning per dropped
+  declaration, de-duplicated per element so a reactive style cannot flood the
+  console.
+
+- **The duplicate-runtime warning gave obsolete advice.** It told users to
+  configure `optimizeDeps.exclude`, which the reactive core's global registry
+  already makes unnecessary — every copy routes through the first one, so signal
+  writes reach subscribers registered by any of them. Duplication is a size
+  problem, not a correctness one, and the message now says that.
+
+### Changed
+
+- **`show`, `when` and `match` accept both an element and a factory.** The
+  shapes disagreed: `show(cond, element)` took an element while
+  `when(cond, () => el)` took thunks. Passing the wrong one produced an obscure
+  `TypeError` from inside the directive, or — for `when` — rendered nothing at
+  all and said nothing. Every form is accepted everywhere now; a factory is
+  still rebuilt per switch, and a bare element is re-attached as-is.
+
+  A re-attached element keeps its own reactive bindings: the directive did not
+  create it and does not tear it down. Development warns on the reuse, because
+  the node also brings back whatever state it accumulated while detached.
+
+- **Sanitizer entry points take an optional context.** `sanitizeCSSValue`,
+  `sanitizeStyleAttribute` and `sanitizeAttributeString` accept an optional
+  property/element used only to enrich the development warning. It never changes
+  a security decision, and every existing call site keeps working.
+
+### Documentation
+
+- Every exported function reachable from an entry point now carries a doc
+  comment saying what it does and what it returns — the router's navigation and
+  guard API, the form validators, the tracking primitives, and the widget and
+  UI factories among them. Signatures that used to require reading
+  `dist/index.d.ts` are documented at the source.
+
+- Functions that participate in a known trap say so, and name the way out:
+  `when` and `match` carry the keying pattern that avoids destroying a live
+  edit; `show` explains when to prefer `when` and what that costs.
+
+---
+
 ## [4.1.0] — 2026-09-03
 
 Progressive-enhancement ergonomics, driven by building a complete chess

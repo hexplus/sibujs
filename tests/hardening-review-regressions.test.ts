@@ -71,20 +71,26 @@ describe("a bare element branch stays reactive across a switch", () => {
   it("still disposes a FACTORY-built branch, which it does own", async () => {
     const [flag, setFlag] = signal(true);
     const [label, setLabel] = signal("one");
-    let built: HTMLElement | null = null;
+    // Collected into an array rather than a `let … = null` binding: TypeScript
+    // does not track assignments made inside a callback, so a `let` initialised
+    // to null narrows to `null` at the read below and then to `never` after the
+    // guard. Pushing also records every node the factory builds, which is what
+    // the assertion is really about.
+    const built: HTMLElement[] = [];
     const host = div([
       when(
         () => flag(),
         () => {
-          built = div({ class: () => label() }) as HTMLElement;
-          return built;
+          const el = div({ class: () => label() }) as HTMLElement;
+          built.push(el);
+          return el;
         },
         () => span("other"),
       ),
     ]);
     document.body.appendChild(host);
     await flush();
-    const first = built;
+    const first = built[0];
     if (!first) throw new Error("branch not built");
 
     setFlag(false); // discarded — `when` built it, so `when` disposes it
