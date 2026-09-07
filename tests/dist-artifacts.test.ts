@@ -42,6 +42,7 @@ const DIAGNOSTIC_MARKERS = {
   "when()/match() element-branch reuse": "branch was given as an element",
   "duplicate reactive runtime": "Multiple instances of the reactive runtime",
   "warning cap notice": "suppressing further",
+  "thenable-setup explanation": "an unwrapped loader is called as a setup",
 } as const;
 
 // `dist/` only exists after `npm run build`. Skipping locally keeps a plain
@@ -87,6 +88,15 @@ describe.skipIf(!built && !onCI)("published CDN artifacts", () => {
     const prod = statSync(PROD_CDN).size;
     const dev = statSync(DEV_CDN).size;
     expect(prod).toBeLessThan(dev);
+  });
+
+  it("keeps the enhancement guard's own error message in production", () => {
+    // The thenable guard is behaviour, not a diagnostic: it stops a broken
+    // enhancement being reported as successful, so it must throw in production
+    // too. Only its long explanation is traded away. If this string ever
+    // disappears, the guard went with it.
+    const source = readFileSync(PROD_CDN, "utf8");
+    expect(source).toContain("setup returned a promise");
   });
 
   it("the production CDN bundle still self-registers on window", () => {

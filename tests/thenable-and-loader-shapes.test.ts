@@ -157,19 +157,56 @@ describe("Suspense recognises async work by shape, not by realm", () => {
 
   it("awaits a plain thenable", async () => {
     const resolved = el("thenable-loaded");
-    const thenable = {
+    const thenable: PromiseLike<HTMLElement> = {
       // biome-ignore lint/suspicious/noThenProperty: a thenable is the subject of this test
-      then(onFulfilled: (v: HTMLElement) => void) {
-        queueMicrotask(() => onFulfilled(resolved));
+      then(onFulfilled?: ((v: HTMLElement) => never) | null) {
+        queueMicrotask(() => onFulfilled?.(resolved));
+        return thenable as never;
       },
     };
 
-    const host = div([Suspense({ nodes: () => thenable as never, fallback: () => el("loading") })]);
+    const host = div([Suspense({ nodes: () => thenable, fallback: () => el("loading") })]);
     document.body.appendChild(host);
     await flush();
 
     expect(host.querySelector(".suspense-error")).toBeNull();
     expect(resolved.isConnected).toBe(true);
+  });
+
+  it("inserts a DOM node that happens to expose `then` instead of awaiting it", async () => {
+    // A custom element may define a `then` method. Shape alone would classify
+    // it as async, leaving the boundary on its fallback forever — so the check
+    // excludes anything with a numeric `nodeType`, which also covers a node
+    // from another realm where `instanceof Node` would not.
+    const node = el("i-am-a-node") as HTMLElement & { then?: unknown };
+    // biome-ignore lint/suspicious/noThenProperty: a node with `then` is the case under test
+    node.then = () => {
+      throw new Error("Suspense awaited a DOM node");
+    };
+
+    const host = div([Suspense({ nodes: () => node, fallback: () => el("loading") })]);
+    document.body.appendChild(host);
+    await flush();
+
+    expect(host.textContent).toContain("i-am-a-node");
+    expect(host.querySelector(".suspense-error")).toBeNull();
+    expect(node.isConnected).toBe(true);
+  });
+
+  it("accepts an element as the fallback, not only a function", async () => {
+    let resolveIt: (v: HTMLElement) => void = () => {};
+    const pending = new Promise<HTMLElement>((r) => {
+      resolveIt = r;
+    });
+
+    const host = div([Suspense({ nodes: () => pending, fallback: el("waiting") })]);
+    document.body.appendChild(host);
+    await flush();
+    expect(host.textContent).toContain("waiting");
+
+    resolveIt(el("done"));
+    await flush();
+    expect(host.textContent).toContain("done");
   });
 
   it("still renders a synchronous element without a fallback flash", async () => {

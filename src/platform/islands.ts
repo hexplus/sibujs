@@ -34,16 +34,28 @@ export type IslandLoader = () => Promise<EnhanceSetup | { default: EnhanceSetup 
  * returns `void | (() => void)`, so a promise-returning function is not
  * assignable to it — with the unbranded loader arm gone, an unwrapped loader
  * no longer satisfies `IslandRegistration` at all.
+ *
+ * The brand is a phantom STRING-keyed property, never a `unique symbol`. A
+ * `unique symbol` has nominal identity per declaration, so two copies of this
+ * package's `.d.ts` in one dependency tree would produce two incompatible
+ * `LazyIslandLoader` types and `lazyIsland()` output from one copy would not
+ * satisfy the other copy's `registerIsland`. That is not hypothetical here:
+ * the registry is deliberately shared through `Symbol.for` precisely because
+ * duplicate copies are expected. A structural brand stays assignable across
+ * them. The property exists only in the type — the runtime marker is still the
+ * global symbol below.
  */
-export type LazyIslandLoader = IslandLoader & { readonly [LAZY]: true };
+export type LazyIslandLoader = IslandLoader & { readonly __sibujsLazyIsland: true };
 
 /** Either an inline setup, or a {@link lazyIsland}-branded loader. */
 export type IslandRegistration = EnhanceSetup | LazyIslandLoader;
 
 /** Island ids appear in attribute selectors and registry lookups. */
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
-/** Brand distinguishing a lazy loader from an inline setup (both are functions). */
-const LAZY: unique symbol = Symbol.for("sibujs.islands.lazy") as never;
+/** Runtime brand distinguishing a lazy loader from an inline setup (both are
+ *  functions). Registered globally so a loader wrapped by one copy of the
+ *  package is still recognised by another. */
+const LAZY = Symbol.for("sibujs.islands.lazy");
 
 // Shared across duplicate runtime copies so islands registered through one copy
 // are mountable by mountIslands() called through another.
@@ -96,40 +108,6 @@ async function resolveSetup(reg: IslandRegistration): Promise<EnhanceSetup | nul
   }
   // Inline setup — used directly, never pre-called.
   return reg as EnhanceSetup;
-}
-
-/**
- * Wrap a setup so that returning a thenable is a hard error rather than a
- * silent no-op.
- *
- * Two different mistakes land here, and neither can be detected before the
- * function runs — an island setup and a lazy loader are both plain functions:
- *
- *   - a loader that was never wrapped in {@link lazyIsland}. Called as a setup
- *     it ignores `ctx`, returns a promise, and the island would otherwise be
- *     marked enhanced while its real setup never ran.
- *   - an `async` setup. `enhance()` is a synchronous transaction, so any
- *     binding registered after the first `await` lands outside it and escapes
- *     both the rollback and the disposer.
- *
- * Throwing is what makes this safe rather than merely loud: `enhance()` records
- * ownership and marks the root only after the setup returns, so an exception
- * here rolls the enhancement back and leaves no `data-sibu-enhanced` marker to
- * misreport.
- */
-function rejectThenableSetup(name: string, setup: EnhanceSetup): EnhanceSetup {
-  return (ctx) => {
-    const returned = setup(ctx) as unknown;
-    if (returned && typeof (returned as PromiseLike<unknown>).then === "function") {
-      throw new Error(
-        `[SibuJS islands] the setup for "${name}" returned a promise. ` +
-          "If it is a lazy import, register it as lazyIsland(() => import(…)) — an unwrapped loader is called as a " +
-          "setup, so its module is never loaded. If it is an async setup, make it synchronous: enhance() is a " +
-          "synchronous transaction, and bindings registered after an await escape both its rollback and its disposer.",
-      );
-    }
-    return returned as ReturnType<EnhanceSetup>;
-  };
 }
 
 export interface MountIslandsOptions {
@@ -214,7 +192,7 @@ export function mountIslands(
           // already rolled back the island's bindings/listeners — the isolation
           // is real lifecycle isolation, not just control flow.
           try {
-            const disposeIsland = enhance(el, rejectThenableSetup(name, setup));
+            const disposeIsland = enhance(el, setup);
             // Teardown can also land *during* setup (setup reaches the cleanup,
             // directly or via a parent). The disposers list was drained before
             // this disposer existed, so pushing it now would strand the island

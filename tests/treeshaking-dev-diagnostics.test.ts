@@ -49,6 +49,7 @@ const CORE_MARKERS = {
   // Emitted by tagFactory and the style sanitizer once their warning caches
   // fill up, so it belongs with the core diagnostics.
   "warning cap notice": "suppressing further",
+  "thenable-setup explanation": "an unwrapped loader is called as a setup",
   // Explanatory prose reached only from a warning callback. It leaked twice
   // while this work was in progress, because tree-shaking marks a TOP-LEVEL
   // binding live before the `__SIBU_DEV__` define folds its only reference

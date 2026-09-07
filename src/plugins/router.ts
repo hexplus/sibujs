@@ -2774,8 +2774,16 @@ export function RouterLink(
  * because ownership is the correct primitive to express that with.
  */
 export function Suspense(props: {
-  fallback?: () => HTMLElement | HTMLElement;
-  nodes: () => HTMLElement | Promise<HTMLElement>;
+  /** Shown while `nodes` is pending. An element, or a function returning one. */
+  fallback?: (() => HTMLElement) | HTMLElement;
+  /**
+   * The content. May be an element, or any thenable resolving to one —
+   * `PromiseLike`, not `Promise`, because a promise from another realm or a
+   * custom thenable is awaited just the same. The previous type admitted only
+   * `Promise`, so the very values the runtime was fixed to handle still had to
+   * be cast at the call site.
+   */
+  nodes: () => HTMLElement | PromiseLike<HTMLElement>;
 }): Node {
   const anchor = document.createComment("suspense-boundary");
   let currentNode: Node | null = null;
@@ -2864,7 +2872,12 @@ export function Suspense(props: {
       //
       // `await` already accepts any thenable, so shape is both the safer test
       // and the one that matches what the next line actually does.
-      if (result != null && typeof (result as PromiseLike<HTMLElement>).then === "function") {
+      // A DOM node is never async work, even if it happens to expose `then`.
+      // Custom elements can define one, and `nodeType` is the realm-agnostic
+      // way to ask — `instanceof Node` would fail for a node from an iframe,
+      // reintroducing the very cross-realm blindness this check replaced.
+      const isNode = typeof (result as { nodeType?: unknown } | null)?.nodeType === "number";
+      if (!isNode && result != null && typeof (result as PromiseLike<HTMLElement>).then === "function") {
         showFallback(myGeneration);
         element = await (result as PromiseLike<HTMLElement>);
       } else {

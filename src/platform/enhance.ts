@@ -13,7 +13,7 @@
 // and ties every binding to disposal — so static content never re-paints.
 // ---------------------------------------------------------------------------
 
-import { devAssert, isDev } from "../core/dev";
+import { DEV, devAssert, isDev } from "../core/dev";
 import {
   MAX_DRAIN_TEARDOWNS,
   registerDisposer,
@@ -27,6 +27,8 @@ import { setSafeAttribute } from "../utils/setSafeAttribute";
 /** Attribute marking a root that *currently* owns an active enhancement.
  *  Added on commit, removed on disposal — see the lifecycle notes on
  *  {@link enhance}. */
+declare const __SIBU_DEV__: boolean | undefined;
+
 const ENHANCED_ATTR = "data-sibu-enhanced";
 
 /**
@@ -551,6 +553,53 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
   let extra: void | (() => void);
   try {
     extra = setup(ctx);
+    // A setup that returns a thenable did not finish inside this transaction,
+    // so treating it as successful is a lie the marker would then carry.
+    //
+    // Two distinct mistakes arrive as the same shape, and neither is
+    // detectable before the call — an island setup and a lazy loader are both
+    // plain functions:
+    //
+    //   - a loader that was never wrapped in `lazyIsland()`. Invoked as a
+    //     setup it ignores `ctx`, returns the import promise, and its module
+    //     is never loaded, so the real setup never runs at all.
+    //   - an `async` setup. Everything after its first `await` registers
+    //     outside this try block: past the rollback, past the disposer, and
+    //     past the commit below.
+    //
+    // Throwing rather than warning is what makes this safe: the commit that
+    // records ownership and sets `data-sibu-enhanced` is below, so an
+    // exception here leaves the root exactly as unenhanced as it started.
+    const returned: unknown = extra;
+    if (returned && typeof (returned as PromiseLike<unknown>).then === "function") {
+      // The thenable is about to be discarded with nobody left to observe it.
+      // An unwrapped loader whose `import()` 404s would otherwise raise an
+      // unhandled rejection on top of the error we are throwing — and that
+      // rejection is the more confusing of the two, because it names a module
+      // the developer did not knowingly ask anyone to load. Report it and mark
+      // it handled.
+      (returned as PromiseLike<unknown>).then(undefined, (reason: unknown) => {
+        if (typeof console !== "undefined") {
+          console.error("[SibuJS enhance] the promise returned by the setup also rejected:", reason);
+        }
+      });
+      // The THROW ships in both builds — a guard that stops a broken
+      // enhancement being reported as successful cannot be development-only.
+      // Only the prose is traded away, via the inline define test rather than
+      // `DEV`: the published `dist` chunk defeats `DEV`'s inlining (see
+      // `src/core/dev.ts`), and a helper taking a message-building callback
+      // does not fold either, because its own body stays live and the argument
+      // is therefore still evaluated. A ternary on the define folds, and the
+      // dead branch's literals go with it.
+      throw new Error(
+        (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV)
+          ? "[SibuJS enhance] the setup returned a promise, so its work did not complete inside the enhancement " +
+              "transaction. If it is a lazy import, register it as lazyIsland(() => import(…)) — an unwrapped loader " +
+              "is called as a setup, so its module is never loaded. If it is an async setup, make it synchronous: " +
+              "bindings registered after an await escape both the rollback and the disposer."
+          : "[SibuJS enhance] setup returned a promise",
+      );
+    }
   } catch (err) {
     drainTeardowns(teardowns, "enhance");
     throw err;

@@ -7,6 +7,76 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.3.0] — 2026-09-07
+
+Two defects where a value of the right *shape* was judged by the wrong test, so
+the runtime confidently did the wrong thing. Minor rather than patch: one public
+type is deliberately narrowed and one previously-silent case now throws.
+
+### Fixed
+
+- **An island loader that was never wrapped in `lazyIsland()` was run as a
+  setup.** A setup and a loader are both plain functions, so nothing could tell
+  them apart before one was called. Invoked as a setup, the loader ignored its
+  `ctx`, returned an import promise nobody awaited, and its module was never
+  fetched — yet `enhance()` returned normally and the element was stamped
+  `data-sibu-enhanced="true"`. The marker claimed an enhancement whose real
+  setup had never run, which is the one thing the marker exists to be trusted
+  about.
+
+  The guard lives in `enhance()` rather than in `mountIslands`, because
+  `enhance()` and `enhanceAll()` are public and are the most direct way to reach
+  the same defect. A setup returning a thenable now throws — before the commit
+  that records ownership and sets the marker, so the transaction rolls back and
+  leaves the root exactly as unenhanced as it started.
+
+- **`Suspense` decided "is this async?" with `instanceof Promise`.** That asks
+  which realm built the object, not what it can do. A promise from an iframe, a
+  `vm` context, a worker bridge or a polyfill failed the test and was treated as
+  a DOM node: `insertBefore` threw, the boundary rendered its error branch for
+  work that was about to succeed, and the element the promise went on to resolve
+  to was never inserted and never disposed — live reactive bindings attached to
+  nothing.
+
+  The check is now by shape (`typeof value.then === "function"`), which is what
+  `await` itself accepts. Nodes are excluded by a realm-agnostic `nodeType`
+  test, so a custom element exposing a `then` method is still inserted rather
+  than awaited.
+
+### Changed
+
+- **`registerIsland` no longer accepts an unwrapped loader.** `lazyIsland()`
+  returns a branded `LazyIslandLoader`, and `IslandRegistration` accepts only
+  that or an inline `EnhanceSetup`. This is the compile-time half of the fix
+  above: the mistake is now a type error instead of a silent runtime failure.
+
+  **Migration:** wrap the loader — `registerIsland("chart", lazyIsland(() =>
+  import("./chart.js")))`. Code that annotates a variable as `IslandLoader`
+  before passing it discards the brand and must wrap at the call site, or widen
+  the annotation to `LazyIslandLoader`. The brand is a phantom string-keyed
+  property rather than a `unique symbol`, so it stays assignable across
+  duplicate copies of the package in one dependency tree — the same scenario the
+  runtime registry already shares through `Symbol.for`.
+
+- **An `async` enhancement setup now throws instead of half-working.**
+  Previously everything before its first `await` was registered and everything
+  after it escaped the transaction — outside the rollback, outside the disposer,
+  and after the commit. It was never supported (`EnhanceSetup` returns
+  `void | (() => void)`); it simply failed quietly. Make the setup synchronous
+  and do async work inside an effect or a lifecycle hook.
+
+- **`Suspense`'s props match what it accepts.** `nodes` is typed
+  `() => HTMLElement | PromiseLike<HTMLElement>`, so the cross-realm and
+  thenable values the fix exists for no longer need a cast; `fallback` is typed
+  `(() => HTMLElement) | HTMLElement`, which the runtime already handled.
+
+The guard's error is thrown in production as well as development — a check that
+stops a broken enhancement being reported as successful cannot be
+development-only. Only its long explanation is compiled out, leaving a short
+message; `tests/dist-artifacts.test.ts` asserts both halves of that.
+
+---
+
 ## [4.2.0] — 2026-09-06
 
 Making the runtime loud where it used to be quiet. Every item below is a case
