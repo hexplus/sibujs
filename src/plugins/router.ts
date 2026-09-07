@@ -2774,8 +2774,16 @@ export function RouterLink(
  * because ownership is the correct primitive to express that with.
  */
 export function Suspense(props: {
-  fallback?: () => HTMLElement | HTMLElement;
-  nodes: () => HTMLElement | Promise<HTMLElement>;
+  /** Shown while `nodes` is pending. An element, or a function returning one. */
+  fallback?: (() => HTMLElement) | HTMLElement;
+  /**
+   * The content. May be an element, or any thenable resolving to one —
+   * `PromiseLike`, not `Promise`, because a promise from another realm or a
+   * custom thenable is awaited just the same. The previous type admitted only
+   * `Promise`, so the very values the runtime was fixed to handle still had to
+   * be cast at the call site.
+   */
+  nodes: () => HTMLElement | PromiseLike<HTMLElement>;
 }): Node {
   const anchor = document.createComment("suspense-boundary");
   let currentNode: Node | null = null;
@@ -2832,7 +2840,12 @@ export function Suspense(props: {
       return;
     }
 
-    if (!(fallback instanceof HTMLElement)) return;
+    // Realm-agnostic, for the same reason the async check below is: an element
+    // from an iframe or another jsdom realm fails `instanceof HTMLElement`, and
+    // the fallback was then dropped in silence while the promise stayed
+    // pending — a boundary showing nothing at all. `nodeType === 1` is what
+    // "is an element" actually means, in any realm.
+    if (!fallback || (fallback as unknown as Node).nodeType !== 1) return;
 
     const parent = commitTarget(myGeneration);
     if (!parent) {
@@ -2852,11 +2865,28 @@ export function Suspense(props: {
     try {
       const result = props.nodes();
       let element: HTMLElement;
-      if (result instanceof Promise) {
+      // Thenable by SHAPE, not `instanceof Promise`.
+      //
+      // `instanceof` asks which realm built the object. A promise from an
+      // iframe, a `vm` context, a worker bridge or a polyfill is a perfectly
+      // good promise and fails that test — it was then treated as a DOM node,
+      // `insertBefore` threw, and the boundary rendered its error branch for
+      // work that was about to succeed. Worse, the element the promise went on
+      // to resolve to was never inserted and never disposed: live reactive
+      // bindings attached to nothing.
+      //
+      // `await` already accepts any thenable, so shape is both the safer test
+      // and the one that matches what the next line actually does.
+      // A DOM node is never async work, even if it happens to expose `then`.
+      // Custom elements can define one, and `nodeType` is the realm-agnostic
+      // way to ask — `instanceof Node` would fail for a node from an iframe,
+      // reintroducing the very cross-realm blindness this check replaced.
+      const isNode = typeof (result as { nodeType?: unknown } | null)?.nodeType === "number";
+      if (!isNode && result != null && typeof (result as PromiseLike<HTMLElement>).then === "function") {
         showFallback(myGeneration);
-        element = await result;
+        element = await (result as PromiseLike<HTMLElement>);
       } else {
-        element = result;
+        element = result as HTMLElement;
       }
 
       // Re-checked *after* the await, immediately before the synchronous

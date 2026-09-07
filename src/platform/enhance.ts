@@ -13,7 +13,7 @@
 // and ties every binding to disposal — so static content never re-paints.
 // ---------------------------------------------------------------------------
 
-import { devAssert, isDev } from "../core/dev";
+import { DEV, devAssert, devWarnLazy, isDev } from "../core/dev";
 import {
   MAX_DRAIN_TEARDOWNS,
   registerDisposer,
@@ -27,6 +27,8 @@ import { setSafeAttribute } from "../utils/setSafeAttribute";
 /** Attribute marking a root that *currently* owns an active enhancement.
  *  Added on commit, removed on disposal — see the lifecycle notes on
  *  {@link enhance}. */
+declare const __SIBU_DEV__: boolean | undefined;
+
 const ENHANCED_ATTR = "data-sibu-enhanced";
 
 /**
@@ -398,7 +400,33 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
   const owner = Symbol("sibujs.enhance");
   let disposed = false;
 
-  const bind = (target_: string | Element | null, fn: (el: HTMLElement) => void): void => {
+  // Whether this context's transaction has been unwound. A setup that returned
+  // a thenable — or one that queued a microtask and then threw — keeps running
+  // after `enhance()` has rolled everything back, and it still holds `ctx`.
+  // Without this flag those continuations register listeners, bindings and
+  // cleanups into an enhancement nobody owns: the root carries no marker, the
+  // disposer has already drained, and the registration can never be released.
+  //
+  // Set AFTER the teardowns drain, never before: a teardown may legitimately
+  // call `ctx.cleanup` while unwinding, and the drain loops until the list is
+  // stable. Closing early would break that documented reentrancy.
+  let closed = false;
+
+  /** True when the context is dead; warns in dev so the drop is not silent. */
+  const isClosed = (method: string): boolean => {
+    if (!closed) return false;
+    devWarnLazy(
+      () =>
+        `enhance: ctx.${method}() was called after this enhancement was rolled back or disposed, so it was ignored. ` +
+        "The setup is still running past the point where its transaction ended — usually an async setup continuing " +
+        "after an await, or a callback it queued before it threw. Registrations made now would belong to nothing: " +
+        "the root carries no enhancement marker and the disposer has already run, so nothing could ever release them.",
+    );
+    return true;
+  };
+
+  const bind = (method: string, target_: string | Element | null, fn: (el: HTMLElement) => void): void => {
+    if (isClosed(method)) return;
     const el = resolveTarget(root, target_);
     if (!el) {
       if (typeof console !== "undefined") {
@@ -421,14 +449,14 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       }
     },
     on: (t, event, handler, options) => {
-      bind(t, (el) => {
+      bind("on", t, (el) => {
         const wrapped = (e: Event) => handler(e as never, el);
         el.addEventListener(event, wrapped as EventListener, options);
         teardowns.push(() => el.removeEventListener(event, wrapped as EventListener, options));
       });
     },
     text: (t, value) => {
-      bind(t, (el) => {
+      bind("text", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             const v = value();
@@ -442,7 +470,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     attr: (t, name, value) => {
-      bind(t, (el) => {
+      bind("attr", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             const v = value();
@@ -476,7 +504,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     classed: (t, name, on) => {
-      bind(t, (el) => {
+      bind("classed", t, (el) => {
         teardowns.push(
           bindNode(el, () => {
             el.classList.toggle(name, Boolean(on()));
@@ -485,7 +513,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     show: (t, when) => {
-      bind(t, (el) => {
+      bind("show", t, (el) => {
         // Toggle the standard `hidden` property — this both reveals an element
         // the server rendered with the `hidden` attribute (the common
         // progressive-enhancement case) and hides one that wasn't. Using
@@ -502,7 +530,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     model: (t, state, options) => {
-      bind(t, (el) => {
+      bind("model", t, (el) => {
         const control = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
         const [get, set] = state;
         const evt =
@@ -524,6 +552,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       });
     },
     each: (target_, describe) => {
+      if (isClosed("each")) return;
       devAssert(typeof describe === "function", "ctx.each: second argument must be a function.");
       const elements =
         typeof target_ === "string" ? ctx.refs<HTMLElement>(target_) : (Array.from(target_) as HTMLElement[]);
@@ -537,6 +566,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
       }
     },
     cleanup: (fn) => {
+      if (isClosed("cleanup")) return;
       teardowns.push(fn);
     },
   };
@@ -551,8 +581,59 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
   let extra: void | (() => void);
   try {
     extra = setup(ctx);
+    // A setup that returns a thenable did not finish inside this transaction,
+    // so treating it as successful is a lie the marker would then carry.
+    //
+    // Two distinct mistakes arrive as the same shape, and neither is
+    // detectable before the call — an island setup and a lazy loader are both
+    // plain functions:
+    //
+    //   - a loader that was never wrapped in `lazyIsland()`. Invoked as a
+    //     setup it ignores `ctx` and returns the import promise. The module IS
+    //     fetched — `import()` ran — but nobody awaits it, so the setup it
+    //     resolves to is discarded and never runs.
+    //   - an `async` setup. Everything after its first `await` registers
+    //     outside this try block: past the rollback, past the disposer, and
+    //     past the commit below.
+    //
+    // Throwing rather than warning is what makes this safe: the commit that
+    // records ownership and sets `data-sibu-enhanced` is below, so an
+    // exception here leaves the root exactly as unenhanced as it started.
+    const returned: unknown = extra;
+    if (returned && typeof (returned as PromiseLike<unknown>).then === "function") {
+      // The thenable is about to be discarded with nobody left to observe it.
+      // An unwrapped loader whose `import()` 404s would otherwise raise an
+      // unhandled rejection on top of the error we are throwing — and that
+      // rejection is the more confusing of the two, because it names a module
+      // the developer did not knowingly ask anyone to load. Report it and mark
+      // it handled.
+      (returned as PromiseLike<unknown>).then(undefined, (reason: unknown) => {
+        // The handler itself must exist in every build — its job is to mark the
+        // rejection handled — but the explanation is a diagnostic and compiles
+        // out with the rest of them.
+        devWarnLazy(() => `enhance: the promise returned by the setup also rejected: ${String(reason)}`);
+      });
+      // The THROW ships in both builds — a guard that stops a broken
+      // enhancement being reported as successful cannot be development-only.
+      // Only the prose is traded away, via the inline define test rather than
+      // `DEV`: the published `dist` chunk defeats `DEV`'s inlining (see
+      // `src/core/dev.ts`), and a helper taking a message-building callback
+      // does not fold either, because its own body stays live and the argument
+      // is therefore still evaluated. A ternary on the define folds, and the
+      // dead branch's literals go with it.
+      throw new Error(
+        (typeof __SIBU_DEV__ !== "undefined" ? __SIBU_DEV__ : DEV)
+          ? "[SibuJS enhance] the setup returned a promise, so its work did not complete inside the enhancement " +
+              "transaction. If it is a lazy import, register it as lazyIsland(() => import(…)): an unwrapped loader " +
+              "is called as a setup, so its module is fetched but the setup it resolves to is discarded. If it is " +
+              "an async setup, make it synchronous — this enhancement has been rolled back, and ctx registrations " +
+              "made after this point are ignored."
+          : "[SibuJS enhance] setup returned a promise",
+      );
+    }
   } catch (err) {
     drainTeardowns(teardowns, "enhance");
+    closed = true;
     throw err;
   }
   if (typeof extra === "function") teardowns.push(extra);
@@ -570,6 +651,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
     // enhance/dispose cycles on a long-lived root don't accumulate closures.
     unregisterDisposer(root, dispose);
     drainTeardowns(teardowns, "enhance");
+    closed = true;
   };
 
   // Commit. Ownership is recorded and only *then* is the root marked, so the

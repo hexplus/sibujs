@@ -103,17 +103,6 @@ export function devAssert(condition: boolean, message: string): void {
 }
 
 /**
- * Warn in dev mode only. No-op in production.
- *
- * Because the body is guarded by {@link DEV}, a production bundler folds this
- * function to an empty one, inlines it at every call site, and drops the
- * message literals with it — so a `devWarn` call costs nothing in production
- * even when the call site itself is unguarded.
- *
- * @param message Warning text, printed to `console.warn` prefixed `[SibuJS]`.
- * @returns Nothing.
- */
-/**
  * Warn in dev only, composing the message lazily.
  *
  * @param build Called only in development; returns the warning text. Returning
@@ -141,6 +130,17 @@ export function devWarnLazy(build: () => string): void {
   }
 }
 
+/**
+ * Warn in dev mode only. No-op in production.
+ *
+ * Because the body is guarded by {@link DEV}, a production bundler folds this
+ * function to an empty one, inlines it at every call site, and drops the
+ * message literals with it — so a `devWarn` call costs nothing in production
+ * even when the call site itself is unguarded.
+ *
+ * @param message Warning text, printed to `console.warn` prefixed `[SibuJS]`.
+ * @returns Nothing.
+ */
 export function devWarn(message: string): void {
   // The `__SIBU_DEV__` test is repeated INLINE here rather than reusing `DEV`,
   // and that redundancy is the point.
