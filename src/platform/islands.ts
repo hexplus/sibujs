@@ -20,13 +20,30 @@ export type IslandStrategy = "load" | "idle" | "visible" | "interaction" | "medi
  *  is one). Only fetched when the island activates. Wrap with {@link lazyIsland}. */
 export type IslandLoader = () => Promise<EnhanceSetup | { default: EnhanceSetup }>;
 
+/**
+ * A loader that has been through {@link lazyIsland}.
+ *
+ * The brand is what makes the distinction real. An inline setup and a loader
+ * are both plain functions, so nothing at runtime can tell them apart before
+ * one is called — and `registerIsland` used to accept a bare `IslandLoader`,
+ * which meant a forgotten `lazyIsland(...)` type-checked and was then invoked
+ * as a setup: it ignored its `ctx`, returned a promise nobody awaited, and the
+ * island was marked enhanced although its real setup never ran.
+ *
+ * Requiring the brand moves that mistake to compile time. `EnhanceSetup`
+ * returns `void | (() => void)`, so a promise-returning function is not
+ * assignable to it — with the unbranded loader arm gone, an unwrapped loader
+ * no longer satisfies `IslandRegistration` at all.
+ */
+export type LazyIslandLoader = IslandLoader & { readonly [LAZY]: true };
+
 /** Either an inline setup, or a {@link lazyIsland}-branded loader. */
-export type IslandRegistration = EnhanceSetup | IslandLoader;
+export type IslandRegistration = EnhanceSetup | LazyIslandLoader;
 
 /** Island ids appear in attribute selectors and registry lookups. */
 const SAFE_NAME = /^[A-Za-z0-9_-]+$/;
 /** Brand distinguishing a lazy loader from an inline setup (both are functions). */
-const LAZY = Symbol.for("sibujs.islands.lazy");
+const LAZY: unique symbol = Symbol.for("sibujs.islands.lazy") as never;
 
 // Shared across duplicate runtime copies so islands registered through one copy
 // are mountable by mountIslands() called through another.
@@ -41,9 +58,9 @@ const registry = globalSingleton(Symbol.for("sibujs.islands.registry.v1"), () =>
  * registerIsland("chart", lazyIsland(() => import("./islands/chart.js")));
  * ```
  */
-export function lazyIsland(loader: IslandLoader): IslandLoader {
+export function lazyIsland(loader: IslandLoader): LazyIslandLoader {
   (loader as unknown as Record<symbol, unknown>)[LAZY] = true;
-  return loader;
+  return loader as LazyIslandLoader;
 }
 
 /**
@@ -79,6 +96,40 @@ async function resolveSetup(reg: IslandRegistration): Promise<EnhanceSetup | nul
   }
   // Inline setup — used directly, never pre-called.
   return reg as EnhanceSetup;
+}
+
+/**
+ * Wrap a setup so that returning a thenable is a hard error rather than a
+ * silent no-op.
+ *
+ * Two different mistakes land here, and neither can be detected before the
+ * function runs — an island setup and a lazy loader are both plain functions:
+ *
+ *   - a loader that was never wrapped in {@link lazyIsland}. Called as a setup
+ *     it ignores `ctx`, returns a promise, and the island would otherwise be
+ *     marked enhanced while its real setup never ran.
+ *   - an `async` setup. `enhance()` is a synchronous transaction, so any
+ *     binding registered after the first `await` lands outside it and escapes
+ *     both the rollback and the disposer.
+ *
+ * Throwing is what makes this safe rather than merely loud: `enhance()` records
+ * ownership and marks the root only after the setup returns, so an exception
+ * here rolls the enhancement back and leaves no `data-sibu-enhanced` marker to
+ * misreport.
+ */
+function rejectThenableSetup(name: string, setup: EnhanceSetup): EnhanceSetup {
+  return (ctx) => {
+    const returned = setup(ctx) as unknown;
+    if (returned && typeof (returned as PromiseLike<unknown>).then === "function") {
+      throw new Error(
+        `[SibuJS islands] the setup for "${name}" returned a promise. ` +
+          "If it is a lazy import, register it as lazyIsland(() => import(…)) — an unwrapped loader is called as a " +
+          "setup, so its module is never loaded. If it is an async setup, make it synchronous: enhance() is a " +
+          "synchronous transaction, and bindings registered after an await escape both its rollback and its disposer.",
+      );
+    }
+    return returned as ReturnType<EnhanceSetup>;
+  };
 }
 
 export interface MountIslandsOptions {
@@ -163,7 +214,7 @@ export function mountIslands(
           // already rolled back the island's bindings/listeners — the isolation
           // is real lifecycle isolation, not just control flow.
           try {
-            const disposeIsland = enhance(el, setup);
+            const disposeIsland = enhance(el, rejectThenableSetup(name, setup));
             // Teardown can also land *during* setup (setup reaches the cleanup,
             // directly or via a parent). The disposers list was drained before
             // this disposer existed, so pushing it now would strand the island

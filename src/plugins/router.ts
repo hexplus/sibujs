@@ -2852,11 +2852,23 @@ export function Suspense(props: {
     try {
       const result = props.nodes();
       let element: HTMLElement;
-      if (result instanceof Promise) {
+      // Thenable by SHAPE, not `instanceof Promise`.
+      //
+      // `instanceof` asks which realm built the object. A promise from an
+      // iframe, a `vm` context, a worker bridge or a polyfill is a perfectly
+      // good promise and fails that test — it was then treated as a DOM node,
+      // `insertBefore` threw, and the boundary rendered its error branch for
+      // work that was about to succeed. Worse, the element the promise went on
+      // to resolve to was never inserted and never disposed: live reactive
+      // bindings attached to nothing.
+      //
+      // `await` already accepts any thenable, so shape is both the safer test
+      // and the one that matches what the next line actually does.
+      if (result != null && typeof (result as PromiseLike<HTMLElement>).then === "function") {
         showFallback(myGeneration);
-        element = await result;
+        element = await (result as PromiseLike<HTMLElement>);
       } else {
-        element = result;
+        element = result as HTMLElement;
       }
 
       // Re-checked *after* the await, immediately before the synchronous
