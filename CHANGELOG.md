@@ -35,7 +35,7 @@ breaking changes.
   | `sibujs` | 26,895 | **25,836** |
   | `sibujs/plugins` | 28,877 | **28,615** |
   | `sibujs/ui` | 16,462 | **16,112** |
-  | `dist/cdn.global.js` | 27,289 | **26,201** |
+  | `dist/cdn.global.js` | 27,289 | **26,224** |
   | application exercising every warning below | 33,658 | **32,958** |
 
   `tests/treeshaking-dev-diagnostics.test.ts` bundles for real and fails if any
