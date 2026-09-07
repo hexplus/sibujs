@@ -9,49 +9,79 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [4.4.0] — 2026-09-07
 
-### Added — `patterns` on the CDN bundle
+### Added — `cdn.full.global.js`, patterns for no-build pages
 
-`cdn.ts` re-exported `./index` and nothing else, which left the no-build story
-quietly incomplete. Islands are the feature most often reached for WITHOUT a
-bundler — one script tag, server HTML, done — but an island that wanted
-`machine` could not have it: it lives in the `sibujs/patterns` entry point, and
-a `<script>` tag resolves no specifiers. The gap was invisible from inside a
-bundled app, where every entry point resolves.
+A `<script>` tag resolves no specifiers, so a no-build page could not reach
+`sibujs/patterns` at all: `machine` and its siblings were unavailable to the
+audience islands are most often used by. They now ship in a second CDN bundle,
+a superset of the default one, under the same `Sibu` global with the namespace
+kept as `Sibu.patterns`. Core is spread last so it wins any collision. New
+export paths: `sibujs/cdn-full` and `sibujs/cdn-full-dev`.
 
-`window.Sibu` now merges `patterns`, with core spread last so core wins any
-collision, and the namespace kept reachable as `Sibu.patterns`.
+A separate artifact rather than a merge, and that is the whole point. Merging
+patterns into `cdn.global.js` charged every no-build page +13.0% gzip for code
+it never calls — measured, reviewed, and reverted before release. Pages that
+want `machine` ask for it by URL; pages that want `signal` are not billed for
+it.
 
-**Size, measured** — the growth is `patterns` alone:
+**Size, measured.** The default bundle came out of this smaller than it went
+in, because it also lost esbuild's `globalName` wrapper (below):
 
 | bundle | before | after |
 | --- | --- | --- |
-| `cdn.global.js` | 78.3 KB raw / 25.7 KB gzip | 84.5 KB raw / 29.1 KB gzip |
-| `cdn.dev.global.js` | 87.1 KB raw / 29.5 KB gzip | 93.3 KB raw / 32.9 KB gzip |
+| `cdn.global.js` | 80,202 B raw / 26,330 B gzip | 76,490 B / 26,149 B (−4.6% / −0.7%) |
+| `cdn.dev.global.js` | — / 30,199 B gzip | 85,526 B / 30,034 B (−0.5%) |
+| `cdn.full.global.js` | — | 86,298 B / 29,758 B |
+| `cdn.full.dev.global.js` | — | 95,406 B / 33,662 B |
 
 Nothing changes for ESM/CJS consumers — their entry points are untouched and
 still tree-shake per import.
 
-`tests/dist-artifacts.test.ts` executes the published IIFE and asserts the
-merged surface and the collision precedence — `machine` present, `dialog` and
-`form` still the element tag factories — so a spread order edited "for
-tidiness" fails the build rather than the user’s page.
+### Fixed — `validateProps` and `assertType` ran in production browsers
+
+`patterns/contracts.ts` decided dev-vs-production by reading
+`process.env.NODE_ENV` directly. That is not a `define` target, so no bundler
+could fold it, and `process` does not exist in a browser at all — which the
+guards read as *development*:
+
+- `validateProps()` performed full validation and emitted `console.warn` on
+  every production page, and its message text shipped in the bundle.
+- `assertType()` threw instead of returning early, in exactly the builds its
+  own doc comment promised it would be a no-op.
+
+Both now gate on `DEV`, the foldable flag the rest of the framework uses, with
+the warning built inside the guarded branch so the string folds away with it.
+Behaviour for ESM/CJS consumers who define `__SIBU_DEV__` is unchanged; a
+browser build that defines nothing now treats itself as production, matching
+every other diagnostic in the library.
+
+This surfaced only because `patterns` briefly became a CDN artifact. It had
+been latent for as long as `contracts.ts` existed, invisible while the module
+was reachable only through a bundler that set `NODE_ENV`.
+
+`tests/dist-artifacts.test.ts` now executes the published IIFEs and asserts the
+behaviour rather than grepping for strings: `validateProps` warns in the
+development bundle and neither validates nor warns in the production one, and
+`assertType` throws in one and is a no-op in the other. The hand-maintained
+marker list missed this for a full release, which is the argument for testing
+what the bytes DO.
 
 ### Fixed — the CDN builds no longer take esbuild’s `globalName`
 
-Found while verifying the above in a real browser, after a first version of the
-test had passed against it. `globalName: "Sibu"` makes esbuild emit
-`var Sibu = (() => { … })()`, and that assignment runs AFTER the module body.
-`cdn.ts` installs its merged object from inside the body, so the wrapper
-overwrote it with the module’s own export namespace — core only. The merge
-disappeared with no error and a bundle that still defined `Sibu`.
+`globalName: "Sibu"` makes esbuild emit `var Sibu = (() => { … })()`, and that
+assignment runs AFTER the module body. `cdn.ts` installs its object from inside
+the body, so the wrapper overwrote it with the module’s own export namespace.
+Harmless while the two matched; silently wrong the moment they did not, which
+is what happened the first time a bundle merged anything in.
 
-`cdn.ts` now assigns `globalThis.Sibu` itself and the config sets no
-`globalName`. The bundles also self-register in a worker as a result, and are
-smaller for losing the wrapper.
+Both entry points now assign `globalThis.Sibu` themselves and the config sets
+no `globalName`. The bundles self-register in a worker as a result, and are
+~3.7 KB smaller for losing the wrapper.
 
-The first test missed this because it ran the IIFE against a `window` stand-in
-that was not the context’s global, so the two assignments landed in different
-slots. It now runs with `window === globalThis`, as a browser has it.
+A first version of the test missed this because it ran the IIFE against a
+`window` stand-in that was not the context’s global, so the two assignments
+landed in different slots. It now runs with `window === globalThis`, as a
+browser has it.
 
 ---
 

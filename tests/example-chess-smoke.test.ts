@@ -125,11 +125,30 @@ describe.skipIf(!distBuilt || !vendorBuilt)("chess example — production output
     }
 
     expect(failures).toEqual([]);
-    // The graph really was walked: the island, the vendored engine and the
-    // package's own entry points.
-    expect(seen.size).toBeGreaterThan(3);
+    // The graph really was walked: the island and the vendored engine.
+    expect(seen.size).toBeGreaterThan(1);
     expect([...seen].some((u) => u.endsWith("/vendor/chess.js"))).toBe(true);
-    expect([...seen].some((u) => u.includes("/dist/index.js"))).toBe(true);
+
+    // And the framework is NOT in it. The example takes SibuJS from the
+    // <script> tag in index.html, so its module graph is the island plus the
+    // engine and nothing else. An import of `../../dist/*` reappearing here
+    // would mean the example silently needs `npm run build` again — a build
+    // step in the one demo whose whole subject is that islands need none.
+    expect([...seen].some((u) => u.includes("/dist/"))).toBe(false);
+  }, 30_000);
+
+  it("takes the runtime from a script tag, ahead of the deferred island", async () => {
+    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
+    const runtime = html.indexOf("cdn.global.js");
+    const island = html.indexOf("chess-island.js");
+
+    // Present at all: without it `globalThis.Sibu` is undefined and the island
+    // throws on its first line.
+    expect(runtime, "index.html no longer loads the runtime from a script tag").toBeGreaterThan(-1);
+    // And FIRST. The island is a module and therefore deferred, so a classic
+    // script anywhere in the document beats it — but ordering them the way a
+    // reader would write them keeps the example honest.
+    expect(runtime).toBeLessThan(island);
   }, 30_000);
 
   it("does not 404 on the vendored engine, whose build step is easy to forget", async () => {

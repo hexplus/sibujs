@@ -133,6 +133,12 @@
     },
     "./cdn-dev": {
       "default": "./dist/cdn.dev.global.js"
+    },
+    "./cdn-full": {
+      "default": "./dist/cdn.full.global.js"
+    },
+    "./cdn-full-dev": {
+      "default": "./dist/cdn.full.dev.global.js"
     }
   },
   "publishConfig": {

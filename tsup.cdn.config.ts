@@ -73,4 +73,23 @@ export default defineConfig([
       __SIBU_VERSION__: JSON.stringify(version),
     },
   },
+  // core + patterns, for no-build pages that want `machine`. A separate file so
+  // the default bundle above keeps its byte budget: patterns cost +13% gzip,
+  // and most pages never call any of it.
+  {
+    ...shared,
+    entry: { "cdn.full": "cdn.full.ts" },
+    define: {
+      __SIBU_DEV__: "false",
+      __SIBU_VERSION__: JSON.stringify(version),
+    },
+  },
+  {
+    ...shared,
+    entry: { "cdn.full.dev": "cdn.full.ts" },
+    define: {
+      __SIBU_DEV__: "true",
+      __SIBU_VERSION__: JSON.stringify(version),
+    },
+  },
 ]);

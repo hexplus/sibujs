@@ -10,31 +10,26 @@
 // ---------------------------------------------------------------------------
 
 import * as core from "./index";
-import * as patterns from "./patterns";
 
 // Auto-register on window when loaded via <script> tag.
 //
-// `patterns` is here because a no-build consumer has no other way to reach it.
-// It is an ordinary entry point that a bundler resolves from
-// `sibujs/patterns`, but a <script> tag resolves nothing — so for the whole
-// no-build audience `machine` and its siblings simply did not exist. Islands
-// are the feature most often used without a bundler, which is where the gap bit.
+// CORE ONLY, and that is a budget decision rather than an oversight. This is
+// the file every no-build page downloads, so anything merged in is paid for by
+// consumers who never call it. `patterns` cost +13% gzip on its own, which is
+// why it lives in `cdn.full.global.js` instead: pages that want `machine` ask
+// for it, and pages that want `signal` are not charged for it.
 //
-// `sibujs/ui` is deliberately NOT here. It is the framework's UI-behaviour
-// layer — form handling, a11y primitives, virtual lists, transitions, toasts —
-// which most pages never touch, so merging it would make every no-build
-// consumer download all of it to get `signal`. It also exports its own `dialog`
-// and `form`, which are NOT the element tag factories of the same name, so a
-// merge would put two unrelated meanings on one key. It stays bundler-only.
-//
-// Core is spread last so it wins any collision, and `patterns` stays reachable
-// as a namespace.
+// `sibujs/ui` is in neither. It is the framework's UI-behaviour layer — form
+// handling, a11y primitives, virtual lists, transitions, toasts — which most
+// pages never touch, and it exports its own `dialog` and `form` that are NOT
+// the element tag factories of the same name, so merging it would put two
+// unrelated meanings on one key. It stays bundler-only.
 //
 // `globalThis` rather than `window`, so the bundle also self-registers in a
 // worker. In a browser they are the same object. See `tsup.cdn.config.ts` for
 // why this is written by hand instead of via esbuild's `globalName`.
 if (typeof globalThis !== "undefined") {
-  (globalThis as unknown as Record<string, unknown>).Sibu = { ...patterns, ...core, patterns };
+  (globalThis as unknown as Record<string, unknown>).Sibu = { ...core };
 }
 
 // Also export everything for ESM consumers of this file.

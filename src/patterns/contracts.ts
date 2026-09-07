@@ -1,9 +1,18 @@
 /**
  * Runtime prop validation and strict typing contracts for SibuJS.
  * Provides runtime type checking for component props in development mode.
+ *
+ * Both diagnostics here gate on `DEV`, the same foldable flag the rest of the
+ * framework uses, so a `__SIBU_DEV__: false` define removes them and their
+ * message text entirely. They used to test `process.env.NODE_ENV` directly,
+ * which is not a `define` target and does not exist in a browser at all — so
+ * every browser build treated itself as development: `validateProps` ran and
+ * warned, `assertType` threw, and the strings shipped. That went unnoticed
+ * while these functions were reachable only through a bundler; putting
+ * `patterns` on the CDN made them a production artifact.
  */
 
-declare var process: { env?: { NODE_ENV?: string } } | undefined;
+import { DEV, devWarn } from "../core/dev";
 
 // ─── Type Validators ────────────────────────────────────────────────────────
 
@@ -91,13 +100,12 @@ export type PropSchema<Props> = {
 
 /**
  * Validate props against a schema. Returns validated props with defaults applied.
- * In production mode (process.env.NODE_ENV === 'production'), validation is skipped
- * and only defaults are applied for performance.
+ * In production builds validation is skipped and only defaults are applied, so the
+ * returned value is the same either way — only the checking disappears.
  */
 export function validateProps<Props extends object>(props: Partial<Props>, schema: PropSchema<Props>): Props {
   const result = { ...props } as Record<string, unknown>;
   const errors: string[] = [];
-  const isDev = typeof process === "undefined" || process?.env?.NODE_ENV !== "production";
 
   for (const [key, def] of Object.entries(schema)) {
     const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
@@ -107,7 +115,7 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
       result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
     }
 
-    if (!isDev) continue; // Skip validation in production
+    if (!DEV) continue; // folds to `continue`, dropping every check below
 
     // Check required
     if (propDef.required && result[key] == null) {
@@ -130,8 +138,11 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
     }
   }
 
-  if (errors.length > 0 && isDev) {
-    console.warn(`[SibuJS] Prop validation errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
+  // `DEV &&` comes first so the template literal sits inside the folded branch.
+  // A bare `devWarn(...)` would still evaluate its argument, leaving the message
+  // text in the bundle even though it could never print.
+  if (DEV && errors.length > 0) {
+    devWarn(`Prop validation errors:\n${errors.map((e) => `  - ${e}`).join("\n")}`);
   }
 
   return result as Props;
@@ -158,10 +169,12 @@ export function defineStrictComponent<Props extends object>(config: {
 
 /**
  * Assert that a value satisfies a contract at runtime.
- * No-op in production builds.
+ *
+ * No-op in production builds — genuinely, now. The previous guard returned early
+ * only when `process` existed, so in a browser it fell through and threw.
  */
 export function assertType<T>(value: unknown, validator: Validator<T>, label?: string): asserts value is T {
-  if (typeof process !== "undefined" && process?.env?.NODE_ENV === "production") return;
+  if (!DEV) return;
   const result = validator(value as T, label || "value");
   if (result !== true) {
     throw new TypeError(`[SibuJS Contract] ${result}`);

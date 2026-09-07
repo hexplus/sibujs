@@ -260,6 +260,10 @@
       </section>
     </main>
 
+    <!-- The runtime, from the CDN. A classic script, so it runs before the
+         deferred module below. Swap in cdn.dev.global.js to get SibuJS's
+         warnings while working on the example. -->
+    <script src="https://unpkg.com/sibujs@latest/dist/cdn.global.js"></script>
     <script type="module" src="./chess-island.js"></script>
   </body>
 </html>

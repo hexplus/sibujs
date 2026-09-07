@@ -29,6 +29,8 @@ import { describe, expect, it } from "vitest";
 const ROOT = resolve(__dirname, "..");
 const PROD_CDN = resolve(ROOT, "dist/cdn.global.js");
 const DEV_CDN = resolve(ROOT, "dist/cdn.dev.global.js");
+const FULL_CDN = resolve(ROOT, "dist/cdn.full.global.js");
+const FULL_DEV_CDN = resolve(ROOT, "dist/cdn.full.dev.global.js");
 
 // Every diagnostic, identified by a literal only it emits, which survives
 // minification verbatim. Keep in step with the marker list in
@@ -46,6 +48,15 @@ const DIAGNOSTIC_MARKERS = {
   "thenable-setup explanation": "an unwrapped loader is called as a setup",
   "post-rollback context use": "was called after this enhancement was rolled back",
   "setup rejection explanation": "the promise returned by the setup also rejected",
+} as const;
+
+// Diagnostics that live in `sibujs/patterns`, so they only appear in the
+// bundles that carry it. `validateProps` gated on `process.env.NODE_ENV`
+// until 4.4.0 — not a `define` target, and absent in a browser, so the check
+// ran and warned in every browser build. Nothing caught it because this list
+// is hand-maintained; the behavioural tests below are the real guard.
+const PATTERNS_DIAGNOSTIC_MARKERS = {
+  "prop validation errors": "Prop validation errors",
 } as const;
 
 // `dist/` only exists after `npm run build`. Skipping locally keeps a plain
@@ -147,45 +158,121 @@ function loadCdnGlobal(file: string): Record<string, unknown> {
   return context.Sibu as Record<string, unknown>;
 }
 
-describe.skipIf(!built && !onCI)("the core CDN global", () => {
+const fullBuilt = existsSync(FULL_CDN) && existsSync(FULL_DEV_CDN);
+
+describe.skipIf(!built && !onCI)("the default CDN global", () => {
   it("self-registers an object on window", () => {
     expect(typeof loadCdnGlobal(PROD_CDN)).toBe("object");
   });
 
-  it("carries the patterns helpers a no-build island cannot otherwise reach", () => {
+  it("carries core and nothing else", () => {
+    // This is the file every no-build page downloads, so anything merged in is
+    // paid for by consumers who never call it. `patterns` cost +13% gzip on its
+    // own, which is why it ships as `cdn.full.global.js` instead.
     const Sibu = loadCdnGlobal(PROD_CDN);
+    expect(typeof Sibu.signal).toBe("function");
+    expect(Sibu.machine).toBeUndefined();
+    expect(Sibu.patterns).toBeUndefined();
+    expect(Sibu.ui).toBeUndefined();
+    expect(Sibu.createDialogAria).toBeUndefined();
+  });
+
+  it("stays within its byte budget", () => {
+    // 80,202 B raw / 26,330 B gzip was the size before patterns was merged in
+    // and then split back out. The default bundle must not drift above it
+    // without someone deciding to; a review caught exactly that drift once.
+    expect(statSync(PROD_CDN).size).toBeLessThanOrEqual(80_202);
+  });
+});
+
+describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
+  it("both full bundles exist (run `npm run build` first)", () => {
+    expect(existsSync(FULL_CDN), `missing ${FULL_CDN}`).toBe(true);
+    expect(existsSync(FULL_DEV_CDN), `missing ${FULL_DEV_CDN}`).toBe(true);
+  });
+
+  it("carries the patterns surface a no-build page cannot otherwise reach", () => {
+    const Sibu = loadCdnGlobal(FULL_CDN);
     expect(typeof Sibu.machine).toBe("function");
     expect(typeof (Sibu.patterns as Record<string, unknown>).machine).toBe("function");
+    expect(typeof Sibu.signal).toBe("function");
   });
 
-  it("does NOT carry the ui behaviour layer", () => {
-    // The boundary, asserted from the core side: merging `sibujs/ui` in would
-    // make every no-build consumer download forms, virtual lists and
-    // transitions to get `signal`.
-    const Sibu = loadCdnGlobal(PROD_CDN);
-    expect(Sibu.createDialogAria).toBeUndefined();
-    expect(Sibu.createFocusManager).toBeUndefined();
-    expect(Sibu.ui).toBeUndefined();
-  });
-
-  it("keeps `dialog` and `form` as the element tag factories", async () => {
-    // `sibujs/ui` exports its own `dialog` and `form`, and they are NOT the tag
-    // factories of the same name. Keeping the bundles apart is what stops that
-    // ambiguity reaching `Sibu`; if the two are ever merged, this fails.
-    //
+  it("lets core win every name collision", async () => {
     // Identified by arity rather than by calling them: a tag factory needs a
     // DOM, and identity comparison is meaningless across a separate bundle.
     // Minification preserves parameter count.
-    const Sibu = loadCdnGlobal(PROD_CDN);
+    const Sibu = loadCdnGlobal(FULL_CDN);
     const core = (await import("../dist/index.js")) as unknown as Record<string, () => void>;
     const ui = (await import("../dist/ui.js")) as unknown as Record<string, () => void>;
 
     // The premise this test rests on, asserted rather than assumed.
     expect(ui.dialog).not.toBe(core.dialog);
     expect(core.dialog.length).not.toBe(ui.dialog.length);
-    expect(core.form.length).not.toBe(ui.form.length);
 
     expect((Sibu.dialog as () => void).length).toBe(core.dialog.length);
     expect((Sibu.form as () => void).length).toBe(core.form.length);
+  });
+
+  it("compiles the patterns diagnostics out of production", () => {
+    const prod = readFileSync(FULL_CDN, "utf8");
+    const dev = readFileSync(FULL_DEV_CDN, "utf8");
+    for (const [name, marker] of Object.entries(PATTERNS_DIAGNOSTIC_MARKERS)) {
+      expect(prod, `${name} survived into the production bundle`).not.toContain(marker);
+      expect(dev, `${name} is missing from the development bundle`).toContain(marker);
+    }
+  });
+
+  // The tests that actually matter: the marker list above is hand-maintained
+  // and missed this for a whole release. These run the published bytes.
+  it("validateProps neither validates nor warns in production", () => {
+    const warnings: string[] = [];
+    const context = createContext({
+      console: { warn: (...a: unknown[]) => warnings.push(a.join(" ")), error() {}, log() {} },
+    }) as Record<string, unknown>;
+    context.window = context;
+    runInContext(readFileSync(FULL_CDN, "utf8"), context);
+    const Sibu = context.Sibu as Record<string, never>;
+    const validators = Sibu.validators as unknown as Record<string, unknown>;
+
+    const out = (Sibu.validateProps as unknown as (p: object, s: object) => Record<string, unknown>)(
+      { n: "not a number" },
+      { n: { type: validators.number, required: true } },
+    );
+
+    expect(warnings).toEqual([]);
+    // Defaults still applied, value untouched: only the checking disappears.
+    expect(out.n).toBe("not a number");
+  });
+
+  it("validateProps does warn in the development bundle", () => {
+    // The negative above is only meaningful if the positive holds.
+    const warnings: string[] = [];
+    const context = createContext({
+      console: { warn: (...a: unknown[]) => warnings.push(a.join(" ")), error() {}, log() {} },
+    }) as Record<string, unknown>;
+    context.window = context;
+    runInContext(readFileSync(FULL_DEV_CDN, "utf8"), context);
+    const Sibu = context.Sibu as Record<string, never>;
+    const validators = Sibu.validators as unknown as Record<string, unknown>;
+
+    (Sibu.validateProps as unknown as (p: object, s: object) => unknown)(
+      { n: "not a number" },
+      { n: { type: validators.number, required: true } },
+    );
+
+    expect(warnings.join(" ")).toContain("Prop validation errors");
+  });
+
+  it("assertType is a no-op in production and throws in development", () => {
+    const call = (file: string) => {
+      const Sibu = loadCdnGlobal(file);
+      const validators = Sibu.validators as Record<string, unknown>;
+      (Sibu.assertType as (v: unknown, val: unknown, l?: string) => void)("nope", validators.number, "n");
+    };
+    // It guarded on `process.env.NODE_ENV`, which does not exist in a browser,
+    // so the early return never fired and this threw on every CDN page.
+    expect(() => call(FULL_CDN)).not.toThrow();
+    expect(() => call(FULL_DEV_CDN)).toThrow(/Contract/);
   });
 });

@@ -1,10 +1,12 @@
 // ---------------------------------------------------------------------------
 // Chess — the SibuJS islands reference application.
 //
-// No build step for this file: it is loaded as a plain ES module and imports
-// the package's own `dist/` entry points. The only thing that was bundled is
-// the third-party rules engine (`vendor/chess.js`, see
-// `scripts/build-example-chess.mjs`).
+// No build step anywhere in this example. It is a plain ES module, the runtime
+// arrives from a <script> tag pointing at the CDN, and the only thing ever
+// bundled is the third-party rules engine (`vendor/chess.js`, see
+// `scripts/build-example-chess.mjs`), which is committed. Serve the directory
+// and it runs — which is the claim islands make, so the demo should not need a
+// toolchain to prove it.
 //
 // THE ARCHITECTURAL BOUNDARY THIS EXISTS TO SHOW
 // ----------------------------------------------
@@ -32,39 +34,47 @@
 // docs/architecture/external-state.md explains when each is worth it.
 // ---------------------------------------------------------------------------
 
-import {
-  batch,
-  div,
-  dispose,
-  each,
-  external,
-  li,
-  mount,
-  mountIslands,
-  ol,
-  p,
-  registerIsland,
-  signal,
-  when,
-} from "../../dist/index.js";
 import { Chess, SQUARES } from "./vendor/chess.js";
+
+// ---------------------------------------------------------------------------
+// SibuJS comes from the <script> tag in index.html, not from an import.
+//
+// This example used to import `../../dist/index.js`, which meant it only ran
+// after `npm run build` inside a framework checkout — a build step in the one
+// demo whose entire subject is that islands need no build step. It now reads
+// the same global a reader would use on their own page, so the example is the
+// thing it documents: server HTML, one script tag, no toolchain.
+//
+// The tag is a classic script and this file is a module, so the runtime is
+// always installed before this line runs — modules are deferred, classic
+// scripts in the document are not.
+// ---------------------------------------------------------------------------
+const Sibu = globalThis.Sibu;
+if (!Sibu) {
+  throw new Error(
+    "[chess example] SibuJS is not on the page. index.html must load " +
+      "https://unpkg.com/sibujs@latest/dist/cdn.global.js before this module.",
+  );
+}
+const { batch, div, dispose, each, external, li, mount, mountIslands, ol, p, registerIsland, signal, when } = Sibu;
 
 // ---------------------------------------------------------------------------
 // Three helpers, written out here rather than imported.
 //
-// `machine` ships in `sibujs/patterns`, and the two a11y helpers in
-// `sibujs/ui`. Both are entry points for people using a bundler — the CDN
-// build carries the core only. This example is served as a page that loads
-// SibuJS from a <script> tag, so importing them was not an option: bundling
-// those two entry points alongside a CDN core would put TWO COPIES of the
-// runtime on the page. `machine`'s signal would belong to the bundled copy
-// while this island's effects track in the CDN's, so reading the state inside
-// an effect would register no dependency and the promotion dialog would
-// quietly stop updating — working on load, broken on the first transition.
+// All three are behind entry points a <script> tag cannot resolve.
+// `createDialogAria` and `createFocusManager` live in `sibujs/ui`, which is
+// bundler-only. `machine` lives in `sibujs/patterns`, which ships on the CDN
+// from 4.4.0 — but in `cdn.full.global.js`, not the default bundle this page
+// loads, because charging every no-build page ~13% gzip for patterns it never
+// calls was the wrong trade.
 //
-// One runtime, therefore, and whatever is not in it gets written out. That is
-// cheap here, and it is the part worth taking away: with a bundler, import
-// them; without one, they cost a dozen lines each.
+// Reaching for a bundle to fill the gap would be a mistake worth naming:
+// bundling those entry points beside a CDN runtime puts a second copy of the
+// framework on the page. Reactivity still works — later copies delegate to the
+// first through a global registry — but it is a large download for nothing.
+//
+// They cost a dozen lines each, which is the part worth taking away: with a
+// bundler, import them; without one, write them.
 // ---------------------------------------------------------------------------
 
 /**
