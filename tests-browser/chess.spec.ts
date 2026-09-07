@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 // ---------------------------------------------------------------------------
@@ -27,10 +30,48 @@ const TO_PROMOTION: Array<[string, string]> = [
   ["b7", "b6"],
 ];
 
+// The example page loads SibuJS from unpkg, which is right for a demo someone
+// opens from a checkout and wrong for this suite twice over: it would make
+// these tests depend on a network service, and it would run the LAST PUBLISHED
+// release instead of the working tree — so a regression in `dist/` would sail
+// through green. Every request for the CDN tag is answered with the local
+// build, which is the code under test.
+// The spec is ESM, so `__dirname` does not exist here.
+const LOCAL_CDN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist", "cdn.global.js");
+
 test.beforeEach(async ({ page }) => {
+  await page.route("**unpkg.com/**/cdn.global.js", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/javascript; charset=utf-8",
+      body: readFileSync(LOCAL_CDN, "utf8"),
+    }),
+  );
   await page.goto(PAGE);
   await expect(page.locator(`${board(1)}[data-sibu-enhanced="true"]`)).toHaveCount(1);
 });
+
+/**
+ * Assert that a square holds a given piece, of a given colour.
+ *
+ * Both sides render the SAME solid glyph and are told apart by `data-side`,
+ * which is what the stylesheet colours. The outline set (♙♘♗♖♕♔) used to
+ * mark white, but those glyphs are hollow — they show the square underneath, so
+ * a white piece only looked white on a pale square. Asserting the glyph alone
+ * would no longer distinguish a white knight from a black one, which is exactly
+ * what the promotion test turns on, so both halves are checked.
+ */
+async function expectPiece(
+  page: import("@playwright/test").Page,
+  n: 1 | 2,
+  sq: string,
+  side: "w" | "b",
+  glyph: string,
+) {
+  const piece = page.locator(`${square(n, sq)} .piece`);
+  await expect(piece).toHaveText(glyph);
+  await expect(piece).toHaveAttribute("data-side", side);
+}
 
 /**
  * Play the fixture moves that get a test to an interesting position.
@@ -59,7 +100,7 @@ test("a mouse move updates only the squares involved, and keeps every node", asy
   await expect(page.locator(square(1, "e4"))).toHaveAttribute("data-marks", "legal");
 
   await page.click(square(1, "e4"));
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
   await expect(page.locator(`${square(1, "e2")} .piece`)).toHaveText("");
   await expect(page.locator(`${board(1)} [data-ref="status"]`)).toContainText("Black to move");
 
@@ -90,7 +131,7 @@ test("keyboard: arrows navigate the grid and Enter/Space play the move", async (
   await expect(page.locator(square(1, "d2"))).toHaveAttribute("data-marks", "selected");
   await page.locator(square(1, "d4")).focus();
   await page.keyboard.press(" ");
-  await expect(page.locator(`${square(1, "d4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "d4", "w", "♟");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`)).toHaveText(["1. d4"]);
 });
 
@@ -123,7 +164,7 @@ test("focus is preserved across a reactive update", async ({ page }) => {
     b.querySelector<HTMLButtonElement>('[data-square="e2"]')?.click();
     b.querySelector<HTMLButtonElement>('[data-square="e4"]')?.click();
   });
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
   await expect(page.locator(square(1, "g1"))).toBeFocused();
 });
 
@@ -176,7 +217,7 @@ test("promotion: Escape cancels, commits nothing and restores focus to the board
   await expect(dialog).toBeHidden();
   await expect(page.locator(square(1, "g8"))).toBeFocused();
   // Nothing was played: the pawn is still on h7 and the move list is unchanged.
-  await expect(page.locator(`${square(1, "h7")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "h7", "w", "♟");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`)).toHaveCount(4);
 });
 
@@ -190,7 +231,7 @@ test("promotion: choosing a piece commits exactly one move and returns focus", a
 
   await expect(dialog).toBeHidden();
   await expect(page.locator(square(1, "g8"))).toBeFocused();
-  await expect(page.locator(`${square(1, "g8")} .piece`)).toHaveText("♘");
+  await expectPiece(page, 1, "g8", "w", "♞");
   await expect(page.locator(`${board(1)} [data-ref="moves"] li`).last()).toHaveText("5. hxg8=N");
 });
 
@@ -225,7 +266,7 @@ test("a broken island beside them changes nothing", async ({ page }) => {
   await expect(page.locator('[data-sibu-island="broken"]')).not.toHaveAttribute("data-sibu-enhanced", "true");
   await page.click(square(1, "e2"));
   await page.click(square(1, "e4"));
-  await expect(page.locator(`${square(1, "e4")} .piece`)).toHaveText("♙");
+  await expectPiece(page, 1, "e4", "w", "♟");
 });
 
 test("disposing the island stops it and leaves the server markup in place", async ({ page }) => {
