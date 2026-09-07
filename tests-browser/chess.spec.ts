@@ -39,19 +39,37 @@ const TO_PROMOTION: Array<[string, string]> = [
 // The spec is ESM, so `__dirname` does not exist here.
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "..", "dist");
 
+/** The exact artifact the example is expected to request, and only this one. */
+const EXPECTED_CDN = "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js";
+
 test.beforeEach(async ({ page }) => {
-  // Matches whichever CDN artifact the page asks for and answers with the
-  // local build of the same name, so switching the example's <script> tag does
-  // not silently start testing a published release again.
-  await page.route("**unpkg.com/**/cdn*.global.js", (route) => {
-    const file = route.request().url().split("/").pop() as string;
-    route.fulfill({
+  // Every CDN request the page makes is recorded and answered with the local
+  // build of the SAME NAME. Two things depend on this:
+  //
+  //   1. the suite tests the working tree. Left alone, the example fetches
+  //      `@latest` from unpkg and these tests would exercise the last published
+  //      release, so a regression in `dist/` would sail through green;
+  //   2. the artifact is pinned. The example needs `machine`, which only the
+  //      full bundle carries — a silent switch to `cdn.global.js` would install
+  //      `Sibu` and leave `machine` undefined, failing far from the cause.
+  let requestedCdnUrl: string | undefined;
+
+  await page.route("**unpkg.com/**/cdn*.global.js", async (route) => {
+    requestedCdnUrl = route.request().url();
+    const filename = new URL(requestedCdnUrl).pathname.split("/").pop();
+    if (!filename) throw new Error(`Unable to resolve CDN filename from ${requestedCdnUrl}`);
+
+    await route.fulfill({
       status: 200,
       contentType: "text/javascript; charset=utf-8",
-      body: readFileSync(resolve(DIST, file), "utf8"),
+      body: readFileSync(resolve(DIST, filename), "utf8"),
     });
   });
+
   await page.goto(PAGE);
+
+  // Exact, so it separates all four artifacts: core vs full, prod vs dev.
+  expect(requestedCdnUrl, "the example requested an unexpected CDN artifact").toBe(EXPECTED_CDN);
   await expect(page.locator(`${board(1)}[data-sibu-enhanced="true"]`)).toHaveCount(1);
 });
 

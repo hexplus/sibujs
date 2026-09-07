@@ -310,7 +310,7 @@ describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
     expect(calls.dev, "no validator ran in the development bundle").toBeGreaterThan(0);
   });
 
-  it("validateProps allocates nothing for the development path in production", () => {
+  it("validateProps makes no validation-only allocations in production", () => {
     // The dev-only `errors` array used to be declared above the loop that fills
     // it, which is outside the foldable branch — so the branch stripped cleanly
     // and left `let r = []` allocated on every production call, forever unread.
@@ -325,7 +325,10 @@ describe.skipIf(!fullBuilt && !onCI)("the core + patterns CDN global", () => {
     // duplication there is deliberate.
     const Sibu = loadCdnGlobal(FULL_CDN);
     const source = (Sibu.validateProps as unknown as () => void).toString();
-    expect(source, `production validateProps allocates an array: ${source}`).not.toMatch(/\[\s*\]/);
+    // The props copy and the `Object.entries` iteration remain — they are the
+    // work itself. What must be absent is anything that exists only to feed
+    // validation.
+    expect(source, `production validateProps allocates an errors array: ${source}`).not.toMatch(/\[\s*\]/);
     expect(source, `production validateProps normalizes for validation: ${source}`).not.toContain("type:");
   });
 

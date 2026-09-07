@@ -137,18 +137,75 @@ describe.skipIf(!distBuilt || !vendorBuilt)("chess example — production output
     expect([...seen].some((u) => u.includes("/dist/"))).toBe(false);
   }, 30_000);
 
-  it("takes the runtime from a script tag, ahead of the deferred island", async () => {
-    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
-    const runtime = html.indexOf("cdn.global.js");
-    const island = html.indexOf("chess-island.js");
+  /**
+   * The `src` of every CLASSIC script in a document, in source order.
+   *
+   * Attribute-level, not substring: `html.indexOf("cdn.global.js")` matched the
+   * explanatory HTML comment above the tag and reported a passing test while
+   * the page loaded a different artifact entirely. A filename mentioned in
+   * prose can no longer satisfy anything here.
+   *
+   * Module scripts are excluded so the runtime tag and the island can be told
+   * apart, and so `type="module"` written on the CDN tag would fail rather than
+   * quietly change its loading semantics.
+   */
+  function classicScriptSources(html: string): string[] {
+    return [...html.matchAll(/<script\b([^>]*)>/gi)]
+      .filter((match) => !/\btype\s*=\s*["']module["']/i.test(match[1]))
+      .map((match) => match[1].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1])
+      .filter((src): src is string => src !== undefined);
+  }
 
-    // Present at all: without it `globalThis.Sibu` is undefined and the island
-    // throws on its first line.
-    expect(runtime, "index.html no longer loads the runtime from a script tag").toBeGreaterThan(-1);
-    // And FIRST. The island is a module and therefore deferred, so a classic
-    // script anywhere in the document beats it — but ordering them the way a
-    // reader would write them keeps the example honest.
+  /** The index of the first script tag whose `src` is exactly `src`. */
+  function scriptTagIndex(html: string, src: string): number {
+    for (const match of html.matchAll(/<script\b[^>]*>/gi)) {
+      const attr = match[0].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+      if (attr === src) return match.index ?? -1;
+    }
+    return -1;
+  }
+
+  const FULL_CDN_SRC = "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js";
+  const CORE_CDN_SRC = "https://unpkg.com/sibujs@latest/dist/cdn.global.js";
+
+  it("loads the FULL runtime bundle from a real script tag, not the core-only one", async () => {
+    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
+    const sources = classicScriptSources(html);
+
+    // The island destructures `machine`, which lives in the patterns half of
+    // the library. The core-only bundle would install `Sibu` and leave
+    // `machine` undefined — a failure well away from the tag that caused it.
+    expect(sources, `classic scripts were: ${JSON.stringify(sources)}`).toContain(FULL_CDN_SRC);
+    expect(sources).not.toContain(CORE_CDN_SRC);
+  }, 30_000);
+
+  it("puts the runtime tag ahead of the deferred island module", async () => {
+    const html = await (await fetch(`${BASE}/examples/chess/index.html`)).text();
+
+    // Positions of the real TAGS, not of filename substrings found anywhere.
+    const runtime = scriptTagIndex(html, FULL_CDN_SRC);
+    const island = scriptTagIndex(html, "./chess-island.js");
+
+    expect(runtime, "no classic script loads the full CDN bundle").toBeGreaterThan(-1);
+    expect(island, "no module script loads the island").toBeGreaterThan(-1);
+    // The island is a module and therefore deferred, so a classic script
+    // anywhere in the document beats it — but ordering them the way a reader
+    // would write them keeps the example honest.
     expect(runtime).toBeLessThan(island);
+  }, 30_000);
+
+  it("tells a reader who is missing the runtime to load the FULL bundle", async () => {
+    // The guard throws when `globalThis.Sibu` is absent. Naming the core-only
+    // bundle there sends the reader to a file that installs `Sibu` and still
+    // leaves `machine` undefined, so the error would be followed by a second,
+    // stranger failure.
+    const source = await (await fetch(`${BASE}/examples/chess/chess-island.js`)).text();
+
+    // Scoped to the throw, so an explanatory comment elsewhere cannot satisfy
+    // it: everything between `new Error(` and its closing paren.
+    const thrown = source.slice(source.indexOf("new Error("), source.indexOf("chess example] SibuJS") + 400);
+    expect(thrown).toContain("cdn.full.global.js");
+    expect(thrown.replace(/cdn\.full\.global\.js/g, "")).not.toContain("cdn.global.js");
   }, 30_000);
 
   it("does not 404 on the vendored engine, whose build step is easy to forget", async () => {

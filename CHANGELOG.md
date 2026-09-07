@@ -95,7 +95,8 @@ production bundle, with the development bundle as the positive control. "It did
 not warn" would also pass for a branch that ran and stayed quiet.
 
 Getting that residue out took two attempts. The first moved validation into a
-second pass over the schema — allocation-free in production, but it reordered
+second pass over the schema — free of validation-only allocations in
+production, but it reordered
 USER CALLBACKS: defaults and validators are both supplied by the caller, and
 running every default before any validator means a later property's factory no
 longer observes what an earlier property's validator wrote. Schema entries are
@@ -110,7 +111,8 @@ exactly where such an allocation hides from a test that reads
 `validateProps.toString()`. The two paths are now written out separately and
 the production loop skips shorthand entries outright: a bare validator carries
 no default, so that mode has nothing to do with it. Production is now the props
-spread, one loop, and no allocation at all.
+copy, one loop over the schema entries, and the defaults it applies — the two
+allocations the work itself requires, and no validation-only ones.
 
 One residue outlived the first two passes. `validateProps` collected its
 findings in an `errors` array declared above the loop that fills it — outside

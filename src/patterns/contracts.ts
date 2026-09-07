@@ -177,7 +177,10 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
     return result as Props;
   }
 
-  // Production: defaults only, in the same order, allocating nothing.
+  // Production: defaults only, in the same order. It still allocates the
+  // returned copy and whatever `Object.entries` builds — both are required to
+  // do the job. What is gone is every allocation that existed only to support
+  // validation: the `errors` array and the normalized `{ type: def }`.
   for (const [key, def] of Object.entries(schema)) {
     // The shorthand form IS a bare validator, so it carries no default and
     // there is nothing to do. Normalizing it to `{ type: def }` would allocate

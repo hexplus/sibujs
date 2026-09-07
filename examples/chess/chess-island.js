@@ -53,7 +53,7 @@ const Sibu = globalThis.Sibu;
 if (!Sibu) {
   throw new Error(
     "[chess example] SibuJS is not on the page. index.html must load " +
-      "https://unpkg.com/sibujs@latest/dist/cdn.global.js before this module.",
+      "https://unpkg.com/sibujs@latest/dist/cdn.full.global.js before this module.",
   );
 }
 const { batch, div, dispose, each, external, li, machine, mount, mountIslands, ol, p, registerIsland, signal, when } =
