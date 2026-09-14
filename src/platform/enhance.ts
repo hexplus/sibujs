@@ -20,8 +20,7 @@ import {
   reportDrainRunaway,
   unregisterDisposer,
 } from "../core/rendering/dispose";
-import { isSSR } from "../core/ssr-context";
-import { reactiveBinding } from "../reactivity/track";
+import { domBinding } from "../reactivity/domBinding";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /** Attribute marking a root that *currently* owns an active enhancement.
@@ -240,8 +239,7 @@ function resolveTarget(root: HTMLElement, target: string | Element | null): HTML
  * server, so a binding created during SSR is inert and its disposer is a no-op.
  */
 function bindNode(el: HTMLElement, commit: () => void): () => void {
-  if (isSSR()) return () => {};
-  return reactiveBinding(commit, el);
+  return domBinding(commit, el);
 }
 
 function readControlValue(el: HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement): unknown {

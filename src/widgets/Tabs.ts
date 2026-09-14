@@ -1,6 +1,6 @@
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundTablists = new WeakMap<HTMLElement, () => void>();
 
@@ -149,7 +149,7 @@ export function tabs(options: TabsOptions): {
     }
 
     // Roving tabindex + aria-selected reflect the active tab reactively.
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const active = activeTab();
       for (const def of tabDefs) {
         const tabEl = els.tabs[def.id];
@@ -160,7 +160,7 @@ export function tabs(options: TabsOptions): {
         const panelEl = els.panels?.[def.id];
         if (panelEl) panelEl.hidden = !isAct;
       }
-    });
+    }, els.tablist);
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {

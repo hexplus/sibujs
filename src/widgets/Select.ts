@@ -1,8 +1,8 @@
 import { createId } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundSelects = new WeakMap<HTMLElement, () => void>();
 
@@ -158,7 +158,7 @@ export function select<T>(options: SelectOptions<T>): {
 
     const toStr = els.itemToString ?? itemToString ?? ((it: T) => String(it));
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const idx = highlightedIndex();
       const sel = selectedItems();
       let activeId = "";
@@ -174,7 +174,7 @@ export function select<T>(options: SelectOptions<T>): {
       }
       if (activeId) els.listbox.setAttribute("aria-activedescendant", activeId);
       else els.listbox.removeAttribute("aria-activedescendant");
-    });
+    }, els.listbox);
 
     // Typeahead — printable chars accumulate within a 500ms window.
     let typeBuffer = "";

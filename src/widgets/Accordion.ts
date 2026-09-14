@@ -1,6 +1,6 @@
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 // First trigger of an accordion identifies the binding instance for
 // idempotency — calling bind() twice on the same set returns the prior
@@ -144,7 +144,7 @@ export function accordion(options: AccordionOptions): {
       });
     }
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const ids = expandedIds();
       for (const item of itemDefs) {
         const trig = els.triggers[item.id];
@@ -154,7 +154,7 @@ export function accordion(options: AccordionOptions): {
         trig.setAttribute("aria-expanded", expanded ? "true" : "false");
         if (panel) panel.hidden = !expanded;
       }
-    });
+    }, idempotencyKey);
 
     const handlers: Array<{ el: HTMLElement; click: (e: Event) => void; key: (e: KeyboardEvent) => void }> = [];
     for (const item of itemDefs) {

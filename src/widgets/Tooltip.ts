@@ -1,6 +1,6 @@
 import { createId } from "../core/rendering/createId";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 // Track which trigger elements already have a bind() active so a second
 // call short-circuits rather than corrupting aria-describedby restore.
@@ -76,9 +76,9 @@ export function tooltip(options?: { delay?: number; hideDelay?: number }): {
     const prevDescribedBy = els.trigger.getAttribute("aria-describedby");
     els.trigger.setAttribute("aria-describedby", prevDescribedBy ? `${prevDescribedBy} ${id}` : id);
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       els.tooltip.hidden = !isVisible();
-    });
+    }, els.trigger);
 
     const onTriggerEnter = () => show();
     const onTriggerLeave = () => scheduleHide();

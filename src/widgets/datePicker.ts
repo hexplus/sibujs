@@ -1,6 +1,6 @@
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundDatePickers = new WeakMap<HTMLElement, () => void>();
 
@@ -183,11 +183,11 @@ export function datePicker(options?: DatePickerOptions): {
     els.grid.setAttribute("role", "grid");
     if (els.grid.tabIndex < 0) els.grid.tabIndex = 0;
 
-    // Set when a keyboard navigation moves the view date, so the effect can move
+    // Set when a keyboard navigation moves the view date, so the binding can move
     // real focus to the newly-current cell (not just the roving tabindex).
     let pendingFocus = false;
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const sel = selectedDate();
       const view = viewDate();
       const days = daysInMonth();
@@ -212,7 +212,7 @@ export function datePicker(options?: DatePickerOptions): {
         pendingFocus = false;
         viewCell.focus();
       }
-    });
+    }, els.grid);
 
     function isSameCalendarDay(a: Date, b: Date): boolean {
       return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();

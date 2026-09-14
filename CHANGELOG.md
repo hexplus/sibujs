@@ -21,6 +21,34 @@ on every plain "s" (including inside text inputs) and never on Ctrl+S or Cmd+S.
 - **Unknown modifiers throw** — `hotkey("hyper+s", fn)` now throws
   `hotkey("hyper+s"): unknown modifier "hyper"` instead of matching the bare key.
 
+### Fixed — widget DOM updates bypassed `ErrorBoundary`
+
+`VirtualList` and several widget `bind()` methods drove their DOM updates with a
+plain `effect()`, which carries no owner node. When an update threw on a later
+scheduled run — a `renderItem`, `option` or `cell` callback, or a DOM write — the
+error was reported with `node: undefined`, so the enclosing `ErrorBoundary` could
+never claim it and it fell through to the global handler.
+
+These updates are now owned DOM bindings, so a later failure carries
+`phase: "binding"` and the owner node, and the nearest boundary renders its
+fallback:
+
+| API | Owner node |
+|---|---|
+| `VirtualList` | the list container |
+| `combobox().bind()` | `els.input` |
+| `select().bind()` | `els.listbox` |
+| `datePicker().bind()` | `els.grid` |
+| `tabs().bind()` | `els.tablist` |
+| `accordion().bind()` | `els.root`, or the first trigger |
+| `fileUpload().bind()` | `els.input` |
+| `popover().bind()` | `els.trigger` |
+| `tooltip().bind()` | `els.trigger` |
+| `bindField()` on a `<select multiple>` | the select element |
+
+Behaviour is otherwise unchanged: the updates stay inert during SSR and are
+released by the same teardown / `dispose()` paths as before.
+
 ## [4.5.0] — 2026-09-13
 
 ### Added — `derived().dispose()`

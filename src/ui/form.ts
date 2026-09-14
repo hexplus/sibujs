@@ -1,7 +1,7 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 // ============================================================================
 // TYPES
@@ -247,17 +247,17 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
   // Write-back: a `<select multiple>` can't be driven by the plain `value` prop
   // (assigning an array to `el.value` clears the selection), so reflect the
   // field's array value onto each option's `selected` flag via a reactive
-  // effect bound to the element. Every other control type is handled correctly
+  // binding owned by the element. Every other control type is handled correctly
   // by the `value` prop alone, so this only engages for multi-selects.
   const onElement = (el: HTMLElement): void => {
     if (el instanceof HTMLSelectElement && el.multiple) {
-      const stop = effect(() => {
+      const stop = domBinding(() => {
         const v = field.value() as unknown;
         const selected = Array.isArray(v) ? v.map(String) : [];
         for (const opt of Array.from(el.options)) {
           opt.selected = selected.includes(opt.value);
         }
-      });
+      }, el);
       registerDisposer(el, stop);
     }
     if (typeof extraOnElement === "function") {

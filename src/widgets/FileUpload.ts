@@ -1,7 +1,7 @@
 import { createId } from "../core/rendering/createId";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundFileUploads = new WeakMap<HTMLElement, () => void>();
 
@@ -175,11 +175,11 @@ export function fileUpload(options?: FileUploadOptions): {
       });
     }
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const errs = errors();
       if (els.errorRegion) els.errorRegion.textContent = errs.join(". ");
       if (els.dropZone) els.dropZone.setAttribute("data-drag-over", isDragOver() ? "true" : "false");
-    });
+    }, els.input);
 
     const onChange = () => {
       if (els.input.files) addFiles(els.input.files);
