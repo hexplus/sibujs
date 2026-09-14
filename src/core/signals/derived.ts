@@ -1,5 +1,5 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
-import { isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
+import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import type { Accessor } from "./signal";
 
@@ -32,8 +32,17 @@ import type { Accessor } from "./signal";
  * propagation, with recomputation still fully lazy: `_validate` only ever runs
  * when an effect is genuinely about to observe the value.
  *
+ * DISPOSAL — a derived subscribes to its sources when it is created, and those
+ * edges live as long as the sources do. A derived created per mount (one per
+ * virtualized row, say) must be released when its owner goes away:
+ * `flag.dispose()`, or `onCleanup(flag.dispose, rowNode)` to tie it to a node.
+ * A disposed accessor is inert: it keeps returning the last value it settled,
+ * never recomputes, never re-subscribes, and never wakes downstream readers.
+ * Disposal is idempotent.
+ *
  * @returns An accessor for the computed value. It recomputes lazily on read
- * after any dependency changes.
+ * after any dependency changes, and carries `dispose()` to release its source
+ * subscriptions.
  */
 export function derived<T>(
   getter: () => T,
@@ -43,7 +52,7 @@ export function derived<T>(
      *  downstream subscribers are not notified. Defaults to `Object.is`. */
     equals?: (a: T, b: T) => boolean;
   },
-): Accessor<T> {
+): DerivedAccessor<T> {
   devAssert(typeof getter === "function", "derived: argument must be a getter function.");
   const debugName = options?.name;
   const equals = options?.equals;
@@ -105,6 +114,7 @@ export function derived<T>(
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
 
   let evaluating = false;
+  let disposed = false;
 
   // Settle a dirty computed: recompute, then bump `__v` ONLY if the result
   // differs from the previous value. `recompute` already applies the custom
@@ -115,7 +125,9 @@ export function derived<T>(
   // computed's value before deciding whether dependents must run — it holds a
   // reference to `cs`, not to this getter. See `depsChanged` in track-core.
   const validate = (): void => {
-    if (!cs._d) return;
+    // A disposed computed must not recompute: `retrack` would re-link the very
+    // source edges `dispose()` released.
+    if (!cs._d || disposed) return;
     const oldValue = cs._v;
     evaluating = true;
     try {
@@ -144,7 +156,7 @@ export function derived<T>(
     // update — and folding the check into the callee turned every one of those
     // reads into a function call that immediately returned. Inline, the clean
     // path is a single boolean load again.
-    if (isTrackingSuspended()) {
+    if (isTrackingSuspended() || disposed) {
       if (cs._d) validate();
       return cs._v;
     }
@@ -165,7 +177,23 @@ export function derived<T>(
   }
   (computedGetter as unknown as Record<string, unknown>).__signal = cs;
 
+  (computedGetter as DerivedAccessor<T>).dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    // Clearing the dirty flag keeps the drain's stabilization check from
+    // treating this computed as pending, and `cleanup` unlinks every source
+    // edge so the sources stop retaining it.
+    cs._d = false;
+    cleanup(markDirty);
+  };
+
   if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
-  return computedGetter as Accessor<T>;
+  return computedGetter as DerivedAccessor<T>;
 }
+
+/** Accessor returned by {@link derived}: read it like any getter, release it with `dispose()`. */
+export type DerivedAccessor<T> = Accessor<T> & {
+  /** Release every source subscription. The accessor then returns its last settled value. Idempotent. */
+  dispose: () => void;
+};

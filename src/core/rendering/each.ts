@@ -1,5 +1,5 @@
 import { batch } from "../../reactivity/batch";
-import { track } from "../../reactivity/track";
+import { resumeTracking, suspendTracking, track } from "../../reactivity/track";
 import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
@@ -111,6 +111,11 @@ interface Row<T> {
  * Identity is not value freshness: a row keeps its DOM node when its key is
  * unchanged, and still updates its contents when the item behind that key is
  * replaced.
+ *
+ * `render` runs untracked, whether the row appears in the first pass or in a
+ * later update: a signal read directly in its body is a one-time read and never
+ * subscribes the list. Put reactive reads inside bindings (`() => item().name`)
+ * or effects created by the row.
  *
  * Reading `item()` subscribes to the ROW's cell, not to the whole-array signal,
  * so a row only re-renders when its own item/index actually changes — mutating
@@ -244,7 +249,19 @@ export function each<T>(
         const [indexGetter, setIndex] = signal<number>(i);
         let node: Node;
         try {
-          node = resolveNodeChild(render(itemGetter, indexGetter));
+          // The renderer runs UNTRACKED. A row created by a later update runs
+          // inside this list's reactive update, so a signal read directly in the
+          // render body would otherwise subscribe the WHOLE list and re-run
+          // reconciliation on every write to it. Rows created by the deferred
+          // first pass ran outside any subscriber, so this also makes both
+          // paths behave the same. Reactivity inside a row belongs to the
+          // bindings and effects it creates, which track in their own scopes.
+          suspendTracking();
+          try {
+            node = resolveNodeChild(render(itemGetter, indexGetter));
+          } finally {
+            resumeTracking();
+          }
         } catch (err) {
           // The row is replaced by an inert placeholder so reconciliation can
           // continue; the failure itself goes through the CENTRAL pipeline.

@@ -70,7 +70,7 @@ export function bindAttrs(el: HTMLElement, attrs: Record<string, AttributeSource
 export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | (() => boolean)): () => void {
   // Static boolean — apply once, no tracking needed
   if (typeof getter !== "function") {
-    setSafeAttribute(el, attr, getter, { label: "bindBoolAttr" });
+    setSafeAttribute(el, attr, getter, { label: "bindBoolAttr", booleanPresence: true });
     return () => {};
   }
 
@@ -85,7 +85,7 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
       return;
     }
 
-    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr" });
+    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr", booleanPresence: true });
   }
 
   const teardown = track(commit);

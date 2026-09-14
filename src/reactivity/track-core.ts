@@ -391,6 +391,27 @@ export function resumeTracking(): void {
   }
 }
 
+// ---------- Tracking runs nested in a suspension ----------------------------
+//
+// `untracked()` suspends recording for ITS OWN reads. A tracking run that starts
+// inside it — a binding or effect created in an `untracked()` body, or a derived
+// recomputing because it was read there — is a separate scope with its own
+// subscriber, and must record its dependencies normally.
+//
+// `retrack` and `track` therefore stash the suspension state on entry and
+// restore it on exit. Without that, two things went wrong inside the nested run:
+//
+//   * `derived()` reads consult `isTrackingSuspended()` and skipped
+//     `recordDependency`. A binding created inside `untracked()` never
+//     subscribed to the deriveds it read, and — worse — a derived-of-derived
+//     that recomputed there had its upstream edge PRUNED by retrack's
+//     stale-dep pass, leaving it permanently stale.
+//   * A nested `untracked()` only bumped the depth and did not clear
+//     `currentSubscriber`, so its reads leaked into the nested run.
+//
+// The stash costs one boolean test on the hot path when nothing is suspended.
+// ---------------------------------------------------------------------------
+
 /** Read the "tracking suspended" flag (used by derived's lazy path). */
 export function isTrackingSuspended(): boolean {
   return trackingSuspended;
@@ -427,6 +448,17 @@ let subscriberEpochCounter = 0;
 // ---------------------------------------------------------------------------
 export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   const prev = currentSubscriber;
+  // A tracking run is a fresh scope even when it starts inside `untracked()` —
+  // see "Tracking runs nested in a suspension" above.
+  let savedDepth = 0;
+  let savedSuspendSub: Subscriber | null = null;
+  if (trackingSuspended) {
+    savedDepth = suspendDepth;
+    savedSuspendSub = suspendSavedSub;
+    suspendDepth = 0;
+    suspendSavedSub = null;
+    trackingSuspended = false;
+  }
   currentSubscriber = subscriber;
   const sub = subscriber as SubWithList;
   const epoch = ++subscriberEpochCounter;
@@ -453,6 +485,11 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
     effectFn();
   } finally {
     currentSubscriber = prev;
+    if (savedDepth !== 0) {
+      suspendDepth = savedDepth;
+      suspendSavedSub = savedSuspendSub;
+      trackingSuspended = true;
+    }
     // Combined post-walk + stale-prune. For each node: restore the signal's
     // `__activeNode` to whatever outer tracking context had, then drop the
     // node if it wasn't refreshed during this run.
@@ -497,12 +534,26 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
   cleanup(subscriber);
 
   const prev = currentSubscriber;
+  let savedDepth = 0;
+  let savedSuspendSub: Subscriber | null = null;
+  if (trackingSuspended) {
+    savedDepth = suspendDepth;
+    savedSuspendSub = suspendSavedSub;
+    suspendDepth = 0;
+    suspendSavedSub = null;
+    trackingSuspended = false;
+  }
   currentSubscriber = subscriber;
 
   try {
     effectFn();
   } finally {
     currentSubscriber = prev;
+    if (savedDepth !== 0) {
+      suspendDepth = savedDepth;
+      suspendSavedSub = savedSuspendSub;
+      trackingSuspended = true;
+    }
 
     // Post-walk: restore each signal's `__activeNode` to what outer
     // tracking contexts had before this track() started. We never do a

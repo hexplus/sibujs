@@ -7,6 +7,66 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.5.0] — 2026-09-13
+
+### Added — `derived().dispose()`
+
+`derived()` subscribes to its sources when it is created, and there was no way
+to release those edges. A derived created per mount (one per virtualized row,
+say) accumulated subscribers on its sources for as long as they lived. The
+returned accessor now carries `dispose()`:
+
+```ts
+const selected = derived(() => range().top <= index && index <= range().bottom);
+onCleanup(selected.dispose, rowElement); // released when the row is disposed
+```
+
+Disposal unlinks every source edge and is idempotent. A disposed accessor is
+inert: it returns the last value it settled, never recomputes, never
+re-subscribes, and never wakes downstream readers. The return type is now
+`DerivedAccessor<T>` (`Accessor<T> & { dispose(): void }`), which is assignable
+wherever `Accessor<T>` was.
+
+### Fixed — tracking scopes created inside `untracked()`
+
+A binding, effect or derived recomputation that ran inside an `untracked()` body
+inherited the suspension:
+
+- A binding created inside `untracked()` never subscribed to the deriveds it
+  read, so it stopped updating when they changed.
+- A derived-of-derived that recomputed while read through `untracked()` had its
+  upstream edge pruned and stayed **stale permanently**.
+- An `untracked()` nested inside such a binding leaked its reads into the
+  binding.
+
+Tracking runs now start a fresh scope and restore the enclosing suspension when
+they finish. `untracked()` still suppresses only its own reads.
+
+### Changed — `each()` render callbacks run untracked
+
+The first rows of a list render in a deferred pass outside any subscriber, but
+rows added by a later update rendered inside the list's reactive update. A
+signal read directly in the render body of such a row subscribed the whole
+list, so writing to it re-ran reconciliation. The render callback now always
+runs untracked, so both paths behave the same. Reactive reads belong inside the
+bindings and effects a row creates (`div(() => item().name)`), which track in
+their own scopes and are unaffected. Wrapping reads in the render body with
+`untracked()` is no longer necessary, and remains harmless.
+
+### Changed — booleans on `aria-*` attributes serialize as `"true"` / `"false"`
+
+ARIA states are enumerated tokens, not presence-based boolean attributes: a
+missing `aria-selected` means "not applicable", not "not selected". Booleans on
+`aria-*` attributes now write `"true"` / `"false"` in every attribute writer
+(static props, reactive bindings, `html` templates, `bindAttrs`), matching what
+`enhance()`'s `attr()` already did. Native boolean attributes (`hidden`,
+`disabled`, `required`, …) keep presence semantics, `null` / `undefined` still
+remove any attribute, and `bindBoolAttr()` keeps its documented presence
+toggling for every name. Code that relied on `"aria-x": () => false` removing
+the attribute should return `null` instead.
+
+---
+
 ## [4.4.0] — 2026-09-07
 
 ### Added — `cdn.full.global.js`, patterns for no-build pages

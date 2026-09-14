@@ -1,7 +1,7 @@
 {
   "name": "sibujs",
-  "version": "4.4.0",
-  "description": "A lightweight, function-based frontend framework that combines the best of React, Svelte, and Vue — with zero VDOM and maximum simplicity. Designed for developers who want fine-grained reactivity and full control without compilation or magic.",
+  "version": "4.5.0",
+  "description": "A function-based frontend framework with fine-grained reactivity and no virtual DOM. Tag factories return live DOM nodes you can hold and mutate, signals update only what changed, and nothing needs a compiler — it runs from a script tag or a bundler.",
   "keywords": [
     "frontend",
     "framework",

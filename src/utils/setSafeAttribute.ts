@@ -68,6 +68,11 @@ export interface SafeAttributeOptions {
    * is the correct sink — it seeds the default value and survives form reset.
    */
   syncValueProperty?: boolean;
+  /**
+   * Apply presence semantics to booleans on EVERY attribute, `aria-*` included.
+   * For writers whose documented contract is presence toggling (`bindBoolAttr`).
+   */
+  booleanPresence?: boolean;
   /** Label used in the dev warning when an event-handler attribute is refused. */
   label?: string;
 }
@@ -107,8 +112,10 @@ function namespaceFor(el: Element, name: string): string | null {
  *     JavaScript on dispatch, so no string may ever reach one. Use
  *     `on: { click: fn }` (addEventListener), which is unaffected.
  *   - `null`/`undefined` — removes the attribute.
- *   - booleans — HTML boolean-attribute semantics, via the IDL property for
- *     `checked`/`disabled`/`selected` where that is the live state.
+ *   - booleans on `aria-*` — serialized as "true"/"false" (ARIA states are
+ *     enumerated tokens, so absence and `false` mean different things).
+ *   - other booleans — HTML boolean-attribute semantics, via the IDL property
+ *     for `checked`/`disabled`/`selected` where that is the live state.
  *   - `value`/`checked` strings — IDL property when `syncValueProperty`.
  *   - everything else — `sanitizeAttributeString`, which applies the URL
  *     allowlist, the per-candidate `srcset` split, and the `style`
@@ -174,6 +181,19 @@ export function setSafeAttribute(
   const idlName = html ? name.toLowerCase() : name;
 
   if (typeof value === "boolean") {
+    // ARIA states are enumerated "true"/"false" tokens, not presence-based
+    // boolean attributes: removing `aria-selected` means "not applicable", which
+    // is a different statement from "not selected". Serialize the boolean so
+    // `"aria-selected": () => selected()` states `false` explicitly. Only
+    // `null`/`undefined` (handled above) remove an ARIA attribute.
+    if (options.booleanPresence !== true && name.length > 5 && name.slice(0, 5).toLowerCase() === "aria-") {
+      const token = value ? "true" : "false";
+      if ((ns ? el.getAttributeNS(ns, localName) : el.getAttribute(name)) !== token) {
+        if (ns) el.setAttributeNS(ns, name, token);
+        else el.setAttribute(name, token);
+      }
+      return true;
+    }
     if (html && BOOLEAN_IDL_ATTRS.has(idlName) && idlName in el) {
       setProp(el, idlName, value);
     } else if (value) {
