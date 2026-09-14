@@ -85,7 +85,7 @@ describe("previous", () => {
 
   it("dispose() stops tracking the source", async () => {
     const [count, setCount] = signal(0);
-    const prev = previous(count) as (() => number | undefined) & { dispose: () => void };
+    const prev = previous(count);
     expect(typeof prev.dispose).toBe("function");
 
     setCount(1);

@@ -15,12 +15,17 @@
 import { describe, expect, it } from "vitest";
 import { action, copyOnClick } from "../../src/core/rendering/action";
 import { input } from "../../src/core/rendering/html";
+import { signal } from "../../src/core/signals/signal";
+import { debounce } from "../../src/data/debounce";
 import { mutation } from "../../src/data/mutation";
+import { previous } from "../../src/data/previous";
 import { query } from "../../src/data/query";
+import { throttle } from "../../src/data/throttle";
 import type { defineComponent } from "../../src/patterns/componentProps";
 import type { validateProps } from "../../src/patterns/contracts";
 import type { withDefaults } from "../../src/patterns/hoc";
 import type { machine } from "../../src/patterns/machine";
+import { persisted } from "../../src/patterns/persist";
 import { normalize, normalizedStore } from "../../src/performance/normalize";
 import type { createSharedScope } from "../../src/platform/microfrontend";
 import type { wasm } from "../../src/platform/wasm";
@@ -256,5 +261,37 @@ describe("public API type contracts", () => {
     // the tag-factory prop types is a wider change. See final-pre-rc-findings.
     const multi = form({ tags: { initial: ["a"] as string[] } });
     expectType<() => string[]>(bindField(multi.fields.tags).value);
+  });
+
+  // debounce / throttle / previous / persisted retain effects, timers and a
+  // global `storage` listener. Their runtime values always carried `dispose()`,
+  // but the declared return types hid it, so valid cleanup failed to compile.
+  // Every call below is deliberately cast-free.
+  it("reactive helpers expose dispose() without casts", () => {
+    const [source, setSource] = signal(1);
+
+    const debounced = debounce(source, 100);
+    expectType<number>(debounced());
+    debounced.dispose();
+
+    const throttled = throttle(source, 100);
+    expectType<number>(throttled());
+    throttled.dispose();
+
+    const prev = previous(source);
+    expectType<number | undefined>(prev());
+    prev.dispose();
+
+    const [theme, setTheme] = persisted("contract-theme", "light");
+    expectType<string>(theme());
+    setTheme("dark");
+    setTheme((current) => `${current}!`);
+    setTheme.dispose();
+
+    // Still assignable wherever a plain getter was expected.
+    const plain: () => number = debounced;
+    expectType<number>(plain());
+    setSource(2);
+    expect(typeof debounced.dispose).toBe("function");
   });
 });

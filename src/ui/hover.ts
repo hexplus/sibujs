@@ -1,4 +1,4 @@
-import { registerDisposer } from "../core/rendering/dispose";
+import { registerDisposer, unregisterDisposer } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
 
 /**
@@ -32,7 +32,15 @@ export function hover(target: HTMLElement): {
   target.addEventListener("pointerenter", onEnter);
   target.addEventListener("pointerleave", onLeave);
 
+  let disposed = false;
   function dispose() {
+    if (disposed) return;
+    disposed = true;
+    // A manual dispose must also drop the node-level registration below, or a
+    // long-lived element accumulates one dead closure per attach/dispose cycle.
+    // When dispose(node) is the caller, the entry is already gone and this is a
+    // no-op.
+    unregisterDisposer(target, dispose);
     target.removeEventListener("pointerenter", onEnter);
     target.removeEventListener("pointerleave", onLeave);
   }

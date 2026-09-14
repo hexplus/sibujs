@@ -1,4 +1,4 @@
-import { registerDisposer } from "../core/rendering/dispose";
+import { registerDisposer, unregisterDisposer } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
 import { globalSingleton } from "../utils/globalSingleton";
@@ -59,6 +59,10 @@ export function focus(): {
     const dispose = () => {
       if (disposed) return;
       disposed = true;
+      // Drop the node-level registration on a manual dispose so re-binding a
+      // long-lived element does not accumulate dead closures. A no-op when
+      // dispose(node) is the caller — its entry is already removed.
+      unregisterDisposer(element, dispose);
       element.removeEventListener("focus", onFocus);
       element.removeEventListener("blur", onBlur);
       if (currentElement === element) currentElement = null;
@@ -150,8 +154,14 @@ export function FocusTrap(
   };
   container.addEventListener("keydown", onTrapKeydown);
 
+  // Terminal lifetime flag. Setup below is queued as microtasks, and the trap
+  // can be disposed before they run — `dispose(trap)` does not detach the
+  // element, so `isConnected` alone cannot tell a live trap from a dead one.
+  let disposed = false;
+
   if (options.autoFocus !== false) {
     queueMicrotask(() => {
+      if (disposed || !container.isConnected) return;
       const first = getFocusable()[0];
       first?.focus();
     });
@@ -163,6 +173,13 @@ export function FocusTrap(
   let trapObserver: MutationObserver | null = null;
 
   function restoreFocusAndCleanup(): void {
+    // Idempotent: the observer path and dispose() can both reach this, and focus
+    // must be restored exactly once.
+    if (disposed) return;
+    disposed = true;
+    // When the observer path runs first, drop the node registration too; when
+    // dispose(node) is the caller its entry is already gone and this is a no-op.
+    unregisterDisposer(container, restoreFocusAndCleanup);
     if (options.restoreFocus !== false) previouslyFocused?.focus();
     container.removeEventListener("keydown", onTrapKeydown);
     if (trapObserver) {
@@ -179,9 +196,9 @@ export function FocusTrap(
     });
 
     queueMicrotask(() => {
-      if (container.isConnected) {
-        trapObserver!.observe(container, { childList: true, subtree: true });
-      }
+      const observer = trapObserver;
+      if (disposed || !container.isConnected || !observer) return;
+      observer.observe(container, { childList: true, subtree: true });
     });
   }
 

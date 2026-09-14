@@ -1,6 +1,7 @@
 import { createId } from "../core/rendering/createId";
-import { registerDisposer } from "../core/rendering/dispose";
+import { registerDisposer, unregisterDisposer } from "../core/rendering/dispose";
 import { signal } from "../core/signals/signal";
+import { batch } from "../reactivity/batch";
 
 // ============================================================================
 // ACCESSIBILITY PRIMITIVES
@@ -114,7 +115,19 @@ export interface ListboxOptions {
 export interface ListboxHandle {
   /** Reactive value: the currently-active (highlighted) option value. */
   activeValue: () => string | null;
-  /** Reactive value: the currently-selected option value (single-select) or CSV (multiple). */
+  /**
+   * Reactive value: the selected option values, in selection order. Holds at
+   * most one value in single-select mode. Every `data-value` string — including
+   * ones containing commas and the empty string — is represented exactly.
+   */
+  selectedValues: () => readonly string[];
+  /**
+   * Reactive value: the selected option value (single-select), or the selected
+   * values joined with `","` (multiple).
+   *
+   * @deprecated In multiple mode the CSV view is lossy — a value containing a
+   * comma cannot be told apart from two values. Use {@link selectedValues}.
+   */
   selectedValue: () => string | null;
   /** Stable id that can be used as `aria-activedescendant` on the trigger. */
   activeDescendantId: () => string | null;
@@ -153,6 +166,9 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   if (!container.hasAttribute("tabindex")) container.setAttribute("tabindex", "0");
 
   const [activeValue, setActiveValue] = signal<string | null>(null);
+  // The collection is the source of truth; `selectedValue` is only a
+  // compatibility view written alongside it and never parsed back.
+  const [selectedValues, setSelectedValues] = signal<readonly string[]>([]);
   const [selectedValue, setSelectedValue] = signal<string | null>(null);
   const [activeDescendantId, setActiveDescendantId] = signal<string | null>(null);
 
@@ -191,27 +207,30 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   }
 
   function select(value: string): void {
-    // Snapshot the previous selection once — reading the signal a second
-    // time after `setSelectedValue()` would mix DOM reconciliation into the
-    // signal read path and can race if any subscribers mutate state.
-    const previous = selectedValue();
-    let nextSelectedSet: Set<string>;
+    // Snapshot the previous selection once and compute the next collection from
+    // it, so DOM reconciliation never reads the signal back. Multiple selection used to live in a CSV string re-split on every toggle,
+    // which merged "a,b" with "a" + "b" and dropped "" — so the collection, not
+    // the string, is what toggling and ARIA reconciliation work from.
+    const previous = selectedValues();
+    let next: string[];
     if (multiple) {
-      nextSelectedSet = new Set((previous ?? "").split(",").filter(Boolean));
-      if (nextSelectedSet.has(value)) nextSelectedSet.delete(value);
-      else nextSelectedSet.add(value);
-      setSelectedValue(Array.from(nextSelectedSet).join(","));
+      next = previous.includes(value) ? previous.filter((v) => v !== value) : [...previous, value];
     } else {
-      nextSelectedSet = new Set([value]);
-      setSelectedValue(value);
+      next = [value];
     }
+    batch(() => {
+      setSelectedValues(next);
+      setSelectedValue(multiple ? next.join(",") : value);
+    });
     options.onSelect?.(value);
 
-    // Reflect `aria-selected` on each option using the computed next set.
+    // Reflect `aria-selected` on each option using the computed next set. An
+    // option without `data-value` is never selectable, so it must not match "".
+    const nextSelectedSet = new Set(next);
     const opts = getOptions();
     for (const opt of opts) {
-      const ov = opt.dataset.value ?? "";
-      opt.setAttribute("aria-selected", nextSelectedSet.has(ov) ? "true" : "false");
+      const ov = opt.dataset.value;
+      opt.setAttribute("aria-selected", ov !== undefined && nextSelectedSet.has(ov) ? "true" : "false");
     }
   }
 
@@ -276,14 +295,21 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   container.addEventListener("keydown", onKeyDown);
   container.addEventListener("click", onClick);
 
+  let disposed = false;
   function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    // Drop the node-level registration on a manual dispose so re-creating a
+    // listbox on a long-lived container does not accumulate dead closures. A
+    // no-op when dispose(node) is the caller — its entry is already removed.
+    unregisterDisposer(container, dispose);
     container.removeEventListener("keydown", onKeyDown);
     container.removeEventListener("click", onClick);
   }
 
   registerDisposer(container, dispose);
 
-  return { activeValue, selectedValue, activeDescendantId, dispose };
+  return { activeValue, selectedValues, selectedValue, activeDescendantId, dispose };
 }
 
 // ─── dialogAria ───────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import { registerDisposer } from "../core/rendering/dispose";
-import { derived } from "../core/signals/derived";
+import { type DerivedAccessor, derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
 
@@ -39,6 +39,16 @@ export interface FormReturn<T extends object> {
   handleSubmit: (onSubmit: (values: T) => void | Promise<void>) => (e?: Event) => void;
   reset: () => void;
   setError: (field: keyof T, message: string) => void;
+  /**
+   * Release the form's derived graph: every field `error` and the `errors`,
+   * `isValid`, `isDirty`, `touched` and `values` aggregates. Call it when the
+   * form's owner goes away, e.g. `onCleanup(f.dispose, formElement)`.
+   *
+   * Afterwards the derived accessors are inert — they return their last
+   * settled values and never recompute — while field `value()`/`set()` keep
+   * working as plain signals. Idempotent.
+   */
+  dispose: () => void;
 }
 
 // ============================================================================
@@ -102,10 +112,18 @@ export function maxLength(max: number, message?: string): ValidatorFn<string> {
  */
 export function matchesPattern(regex: RegExp, message = "Invalid format"): ValidatorFn<string> {
   return (value: string) => {
-    if (value && !regex.test(value)) {
-      return message;
+    if (!value) return null;
+    // `test()` on a global (`g`) or sticky (`y`) expression starts at, and then
+    // advances, `lastIndex` — so the same valid value alternated between valid
+    // and invalid, and a validator shared by two fields rejected the second.
+    // Every validation starts from 0, and the caller's `lastIndex` is restored.
+    const savedLastIndex = regex.lastIndex;
+    regex.lastIndex = 0;
+    try {
+      return regex.test(value) ? null : message;
+    } finally {
+      regex.lastIndex = savedLastIndex;
     }
-    return null;
   };
 }
 
@@ -283,6 +301,9 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
   const fieldEntries = Object.entries(config) as [keyof T, FieldConfig][];
   const fieldMap = {} as { [K in keyof T]: FormField<T[K]> };
   const [manualErrors, setManualErrors] = signal<Record<string, string | null>>({});
+  // Field error deriveds, kept so dispose() can release them. Validators may
+  // read caller-owned signals, which would otherwise hold these forever.
+  const fieldErrors: DerivedAccessor<string | null>[] = [];
 
   for (const [name, cfg] of fieldEntries) {
     const [value, setValue] = signal<T[keyof T]>(cfg.initial as T[keyof T]);
@@ -299,6 +320,7 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
       }
       return null;
     });
+    fieldErrors.push(error);
 
     // Wrap the setter so editing the field clears any prior manual error
     // (e.g. server-side "email already taken" must not stick after edit).
@@ -414,6 +436,20 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
     setManualErrors((prev) => ({ ...prev, [field as string]: message }));
   }
 
+  let disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    // Aggregates first: they read the field errors, so releasing them before
+    // their sources never leaves an aggregate linked to a disposed derived.
+    errors.dispose();
+    isValid.dispose();
+    isDirty.dispose();
+    touchedState.dispose();
+    values.dispose();
+    for (const error of fieldErrors) error.dispose();
+  }
+
   return {
     fields: fieldMap,
     errors,
@@ -425,5 +461,6 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
     handleSubmit,
     reset,
     setError,
+    dispose,
   };
 }

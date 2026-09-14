@@ -122,7 +122,8 @@ function scheduleIdle(fn: () => void): void {
  * and avoids the complexity of an interruptible reconciler.
  *
  * Async callbacks are supported: `pending()` stays `true` until the
- * returned promise resolves OR rejects.
+ * returned promise resolves OR rejects. With overlapping `start()` calls it
+ * stays `true` until every one of them has settled.
  *
  * @example
  * ```ts
@@ -135,24 +136,41 @@ function scheduleIdle(fn: () => void): void {
  */
 export function transition(): TransitionState {
   const [pending, setPending] = signal(false);
+  // Transitions started but not yet settled. `pending()` is derived from this
+  // rather than toggled per call: with overlapping starts, the first to settle
+  // used to publish `false` while later ones were still in flight.
+  let outstanding = 0;
 
   function start(fn: () => void | Promise<void>): void {
+    outstanding++;
     setPending(true);
+
+    // Each start settles exactly once, whichever way it ends.
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      outstanding--;
+      if (outstanding === 0) setPending(false);
+    };
+
     scheduleIdle(() => {
       let result: void | Promise<void>;
       try {
         result = fn();
       } catch {
-        setPending(false);
+        finish();
         return;
       }
       if (result && typeof (result as Promise<void>).then === "function") {
-        (result as Promise<void>).then(
-          () => setPending(false),
-          () => setPending(false),
-        );
+        try {
+          (result as Promise<void>).then(finish, finish);
+        } catch {
+          // A thenable whose `then` throws will never call back.
+          finish();
+        }
       } else {
-        setPending(false);
+        finish();
       }
     });
   }

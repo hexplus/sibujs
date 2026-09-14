@@ -1,3 +1,5 @@
+import { DEV, devWarn } from "../core/dev";
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
 import { stripUnsafeKeys } from "../utils/guards";
 
@@ -88,6 +90,30 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
   const listeners: Set<(state: S) => void> = new Set();
   const middlewares = config.middleware || [];
 
+  /**
+   * Deliver a committed state to every listener.
+   *
+   * State is already committed when this runs, so a listener failure must not
+   * look like a failed dispatch or cost the listeners after it the update: each
+   * one is isolated and its error reported. Delivery walks a snapshot, so a
+   * listener subscribed during notification starts with the NEXT update —
+   * iterating the live Set would run it now, and a listener that subscribes on
+   * every call would keep iteration from terminating. A listener unsubscribed
+   * by an earlier one in the same round is skipped.
+   */
+  function notifyListeners(state: S): void {
+    if (listeners.size === 0) return;
+    const snapshot = Array.from(listeners);
+    for (const listener of snapshot) {
+      if (!listeners.has(listener)) continue;
+      try {
+        listener(state);
+      } catch (err) {
+        reportError(err, { phase: "event", name: "globalStore(subscribe)" });
+      }
+    }
+  }
+
   function dispatch<K extends keyof A>(action: K, payload?: Parameters<A[K]>[1]): void {
     const actionFn = config.actions[action];
     if (!actionFn) throw new Error(`Unknown action: ${String(action)}`);
@@ -104,11 +130,7 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
       // Strip prototype-pollution keys before merging (shared guard).
       const patch = stripUnsafeKeys(rawPatch as Record<string, unknown>) as Partial<S>;
       setState({ ...current, ...patch } as S);
-      // Notify listeners
-      const newState = getState();
-      for (const listener of listeners) {
-        listener(newState);
-      }
+      notifyListeners(getState());
     };
 
     if (middlewares.length === 0) {
@@ -116,17 +138,28 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
       return;
     }
 
-    // Run middleware chain
-    let index = 0;
-    const next = () => {
-      if (index < middlewares.length) {
-        const mw = middlewares[index++];
-        mw(getState(), String(action), payload, next);
-      } else {
+    // Run middleware chain. Each middleware receives its OWN `next`, usable
+    // once. A single shared `next` over one index let a middleware that called
+    // it twice run the action twice, and let the second call skip past every
+    // middleware after it straight to the action.
+    const runFrom = (index: number): void => {
+      if (index >= middlewares.length) {
         execute();
+        return;
       }
+      let called = false;
+      const next = () => {
+        if (called) {
+          if (DEV)
+            devWarn(`globalStore: middleware ${index} next() called more than once for "${String(action)}"; ignored.`);
+          return;
+        }
+        called = true;
+        runFrom(index + 1);
+      };
+      middlewares[index](getState(), String(action), payload, next);
     };
-    next();
+    runFrom(0);
   }
 
   function select<R>(selector: Selector<S, R>): () => R {
@@ -145,9 +178,7 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
 
   function reset(): void {
     setState({ ...initialState } as S);
-    for (const listener of listeners) {
-      listener(getState());
-    }
+    notifyListeners(getState());
   }
 
   return { getState, select, dispatch, subscribe, reset };

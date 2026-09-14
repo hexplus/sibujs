@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ErrorBoundary } from "../src/components/ErrorBoundary";
 import { type RuntimeErrorContext, setRuntimeErrorHandler } from "../src/core/errors";
 import { dispose } from "../src/core/rendering/dispose";
-import { div } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
 import { getSubscriberCount } from "../src/devtools/introspect";
 import { bindField, form } from "../src/ui/form";
@@ -44,6 +43,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** A plain `<div>` typed as HTMLElement, holding the given children or text. */
+function box(children: Array<Node | string> | string = []): HTMLElement {
+  const el = document.createElement("div");
+  if (typeof children === "string") el.textContent = children;
+  else el.append(...children);
+  return el;
+}
+
 /** Make `prop` on `el` throw on writes while `bad()` is true. */
 function throwingSetter(el: HTMLElement, prop: string, bad: () => boolean, message: string): void {
   let value: unknown = (el as unknown as Record<string, unknown>)[prop];
@@ -78,7 +85,7 @@ const SCENARIOS: Scenario[] = [
         containerHeight: 30,
         renderItem: (n) => {
           if (bad()) throw new Error("renderItem exploded");
-          return div(String(n));
+          return box(String(n));
         },
       });
       return { root: list, owner: list, trigger: () => setItems([4, 5, 6]) };
@@ -89,8 +96,8 @@ const SCENARIOS: Scenario[] = [
     build: (bad) => {
       const cb = combobox({ items: ["a", "b"] });
       const input = document.createElement("input");
-      const listbox = div();
-      const root = div([input, listbox]);
+      const listbox = box();
+      const root = box([input, listbox]);
       cb.bind({
         input,
         listbox,
@@ -106,8 +113,8 @@ const SCENARIOS: Scenario[] = [
     name: "Select.bind option",
     build: (bad) => {
       const s = select({ items: ["a", "b"] });
-      const listbox = div();
-      const root = div([listbox]);
+      const listbox = box();
+      const root = box([listbox]);
       s.bind({
         listbox,
         option: () => {
@@ -122,8 +129,8 @@ const SCENARIOS: Scenario[] = [
     name: "datePicker.bind cell",
     build: (bad) => {
       const dp = datePicker({ initialDate: new Date(2026, 0, 15) });
-      const grid = div();
-      const root = div([grid]);
+      const grid = box();
+      const root = box([grid]);
       dp.bind({
         grid,
         cell: () => {
@@ -143,10 +150,10 @@ const SCENARIOS: Scenario[] = [
           { id: "two", label: "Two" },
         ],
       });
-      const tablist = div();
-      const one = div();
-      const two = div();
-      const root = div([tablist, one, two]);
+      const tablist = box();
+      const one = box();
+      const two = box();
+      const root = box([tablist, one, two]);
       t.bind({ tablist, tabs: { one, two } });
       throwingSetter(two, "tabIndex", bad, "tabs update exploded");
       return { root, owner: tablist, trigger: () => t.setActiveTab("two") };
@@ -156,9 +163,9 @@ const SCENARIOS: Scenario[] = [
     name: "Accordion.bind with root",
     build: (bad) => {
       const a = accordion({ items: [{ id: "x", label: "X" }] });
-      const trig = div();
-      const panel = div();
-      const root = div([trig, panel]);
+      const trig = box();
+      const panel = box();
+      const root = box([trig, panel]);
       a.bind({ root, triggers: { x: trig }, panels: { x: panel } });
       throwingSetter(panel, "hidden", bad, "accordion update exploded");
       return { root, owner: root, trigger: () => a.toggle("x") };
@@ -168,9 +175,9 @@ const SCENARIOS: Scenario[] = [
     name: "Accordion.bind without root (first trigger)",
     build: (bad) => {
       const a = accordion({ items: [{ id: "x", label: "X" }] });
-      const trig = div();
-      const panel = div();
-      const root = div([trig, panel]);
+      const trig = box();
+      const panel = box();
+      const root = box([trig, panel]);
       a.bind({ triggers: { x: trig }, panels: { x: panel } });
       throwingSetter(panel, "hidden", bad, "accordion update exploded");
       return { root, owner: trig, trigger: () => a.toggle("x") };
@@ -181,8 +188,8 @@ const SCENARIOS: Scenario[] = [
     build: (bad) => {
       const f = fileUpload();
       const input = document.createElement("input");
-      const dropZone = div();
-      const root = div([input, dropZone]);
+      const dropZone = box();
+      const root = box([input, dropZone]);
       f.bind({ input, dropZone });
       const original = dropZone.setAttribute.bind(dropZone);
       dropZone.setAttribute = (name: string, value: string) => {
@@ -197,8 +204,8 @@ const SCENARIOS: Scenario[] = [
     build: (bad) => {
       const p = popover();
       const trigger = document.createElement("button");
-      const pop = div();
-      const root = div([trigger, pop]);
+      const pop = box();
+      const root = box([trigger, pop]);
       p.bind({ trigger, popover: pop });
       throwingSetter(pop, "hidden", bad, "popover update exploded");
       return { root, owner: trigger, trigger: () => p.open() };
@@ -209,8 +216,8 @@ const SCENARIOS: Scenario[] = [
     build: (bad) => {
       const t = tooltip({ delay: 0 });
       const trigger = document.createElement("button");
-      const tip = div();
-      const root = div([trigger, tip]);
+      const tip = box();
+      const root = box([trigger, tip]);
       t.bind({ trigger, tooltip: tip });
       throwingSetter(tip, "hidden", bad, "tooltip update exploded");
       return { root, owner: trigger, trigger: () => t.show() };
@@ -225,9 +232,9 @@ const SCENARIOS: Scenario[] = [
       const opt = document.createElement("option");
       opt.value = "a";
       el.appendChild(opt);
-      bindField(f.fields.tags).onElement?.(el);
+      (bindField(f.fields.tags).onElement as (el: HTMLElement) => void)(el);
       throwingSetter(opt, "selected", bad, "multi-select update exploded");
-      const root = div([el]);
+      const root = box([el]);
       return { root, owner: el, trigger: () => f.fields.tags.set(["b"]) };
     },
   },
@@ -263,11 +270,20 @@ describe("a scheduled widget failure is claimed by the enclosing ErrorBoundary",
 
       let isBad = false;
       let trigger: () => void = () => {};
-      const boundary = ErrorBoundary({ fallback: () => div({ class: "boundary-fallback" }, "caught") }, () => {
-        const built = scenario.build(() => isBad);
-        trigger = built.trigger;
-        return built.root;
-      });
+      const boundary = ErrorBoundary(
+        {
+          fallback: () => {
+            const fb = box("caught");
+            fb.className = "boundary-fallback";
+            return fb;
+          },
+        },
+        () => {
+          const built = scenario.build(() => isBad);
+          trigger = built.trigger;
+          return built.root;
+        },
+      );
 
       host = document.createElement("div");
       document.body.appendChild(host);
@@ -288,7 +304,7 @@ describe("a scheduled widget failure is claimed by the enclosing ErrorBoundary",
 describe("VirtualList disposal still releases its binding", () => {
   it("dispose() unsubscribes the items source", () => {
     const [items] = signal([1, 2, 3]);
-    const list = VirtualList({ items, itemHeight: 10, containerHeight: 30, renderItem: (n) => div(String(n)) });
+    const list = VirtualList({ items, itemHeight: 10, containerHeight: 30, renderItem: (n) => box(String(n)) });
     expect(getSubscriberCount(items)).toBe(1);
     dispose(list);
     expect(getSubscriberCount(items)).toBe(0);

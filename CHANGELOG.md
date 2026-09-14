@@ -9,6 +9,304 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — a middleware calling `next()` twice ran the action twice
+
+Every `globalStore` middleware shared one `next` closure over a single chain
+index. A middleware that called `next()` twice applied the action twice — one
+`dispatch()` incremented a counter by two and notified listeners twice — and
+with several middlewares the second call jumped straight to the action,
+bypassing the middlewares after it.
+
+Each middleware now receives its own `next`, which advances the chain at most
+once per dispatch. Extra calls are ignored, with a development warning naming the
+middleware and action.
+
+### Fixed — a throwing `globalStore` listener broke `dispatch()` and `reset()`
+
+Both committed the new state and then iterated the live listener `Set` without
+isolation. One throwing listener made `dispatch()` / `reset()` throw even though
+the mutation had landed, and every later listener missed the update. Iterating
+the live `Set` also delivered the current update to listeners subscribed during
+notification, so a listener that subscribed on every call kept iteration from
+terminating.
+
+Both paths now share one notifier that delivers to a snapshot of the listeners,
+isolates each call, and reports failures through the runtime error pipeline
+(`phase: "event"`). Listeners subscribed during notification start with the next
+update; listeners unsubscribed by an earlier listener in the same round are
+skipped.
+
+### Fixed — `machine.send()` lost reentrant events
+
+Exit hooks and transition actions ran before the outer transition committed its
+state. A `send()` from an action, an exit or entry hook, or a subscriber woken by
+the context update saw the old state: its transition was overwritten when the
+outer one finished, and exit hooks could run twice for one logical state.
+Context and state were also published separately, exposing the new context
+paired with the old state.
+
+`send()` is now run-to-completion. Each machine has an internal FIFO event
+queue; an event sent while a transition is in progress (exit → action → publish
+→ entry) is processed, in order, after that transition completes — including
+events sent from the initial state's entry hook. Context and state are published
+in one batch. If a transition throws, the error still reaches the caller, the
+processing guard is reset, and the events queued by that failed transition are
+discarded. `send()` also no longer subscribes a calling effect to the machine.
+
+### Fixed — `matchesPattern()` was nondeterministic with `g` / `y` expressions
+
+The validator called `regex.test(value)` directly. A global or sticky expression
+advances `lastIndex` on each match, so the same valid value alternated between
+valid and invalid, and one validator shared by two fields marked the second
+identical — and valid — field invalid, blocking submission.
+
+Every validation now starts from `lastIndex = 0`, and the caller's `lastIndex` is
+restored afterwards, so results no longer depend on call history and the
+expression the caller passed in is left as it was.
+
+### Fixed — `imageLoader()` exposed stale dimensions
+
+Starting a new load reset `status` and `image` but not `width` / `height`, so
+while a new reactive `src` was pending — and permanently if it failed — the
+loader reported the previous image's dimensions, contradicting "0 until loaded"
+and producing wrong aspect ratios. `dispose()`, documented to reset state, left
+every signal unchanged.
+
+- Starting a load now resets `status`, `image`, `width` and `height` together in
+  one batch, and a successful load publishes them together too, so observers
+  never see a mix of old and new values.
+- `dispose()` resets every signal to its initial value, and is idempotent.
+- An abandoned request that is still in flight — on a `src` change or on
+  `dispose()` — is best-effort cancelled by clearing its `src`. An image that
+  already loaded is left untouched, since a caller may still be displaying it.
+
+### Fixed — `flushScheduler()` stranded remaining work when a task threw
+
+`flushScheduler()` cancelled the pending frame / idle / timeout wake-up and then
+invoked tasks without containment. The first throwing task escaped the flush,
+and every task behind it stayed queued with nothing scheduled to run it, leaving
+the application partially updated.
+
+All scheduler drains — `flushScheduler()`, the frame/idle/timeout queue drain and
+`Priority.IMMEDIATE` tasks — now invoke tasks through one shared safe path. A
+failure is reported through the runtime error pipeline with
+`phase: "scheduler"` (previously the async drain wrote straight to
+`console.error`) and draining continues. Scheduler state is restored in a
+`finally`.
+
+### Fixed — `lazyChunk()` mounted components into disposed containers
+
+`lazyChunk()` had no lifetime state and registered no disposer, so both
+settlement paths always mutated the container. A container disposed before its
+chunk loaded still called the component factory and appended the result — or
+the failure message — after the disposal traversal had completed, leaving any
+bindings and listeners the component created attached to an unreachable
+subtree.
+
+The container now registers terminal ownership before the load starts, as core
+`lazy()` does. A container disposed before settlement never has the component
+built or the failure message inserted, and a component whose own construction
+disposes the container is disposed and discarded instead of appended.
+
+### Fixed — overlapping `transition().start()` calls corrupted `pending()`
+
+Every `start()` set `pending` to `true`, but each body reset it to `false` when
+that one operation finished. With two transitions in flight, the first to
+settle cleared `pending()` while the second was still running; a synchronous
+first body cleared it before the second body had even started.
+
+The transition now counts outstanding starts. Each one is released exactly once
+— on synchronous completion, a throw, resolution or rejection — and `pending()`
+becomes `false` only when none remain.
+
+### Fixed — `intersection()` and `lazyLoad()` accepted callbacks from disconnected observers
+
+`disconnect()` removes an observer's targets but does not clear entries it has
+already queued, so the browser can still deliver a notification afterwards.
+
+- **`intersection()`** — after `observe()` moved to another element, or after
+  `unobserve()`, a notification queued for the previous observation overwrote
+  the reactive `isIntersecting` / `intersectionRatio` state. Each observation now
+  has a generation, and callbacks from a superseded one are ignored.
+- **`lazyLoad()`** — a queued intersecting notification could call `loader()`
+  after the returned cleanup ran, or call it a second time. It now has a
+  terminal state: the loader runs at most once and never after cleanup.
+
+Both also call `takeRecords()` before `disconnect()` to drop entries not yet
+delivered.
+
+### Fixed — `dispose()` was hidden from TypeScript on reactive helpers
+
+`debounce()`, `throttle()`, `previous()` and `persisted()` retain effects, timers
+and (for `persisted()`) a global `storage` listener, and their runtime values
+always carried `dispose()` — but the declared return types were a plain getter
+or tuple, so `value.dispose()` failed to compile without a cast.
+
+- **New `DisposableAccessor<T>`** type (`Accessor<T> & { dispose(): void }`).
+  `debounce`, `throttle` and `previous` now return it; it stays assignable
+  wherever a plain getter was expected.
+- **New `PersistedSetter<T>`** type. `persisted()` returns it as the setter, so
+  `setValue.dispose()` type-checks. Its documentation now also states that the
+  setter always carries `dispose()`, not only when cross-tab sync is on.
+
+### Fixed — `animationFrame()` kept running after a reactive `pause()` / `dispose()`
+
+Each frame published `delta` and `elapsed` — whose subscribers run synchronously
+— and then unconditionally requested the next frame. An effect that called
+`pause()` or `dispose()` in response flipped `running()` to `false`, but the
+loop kept scheduling frames and publishing values indefinitely, breaking the
+permanent-disposal contract with a full-speed browser loop.
+
+The loop now tracks its state internally, independent of the `running` signal,
+and re-checks it after every publication. A frame stops publishing and schedules
+nothing once a subscriber pauses or disposes it, and never double-schedules when
+a subscriber pauses and resumes it. `resume()` and `pause()` update internal
+state before publishing `running`, so a subscriber reacting to it sees settled
+state too.
+
+### Fixed — `when()` and `match()` rendered after disposal
+
+Both directives queue their first render in a microtask that checked only
+`initialized` and `anchor.parentNode`. `dispose(anchor)` does not detach the
+anchor, so a directive disposed before that microtask ran still invoked its
+branch or case factory and inserted DOM after teardown — outside the disposal
+traversal that had already completed, so the new branch's bindings and
+listeners were never released.
+
+Both now carry a terminal disposed flag, set by their registered disposer and
+checked by the queued render and by `update()`. A directive disposed before its
+first render never calls a factory and inserts nothing, matching `each()`.
+
+### Fixed — `FocusTrap` threw from a microtask after disposal
+
+`FocusTrap()` attaches its removal observer and performs autofocus in queued
+microtasks. `dispose(trap)` does not detach the element, so a trap appended and
+disposed before those microtasks ran was still connected, but its observer had
+already been cleared: the queued `observe()` call threw an uncaught `TypeError`,
+and autofocus moved focus into the torn-down trap.
+
+The trap now has a terminal disposed state. Both microtasks return early once it
+is disposed or no longer connected, so a disposed trap attaches no observer and
+leaves focus where it was. Cleanup is idempotent — when the removal observer and
+`dispose()` both reach it, focus is restored once — and the observer path also
+releases the node's disposer registration.
+
+### Fixed — manual helper disposal left dead cleanup registrations
+
+`hover()`, `focus().bind()` and `createListbox()` register their cleanup with the
+element and also return it for manual disposal, but the manual path never
+removed the node-level registration. Every attach/dispose cycle on a long-lived
+element left one dead closure behind: it kept its captured state alive,
+`checkLeaks()` kept counting it, and the final `dispose(node)` re-ran every
+historical cleanup.
+
+Manual disposal now calls `unregisterDisposer()` — the pattern `enhance()`
+already used — so repeated cycles return the active binding count to its
+original value and `dispose(node)` runs only the cleanups still live. Each
+disposer is idempotent, and calling it after `dispose(node)` is a no-op.
+
+### Fixed — multi-select `createListbox()` lost values stored as CSV
+
+Multiple selection lived in one comma-joined string that was re-split on every
+toggle. Selecting an option whose `data-value` was `"a,b"` was indistinguishable
+from selecting `"a"` and `"b"`, it could not be deselected, and later toggles
+marked options the user never chose as `aria-selected="true"`. The empty-string
+value was dropped by the split and could not be toggled at all.
+
+### Added — `ListboxHandle.selectedValues()`
+
+The listbox now stores its selection as a collection. `selectedValues()` returns
+the selected values in selection order (at most one in single-select mode), and
+toggling and `aria-selected` reconciliation work from it, so every `data-value`
+string — including commas and `""` — is selectable and deselectable on its own.
+An option without a `data-value` is never marked selected.
+
+`selectedValue()` is kept as a compatibility view (the value in single-select
+mode, the CSV in multiple mode) and is deprecated for multiple mode.
+
+### Fixed — `dialog()` stack corruption under reentrancy and after `dispose()`
+
+`open()` published `isOpen = true` before adding the dialog to the global stack.
+Subscribers run synchronously, so an effect that closed the dialog as it opened
+ran before the push, and `open()` then pushed an already-closed "ghost" entry:
+the global Escape listener stayed attached, and after the real top dialog closed
+the next Escape targeted the ghost. The mirror case — an effect reopening the
+dialog as it closed — left it open but off the stack. `dispose()` had no
+terminal state, so a stale `open()` or `toggle()` re-attached the controller.
+
+`open()` and `close()` now commit the open state and stack membership before
+publishing `isOpen`, so a reentrant call always sees settled state. `dispose()`
+is terminal: it marks the dialog disposed before changing anything observable,
+and `open()` / `toggle()` are no-ops afterwards. `isOpen()`, stack membership
+and the global Escape listener stay in sync in every case. `open()`, `close()`
+and `toggle()` also no longer subscribe a calling effect to `isOpen`.
+
+### Fixed — a throwing transition callback hung `enter()` / `leave()`
+
+`transition()` called `onEnterDone` / `onLeaveDone` and only then resolved the
+promise, so a throwing callback skipped the resolve. With a timed transition,
+`await enter()` or `await leave()` hung forever and the exception escaped from
+`setTimeout`, bypassing `ErrorBoundary` and `setRuntimeErrorHandler`. With
+`duration: 0` the promise rejected instead, so behaviour depended on duration.
+
+The promise now always resolves. The callback's error is reported once with
+`phase: "async"` and the element as its node, so the nearest `ErrorBoundary`
+claims it, or the runtime handler when none does. Transition classes and timer
+state are cleaned up as before, and the controller stays usable.
+
+### Fixed — `resource()` ran `onSettled` after `dispose()`
+
+`dispose()` blocked late `data`, `error`, `loading`, `onSuccess` and `onError`
+updates, but `onSettled` was gated only on the request version, which disposal
+does not change. When the aborted request rejected — or a fetcher that ignores
+the abort signal eventually resolved or rejected — `onSettled` still ran against
+a torn-down owner. No lifecycle callback runs after `dispose()` now; a request
+that settles before disposal still gets its `onSettled`.
+
+### Fixed — uncloneable payloads corrupted the worker controllers
+
+`postMessage()` throws synchronously (`DataCloneError`) when a payload cannot be
+structured-cloned — a function, DOM node, symbol or some proxies. None of the
+worker APIs handled that, and each was left in a broken state:
+
+- **`worker().post()`** set `loading` to `true` before posting, and nothing ever
+  cleared it. It now posts first: a failed post sets `error()` to the original
+  exception and leaves `loading` and `result` untouched, so a request already in
+  flight is unaffected. When that request's reply arrives it clears the error
+  together with setting `result` and `loading`, so the hook never shows a good
+  result alongside another call's failure.
+- **`workerFn().run()`** queued the request before posting. Replies are matched
+  to requests by queue position, so the failed request absorbed the next reply
+  and every later caller received its predecessor's result. The failed `run()`
+  now rejects without ever entering the queue, and `loading` reflects only the
+  requests actually sent.
+- **`createWorkerPool().execute()`** left the worker's slot marked in flight with
+  its listeners attached, so that worker's queue never advanced. The task now
+  rejects, the slot is released, and the next queued task is dispatched.
+
+The rejection or `error()` value is the original `DataCloneError`, so callers
+can check `err.name`. The worker is not terminated: a clone failure never
+reaches it, and it stays usable for later valid requests.
+
+### Added — `form().dispose()`
+
+A form creates one derived `error` per field plus five aggregates (`errors`,
+`isValid`, `isDirty`, `touched`, `values`), and none of them could be released. A
+validator that reads a caller-owned signal kept its subscription for as long as
+that signal lived, and DevTools retained every node of an abandoned form.
+
+`FormReturn` now carries `dispose()`:
+
+```ts
+const f = form({ age: { initial: 0, validators: [(v) => (v < minAge() ? "Too young" : null)] } });
+onCleanup(f.dispose, formElement);
+```
+
+It releases the aggregates first, then every field error, and is idempotent.
+Each derived emits its DevTools `computed:destroy` event. Afterwards the derived
+accessors are inert: they return their last settled values and never recompute
+or resubscribe. Field `value()` and `set()` keep working as plain signals.
+
 ### Fixed — `hotkey()` dropped unknown combo modifiers
 
 The combo parser silently ignored any modifier it did not recognize, so

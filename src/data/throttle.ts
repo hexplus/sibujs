@@ -1,5 +1,5 @@
 import { effect } from "../core/signals/effect";
-import { signal } from "../core/signals/signal";
+import { type DisposableAccessor, signal } from "../core/signals/signal";
 
 /**
  * Returns a throttled reactive getter that updates at most once per `interval` ms.
@@ -8,7 +8,8 @@ import { signal } from "../core/signals/signal";
  *
  * @param getter A reactive getter to throttle
  * @param interval Throttle interval in milliseconds
- * @returns A reactive getter for the throttled value
+ * @returns A reactive getter for the throttled value, with `dispose()` to stop
+ *   tracking the source and clear the cooldown timer
  *
  * @example
  * ```ts
@@ -17,7 +18,7 @@ import { signal } from "../core/signals/signal";
  * // throttled() updates at most once every 100ms
  * ```
  */
-export function throttle<T>(getter: () => T, interval: number): () => T {
+export function throttle<T>(getter: () => T, interval: number): DisposableAccessor<T> {
   const [throttled, setThrottled] = signal<T>(getter());
   let cooldown = false;
   let pending: { value: T } | null = null;
@@ -64,5 +65,5 @@ export function throttle<T>(getter: () => T, interval: number): () => T {
     enumerable: false,
   });
 
-  return throttled;
+  return throttled as DisposableAccessor<T>;
 }

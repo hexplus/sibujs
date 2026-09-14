@@ -49,5 +49,6 @@ describe("documented limits: DOM disposal depth", () => {
 
     expect(() => dispose(root)).not.toThrow();
     expect(disposed).toBe(2000);
-  });
+    // Scale test: under a parallel full-suite run jsdom can exceed the 15s default.
+  }, 60_000);
 });

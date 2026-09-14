@@ -3,6 +3,7 @@
  * Provides declarative transition and spring animations for elements.
  */
 
+import { reportError } from "../core/errors";
 import { registerDisposer } from "../core/rendering/dispose";
 
 export interface TransitionOptions {
@@ -83,6 +84,21 @@ export function transition(
     }
   }
 
+  // Run a completion callback, then settle the promise no matter what. A throw
+  // used to skip `resolve()`: a timed transition hung `await enter()` forever
+  // and its exception escaped from `setTimeout`, past every ErrorBoundary and
+  // the runtime handler, while `duration: 0` rejected instead. The error is
+  // reported with the element so the nearest boundary can claim it.
+  function complete(callback: (() => void) | undefined, name: string, resolve: () => void): void {
+    try {
+      callback?.();
+    } catch (error) {
+      reportError(error, { phase: "async", name, node: element });
+    } finally {
+      resolve();
+    }
+  }
+
   function enter(): Promise<void> {
     return new Promise<void>((resolve) => {
       cancelPending();
@@ -100,8 +116,7 @@ export function transition(
         activeTimer = null;
         pendingResolve = null;
         if (enterClass) element.classList.remove(enterClass);
-        onEnterDone?.();
-        resolve();
+        complete(onEnterDone, "transition(onEnterDone)", resolve);
       };
 
       if (duration > 0) {
@@ -126,8 +141,7 @@ export function transition(
         activeTimer = null;
         pendingResolve = null;
         if (leaveClass) element.classList.remove(leaveClass);
-        onLeaveDone?.();
-        resolve();
+        complete(onLeaveDone, "transition(onLeaveDone)", resolve);
       };
 
       if (duration > 0) {
