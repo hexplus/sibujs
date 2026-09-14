@@ -91,6 +91,11 @@ type SignalWithList = ReactiveSignal & {
   // settle a computed's value BEFORE deciding whether dependents must run.
   _d?: boolean;
   _validate?: () => void;
+  // Set on a computed whose last recompute threw while it was live. It stays
+  // dirty (the next read must retry), but its dependents have already been
+  // notified and have run — so `propagateDirty` must not treat "already dirty"
+  // as "dependents already enqueued" for it. Cleared when the walk passes it.
+  _f?: boolean;
 };
 
 // ---------- Node pool -----------------------------------------------------
@@ -953,8 +958,16 @@ function propagateDirty(sub: Subscriber): void {
             // Avoid redundant downstream walks when the same signal is
             // reached by multiple diamond paths — mark dirty inline and
             // only push the signal if it wasn't already dirty.
-            if (!nSig._d) {
+            //
+            // A computed left dirty by a FAILED recompute is the exception:
+            // it was already dirty before this write, yet its dependents are
+            // not queued — they ran and received the error. Skipping it here
+            // would stop the write from ever reaching them again, so a reader
+            // behind a failed intermediate computed never recovered. Clearing
+            // `_f` keeps diamond deduplication within this walk.
+            if (!nSig._d || nSig._f === true) {
               nSig._d = true;
+              nSig._f = false;
               stack.push(nSig);
             }
             // Defensive: every `_c` (computed) subscriber carries a `_sig`

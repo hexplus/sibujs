@@ -1,4 +1,4 @@
-import { derived } from "../../core/signals/derived";
+import { type DerivedAccessor, derived } from "../../core/signals/derived";
 import { signal } from "../../core/signals/signal";
 import { createPlugin, type SibuPlugin } from "../../plugins/plugin";
 import { batch } from "../../reactivity/batch";
@@ -18,8 +18,12 @@ export interface ZustandAdapterOptions<S> {
 export interface ZustandAdapterAPI<S> {
   /** Full Zustand state as a SibuJS reactive getter */
   getState: () => S;
-  /** Create a SibuJS reactive getter from a Zustand selector */
-  select: <R>(selector: (state: S) => R) => () => R;
+  /**
+   * Create a SibuJS reactive getter from a Zustand selector. The getter is a
+   * `derived()` subscribed to the store state; call its `dispose()` when a
+   * selector is discarded before the adapter.
+   */
+  select: <R>(selector: (state: S) => R) => DerivedAccessor<R>;
   /** Set state on the Zustand store */
   setState: ZustandStore<S>["setState"];
   /** Destroy the subscription and the Zustand store */
@@ -58,7 +62,7 @@ export function zustandAdapter<S>(options: ZustandAdapterOptions<S>): SibuPlugin
       });
     });
 
-    function select<R>(selector: (state: S) => R): () => R {
+    function select<R>(selector: (state: S) => R): DerivedAccessor<R> {
       return derived(() => selector(getState()));
     }
 

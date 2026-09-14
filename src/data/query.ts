@@ -537,6 +537,10 @@ export function query<T>(
     // entry, and other observers may still need it (QRY-001). Abandoned
     // requests are cancelled when the entry itself is garbage collected.
     effectCleanup();
+    // The deriveds this observer owns: release their source edges and their
+    // DevTools entries. A retained result keeps returning their last values.
+    loading.dispose();
+    isStale.dispose();
     if (intervalTimer) clearInterval(intervalTimer);
     detachFromEntry();
     // Guard removeEventListener in case the runtime added addEventListener

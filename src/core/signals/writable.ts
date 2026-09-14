@@ -1,6 +1,5 @@
 import { batch } from "../../reactivity/batch";
-import { derived } from "./derived";
-import type { Accessor } from "./signal";
+import { type DerivedAccessor, derived } from "./derived";
 
 /**
  * Creates a writable computed value — a derived getter paired with
@@ -8,7 +7,9 @@ import type { Accessor } from "./signal";
  * dependency-tracked). The setter typically updates upstream signals,
  * and the derived value recomputes on the next read.
  *
- * Returns a `[getter, setter]` tuple, matching the `signal()` API.
+ * Returns a `[getter, setter]` tuple, matching the `signal()` API. The getter
+ * is the underlying `derived()` accessor, so `getter.dispose()` releases its
+ * upstream subscriptions when the writable is discarded before its sources.
  *
  * @param get Computed getter — reads reactive dependencies
  * @param set Setter — called with the new value, typically updates upstream signals
@@ -35,13 +36,13 @@ import type { Accessor } from "./signal";
  * fullName();              // "Jane Smith"
  * ```
  *
- * @returns A store handle with `subscribe`, `set` and `update`.
+ * @returns A `[getter, setter]` tuple; the getter carries `dispose()`.
  */
 export function writable<T>(
   get: () => T,
   set: (value: T) => void,
   options?: { name?: string },
-): [Accessor<T>, (value: T) => void] {
+): [DerivedAccessor<T>, (value: T) => void] {
   const getter = derived(get, options);
 
   const setter = (value: T): void => {

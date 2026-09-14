@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getSubscriberCount } from "../src/devtools/introspect";
 import type { ReduxAdapterAPI, ReduxStore } from "../src/ecosystem/adapters/redux";
 import { reduxAdapter } from "../src/ecosystem/adapters/redux";
 import { inject, plugin, resetPlugins } from "../src/plugins/plugin";
@@ -145,5 +146,19 @@ describe("reduxAdapter", () => {
     // Mutate directly via the store; the adapter is no longer subscribed.
     store.setStateDirect({ counter: 99, label: "x" });
     expect(count()).toBe(0);
+  });
+
+  it("select() returns a derived whose dispose() releases the store-state subscription", () => {
+    const store = createFakeReduxStore({ counter: 1, label: "x" });
+    plugin(reduxAdapter({ store }));
+    const api = inject<ReduxAdapterAPI<CounterState>>("redux");
+    const count = api.select((s) => s.counter);
+    expect(count()).toBe(1);
+    expect(getSubscriberCount(api.getState)).toBe(1);
+
+    count.dispose();
+    expect(getSubscriberCount(api.getState)).toBe(0);
+    store.dispatch({ type: "increment" });
+    expect(count()).toBe(1);
   });
 });

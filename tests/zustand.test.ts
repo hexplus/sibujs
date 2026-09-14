@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getSubscriberCount } from "../src/devtools/introspect";
 import type { ZustandAdapterAPI, ZustandStore } from "../src/ecosystem/adapters/zustand";
 import { zustandAdapter } from "../src/ecosystem/adapters/zustand";
 import { inject, plugin, resetPlugins } from "../src/plugins/plugin";
@@ -116,5 +117,19 @@ describe("zustandAdapter", () => {
     api.destroy();
     expect(destroySpy).toHaveBeenCalledTimes(1);
     expect(store.destroyed).toBe(true);
+  });
+
+  it("select() returns a derived whose dispose() releases the store-state subscription", () => {
+    const store = createFakeZustandStore({ bears: 1, honey: 0 });
+    plugin(zustandAdapter({ store }));
+    const api = inject<ZustandAdapterAPI<BearState>>("zustand");
+    const bears = api.select((s) => s.bears);
+    expect(bears()).toBe(1);
+    expect(getSubscriberCount(api.getState)).toBe(1);
+
+    bears.dispose();
+    expect(getSubscriberCount(api.getState)).toBe(0);
+    store.setState({ bears: 5 });
+    expect(bears()).toBe(1);
   });
 });

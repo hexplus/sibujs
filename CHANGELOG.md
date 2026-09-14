@@ -49,10 +49,53 @@ a self-disposed one returns its frozen value. Disposing a derived that still
 holds a failure keeps it: the next read throws it once, and later reads return
 the frozen value.
 
+A reader that receives a live derived's failure stays subscribed to it. The
+edge is recorded before the error is thrown, so a binding that catches it (and
+an effect or derived chain that reports it) runs again once the sources
+recover, instead of being pruned and left stale. A write also still reaches the
+dependents of an intermediate derived whose last recompute failed.
+
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`
 during development.
+
+APIs built on `derived()` pass the disposer on or use it themselves:
+
+- `writable()` returns `[DerivedAccessor<T>, setter]`, so `getter.dispose()`
+  is available from TypeScript.
+- `select()` on the Redux and Zustand adapters returns `DerivedAccessor<R>`.
+  Each selector subscribes to the adapter's state; dispose one that is
+  discarded before the adapter.
+- `query().dispose()` disposes its internal `loading` and `isStale` deriveds,
+  and `infiniteQuery().dispose()` its `data`, `loading`, `hasNextPage` and
+  `hasPreviousPage`. Their source edges and DevTools entries are released; a
+  retained result keeps returning the last values.
+- `pagination()` returns a `PaginationResult` with `dispose()`. Its
+  `totalPages` and `endIndex` subscribe to the caller's `totalItems`, which
+  normally outlives the pagination and kept the whole derived graph alive;
+  `dispose()` releases all four internal deriveds and is idempotent.
+- `timeline()` returns `dispose()` for its `value`, `canUndo` and `canRedo`
+  deriveds. They read only the timeline's own signals, so this matters for the
+  DevTools inventory rather than for retention.
+
+### Fixed — `bindBoolAttr()` reported nothing when its getter threw
+
+The getter's exception was caught and dropped, leaving the attribute stale
+with no report anywhere — including a derived's deferred failure. It now goes
+through the runtime error pipeline as a `"binding"` failure named
+`bindBoolAttr`, carrying the element, so the nearest `ErrorBoundary` can claim
+it, exactly like `bindAttribute`. The attribute keeps its last value.
+
+### Fixed — `show()`, `when()` and `match()` bypassed `ErrorBoundary` on updates
+
+Their reactive subscriptions carried no owner node, so a condition, selector or
+branch factory that threw on a later scheduled update was reported with no DOM
+position: the enclosing `ErrorBoundary` could not be found and the error went
+straight to the runtime handler or the console. The subscriptions are now
+stamped with the element (`show`) or the anchor (`when`, `match`), as reactive
+class and style bindings already were, so the boundary claims the failure and
+recovers normally after its reset.
 
 ### Fixed — tracking scopes created inside `untracked()`
 

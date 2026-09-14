@@ -1,4 +1,4 @@
-import { derived } from "../../core/signals/derived";
+import { type DerivedAccessor, derived } from "../../core/signals/derived";
 import { signal } from "../../core/signals/signal";
 import { createPlugin, type SibuPlugin } from "../../plugins/plugin";
 import { batch } from "../../reactivity/batch";
@@ -17,8 +17,12 @@ export interface ReduxAdapterOptions<S = unknown> {
 export interface ReduxAdapterAPI<S = unknown> {
   /** Full store state as a SibuJS reactive getter */
   getState: () => S;
-  /** Create a SibuJS reactive getter from a Redux selector */
-  select: <R>(selector: (state: S) => R) => () => R;
+  /**
+   * Create a SibuJS reactive getter from a Redux selector. The getter is a
+   * `derived()` subscribed to the store state; call its `dispose()` when a
+   * selector is discarded before the adapter.
+   */
+  select: <R>(selector: (state: S) => R) => DerivedAccessor<R>;
   /** Dispatch an action to the Redux store */
   dispatch: ReduxStore<S>["dispatch"];
   /** Unsubscribe from the Redux store */
@@ -57,7 +61,7 @@ export function reduxAdapter<S>(options: ReduxAdapterOptions<S>): SibuPlugin {
       });
     });
 
-    function select<R>(selector: (state: S) => R): () => R {
+    function select<R>(selector: (state: S) => R): DerivedAccessor<R> {
       return derived(() => selector(getState()));
     }
 

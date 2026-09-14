@@ -1,10 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 
-/**
- * pagination provides reactive pagination state and controls.
- */
-export function pagination(options: { totalItems: () => number; pageSize?: number; initialPage?: number }): {
+export interface PaginationResult {
   page: () => number;
   pageSize: () => number;
   totalPages: () => number;
@@ -13,7 +10,26 @@ export function pagination(options: { totalItems: () => number; pageSize?: numbe
   goTo: (page: number) => void;
   startIndex: () => number;
   endIndex: () => number;
-} {
+  /**
+   * Release the subscriptions to `totalItems`. Call it when the pagination is
+   * discarded before the state it reads. Afterwards the accessors return their
+   * last values and the controls no longer move the page. Idempotent.
+   */
+  dispose: () => void;
+}
+
+/**
+ * pagination provides reactive pagination state and controls.
+ *
+ * It subscribes to the caller's `totalItems` getter, which usually lives longer
+ * than the pagination itself (a store, a query result). Call `dispose()` when
+ * the pagination is no longer used, e.g. `onUnmount(pager.dispose, el)`.
+ */
+export function pagination(options: {
+  totalItems: () => number;
+  pageSize?: number;
+  initialPage?: number;
+}): PaginationResult {
   const pageSizeValue = options.pageSize ?? 10;
   const [page, setPage] = signal(options.initialPage ?? 1);
   const [pageSize] = signal(pageSizeValue);
@@ -55,5 +71,14 @@ export function pagination(options: { totalItems: () => number; pageSize?: numbe
     setPage(clamped);
   }
 
-  return { page: currentPage, pageSize, totalPages, next, prev, goTo, startIndex, endIndex };
+  // Dependents first, so no disposed derived is ever read by a live one.
+  // `derived().dispose()` is idempotent, which makes this idempotent too.
+  function dispose(): void {
+    startIndex.dispose();
+    endIndex.dispose();
+    currentPage.dispose();
+    totalPages.dispose();
+  }
+
+  return { page: currentPage, pageSize, totalPages, next, prev, goTo, startIndex, endIndex, dispose };
 }
