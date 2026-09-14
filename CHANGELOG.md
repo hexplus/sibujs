@@ -7,6 +7,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Fixed — `hotkey()` dropped unknown combo modifiers
+
+The combo parser silently ignored any modifier it did not recognize, so
+`hotkey("mod+s", save)` registered a shortcut with no modifier at all: it fired
+on every plain "s" (including inside text inputs) and never on Ctrl+S or Cmd+S.
+
+- **`mod` modifier** — resolves to Cmd on Apple platforms and Ctrl everywhere
+  else, so `hotkey("mod+s", save)` works cross-platform with one registration.
+- **`option`** is accepted as an alias for `alt`.
+- **Unknown modifiers throw** — `hotkey("hyper+s", fn)` now throws
+  `hotkey("hyper+s"): unknown modifier "hyper"` instead of matching the bare key.
+
 ## [4.5.0] — 2026-09-13
 
 ### Added — `derived().dispose()`

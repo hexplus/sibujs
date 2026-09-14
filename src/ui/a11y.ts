@@ -192,6 +192,12 @@ export function FocusTrap(
   return container;
 }
 
+function isApplePlatform(): boolean {
+  if (typeof navigator === "undefined") return false;
+  const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+  return /mac|iphone|ipad|ipod/i.test(nav.userAgentData?.platform || nav.platform || "");
+}
+
 /**
  * hotkey registers a keyboard shortcut handler.
  *
@@ -204,6 +210,11 @@ export function FocusTrap(
  * Supports two calling styles:
  * - String combo:   hotkey("ctrl+shift+z", handler)
  * - Explicit flags: hotkey("z", handler, { ctrl: true, shift: true })
+ *
+ * Combo modifiers: `ctrl`/`control`, `shift`, `alt`/`option`,
+ * `meta`/`cmd`/`command`, and `mod` — Cmd on Apple platforms, Ctrl
+ * everywhere else. An unknown modifier throws, because dropping it would
+ * make the shortcut fire on the bare key.
  */
 export function hotkey(
   combo: string,
@@ -230,8 +241,14 @@ export function hotkey(
       const mod = parts[i];
       if (mod === "ctrl" || mod === "control") needCtrl = true;
       else if (mod === "shift") needShift = true;
-      else if (mod === "alt") needAlt = true;
+      else if (mod === "alt" || mod === "option") needAlt = true;
       else if (mod === "meta" || mod === "cmd" || mod === "command") needMeta = true;
+      else if (mod === "mod") {
+        if (isApplePlatform()) needMeta = true;
+        else needCtrl = true;
+      } else {
+        throw new Error(`hotkey("${combo}"): unknown modifier "${mod}"`);
+      }
     }
   }
 
