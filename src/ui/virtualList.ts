@@ -17,6 +17,17 @@ export interface VirtualListProps<T> {
 
 /**
  * VirtualList renders only visible items for efficient large-list rendering.
+ *
+ * Scope — it virtualizes ONE axis:
+ *   - vertical only, inside a container of fixed `containerHeight`;
+ *   - every item has the same fixed `itemHeight`;
+ *   - on each scroll or `items()` change the visible window is disposed and
+ *     re-rendered through `renderItem` (no keyed reuse of item nodes);
+ *   - no horizontal virtualization, frozen rows/columns or sticky headers.
+ *
+ * Two-axis content (spreadsheets, large grids with frozen headers) needs its
+ * own windowing, typically a keyed `each()` over the visible row indices with a
+ * nested keyed `each()` over the visible column indices.
  */
 export function VirtualList<T>(props: VirtualListProps<T>): HTMLElement {
   const overscan = props.overscan ?? 3;

@@ -7,6 +7,115 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.5.0] — 2026-09-13
+
+### Added — `derived().dispose()`
+
+`derived()` subscribes to its sources when it is created, and there was no way
+to release those edges. A derived created per mount (one per virtualized row,
+say) accumulated subscribers on its sources for as long as they lived. The
+returned accessor now carries `dispose()`:
+
+```ts
+const selected = derived(() => range().top <= index && index <= range().bottom);
+onCleanup(selected.dispose, rowElement); // released when the row is disposed
+```
+
+Disposal unlinks every source edge and is idempotent. A disposed accessor is
+inert: it returns the last value it settled, never recomputes, never
+re-subscribes, and never wakes downstream readers. The return type is now
+`DerivedAccessor<T>` (`Accessor<T> & { dispose(): void }`), which is assignable
+wherever `Accessor<T>` was.
+
+Disposal is safe from inside the derived's own getter: edges recorded by reads
+that follow the `dispose()` call in the same recomputation are released when
+that run finishes, and the dirty marker is inert once disposed, so a
+self-disposing derived ends with no source subscriptions either way.
+
+Disposal also emits a `computed:destroy` DevTools event, read from the global
+hook at disposal time, and DevTools drops the node from its inventory. Without
+it, deriveds created and disposed per row kept accumulating in `hook.nodes`
+during development.
+
+### Fixed — tracking scopes created inside `untracked()`
+
+A binding, effect or derived recomputation that ran inside an `untracked()` body
+inherited the suspension:
+
+- A binding created inside `untracked()` never subscribed to the deriveds it
+  read, so it stopped updating when they changed.
+- A derived-of-derived that recomputed while read through `untracked()` had its
+  upstream edge pruned and stayed **stale permanently**.
+- An `untracked()` nested inside such a binding leaked its reads into the
+  binding.
+
+Tracking runs now start a fresh scope and restore the enclosing suspension when
+they finish. `untracked()` still suppresses only its own reads.
+
+### Changed — `each()` render callbacks run untracked
+
+The first rows of a list render in a deferred pass outside any subscriber, but
+rows added by a later update rendered inside the list's reactive update. A
+signal read directly in the render body of such a row subscribed the whole
+list, so writing to it re-ran reconciliation. The render callback now always
+runs untracked, so both paths behave the same. Reactive reads belong inside the
+bindings and effects a row creates (`div(() => item().name)`), which track in
+their own scopes and are unaffected. Wrapping reads in the render body with
+`untracked()` is no longer necessary, and remains harmless.
+
+Because `render` runs once per key and untracked, unwrapping `item()` /
+`index()` in its body captures one-time values that go stale when the key
+receives a replacement item or moves. Pass the getters into the row
+(`Row({ user, index })`) or read them inside bindings. The best-practices guide,
+the todo and e-commerce examples and the migration guides previously showed the
+unwrapping pattern and now show the getter form.
+
+### Changed — booleans on `aria-*` attributes serialize as `"true"` / `"false"`
+
+ARIA states are enumerated tokens, not presence-based boolean attributes: a
+missing `aria-selected` means "not applicable", not "not selected". Booleans on
+`aria-*` attributes now write `"true"` / `"false"` in every attribute writer —
+tag factory props (HTML and SVG), `bindAttribute` / `bindDynamic`, `bindAttrs`,
+`bindBoolAttr`, `svgElement`, `html` templates (runtime and compiled), and
+therefore SSR, streaming SSR and hydrated output — matching what `enhance()`'s
+`attr()` already did. Native boolean attributes (`hidden`, `disabled`,
+`required`, …) keep presence semantics, `null` / `undefined` still remove any
+attribute, and non-boolean values (`aria-checked="mixed"`, numbers) pass through
+unchanged.
+
+To remove an ARIA attribute, produce `null` or `undefined` instead of `false`:
+
+- Props, `bindAttribute`, `bindDynamic` and `bindAttrs` take any value, so
+  `"aria-x": () => (active() ? true : null)` writes `"true"` or removes it.
+- `bindBoolAttr` accepts only `boolean | (() => boolean)` and coerces the
+  getter's result with `Boolean()`, so it can no longer remove an ARIA
+  attribute. Code that relied on `bindBoolAttr(el, "aria-x", false)` removing
+  it should switch to `bindAttribute(el, "aria-x", () => (active() ? true : null))`.
+
+### Documented — `media()` returns `{ matches, dispose }`
+
+`media()` returns an object, not a bare `() => boolean`, and its `matchMedia`
+listener stays attached until `dispose()` is called. The README, the
+best-practices guide and its JSDoc now show the real shape and when to release
+it:
+
+```ts
+const { matches: small, dispose } = media("(max-width: 640px)");
+
+small();
+dispose();
+```
+
+### Documented — `VirtualList` is one-dimensional
+
+`VirtualList` virtualizes vertical scrolling with a fixed container height and
+a fixed item height, and re-renders its visible window on every scroll. It has
+no horizontal virtualization, frozen rows or sticky headers; two-axis grids need
+their own windowing (nested keyed `each()`). Its JSDoc and the best-practices
+guide now say so.
+
+---
+
 ## [4.4.0] — 2026-09-07
 
 ### Added — `cdn.full.global.js`, patterns for no-build pages

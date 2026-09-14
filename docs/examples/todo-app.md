@@ -93,21 +93,24 @@ function TodoInput(): HTMLElement {
   ]) as HTMLElement;
 }
 
-function TodoItem(todo: Todo): HTMLElement {
+// `todo` is the row's reactive getter from each(). The row is built once per id
+// and reused when that todo is replaced, so every read happens inside a binding
+// or handler — never unwrapped at build time.
+function TodoItem(todo: () => Todo): HTMLElement {
   return li({
-    class: () => `todo-item ${todo.completed ? "completed" : ""}`,
+    class: () => `todo-item ${todo().completed ? "completed" : ""}`,
   }, [
     label([
       input({
         type: "checkbox",
-        checked: todo.completed ? "checked" : undefined,
-        on: { change: () => toggleTodo(todo.id) },
+        checked: () => todo().completed,
+        on: { change: () => toggleTodo(todo().id) },
       }),
-      span(todo.text),
+      span(() => todo().text),
     ]),
     button({
       class: "remove-btn",
-      on: { click: () => removeTodo(todo.id) },
+      on: { click: () => removeTodo(todo().id) },
     }, "\u00d7"),
   ]) as HTMLElement;
 }
@@ -137,7 +140,7 @@ function App(): HTMLElement {
     ul("todo-list", [
       each(
         () => filteredTodos(),
-        (todo) => TodoItem(todo()),
+        (todo) => TodoItem(todo),
         { key: (t) => t.id }
       ),
     ]),

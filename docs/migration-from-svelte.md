@@ -499,7 +499,7 @@ import { ul, li, each } from "sibujs";
 ul([
   each(
     () => items(),
-    (item, index) => li(item().name),
+    (item) => li(() => item().name),
     { key: item => item.id }
   ),
 ]);

@@ -1,5 +1,5 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
-import { isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
+import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import type { Accessor } from "./signal";
 
@@ -32,8 +32,17 @@ import type { Accessor } from "./signal";
  * propagation, with recomputation still fully lazy: `_validate` only ever runs
  * when an effect is genuinely about to observe the value.
  *
+ * DISPOSAL — a derived subscribes to its sources when it is created, and those
+ * edges live as long as the sources do. A derived created per mount (one per
+ * virtualized row, say) must be released when its owner goes away:
+ * `flag.dispose()`, or `onCleanup(flag.dispose, rowNode)` to tie it to a node.
+ * A disposed accessor is inert: it keeps returning the last value it settled,
+ * never recomputes, never re-subscribes, and never wakes downstream readers.
+ * Disposal is idempotent.
+ *
  * @returns An accessor for the computed value. It recomputes lazily on read
- * after any dependency changes.
+ * after any dependency changes, and carries `dispose()` to release its source
+ * subscriptions.
  */
 export function derived<T>(
   getter: () => T,
@@ -43,7 +52,7 @@ export function derived<T>(
      *  downstream subscribers are not notified. Defaults to `Object.is`. */
     equals?: (a: T, b: T) => boolean;
   },
-): Accessor<T> {
+): DerivedAccessor<T> {
   devAssert(typeof getter === "function", "derived: argument must be a getter function.");
   const debugName = options?.name;
   const equals = options?.equals;
@@ -60,8 +69,14 @@ export function derived<T>(
   // computed so future read-side short-circuit work can compare against it.
   cs.__v = 0;
 
+  // Declared before `markDirty` and the initial track so every closure below
+  // sees the binding (no temporal-dead-zone reads).
+  let evaluating = false;
+  let disposed = false;
+
   const markDirty = (): void => {
-    if (cs._d) return;
+    // Inert once disposed: nothing may make a released computed dirty again.
+    if (cs._d || disposed) return;
     cs._d = true;
   };
   (markDirty as any)._c = 1;
@@ -104,8 +119,6 @@ export function derived<T>(
   // DevTools: emit computed:create
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
 
-  let evaluating = false;
-
   // Settle a dirty computed: recompute, then bump `__v` ONLY if the result
   // differs from the previous value. `recompute` already applies the custom
   // comparator by keeping the OLD reference when `equals` says they match, so
@@ -115,7 +128,9 @@ export function derived<T>(
   // computed's value before deciding whether dependents must run — it holds a
   // reference to `cs`, not to this getter. See `depsChanged` in track-core.
   const validate = (): void => {
-    if (!cs._d) return;
+    // A disposed computed must not recompute: `retrack` would re-link the very
+    // source edges `dispose()` released.
+    if (!cs._d || disposed) return;
     const oldValue = cs._v;
     evaluating = true;
     try {
@@ -123,8 +138,17 @@ export function derived<T>(
       if (!Object.is(oldValue, cs._v)) cs.__v++;
     } finally {
       evaluating = false;
+      // The getter may have disposed this computed mid-run. `dispose()` already
+      // released the edges that existed at that moment, but any source read
+      // AFTER the call was linked by this very retrack — and its stale-dep pass
+      // only prunes edges that were not re-read, so those survive it. Release
+      // them now that the run is over, so a disposed computed holds no edges.
+      if (disposed) cleanup(markDirty);
     }
-    if (hook && !Object.is(oldValue, cs._v)) {
+    // A getter that disposed this computed has already emitted
+    // `computed:destroy`; an update after it would describe a node DevTools no
+    // longer tracks.
+    if (hook && !disposed && !Object.is(oldValue, cs._v)) {
       hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
     }
   };
@@ -144,7 +168,7 @@ export function derived<T>(
     // update — and folding the check into the callee turned every one of those
     // reads into a function call that immediately returned. Inline, the clean
     // path is a single boolean load again.
-    if (isTrackingSuspended()) {
+    if (isTrackingSuspended() || disposed) {
       if (cs._d) validate();
       return cs._v;
     }
@@ -165,7 +189,36 @@ export function derived<T>(
   }
   (computedGetter as unknown as Record<string, unknown>).__signal = cs;
 
+  (computedGetter as DerivedAccessor<T>).dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    // Clearing the dirty flag keeps the drain's stabilization check from
+    // treating this computed as pending, and `cleanup` unlinks every source
+    // edge so the sources stop retaining it. When called from inside this
+    // computed's own recomputation, `validate()` runs `cleanup` once more after
+    // the run, for edges the rest of the getter records.
+    cs._d = false;
+    cleanup(markDirty);
+    // Read the hook NOW, not the one captured at creation: DevTools may have
+    // been attached (or detached) since, and its node inventory retains this
+    // computed until it hears about the disposal.
+    const h = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+    if (h) {
+      try {
+        h.emit("computed:destroy", { signal: cs, getter: computedGetter });
+      } catch {
+        /* devtools hook errors should not break user teardown */
+      }
+    }
+  };
+
   if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
-  return computedGetter as Accessor<T>;
+  return computedGetter as DerivedAccessor<T>;
 }
+
+/** Accessor returned by {@link derived}: read it like any getter, release it with `dispose()`. */
+export type DerivedAccessor<T> = Accessor<T> & {
+  /** Release every source subscription. The accessor then returns its last settled value. Idempotent. */
+  dispose: () => void;
+};
