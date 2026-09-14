@@ -1,6 +1,7 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { reportError } from "../errors";
 import type { Accessor } from "./signal";
 
 /**
@@ -38,7 +39,9 @@ import type { Accessor } from "./signal";
  * `flag.dispose()`, or `onCleanup(flag.dispose, rowNode)` to tie it to a node.
  * A disposed accessor is inert: it keeps returning the last value it settled,
  * never recomputes, never re-subscribes, and never wakes downstream readers.
- * Disposal is idempotent.
+ * Disposal is idempotent. If a getter disposes its own derived and then throws,
+ * the exception is reported through the runtime error pipeline (phase
+ * `"derived"`) instead of being thrown to a reader that could never see it again.
  *
  * @returns An accessor for the computed value. It recomputes lazily on read
  * after any dependency changes, and carries `dispose()` to release its source
@@ -132,10 +135,25 @@ export function derived<T>(
     // source edges `dispose()` released.
     if (!cs._d || disposed) return;
     const oldValue = cs._v;
+    let failure: { error: unknown } | undefined;
     evaluating = true;
     try {
       retrack(recompute, markDirty);
       if (!Object.is(oldValue, cs._v)) cs.__v++;
+    } catch (err) {
+      // A live computed rethrows: it stays dirty, so its reader — or the
+      // subscriber the scheduler lets run after a failed validation — reads it
+      // again and the failure surfaces there.
+      //
+      // A computed disposed during this run has no such second chance. It is
+      // inert from here on, so every later read returns the frozen value
+      // without recomputing, and an exception left to the reader would simply
+      // vanish (the scheduler's validation catch swallows it on the promise
+      // that the subscriber rethrows). This run is the only place it can be
+      // reported, so it is reported here, once, and not rethrown — rethrowing
+      // would make a reader that is itself reported (an effect) count it twice.
+      if (!disposed) throw err;
+      failure = { error: err };
     } finally {
       evaluating = false;
       // The getter may have disposed this computed mid-run. `dispose()` already
@@ -144,6 +162,10 @@ export function derived<T>(
       // only prunes edges that were not re-read, so those survive it. Release
       // them now that the run is over, so a disposed computed holds no edges.
       if (disposed) cleanup(markDirty);
+    }
+    if (failure !== undefined) {
+      reportError(failure.error, { phase: "derived", name: debugName });
+      return;
     }
     // A getter that disposed this computed has already emitted
     // `computed:destroy`; an update after it would describe a node DevTools no

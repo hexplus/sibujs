@@ -32,6 +32,14 @@ that follow the `dispose()` call in the same recomputation are released when
 that run finishes, and the dirty marker is inert once disposed, so a
 self-disposing derived ends with no source subscriptions either way.
 
+A getter that disposes its own derived and then throws has its exception
+reported exactly once through the runtime error pipeline, with phase
+`"derived"`. It is not rethrown: a disposed derived never recomputes, so the
+reader it would be thrown to — typically an effect the scheduler lets run after
+a failed validation — reads the frozen value instead, and the error used to
+vanish. A derived that throws without disposing itself still throws to its
+reader, as before.
+
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`
