@@ -32,6 +32,23 @@ that follow the `dispose()` call in the same recomputation are released when
 that run finishes, and the dirty marker is inert once disposed, so a
 self-disposing derived ends with no source subscriptions either way.
 
+A getter that disposes its own derived and then throws no longer loses the
+exception, whether the derived is read directly or through other deriveds.
+When the scheduler validates a derived for a subscriber, it swallows a failure
+and lets the subscriber run, expecting the subscriber's read to throw again. A
+disposed derived returns its frozen value instead, and a derived downstream of
+one recomputes against that frozen value and succeeds, so the error vanished.
+
+A failed recomputation now keeps its exception and throws it to the next reader
+exactly once, in that reader's own context: a binding reports it with its node,
+so the nearest `ErrorBoundary` can claim it; an effect reports it as an effect
+failure; a direct caller can catch it; and a derived reading it fails and keeps
+it in turn, so the error travels up a chain to the first binding, effect or
+direct caller. A live derived stays dirty and recomputes on the following read;
+a self-disposed one returns its frozen value. Disposing a derived that still
+holds a failure keeps it: the next read throws it once, and later reads return
+the frozen value.
+
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`

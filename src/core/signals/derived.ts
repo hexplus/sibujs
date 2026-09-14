@@ -40,6 +40,13 @@ import type { Accessor } from "./signal";
  * never recomputes, never re-subscribes, and never wakes downstream readers.
  * Disposal is idempotent.
  *
+ * ERRORS — a recomputation that throws is thrown to the next reader, in that
+ * reader's context: a binding reports it with its node (so the nearest
+ * `ErrorBoundary` can claim it), an effect reports it, a direct caller can catch
+ * it, and a derived reading another derived passes it on. A live derived stays
+ * dirty and recomputes on the following read; a derived that disposed itself
+ * during the failing run returns its frozen value afterwards.
+ *
  * @returns An accessor for the computed value. It recomputes lazily on read
  * after any dependency changes, and carries `dispose()` to release its source
  * subscriptions.
@@ -73,6 +80,9 @@ export function derived<T>(
   // sees the binding (no temporal-dead-zone reads).
   let evaluating = false;
   let disposed = false;
+  // The exception from the last failed recomputation, kept until one reader
+  // takes it. See `validate` for why it cannot be thrown on the spot.
+  let pendingError: { error: unknown } | undefined;
 
   const markDirty = (): void => {
     // Inert once disposed: nothing may make a released computed dirty again.
@@ -129,13 +139,40 @@ export function derived<T>(
   // reference to `cs`, not to this getter. See `depsChanged` in track-core.
   const validate = (): void => {
     // A disposed computed must not recompute: `retrack` would re-link the very
-    // source edges `dispose()` released.
-    if (!cs._d || disposed) return;
+    // source edges `dispose()` released. A failure still waiting for its reader
+    // must not be overwritten by a retry that nobody has asked for yet.
+    if (!cs._d || disposed || pendingError !== undefined) return;
     const oldValue = cs._v;
     evaluating = true;
     try {
       retrack(recompute, markDirty);
       if (!Object.is(oldValue, cs._v)) cs.__v++;
+    } catch (err) {
+      // The failure is kept for the NEXT reader, which takes it exactly once,
+      // instead of being thrown from here.
+      //
+      // Thrown from here, it is lost whenever the caller is the scheduler's
+      // validation step, which swallows it expecting the subscriber's own read
+      // to throw again. That expectation fails whenever the retry cannot
+      // reproduce the error: a computed that disposed itself returns its frozen
+      // value, and a computed downstream of one recomputes against that frozen
+      // value and succeeds. Reporting it from here instead would bypass the
+      // reader's error handling — a binding reports with its node, which is
+      // what lets the nearest ErrorBoundary claim it — and a direct caller
+      // could no longer catch it.
+      //
+      // Every failed validation keeps its error, not only a self-disposing one,
+      // so a failure travels up a derived chain: the downstream computed's
+      // recomputation reads this one, receives the error, fails, and keeps it
+      // in turn, until a binding, effect or direct caller reads it.
+      //
+      // Bumping the version marks the value as changed, so the scheduler runs
+      // the subscriber it was validating for. A live computed stays dirty and
+      // recomputes on the read after the one that takes the error; a disposed
+      // one is marked dirty only so readers check for the pending error.
+      pendingError = { error: err };
+      cs.__v++;
+      if (disposed) cs._d = true;
     } finally {
       evaluating = false;
       // The getter may have disposed this computed mid-run. `dispose()` already
@@ -154,6 +191,16 @@ export function derived<T>(
   };
   cs._validate = validate;
 
+  // Hand the pending failure to exactly one reader. A disposed computed is
+  // clean again afterwards and keeps returning its frozen value; a live one
+  // stays dirty, so the next read retries.
+  const throwPending = (): never => {
+    const { error } = pendingError as { error: unknown };
+    pendingError = undefined;
+    if (disposed) cs._d = false;
+    throw error;
+  };
+
   function computedGetter(): T {
     if (evaluating) {
       throw new Error(
@@ -169,7 +216,10 @@ export function derived<T>(
     // reads into a function call that immediately returned. Inline, the clean
     // path is a single boolean load again.
     if (isTrackingSuspended() || disposed) {
-      if (cs._d) validate();
+      if (cs._d) {
+        validate();
+        if (pendingError !== undefined) throwPending();
+      }
       return cs._v;
     }
 
@@ -177,7 +227,10 @@ export function derived<T>(
     // `cs.__v`, and that stamp must describe the value we are about to return —
     // stamping a pre-recompute version would make the reader look permanently
     // stale and re-run it on every unrelated upstream write.
-    if (cs._d) validate();
+    if (cs._d) {
+      validate();
+      if (pendingError !== undefined) throwPending();
+    }
     recordDependency(cs as ReactiveSignal);
     return cs._v;
   }
@@ -197,7 +250,11 @@ export function derived<T>(
     // edge so the sources stop retaining it. When called from inside this
     // computed's own recomputation, `validate()` runs `cleanup` once more after
     // the run, for edges the rest of the getter records.
-    cs._d = false;
+    //
+    // A failure still waiting for its reader keeps the flag set: readers only
+    // look for a pending error on a dirty computed, so clearing it here would
+    // make that error unreachable. `throwPending` clears it once delivered.
+    cs._d = pendingError !== undefined;
     cleanup(markDirty);
     // Read the hook NOW, not the one captured at creation: DevTools may have
     // been attached (or detached) since, and its node inventory retains this
