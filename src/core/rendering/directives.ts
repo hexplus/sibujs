@@ -1,4 +1,4 @@
-import { track } from "../../reactivity/track";
+import { reactiveBinding } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
@@ -43,7 +43,13 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
   // Register the teardown on the element so disposing the element (e.g. when an
   // enclosing each/when row is removed) also stops the condition subscription.
   // Without this the effect — and everything it closes over — leaks forever.
-  registerDisposer(resolved, track(update));
+  //
+  // `reactiveBinding(update, node)` rather than a bare `track(update)`: both
+  // create the same subscriber, but only this form stamps the owning node on it.
+  // A condition that throws on a LATER scheduled run is reported from the
+  // drain, which finds the enclosing ErrorBoundary only through that node (see
+  // the note above the class/style bindings in tagFactory.ts).
+  registerDisposer(resolved, reactiveBinding(update, resolved));
   return resolved;
 }
 
@@ -200,8 +206,10 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
 
   // Tie the reactive subscription to the anchor's lifetime. When the anchor is
   // disposed the condition subscription, current branch node, and branch
-  // closures are released instead of leaking.
-  registerDisposer(anchor, track(update));
+  // closures are released instead of leaking. Owner-stamped with the anchor, as
+  // in `show`, so a condition or branch factory that throws on a scheduled run
+  // reaches the enclosing ErrorBoundary.
+  registerDisposer(anchor, reactiveBinding(update, anchor));
 
   if (!initialized) {
     queueMicrotask(() => {
@@ -303,8 +311,10 @@ export function match<T extends string | number>(
   };
 
   // Tie the reactive subscription to the anchor's lifetime so disposing the
-  // anchor releases the value subscription and the matched branch.
-  registerDisposer(anchor, track(update));
+  // anchor releases the value subscription and the matched branch. Owner-stamped
+  // with the anchor, as in `when`, so a throwing selector or case factory on a
+  // scheduled run reaches the enclosing ErrorBoundary.
+  registerDisposer(anchor, reactiveBinding(update, anchor));
 
   if (!initialized) {
     queueMicrotask(() => {

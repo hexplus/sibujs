@@ -54,6 +54,36 @@ hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`
 during development.
 
+APIs built on `derived()` pass the disposer on or use it themselves:
+
+- `writable()` returns `[DerivedAccessor<T>, setter]`, so `getter.dispose()`
+  is available from TypeScript.
+- `select()` on the Redux and Zustand adapters returns `DerivedAccessor<R>`.
+  Each selector subscribes to the adapter's state; dispose one that is
+  discarded before the adapter.
+- `query().dispose()` disposes its internal `loading` and `isStale` deriveds,
+  and `infiniteQuery().dispose()` its `data`, `loading`, `hasNextPage` and
+  `hasPreviousPage`. Their source edges and DevTools entries are released; a
+  retained result keeps returning the last values.
+
+### Fixed — `bindBoolAttr()` reported nothing when its getter threw
+
+The getter's exception was caught and dropped, leaving the attribute stale
+with no report anywhere — including a derived's deferred failure. It now goes
+through the runtime error pipeline as a `"binding"` failure named
+`bindBoolAttr`, carrying the element, so the nearest `ErrorBoundary` can claim
+it, exactly like `bindAttribute`. The attribute keeps its last value.
+
+### Fixed — `show()`, `when()` and `match()` bypassed `ErrorBoundary` on updates
+
+Their reactive subscriptions carried no owner node, so a condition, selector or
+branch factory that threw on a later scheduled update was reported with no DOM
+position: the enclosing `ErrorBoundary` could not be found and the error went
+straight to the runtime handler or the console. The subscriptions are now
+stamped with the element (`show`) or the anchor (`when`, `match`), as reactive
+class and style bindings already were, so the boundary claims the failure and
+recovers normally after its reset.
+
 ### Fixed — tracking scopes created inside `untracked()`
 
 A binding, effect or derived recomputation that ran inside an `untracked()` body

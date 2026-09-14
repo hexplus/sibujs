@@ -208,7 +208,9 @@ describe("the real built declarations", () => {
       expect(findDeclaredExports(source, INTERNAL_ONLY), `${file} was not clean`).toEqual([]);
 
       // Into the final aggregate block…
-      const atEnd = source.replace(/export \{ type Accessor,/, "export { getRequestStore, type Accessor,");
+      // `Accessor` opens the block with or without `type`, depending on whether
+      // the bundler re-exports it from a shared chunk.
+      const atEnd = source.replace(/export \{ ((?:type )?Accessor,)/, "export { getRequestStore, $1");
       expect(atEnd, `${file} lost its aggregate export block`).not.toBe(source);
       expect(findDeclaredExports(atEnd, INTERNAL_ONLY), `${file}: leak at end not caught`).toEqual(["getRequestStore"]);
 

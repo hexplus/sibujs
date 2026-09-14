@@ -236,6 +236,12 @@ export function infiniteQuery<TData, TPageParam = number>(
     disposed = true;
     abortController?.abort();
     effectCleanup();
+    // The deriveds this query owns: release their source edges and their
+    // DevTools entries. A retained result keeps returning their last values.
+    data.dispose();
+    loading.dispose();
+    hasNextPage.dispose();
+    hasPreviousPage.dispose();
   }
 
   return {

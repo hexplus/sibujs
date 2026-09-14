@@ -1,5 +1,6 @@
+import { reportError } from "../core/errors";
 import { bindAttribute } from "../reactivity/bindAttribute";
-import { track } from "../reactivity/track";
+import { reactiveBinding } from "../reactivity/track";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /**
@@ -87,15 +88,21 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
     let value: boolean;
     try {
       value = reactiveGetter();
-    } catch {
+    } catch (err) {
+      // Keep the attribute at its last value, but report — exactly like
+      // `bindAttribute`. Returning silently hid ordinary getter errors and a
+      // derived's deferred failure from ErrorBoundary, the runtime handler and
+      // the console alike.
+      reportError(err, { phase: "binding", name: "bindBoolAttr", node: el });
       return;
     }
 
     setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr" });
   }
 
-  const teardown = track(commit);
-  return teardown;
+  // Owner-stamped like every DOM binding, so a failure on a later scheduled run
+  // is attributed to `el` as well.
+  return reactiveBinding(commit, el);
 }
 
 /**
