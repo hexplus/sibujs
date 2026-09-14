@@ -58,6 +58,20 @@ describe("media", () => {
     expect(matches()).toBe(false);
   });
 
+  it("dispose() removes the exact change listener it added and freezes matches()", () => {
+    matchesMap.set("(max-width: 640px)", false);
+    const { matches: small, dispose } = media("(max-width: 640px)");
+    const mql = (window.matchMedia as unknown as ReturnType<typeof vi.fn>).mock.results[0].value;
+    const handler = listeners.get("(max-width: 640px)");
+
+    handler?.({ matches: true } as MediaQueryListEvent);
+    expect(small()).toBe(true);
+
+    dispose();
+    expect(mql.removeEventListener).toHaveBeenCalledWith("change", handler);
+    expect(small()).toBe(true);
+  });
+
   it("returns false when window is undefined", () => {
     vi.stubGlobal("window", undefined);
     const { matches } = media("(max-width: 768px)");

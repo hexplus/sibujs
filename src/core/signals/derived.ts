@@ -69,8 +69,14 @@ export function derived<T>(
   // computed so future read-side short-circuit work can compare against it.
   cs.__v = 0;
 
+  // Declared before `markDirty` and the initial track so every closure below
+  // sees the binding (no temporal-dead-zone reads).
+  let evaluating = false;
+  let disposed = false;
+
   const markDirty = (): void => {
-    if (cs._d) return;
+    // Inert once disposed: nothing may make a released computed dirty again.
+    if (cs._d || disposed) return;
     cs._d = true;
   };
   (markDirty as any)._c = 1;
@@ -113,9 +119,6 @@ export function derived<T>(
   // DevTools: emit computed:create
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
 
-  let evaluating = false;
-  let disposed = false;
-
   // Settle a dirty computed: recompute, then bump `__v` ONLY if the result
   // differs from the previous value. `recompute` already applies the custom
   // comparator by keeping the OLD reference when `equals` says they match, so
@@ -135,6 +138,12 @@ export function derived<T>(
       if (!Object.is(oldValue, cs._v)) cs.__v++;
     } finally {
       evaluating = false;
+      // The getter may have disposed this computed mid-run. `dispose()` already
+      // released the edges that existed at that moment, but any source read
+      // AFTER the call was linked by this very retrack — and its stale-dep pass
+      // only prunes edges that were not re-read, so those survive it. Release
+      // them now that the run is over, so a disposed computed holds no edges.
+      if (disposed) cleanup(markDirty);
     }
     if (hook && !Object.is(oldValue, cs._v)) {
       hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
@@ -182,7 +191,9 @@ export function derived<T>(
     disposed = true;
     // Clearing the dirty flag keeps the drain's stabilization check from
     // treating this computed as pending, and `cleanup` unlinks every source
-    // edge so the sources stop retaining it.
+    // edge so the sources stop retaining it. When called from inside this
+    // computed's own recomputation, `validate()` runs `cleanup` once more after
+    // the run, for edges the rest of the getter records.
     cs._d = false;
     cleanup(markDirty);
     // Read the hook NOW, not the one captured at creation: DevTools may have

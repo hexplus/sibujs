@@ -109,17 +109,22 @@ interface Row<T> {
  * assigns that row a new item or position.
  *
  * Identity is not value freshness: a row keeps its DOM node when its key is
- * unchanged, and still updates its contents when the item behind that key is
- * replaced.
+ * unchanged, and its bindings still update when the item behind that key is
+ * replaced — provided they read the getter rather than a value captured when
+ * `render` ran.
  *
  * `render` runs untracked, whether the row appears in the first pass or in a
- * later update: a signal read directly in its body is a one-time read and never
- * subscribes the list. Put reactive reads inside bindings (`() => item().name`)
- * or effects created by the row.
+ * later update: a signal read directly in its body — `item()` and `index()`
+ * included — is a one-time read that never subscribes anything and goes stale
+ * when the key later receives a replacement item or moves. Pass the getters
+ * down (`Row({ item, index })`) or read them inside bindings
+ * (`() => item().name`) and effects created by the row.
  *
- * Reading `item()` subscribes to the ROW's cell, not to the whole-array signal,
- * so a row only re-renders when its own item/index actually changes — mutating
- * an unrelated row does not disturb it.
+ * A binding that reads `item()` subscribes to the ROW's cell, not to the
+ * whole-array signal. `render` never re-runs for an existing key; only the
+ * bindings and effects that read that row's `item()` / `index()` re-run, and
+ * only when its own item or position actually changes — mutating an unrelated
+ * row does not disturb it.
  *
  * @param getArray A reactive getter returning an array.
  * @param render A function that receives reactive item and index getters and returns a NodeChild.
@@ -169,7 +174,7 @@ export function each<T>(
   let reusedNewBuf: number[] = [];
   let reusedOldBuf: number[] = [];
   // Per-key index tracking — maps key to its current index in the array,
-  // so item/index getters always return fresh data without re-rendering.
+  // so item/index getters always return fresh data without re-running render.
   const keyIndexMap = new Map<string | number, number>();
 
   let initialized = false;
@@ -384,7 +389,7 @@ export function each<T>(
   /**
    * Publish the item/index each reused row must now report.
    *
-   * Deferred to the end of reconciliation so row content re-renders against the
+   * Deferred to the end of reconciliation so row bindings re-run against the
    * final DOM order, and batched so N reused rows cost ONE drain instead of N.
    * Cells use signal equality, so a row whose item and position are both
    * unchanged writes nothing and re-runs nothing — the common case for a list

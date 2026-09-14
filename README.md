@@ -164,6 +164,17 @@ Import advanced features from focused entry points for optimal tree-shaking. `si
 ### `sibujs/browser` — Reactive browser APIs
 Reactive wrappers for `media` queries, `resize`, `scroll`, `online`/`network`, `geo`, `battery`, `idle`, `permissions`, `clipboard`, `dragDrop`, `title`/`favicon`, `colorScheme`, `visibility`, `mouse`/`swipe`, `windowSize`, `urlState`, `broadcast`, `fullscreen`, `wakeLock`, `animationFrame`, `mutationObserver`, `bounds`, `keyboard`, `speech`, `gamepad`, `pointerLock`, `vibrate`, `textSelection`, `imageLoader`, and `format`.
 
+`media()` returns `{ matches, dispose }`, not a bare `() => boolean`. Its `matchMedia` listener stays attached until `dispose()` is called, so release it when the owner goes away:
+
+```ts
+import { media } from "sibujs/browser";
+
+const { matches: small, dispose } = media("(max-width: 640px)");
+
+small();   // reactive boolean
+dispose(); // remove the matchMedia listener
+```
+
 ### `sibujs/ui` — UI utilities
 `form` & `formAction` (validation/binding), `virtualList`, `intersection`, `inputMask`, `a11y` / `a11yPrimitives`, `scopedStyle`, `reactiveAttr`, `dialog`, `toast`, `infiniteScroll`, `pagination`, `eventBus`, `timers`, `hover`, `scrollLock`, `lazyEffect`, plus composable/HOC patterns.
 

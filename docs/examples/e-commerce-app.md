@@ -171,18 +171,21 @@ import { Trans } from "sibujs/plugins";
 // Product Card
 // ---------------------------------------------------------------------------
 
-function ProductCard(product: Product): HTMLElement {
+// `product` is the row's reactive getter from each(): the card is built once
+// per product id and reused when that product is replaced (a price change, say),
+// so its fields are read inside bindings and handlers.
+function ProductCard(product: () => Product): HTMLElement {
   return div({
     class: "product-card",
-    "data-track": `product-${product.id}`,
+    "data-track": () => `product-${product().id}`,
   }, [
-    img({ src: product.image, alt: product.name, class: "product-image" }),
+    img({ src: () => product().image, alt: () => product().name, class: "product-image" }),
     div("product-info", [
-      h3(product.name),
-      p("price", `$${product.price.toFixed(2)}`),
+      h3(() => product().name),
+      p("price", () => `$${product().price.toFixed(2)}`),
       button({
         class: "btn btn-primary",
-        on: { click: () => addToCart(product.id) },
+        on: { click: () => addToCart(product().id) },
       }, t("product.addToCart")),
     ]),
   ]) as HTMLElement;
@@ -344,7 +347,7 @@ function ProductListPage(): HTMLElement {
     div("product-grid", [
       each(
         () => filtered(),
-        (product) => ProductCard(product()),
+        (product) => ProductCard(product),
         { key: (p) => p.id }
       ),
     ]),

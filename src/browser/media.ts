@@ -1,11 +1,24 @@
 import { signal } from "../core/signals/signal";
 
 /**
- * media returns a reactive boolean that tracks whether a CSS media query matches.
+ * media tracks whether a CSS media query matches.
  * Uses `window.matchMedia` and listens to `change` events for live updates.
  *
+ * It returns an object, not a bare `() => boolean`. The `change` listener stays
+ * attached until `dispose()` is called, so a query created by a component must
+ * be released with it (e.g. `onUnmount(dispose, el)`). After disposal `matches()`
+ * keeps returning its last value.
+ *
+ * @example
+ * ```ts
+ * const { matches: small, dispose } = media("(max-width: 640px)");
+ *
+ * small();
+ * dispose();
+ * ```
+ *
  * @param query CSS media query string (e.g. "(max-width: 768px)")
- * @returns Object with reactive matches getter and dispose function for cleanup
+ * @returns `{ matches, dispose }` — a reactive getter and the listener release
  */
 export function media(query: string): { matches: () => boolean; dispose: () => void } {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {

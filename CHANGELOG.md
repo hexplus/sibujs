@@ -27,6 +27,11 @@ re-subscribes, and never wakes downstream readers. The return type is now
 `DerivedAccessor<T>` (`Accessor<T> & { dispose(): void }`), which is assignable
 wherever `Accessor<T>` was.
 
+Disposal is safe from inside the derived's own getter: edges recorded by reads
+that follow the `dispose()` call in the same recomputation are released when
+that run finishes, and the dirty marker is inert once disposed, so a
+self-disposing derived ends with no source subscriptions either way.
+
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`
@@ -58,6 +63,13 @@ bindings and effects a row creates (`div(() => item().name)`), which track in
 their own scopes and are unaffected. Wrapping reads in the render body with
 `untracked()` is no longer necessary, and remains harmless.
 
+Because `render` runs once per key and untracked, unwrapping `item()` /
+`index()` in its body captures one-time values that go stale when the key
+receives a replacement item or moves. Pass the getters into the row
+(`Row({ user, index })`) or read them inside bindings. The best-practices guide,
+the todo and e-commerce examples and the migration guides previously showed the
+unwrapping pattern and now show the getter form.
+
 ### Changed — booleans on `aria-*` attributes serialize as `"true"` / `"false"`
 
 ARIA states are enumerated tokens, not presence-based boolean attributes: a
@@ -73,6 +85,20 @@ unchanged.
 
 Code that relied on `"aria-x": () => false` — or `bindBoolAttr(el, "aria-x",
 false)` — removing the attribute should return `null` instead.
+
+### Documented — `media()` returns `{ matches, dispose }`
+
+`media()` returns an object, not a bare `() => boolean`, and its `matchMedia`
+listener stays attached until `dispose()` is called. The README, the
+best-practices guide and its JSDoc now show the real shape and when to release
+it:
+
+```ts
+const { matches: small, dispose } = media("(max-width: 640px)");
+
+small();
+dispose();
+```
 
 ### Documented — `VirtualList` is one-dimensional
 

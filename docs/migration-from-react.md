@@ -546,7 +546,7 @@ function TodoList() {
   return ul([
     each(
       () => todos(),
-      (todo, index) => li(todo().text),
+      (todo) => li(() => todo().text),
       { key: (todo) => todo.id }
     ),
   ]);
@@ -628,7 +628,7 @@ function TaskList() {
         () => tasks(),
         (task) =>
           li([
-            task().text,
+            () => task().text,
             button({
               on: { click: () => removeTask(task().id) },
             }, "X"),

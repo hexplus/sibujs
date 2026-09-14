@@ -326,17 +326,35 @@ duplicate keys drop or mis-order rows (and warn in dev).
 import { each } from "sibujs";
 
 // Good: keyed by a unique, stable identifier
-each(() => users(), (user) => UserCard(user()), { key: (u) => u.id });
+each(() => users(), (user, index) => Row({ user, index }), { key: (u) => u.id });
 
 // Anti-pattern: a non-unique key (duplicate names collapse rows)
-each(() => users(), (user) => UserCard(user()), { key: (u) => u.name });
+each(() => users(), (user, index) => Row({ user, index }), { key: (u) => u.name });
 ```
 
 The `key` function receives the raw item and must return a unique, stable id.
-The render callback receives reactive getters — call `user()` / `index()` to read
-the current item and index:
+
+The render callback runs **once per key** and **untracked**. It receives reactive
+getters, `user` and `index`, whose values reconciliation updates when that key
+receives a replacement item or moves to a new position. Pass the getters into
+the row, or read them inside reactive bindings — never unwrap them in the render
+body:
 
 ```ts
+each(() => users(), (user, index) => Row({ user, index }), {
+  key: (u) => u.id,
+});
+
+function Row({ user, index }: { user: () => User; index: () => number }) {
+  return li([
+    span(() => `${index() + 1}.`),
+    span(() => user().name),
+  ]);
+}
+
+// Anti-pattern: `user()` and `index()` read once in the render body. The row
+// keeps showing the old name when the item behind its key is replaced, and the
+// old position after a reorder.
 each(() => users(), (user, index) => Row({ user: user(), n: index() }), { key: (u) => u.id });
 ```
 
@@ -402,6 +420,37 @@ function LiveFeed(): HTMLElement {
 
 If you create a standalone `effect` that is *not* tied to an element, keep its
 returned disposer and call it when you are done.
+
+### Release browser listeners from `sibujs/browser`
+
+Helpers that listen to the browser return their reactive value **and** a
+`dispose` function. `media()` returns `{ matches, dispose }` — not a bare
+`() => boolean` — and keeps a `change` listener on its `MediaQueryList` until
+`dispose()` is called:
+
+```ts
+import { media } from "sibujs/browser";
+
+const { matches: small, dispose } = media("(max-width: 640px)");
+
+small(); // reactive boolean: true while the query matches
+dispose(); // removes the listener; `small()` keeps its last value
+```
+
+A query created for the whole lifetime of the app can live forever. A query
+created by a component must be released with it:
+
+```ts
+import { div, onUnmount } from "sibujs";
+import { media } from "sibujs/browser";
+
+function Sidebar(): HTMLElement {
+  const { matches: small, dispose } = media("(max-width: 640px)");
+  const el = div({ class: () => (small() ? "sidebar compact" : "sidebar") }) as HTMLElement;
+  onUnmount(dispose, el);
+  return el;
+}
+```
 
 ---
 

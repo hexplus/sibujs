@@ -282,3 +282,51 @@ describe("media()", () => {
     result.dispose();
   });
 });
+
+describe("each(): the documented row pattern stays fresh", () => {
+  type User = { id: number; name: string };
+
+  // Mirrors docs/best-practices.md: getters are passed into the row and read
+  // inside bindings, never unwrapped in the render body.
+  function Row({ user, index }: { user: () => User; index: () => number }) {
+    return div({ "data-id": () => String(user().id) }, [() => `${index() + 1}.${user().name}`]);
+  }
+
+  it("updates a reused row on same-key replacement and on reorder, rendering once per key", async () => {
+    const [users, setUsers] = signal<User[]>([
+      { id: 1, name: "Ada" },
+      { id: 2, name: "Grace" },
+    ]);
+    let renders = 0;
+    const list = div([
+      each(
+        () => users(),
+        (user, index) => {
+          renders++;
+          return Row({ user, index });
+        },
+        { key: (u) => u.id },
+      ),
+    ]);
+    const { unmount } = mount(list, document.body);
+    await flush();
+    const [first, second] = Array.from(list.children);
+    expect(list.textContent).toBe("1.Ada2.Grace");
+
+    setUsers([
+      { id: 1, name: "Ada Lovelace" },
+      { id: 2, name: "Grace" },
+    ]);
+    expect(list.textContent).toBe("1.Ada Lovelace2.Grace");
+
+    setUsers([
+      { id: 2, name: "Grace Hopper" },
+      { id: 1, name: "Ada Lovelace" },
+    ]);
+    expect(list.textContent).toBe("1.Grace Hopper2.Ada Lovelace");
+    expect(list.children[0]).toBe(second);
+    expect(list.children[1]).toBe(first);
+    expect(renders).toBe(2);
+    unmount();
+  });
+});
