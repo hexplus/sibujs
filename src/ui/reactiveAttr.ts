@@ -61,6 +61,11 @@ export function bindAttrs(el: HTMLElement, attrs: Record<string, AttributeSource
  * Reactively toggle a boolean attribute (like disabled, readonly, hidden).
  * When the value is truthy the attribute is present (set to ""),
  * when falsy the attribute is removed entirely.
+ *
+ * `aria-*` names are the exception, as in every attribute writer: ARIA states
+ * are "true"/"false" tokens, and a missing state means "not applicable" rather
+ * than `false`, so `bindBoolAttr(el, "aria-busy", false)` writes
+ * `aria-busy="false"`.
  * Returns a teardown function to stop reactive tracking.
  *
  * The attribute NAME is policed too: `bindBoolAttr(el, "onclick", true)` would
@@ -70,7 +75,7 @@ export function bindAttrs(el: HTMLElement, attrs: Record<string, AttributeSource
 export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | (() => boolean)): () => void {
   // Static boolean — apply once, no tracking needed
   if (typeof getter !== "function") {
-    setSafeAttribute(el, attr, getter, { label: "bindBoolAttr", booleanPresence: true });
+    setSafeAttribute(el, attr, getter, { label: "bindBoolAttr" });
     return () => {};
   }
 
@@ -85,7 +90,7 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
       return;
     }
 
-    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr", booleanPresence: true });
+    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr" });
   }
 
   const teardown = track(commit);

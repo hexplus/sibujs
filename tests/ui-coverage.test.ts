@@ -77,10 +77,10 @@ describe("reactiveAttr bindBoolAttr", () => {
   it("updates reactively from a getter", () => {
     const el = document.createElement("div");
     const [on, setOn] = signal(false);
-    bindBoolAttr(el, "aria-busy", () => on());
-    expect(el.hasAttribute("aria-busy")).toBe(false);
+    bindBoolAttr(el, "hidden", () => on());
+    expect(el.hasAttribute("hidden")).toBe(false);
     setOn(true);
-    expect(el.hasAttribute("aria-busy")).toBe(true);
+    expect(el.hasAttribute("hidden")).toBe(true);
   });
 });
 

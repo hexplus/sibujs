@@ -185,6 +185,17 @@ export function derived<T>(
     // edge so the sources stop retaining it.
     cs._d = false;
     cleanup(markDirty);
+    // Read the hook NOW, not the one captured at creation: DevTools may have
+    // been attached (or detached) since, and its node inventory retains this
+    // computed until it hears about the disposal.
+    const h = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
+    if (h) {
+      try {
+        h.emit("computed:destroy", { signal: cs, getter: computedGetter });
+      } catch {
+        /* devtools hook errors should not break user teardown */
+      }
+    }
   };
 
   if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });

@@ -68,11 +68,6 @@ export interface SafeAttributeOptions {
    * is the correct sink — it seeds the default value and survives form reset.
    */
   syncValueProperty?: boolean;
-  /**
-   * Apply presence semantics to booleans on EVERY attribute, `aria-*` included.
-   * For writers whose documented contract is presence toggling (`bindBoolAttr`).
-   */
-  booleanPresence?: boolean;
   /** Label used in the dev warning when an event-handler attribute is refused. */
   label?: string;
 }
@@ -186,7 +181,7 @@ export function setSafeAttribute(
     // is a different statement from "not selected". Serialize the boolean so
     // `"aria-selected": () => selected()` states `false` explicitly. Only
     // `null`/`undefined` (handled above) remove an ARIA attribute.
-    if (options.booleanPresence !== true && name.length > 5 && name.slice(0, 5).toLowerCase() === "aria-") {
+    if (name.length > 5 && name.slice(0, 5).toLowerCase() === "aria-") {
       const token = value ? "true" : "false";
       if ((ns ? el.getAttributeNS(ns, localName) : el.getAttribute(name)) !== token) {
         if (ns) el.setAttributeNS(ns, name, token);

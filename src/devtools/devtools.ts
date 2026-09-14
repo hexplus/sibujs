@@ -329,6 +329,20 @@ export function initDevTools(config?: DevToolsConfig) {
     emit();
   });
 
+  // A disposed computed leaves the inventory. Without this, deriveds created and
+  // disposed per mount (virtualized rows) accumulated in `hook.nodes` for the
+  // life of the page, retaining their state objects and getters.
+  hook.on("computed:destroy", (payload: unknown) => {
+    const p = payload as { signal: object };
+    for (const [id, node] of hook.nodes) {
+      if (node.ref === p.signal) {
+        hook.nodes.delete(id);
+        break;
+      }
+    }
+    emit();
+  });
+
   hook.on("effect:create", (payload: unknown) => {
     _dt.nextNodeId++;
     const name = inferName();

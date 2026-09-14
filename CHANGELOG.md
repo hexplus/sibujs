@@ -27,6 +27,11 @@ re-subscribes, and never wakes downstream readers. The return type is now
 `DerivedAccessor<T>` (`Accessor<T> & { dispose(): void }`), which is assignable
 wherever `Accessor<T>` was.
 
+Disposal also emits a `computed:destroy` DevTools event, read from the global
+hook at disposal time, and DevTools drops the node from its inventory. Without
+it, deriveds created and disposed per row kept accumulating in `hook.nodes`
+during development.
+
 ### Fixed — tracking scopes created inside `untracked()`
 
 A binding, effect or derived recomputation that ran inside an `untracked()` body
@@ -57,13 +62,25 @@ their own scopes and are unaffected. Wrapping reads in the render body with
 
 ARIA states are enumerated tokens, not presence-based boolean attributes: a
 missing `aria-selected` means "not applicable", not "not selected". Booleans on
-`aria-*` attributes now write `"true"` / `"false"` in every attribute writer
-(static props, reactive bindings, `html` templates, `bindAttrs`), matching what
-`enhance()`'s `attr()` already did. Native boolean attributes (`hidden`,
-`disabled`, `required`, …) keep presence semantics, `null` / `undefined` still
-remove any attribute, and `bindBoolAttr()` keeps its documented presence
-toggling for every name. Code that relied on `"aria-x": () => false` removing
-the attribute should return `null` instead.
+`aria-*` attributes now write `"true"` / `"false"` in every attribute writer —
+tag factory props (HTML and SVG), `bindAttribute` / `bindDynamic`, `bindAttrs`,
+`bindBoolAttr`, `svgElement`, `html` templates (runtime and compiled), and
+therefore SSR, streaming SSR and hydrated output — matching what `enhance()`'s
+`attr()` already did. Native boolean attributes (`hidden`, `disabled`,
+`required`, …) keep presence semantics, `null` / `undefined` still remove any
+attribute, and non-boolean values (`aria-checked="mixed"`, numbers) pass through
+unchanged.
+
+Code that relied on `"aria-x": () => false` — or `bindBoolAttr(el, "aria-x",
+false)` — removing the attribute should return `null` instead.
+
+### Documented — `VirtualList` is one-dimensional
+
+`VirtualList` virtualizes vertical scrolling with a fixed container height and
+a fixed item height, and re-renders its visible window on every scroll. It has
+no horizontal virtualization, frozen rows or sticky headers; two-axis grids need
+their own windowing (nested keyed `each()`). Its JSDoc and the best-practices
+guide now say so.
 
 ---
 

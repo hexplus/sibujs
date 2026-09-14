@@ -356,6 +356,13 @@ VirtualList({
 });
 ```
 
+`VirtualList` virtualizes one axis: vertical scrolling, a fixed container height
+and a fixed height per item. The visible window is re-rendered on every scroll.
+It has no horizontal virtualization, frozen rows or sticky headers, so two-axis
+content such as a spreadsheet grid needs its own windowing — typically a keyed
+`each()` over the visible row indices with a nested keyed `each()` over the
+visible column indices.
+
 ---
 
 ## Memory Management
