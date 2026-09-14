@@ -194,3 +194,120 @@ describe("a derived that throws without disposing itself", () => {
     expect(getSubscriberCount(source)).toBe(0);
   });
 });
+
+describe("a pending failure propagates through derived chains", () => {
+  function chain(levels: number) {
+    const t = selfDisposingThrower();
+    let top: DerivedAccessor<number> = t.value;
+    for (let i = 0; i < levels; i++) {
+      const below = top;
+      top = derived(() => below() * 2);
+    }
+    return { ...t, top };
+  }
+
+  it("signal → self-disposing derived → derived → effect: the effect reports it once", () => {
+    recordReports();
+    const t = chain(1);
+    const seen: number[] = [];
+    const stop = effect(() => {
+      seen.push(t.top());
+    });
+
+    t.arm();
+    t.setSource(2);
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].error).toBe(t.boom);
+    expect(reports[0].context.phase).toBe("effect");
+    expect(seen).toEqual([2]);
+
+    // The chain recovers onto the frozen value and reports nothing further.
+    expect(t.top()).toBe(2);
+    expect(getSubscriberCount(t.source)).toBe(0);
+    t.setSource(3);
+    expect(t.top()).toBe(2);
+    expect(reports).toHaveLength(1);
+    stop();
+  });
+
+  it("the same chain consumed by a binding inside ErrorBoundary is claimed by the boundary", async () => {
+    const handler = vi.fn();
+    setRuntimeErrorHandler(handler);
+    const t = chain(1);
+
+    const boundary = ErrorBoundary({ fallback: () => div({ class: "fallback" }, "caught") }, () =>
+      div({ class: "content" }, [() => `value ${t.top()}`]),
+    );
+    const container = mount(boundary);
+    await flush();
+    expect(container.querySelector(".content")?.textContent).toBe("value 2");
+
+    t.arm();
+    t.setSource(2);
+    await flush();
+
+    expect(container.querySelector(".fallback")?.textContent).toBe("caught");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("a multi-level chain delivers it to the effect, the boundary, or a direct reader", async () => {
+    recordReports();
+    const viaEffect = chain(4);
+    const stop = effect(() => {
+      viaEffect.top();
+    });
+    viaEffect.arm();
+    viaEffect.setSource(2);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].error).toBe(viaEffect.boom);
+    expect(viaEffect.top()).toBe(16);
+    stop();
+
+    const handler = vi.fn();
+    setRuntimeErrorHandler(handler);
+    const viaBoundary = chain(4);
+    const boundary = ErrorBoundary({ fallback: () => div({ class: "fallback" }, "caught") }, () =>
+      div({ class: "content" }, [() => String(viaBoundary.top())]),
+    );
+    const container = mount(boundary);
+    await flush();
+    viaBoundary.arm();
+    viaBoundary.setSource(2);
+    await flush();
+    expect(container.querySelector(".fallback")?.textContent).toBe("caught");
+    expect(handler).not.toHaveBeenCalled();
+
+    const direct = chain(4);
+    direct.top();
+    direct.arm();
+    direct.setSource(2);
+    expect(() => direct.top()).toThrow(direct.boom);
+    expect(direct.top()).toBe(16);
+  });
+
+  it("a live throwing derived inside a chain still reaches the effect on every failure", () => {
+    recordReports();
+    const [source, setSource] = signal(1);
+    let fail = false;
+    const inner = derived(() => {
+      const next = source();
+      if (fail) throw new Error("transient");
+      return next;
+    });
+    const outer = derived(() => inner() * 2);
+    const stop = effect(() => {
+      outer();
+    });
+
+    fail = true;
+    setSource(2);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].context.phase).toBe("effect");
+    expect(() => outer()).toThrow("transient");
+
+    fail = false;
+    expect(outer()).toBe(4);
+    stop();
+  });
+});
