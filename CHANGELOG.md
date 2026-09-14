@@ -32,13 +32,15 @@ that follow the `dispose()` call in the same recomputation are released when
 that run finishes, and the dirty marker is inert once disposed, so a
 self-disposing derived ends with no source subscriptions either way.
 
-A getter that disposes its own derived and then throws has its exception
-reported exactly once through the runtime error pipeline, with phase
-`"derived"`. It is not rethrown: a disposed derived never recomputes, so the
-reader it would be thrown to — typically an effect the scheduler lets run after
-a failed validation — reads the frozen value instead, and the error used to
-vanish. A derived that throws without disposing itself still throws to its
-reader, as before.
+A getter that disposes its own derived and then throws no longer loses the
+exception. A disposed derived never recomputes, so when the scheduler validated
+it for a subscriber, swallowed the exception and let the subscriber run, the
+subscriber read the frozen value and the error vanished. The exception is now
+kept and thrown to the next reader exactly once, in that reader's own context:
+a binding reports it with its node, so the nearest `ErrorBoundary` can claim
+it; an effect reports it as an effect failure; a direct caller can catch it.
+Later reads return the frozen value. A derived that throws without disposing
+itself still throws to every reader, as before.
 
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without

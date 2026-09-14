@@ -1,42 +1,58 @@
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ErrorBoundary } from "../src/components/ErrorBoundary";
 import { type RuntimeErrorContext, setRuntimeErrorHandler } from "../src/core/errors";
+import { div } from "../src/core/rendering/html";
 import { type DerivedAccessor, derived } from "../src/core/signals/derived";
 import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
 import { getSubscriberCount } from "../src/devtools/introspect";
 
 // A getter that disposes its own derived and then throws must not lose the
-// exception: once disposed, no later read can recompute and rethrow it, so the
-// failing run itself is the only place it can surface.
+// exception. Once disposed, no later read can recompute and rethrow it, so the
+// failure is kept pending and thrown to the NEXT reader — the consuming
+// binding or effect, or a direct caller. The reader's own error handling then
+// applies: a binding reports with its node, so the nearest ErrorBoundary gets
+// first refusal; a direct caller can catch it.
+
+const flush = async () => {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+};
 
 const reports: Array<{ error: unknown; context: RuntimeErrorContext }> = [];
-const previousHandler = setRuntimeErrorHandler((error, context) => reports.push({ error, context }));
+let host: HTMLElement | null = null;
+
+function mount(node: Node): HTMLElement {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  container.appendChild(node);
+  host = container;
+  return container;
+}
 
 afterEach(() => {
+  setRuntimeErrorHandler(null);
   reports.length = 0;
+  host?.remove();
+  host = null;
+  vi.restoreAllMocks();
 });
 
-afterAll(() => {
-  setRuntimeErrorHandler(previousHandler);
-});
+const recordReports = () => setRuntimeErrorHandler((error, context) => reports.push({ error, context }));
 
-function selfDisposingThrower(name?: string) {
+function selfDisposingThrower() {
   const [source, setSource] = signal(1);
   let armed = false;
   let runs = 0;
   const boom = new Error("boom");
-  const value: DerivedAccessor<number> = derived(
-    () => {
-      runs++;
-      const next = source();
-      if (armed) {
-        value.dispose();
-        throw boom;
-      }
-      return next;
-    },
-    name ? { name } : undefined,
-  );
+  const value: DerivedAccessor<number> = derived(() => {
+    runs++;
+    const next = source();
+    if (armed) {
+      value.dispose();
+      throw boom;
+    }
+    return next;
+  });
   return {
     source,
     setSource,
@@ -50,12 +66,52 @@ function selfDisposingThrower(name?: string) {
 }
 
 describe("a derived that disposes itself and then throws", () => {
-  it("reports the exception once with phase 'derived' when validated for a downstream effect", () => {
-    const t = selfDisposingThrower("total");
-    let effectRuns = 0;
+  it("is claimed by the ErrorBoundary around the binding that consumes it", async () => {
+    const handler = vi.fn();
+    setRuntimeErrorHandler(handler);
+    const t = selfDisposingThrower();
+
+    const boundary = ErrorBoundary({ fallback: () => div({ class: "fallback" }, "caught") }, () =>
+      div({ class: "content" }, [() => `value ${t.value()}`]),
+    );
+    const container = mount(boundary);
+    await flush();
+    expect(container.querySelector(".content")?.textContent).toBe("value 1");
+
+    t.arm();
+    t.setSource(2);
+    await flush();
+
+    expect(container.querySelector(".fallback")?.textContent).toBe("caught");
+    expect(handler).not.toHaveBeenCalled();
+    expect(getSubscriberCount(t.source)).toBe(0);
+  });
+
+  it("is reported once, by the consuming binding with its node, when no boundary claims it", () => {
+    recordReports();
+    const t = selfDisposingThrower();
+    const el = div({ "data-value": () => String(t.value()) });
+    mount(el);
+
+    t.arm();
+    t.setSource(2);
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0].error).toBe(t.boom);
+    expect(reports[0].context.phase).toBe("binding");
+    expect(reports[0].context.node).toBe(el);
+    // The failed commit leaves the attribute at its last value.
+    expect(el.getAttribute("data-value")).toBe("1");
+
+    t.setSource(3);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("is reported once, by the consuming effect, and never again", () => {
+    recordReports();
+    const t = selfDisposingThrower();
     const seen: number[] = [];
     const stop = effect(() => {
-      effectRuns++;
       seen.push(t.value());
     });
 
@@ -64,15 +120,11 @@ describe("a derived that disposes itself and then throws", () => {
 
     expect(reports).toHaveLength(1);
     expect(reports[0].error).toBe(t.boom);
-    expect(reports[0].context.phase).toBe("derived");
-    expect(reports[0].context.name).toBe("total");
-
-    // Frozen at the last settled value; the unchanged value wakes nobody.
-    expect(t.value()).toBe(1);
+    expect(reports[0].context.phase).toBe("effect");
     expect(seen).toEqual([1]);
-    expect(effectRuns).toBe(1);
 
-    // Cleanup still happened, and nothing recomputes or reports again.
+    // Frozen, released, and inert from here on.
+    expect(t.value()).toBe(1);
     expect(getSubscriberCount(t.source)).toBe(0);
     const runsAfter = t.runs();
     t.setSource(3);
@@ -82,38 +134,43 @@ describe("a derived that disposes itself and then throws", () => {
     stop();
   });
 
-  it("reports once, without throwing, when the failing recomputation is a direct read", () => {
+  it("throws to a direct reader exactly once, then returns the frozen value", () => {
+    recordReports();
     const t = selfDisposingThrower();
     t.arm();
     t.setSource(2);
 
-    expect(() => t.value()).not.toThrow();
-    expect(reports).toHaveLength(1);
-    expect(reports[0].context.phase).toBe("derived");
+    expect(() => t.value()).toThrow(t.boom);
     expect(t.value()).toBe(1);
-    expect(reports).toHaveLength(1);
+    expect(t.value()).toBe(1);
+    expect(reports).toHaveLength(0);
     expect(getSubscriberCount(t.source)).toBe(0);
   });
 
-  it("reports once, not also as an effect failure, when an effect's own read runs the failing recomputation", () => {
+  it("stays pending until read when the failure happens during a scheduler validation", () => {
+    recordReports();
     const t = selfDisposingThrower();
-    t.arm();
-    t.setSource(2);
-
-    const seen: number[] = [];
+    let reads = 0;
     const stop = effect(() => {
-      seen.push(t.value());
+      reads++;
+      // Reads the derived only on the first run; a later run skips it.
+      if (reads === 1) t.value();
     });
 
-    expect(reports).toHaveLength(1);
-    expect(reports[0].context.phase).toBe("derived");
-    expect(seen).toEqual([1]);
+    t.arm();
+    t.setSource(2);
+    // The effect ran again without reading, so nothing has surfaced yet.
+    expect(reports).toHaveLength(0);
+
+    expect(() => t.value()).toThrow(t.boom);
+    expect(t.value()).toBe(1);
     stop();
   });
 });
 
 describe("a derived that throws without disposing itself", () => {
   it("still throws to its reader and stays live", () => {
+    recordReports();
     const [source, setSource] = signal(1);
     let fail = false;
     const value = derived(() => {
@@ -125,6 +182,7 @@ describe("a derived that throws without disposing itself", () => {
 
     fail = true;
     setSource(2);
+    expect(() => value()).toThrow("transient");
     expect(() => value()).toThrow("transient");
     expect(reports).toHaveLength(0);
 

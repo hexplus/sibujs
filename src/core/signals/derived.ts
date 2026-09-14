@@ -1,7 +1,6 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
-import { reportError } from "../errors";
 import type { Accessor } from "./signal";
 
 /**
@@ -40,8 +39,9 @@ import type { Accessor } from "./signal";
  * A disposed accessor is inert: it keeps returning the last value it settled,
  * never recomputes, never re-subscribes, and never wakes downstream readers.
  * Disposal is idempotent. If a getter disposes its own derived and then throws,
- * the exception is reported through the runtime error pipeline (phase
- * `"derived"`) instead of being thrown to a reader that could never see it again.
+ * the exception is thrown to the next reader exactly once — the consuming
+ * binding or effect, whose own error handling (and nearest `ErrorBoundary`)
+ * applies, or a direct caller — and later reads return the frozen value.
  *
  * @returns An accessor for the computed value. It recomputes lazily on read
  * after any dependency changes, and carries `dispose()` to release its source
@@ -76,6 +76,10 @@ export function derived<T>(
   // sees the binding (no temporal-dead-zone reads).
   let evaluating = false;
   let disposed = false;
+  // An exception thrown by the recomputation that disposed this computed, kept
+  // until a reader takes it. See `validate` for why it cannot be thrown or
+  // reported on the spot.
+  let pendingError: { error: unknown } | undefined;
 
   const markDirty = (): void => {
     // Inert once disposed: nothing may make a released computed dirty again.
@@ -135,7 +139,6 @@ export function derived<T>(
     // source edges `dispose()` released.
     if (!cs._d || disposed) return;
     const oldValue = cs._v;
-    let failure: { error: unknown } | undefined;
     evaluating = true;
     try {
       retrack(recompute, markDirty);
@@ -145,15 +148,22 @@ export function derived<T>(
       // subscriber the scheduler lets run after a failed validation — reads it
       // again and the failure surfaces there.
       //
-      // A computed disposed during this run has no such second chance. It is
-      // inert from here on, so every later read returns the frozen value
-      // without recomputing, and an exception left to the reader would simply
-      // vanish (the scheduler's validation catch swallows it on the promise
-      // that the subscriber rethrows). This run is the only place it can be
-      // reported, so it is reported here, once, and not rethrown — rethrowing
-      // would make a reader that is itself reported (an effect) count it twice.
+      // A computed disposed during this run has no second recomputation to
+      // rethrow from: every later read returns the frozen value. Thrown from
+      // here, the exception would be lost whenever the caller is the
+      // scheduler's validation step, which swallows it expecting the
+      // subscriber's own read to throw. Reporting it from here instead would
+      // bypass the reader's error handling — a binding reports with its node,
+      // which is what lets the nearest ErrorBoundary claim the failure — and a
+      // direct caller could no longer catch it.
+      //
+      // So the failure is kept for the NEXT reader, which takes it exactly
+      // once. Bumping the version marks the value as changed, so the
+      // scheduler runs the subscriber it was validating for, and that
+      // subscriber's read surfaces the error in its own context.
       if (!disposed) throw err;
-      failure = { error: err };
+      pendingError = { error: err };
+      cs.__v++;
     } finally {
       evaluating = false;
       // The getter may have disposed this computed mid-run. `dispose()` already
@@ -163,10 +173,6 @@ export function derived<T>(
       // them now that the run is over, so a disposed computed holds no edges.
       if (disposed) cleanup(markDirty);
     }
-    if (failure !== undefined) {
-      reportError(failure.error, { phase: "derived", name: debugName });
-      return;
-    }
     // A getter that disposed this computed has already emitted
     // `computed:destroy`; an update after it would describe a node DevTools no
     // longer tracks.
@@ -175,6 +181,13 @@ export function derived<T>(
     }
   };
   cs._validate = validate;
+
+  // Hand the pending failure to exactly one reader.
+  const throwPending = (): never => {
+    const { error } = pendingError as { error: unknown };
+    pendingError = undefined;
+    throw error;
+  };
 
   function computedGetter(): T {
     if (evaluating) {
@@ -192,6 +205,7 @@ export function derived<T>(
     // path is a single boolean load again.
     if (isTrackingSuspended() || disposed) {
       if (cs._d) validate();
+      if (pendingError !== undefined) throwPending();
       return cs._v;
     }
 
@@ -199,7 +213,10 @@ export function derived<T>(
     // `cs.__v`, and that stamp must describe the value we are about to return —
     // stamping a pre-recompute version would make the reader look permanently
     // stale and re-run it on every unrelated upstream write.
-    if (cs._d) validate();
+    if (cs._d) {
+      validate();
+      if (pendingError !== undefined) throwPending();
+    }
     recordDependency(cs as ReactiveSignal);
     return cs._v;
   }
