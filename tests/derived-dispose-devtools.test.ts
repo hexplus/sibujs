@@ -143,3 +143,33 @@ describe("derived().dispose() called by its own getter during recomputation", ()
     expect(runs).toBe(2);
   });
 });
+
+describe("DevTools lifecycle event order for a self-disposing derived", () => {
+  it("emits no computed:update after computed:destroy", () => {
+    initDevTools();
+    const hook = getHook() as Hook & { on: (event: string, fn: (payload: unknown) => void) => () => void };
+    const [a, setA] = signal(1);
+    let disposeNow = false;
+    const d = derived(() => {
+      const value = a() * 2;
+      if (disposeNow) d.dispose();
+      return value;
+    });
+    const ref = (d as never as { __signal: unknown }).__signal;
+    const events: string[] = [];
+    for (const name of ["computed:update", "computed:destroy"]) {
+      hook.on(name, (payload) => {
+        if ((payload as { signal: unknown }).signal === ref) events.push(name);
+      });
+    }
+
+    setA(2);
+    expect(d()).toBe(4);
+    expect(events).toEqual(["computed:update"]);
+
+    disposeNow = true;
+    setA(3);
+    expect(d()).toBe(6);
+    expect(events).toEqual(["computed:update", "computed:destroy"]);
+  });
+});

@@ -65,7 +65,8 @@ export function bindAttrs(el: HTMLElement, attrs: Record<string, AttributeSource
  * `aria-*` names are the exception, as in every attribute writer: ARIA states
  * are "true"/"false" tokens, and a missing state means "not applicable" rather
  * than `false`, so `bindBoolAttr(el, "aria-busy", false)` writes
- * `aria-busy="false"`.
+ * `aria-busy="false"`. This helper cannot remove an ARIA attribute; use
+ * `bindAttribute(el, "aria-busy", () => (busy() ? true : null))` for that.
  * Returns a teardown function to stop reactive tracking.
  *
  * The attribute NAME is policed too: `bindBoolAttr(el, "onclick", true)` would

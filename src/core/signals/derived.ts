@@ -145,7 +145,10 @@ export function derived<T>(
       // them now that the run is over, so a disposed computed holds no edges.
       if (disposed) cleanup(markDirty);
     }
-    if (hook && !Object.is(oldValue, cs._v)) {
+    // A getter that disposed this computed has already emitted
+    // `computed:destroy`; an update after it would describe a node DevTools no
+    // longer tracks.
+    if (hook && !disposed && !Object.is(oldValue, cs._v)) {
       hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
     }
   };

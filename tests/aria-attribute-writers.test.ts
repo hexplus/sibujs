@@ -46,6 +46,17 @@ describe("ARIA booleans across attribute writers", () => {
     expect(el.getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("documented migration: bindAttribute() with true | null writes or removes an ARIA attribute", () => {
+    const el = document.createElement("div");
+    const [busy, setBusy] = signal(true);
+    bindAttribute(el, "aria-busy", () => (busy() ? true : null));
+    expect(el.getAttribute("aria-busy")).toBe("true");
+    setBusy(false);
+    expect(el.hasAttribute("aria-busy")).toBe(false);
+    setBusy(true);
+    expect(el.getAttribute("aria-busy")).toBe("true");
+  });
+
   it("bindBoolAttr(): native boolean attributes keep presence semantics", () => {
     const el = document.createElement("input");
     const [on, setOn] = signal(true);

@@ -83,8 +83,14 @@ therefore SSR, streaming SSR and hydrated output — matching what `enhance()`'s
 attribute, and non-boolean values (`aria-checked="mixed"`, numbers) pass through
 unchanged.
 
-Code that relied on `"aria-x": () => false` — or `bindBoolAttr(el, "aria-x",
-false)` — removing the attribute should return `null` instead.
+To remove an ARIA attribute, produce `null` or `undefined` instead of `false`:
+
+- Props, `bindAttribute`, `bindDynamic` and `bindAttrs` take any value, so
+  `"aria-x": () => (active() ? true : null)` writes `"true"` or removes it.
+- `bindBoolAttr` accepts only `boolean | (() => boolean)` and coerces the
+  getter's result with `Boolean()`, so it can no longer remove an ARIA
+  attribute. Code that relied on `bindBoolAttr(el, "aria-x", false)` removing
+  it should switch to `bindAttribute(el, "aria-x", () => (active() ? true : null))`.
 
 ### Documented — `media()` returns `{ matches, dispose }`
 
