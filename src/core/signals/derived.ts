@@ -250,7 +250,11 @@ export function derived<T>(
     // edge so the sources stop retaining it. When called from inside this
     // computed's own recomputation, `validate()` runs `cleanup` once more after
     // the run, for edges the rest of the getter records.
-    cs._d = false;
+    //
+    // A failure still waiting for its reader keeps the flag set: readers only
+    // look for a pending error on a dirty computed, so clearing it here would
+    // make that error unreachable. `throwPending` clears it once delivered.
+    cs._d = pendingError !== undefined;
     cleanup(markDirty);
     // Read the hook NOW, not the one captured at creation: DevTools may have
     // been attached (or detached) since, and its node inventory retains this

@@ -311,3 +311,55 @@ describe("a pending failure propagates through derived chains", () => {
     stop();
   });
 });
+
+describe("disposing a derived that still holds a pending failure", () => {
+  it("keeps the failure for the next direct read, exactly once", () => {
+    recordReports();
+    const t = selfDisposingThrower();
+    const outer = derived(() => t.value() * 2);
+
+    let effectRuns = 0;
+    const stop = effect(() => {
+      effectRuns++;
+      // Reads the outer derived only on the first run.
+      if (effectRuns === 1) outer();
+    });
+
+    t.arm();
+    t.setSource(2); // outer keeps the propagated failure; the effect skips its read
+    expect(effectRuns).toBe(2);
+    expect(reports).toHaveLength(0);
+
+    outer.dispose();
+    expect(() => outer()).toThrow(t.boom);
+    expect(outer()).toBe(2);
+    expect(outer()).toBe(2);
+    expect(reports).toHaveLength(0);
+    expect(getSubscriberCount(t.source)).toBe(0);
+    stop();
+  });
+
+  it("keeps the failure through dispose() for a live derived that failed on its own", () => {
+    const [source, setSource] = signal(1);
+    let fail = false;
+    const value = derived(() => {
+      const next = source();
+      if (fail) throw new Error("transient");
+      return next;
+    });
+    let runs = 0;
+    const stop = effect(() => {
+      runs++;
+      if (runs === 1) value();
+    });
+
+    fail = true;
+    setSource(2);
+    value.dispose();
+
+    expect(() => value()).toThrow("transient");
+    expect(value()).toBe(1);
+    expect(getSubscriberCount(source)).toBe(0);
+    stop();
+  });
+});
