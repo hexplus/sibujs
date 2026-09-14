@@ -49,6 +49,12 @@ a self-disposed one returns its frozen value. Disposing a derived that still
 holds a failure keeps it: the next read throws it once, and later reads return
 the frozen value.
 
+A reader that receives a live derived's failure stays subscribed to it. The
+edge is recorded before the error is thrown, so a binding that catches it (and
+an effect or derived chain that reports it) runs again once the sources
+recover, instead of being pruned and left stale. A write also still reaches the
+dependents of an intermediate derived whose last recompute failed.
+
 Disposal also emits a `computed:destroy` DevTools event, read from the global
 hook at disposal time, and DevTools drops the node from its inventory. Without
 it, deriveds created and disposed per row kept accumulating in `hook.nodes`

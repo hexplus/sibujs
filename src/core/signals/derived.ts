@@ -70,6 +70,8 @@ export function derived<T>(
   // wrongly disabled `equals` whenever the previous value was a legitimate
   // `undefined`, causing spurious version bumps / downstream notifications.
   cs._init = false;
+  // A live recompute threw; see `_f` in track-core's SignalWithList.
+  cs._f = false;
   cs._g = getter;
   // __v: monotonic version counter, bumped only when re-evaluation produces
   // a value different from the previous (Object.is comparison). Kept on the
@@ -173,6 +175,7 @@ export function derived<T>(
       pendingError = { error: err };
       cs.__v++;
       if (disposed) cs._d = true;
+      else cs._f = true;
     } finally {
       evaluating = false;
       // The getter may have disposed this computed mid-run. `dispose()` already
@@ -229,7 +232,14 @@ export function derived<T>(
     // stale and re-run it on every unrelated upstream write.
     if (cs._d) {
       validate();
-      if (pendingError !== undefined) throwPending();
+      if (pendingError !== undefined) {
+        // Record the edge BEFORE delivering the error. A reader that catches it
+        // (a binding, `bindBoolAttr`) otherwise ends its run without having
+        // re-read this computed, and `retrack`'s stale-dependency pass prunes
+        // the edge — the reader never runs again when the sources recover.
+        recordDependency(cs as ReactiveSignal);
+        throwPending();
+      }
     }
     recordDependency(cs as ReactiveSignal);
     return cs._v;

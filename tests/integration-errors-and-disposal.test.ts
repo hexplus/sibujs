@@ -3,6 +3,7 @@ import { ErrorBoundary } from "../src/components/ErrorBoundary";
 import { type RuntimeErrorContext, setRuntimeErrorHandler } from "../src/core/errors";
 import { div } from "../src/core/rendering/html";
 import { type DerivedAccessor, derived } from "../src/core/signals/derived";
+import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
 import { writable } from "../src/core/signals/writable";
 import { infiniteQuery } from "../src/data/infiniteQuery";
@@ -178,5 +179,70 @@ describe("composite disposers release the deriveds they own", () => {
     expect(computedCount()).toBe(0);
     expect(getSubscriberCount(result.pages)).toBe(0);
     expect(getSubscriberCount(result.fetching)).toBe(0);
+  });
+});
+
+describe("a reader keeps its subscription to a live derived after receiving its error", () => {
+  function liveThrower() {
+    const [source, setSource] = signal(1);
+    const value = derived(() => {
+      const next = source();
+      if (next < 0) throw new Error(`negative: ${next}`);
+      return next;
+    });
+    return { source, setSource, value };
+  }
+
+  it("bindBoolAttr reports the failure, then updates again once the source recovers", () => {
+    setRuntimeErrorHandler((error, context) => reports.push({ error, context }));
+    const { setSource, value } = liveThrower();
+    const el = document.createElement("div");
+    bindBoolAttr(el, "hidden", () => value() > 5);
+    expect(el.hasAttribute("hidden")).toBe(false);
+
+    setSource(-1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].context.name).toBe("bindBoolAttr");
+    expect(el.hasAttribute("hidden")).toBe(false);
+
+    setSource(10);
+    expect(el.hasAttribute("hidden")).toBe(true);
+    setSource(2);
+    expect(el.hasAttribute("hidden")).toBe(false);
+    expect(reports).toHaveLength(1);
+  });
+
+  it("an effect reports the failure, then runs again once the source recovers", () => {
+    setRuntimeErrorHandler((error, context) => reports.push({ error, context }));
+    const { setSource, value } = liveThrower();
+    const seen: number[] = [];
+    const stop = effect(() => {
+      seen.push(value());
+    });
+
+    setSource(-1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0].context.phase).toBe("effect");
+
+    setSource(7);
+    expect(seen).toEqual([1, 7]);
+    stop();
+  });
+
+  it("a derived chain delivers the failure, then recovers", () => {
+    setRuntimeErrorHandler((error, context) => reports.push({ error, context }));
+    const { setSource, value } = liveThrower();
+    const doubled = derived(() => value() * 2);
+    const el = document.createElement("div");
+    bindBoolAttr(el, "hidden", () => doubled() > 10);
+
+    setSource(-1);
+    expect(reports).toHaveLength(1);
+
+    setSource(6);
+    expect(el.hasAttribute("hidden")).toBe(true);
+    setSource(1);
+    expect(el.hasAttribute("hidden")).toBe(false);
+    expect(reports).toHaveLength(1);
   });
 });
