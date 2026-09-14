@@ -17,6 +17,11 @@ export interface TimeTravelReturn<T> {
   index: () => number;
   reset: () => void;
   jumpTo: (index: number) => void;
+  /**
+   * Dispose the internal `value`, `canUndo` and `canRedo` deriveds and remove
+   * them from DevTools. Afterwards they return their last values. Idempotent.
+   */
+  dispose: () => void;
 }
 
 /**
@@ -84,5 +89,11 @@ export function timeline<T>(initial: T, maxHistory = 100): TimeTravelReturn<T> {
     }
   }
 
-  return { value, set, undo, redo, canUndo, canRedo, history, index, reset, jumpTo };
+  function dispose(): void {
+    value.dispose();
+    canUndo.dispose();
+    canRedo.dispose();
+  }
+
+  return { value, set, undo, redo, canUndo, canRedo, history, index, reset, jumpTo, dispose };
 }

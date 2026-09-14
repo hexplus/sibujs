@@ -71,6 +71,13 @@ APIs built on `derived()` pass the disposer on or use it themselves:
   and `infiniteQuery().dispose()` its `data`, `loading`, `hasNextPage` and
   `hasPreviousPage`. Their source edges and DevTools entries are released; a
   retained result keeps returning the last values.
+- `pagination()` returns a `PaginationResult` with `dispose()`. Its
+  `totalPages` and `endIndex` subscribe to the caller's `totalItems`, which
+  normally outlives the pagination and kept the whole derived graph alive;
+  `dispose()` releases all four internal deriveds and is idempotent.
+- `timeline()` returns `dispose()` for its `value`, `canUndo` and `canRedo`
+  deriveds. They read only the timeline's own signals, so this matters for the
+  DevTools inventory rather than for retention.
 
 ### Fixed — `bindBoolAttr()` reported nothing when its getter threw
 
