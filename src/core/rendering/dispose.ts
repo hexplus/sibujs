@@ -98,7 +98,9 @@ export function withDisposerRollback<T>(build: () => T): T {
           break;
         }
         const [node, teardown] = captured.pop()!;
-        unregisterDisposer(node, teardown);
+        // Only teardowns still registered are owed a run: one already executed
+        // (or removed) by a dispose() during the build must not run twice.
+        if (!unregisterDisposer(node, teardown)) continue;
         executed++;
         try {
           teardown();
@@ -113,7 +115,13 @@ export function withDisposerRollback<T>(build: () => T): T {
   }
   registrationCaptures.pop();
   const parent = registrationCaptures[registrationCaptures.length - 1];
-  if (parent) parent.push(...captured);
+  if (parent) {
+    // Hand up only registrations that are still live; ones a dispose() already
+    // ran are not the enclosing transaction's to roll back.
+    for (const entry of captured) {
+      if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.push(entry);
+    }
+  }
   return result;
 }
 
@@ -127,14 +135,15 @@ export function withDisposerRollback<T>(build: () => T): T {
  * The teardown is assumed to have already run (or to be deliberately abandoned);
  * this only releases the reference.
  */
-export function unregisterDisposer(node: Node, teardown: () => void): void {
+export function unregisterDisposer(node: Node, teardown: () => void): boolean {
   const disposers = elementDisposers.get(node);
-  if (!disposers) return;
+  if (!disposers) return false;
   const index = disposers.indexOf(teardown);
-  if (index === -1) return;
+  if (index === -1) return false;
   disposers.splice(index, 1);
   if (DEV) activeBindingCount--;
   if (disposers.length === 0) elementDisposers.delete(node);
+  return true;
 }
 
 /**

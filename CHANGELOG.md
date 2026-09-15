@@ -93,7 +93,9 @@ captured teardowns, so a teardown that registered more cleanup left it attached 
 nodes the failed render never returned. Capture now stays open while rolling back
 and the queue is drained to stability (newest first), bounded by the same teardown
 ceiling as `dispose()` and reported when reached. Nested transactions and
-teardowns that both throw and register cleanup are covered.
+teardowns that both throw and register cleanup are covered. Cleanups that a
+`dispose()` already ran during the build are neither run again by the rollback
+nor handed to an enclosing transaction.
 
 ### Fixed — adapted components ignored positional children
 
@@ -128,6 +130,9 @@ sets it the value and priority the element had before are restored.
   supersedes the `Request`'s own, an explicit content type decides how the body
   is decoded, and handlers see the `Content-Type` `fetch()` generates for
   `FormData` (with boundary), `URLSearchParams` and typed `Blob` bodies.
+- Relative URLs resolve against the page location when it is an http(s) URL, and
+  against `http://localhost` otherwise (for example jsdom's default
+  `about:blank`), instead of rejecting with "Invalid URL".
 - Abort signals are honoured: an already-aborted signal rejects immediately, and an
   abort during a handler or `delay` rejects with an `AbortError` instead of
   resolving later. As in `fetch()`, an input `Request`'s signal is inherited
@@ -284,8 +289,11 @@ cleared when the active target is detached, and `dispose()` is idempotent.
 Every bubbling `dragleave` cleared `isOver`, including the one fired when moving
 from one child to another inside the zone. Enter/leave events are now balanced
 with a depth counter, and the state resets on drop, retarget and disposal. A leave
-whose destination is not a node inside the zone — an outside element, another
-document, or no destination at all — ends the hover outright.
+to a known node outside the zone (including another document) ends the hover
+outright. A leave with no destination — which Safari reports for every drag leave,
+including moves between children — ends it only if no `dragenter`/`dragover` on
+the zone follows within 600 ms, so the hover neither sticks after leaving the
+window nor flickers off inside the zone.
 
 ### Fixed — `pointerLock().request()` discarded the browser's result
 
@@ -293,8 +301,9 @@ Modern `requestPointerLock()` returns a promise that rejects on refusal, but the
 wrapper ignored it, so permission and user-activation failures became unhandled
 rejections. `request()` now returns `Promise<void>`, resolving when the lock is
 granted and rejecting with the browser's original error; synchronous throws and
-legacy `void` implementations are normalized, and an element without Pointer Lock
-support rejects.
+legacy `void` implementations are normalized. An element without Pointer Lock
+support (e.g. iOS Safari) resolves without doing anything, so fire-and-forget
+callers never get an unhandled rejection.
 
 ### Fixed — `throttle()` emitted twice in quick succession after a trailing update
 

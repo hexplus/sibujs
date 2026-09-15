@@ -92,6 +92,9 @@ export function draggable(element: ElementTarget, data?: unknown): { isDragging:
  * @param options Object with onDrop callback receiving the transferred data and event
  * @returns Object with reactive isOver getter and dispose function
  */
+/** How long an ambiguous drag leave (null `relatedTarget`) waits for the drag to reappear. */
+const DROP_ZONE_EXIT_GRACE_MS = 600;
+
 export function dropZone(
   element: ElementTarget,
   options: { onDrop: (data: unknown, event: DragEvent) => void },
@@ -112,8 +115,23 @@ export function dropZone(
   // the old child's leave — so clearing on every leave made `isOver` flicker
   // false while the pointer was still inside the zone.
   let depth = 0;
+  // A leave with no usable destination is ambiguous: browsers report a null
+  // `relatedTarget` when the drag leaves the window, and Safari reports null on
+  // EVERY drag leave — including moves between two children inside the zone.
+  // Such a leave only ends the hover if no dragenter/dragover on the zone follows
+  // within the grace period; dragover keeps firing (every ~350 ms at most) while
+  // the pointer is still inside.
+  let exitTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelPendingExit(): void {
+    if (exitTimer !== null) {
+      clearTimeout(exitTimer);
+      exitTimer = null;
+    }
+  }
 
   function resetOver(): void {
+    cancelPendingExit();
     depth = 0;
     setIsOver(false);
   }
@@ -140,23 +158,35 @@ export function dropZone(
 
     onDragOver = (e: DragEvent) => {
       e.preventDefault();
+      cancelPendingExit();
     };
 
     onDragEnter = (e: DragEvent) => {
       e.preventDefault();
+      cancelPendingExit();
       depth++;
       setIsOver(true);
     };
 
     onDragLeave = (e: DragEvent) => {
       depth = Math.max(0, depth - 1);
-      // A leave whose destination is outside the zone ends the hover outright,
-      // even if an enter was missed along the way. A null or non-node
-      // destination (leaving the window, another document's frame) is outside
-      // too; only a node inside the zone keeps the hover.
+      if (depth === 0) {
+        resetOver();
+        return;
+      }
       const to = e.relatedTarget as Node | null;
-      const leftZone = !(to != null && typeof (to as Node).nodeType === "number" && el.contains(to));
-      if (depth === 0 || leftZone) resetOver();
+      if (to != null && typeof (to as Node).nodeType === "number") {
+        // A known destination outside the zone (including another document's
+        // node) ends the hover outright, even if an enter was missed.
+        if (!el.contains(to)) resetOver();
+        return;
+      }
+      // No usable destination: end the hover unless the drag shows up again.
+      cancelPendingExit();
+      exitTimer = setTimeout(() => {
+        exitTimer = null;
+        resetOver();
+      }, DROP_ZONE_EXIT_GRACE_MS);
     };
 
     onDrop = (e: DragEvent) => {

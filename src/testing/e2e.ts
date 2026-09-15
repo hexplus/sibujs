@@ -96,6 +96,21 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     }
   };
 
+  // The page URL when it is a usable base; otherwise (no location, or an opaque
+  // one such as jsdom's default `about:blank`) http://localhost, so relative
+  // URLs never make the mock reject with "Invalid URL".
+  const httpBase = (): string => {
+    const href = (globalThis as { location?: { href?: string } }).location?.href;
+    if (href) {
+      try {
+        if (/^https?:$/.test(new URL(href).protocol)) return href;
+      } catch {
+        // Unparseable location — fall through.
+      }
+    }
+    return "http://localhost";
+  };
+
   const toEffectiveRequest = (input: RequestInfo | URL, request: Request | undefined, init?: RequestInit): Request => {
     const overrides: RequestInit & { duplex?: "half" } = {};
     // Each member is read once (accessors must not answer twice differently).
@@ -112,8 +127,8 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     if (request) return new Request(request.clone(), overrides);
     // Relative URLs resolve like a page's fetch() would; the original string is
     // still what routes match and the log records.
-    const base = (globalThis as { location?: { href?: string } }).location?.href || "http://localhost";
-    const href = new URL(input instanceof URL ? input.href : (input as string), base).href;
+    const raw = input instanceof URL ? input.href : (input as string);
+    const href = new URL(raw, httpBase()).href;
     return new Request(href, overrides);
   };
 

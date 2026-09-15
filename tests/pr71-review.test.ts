@@ -414,13 +414,43 @@ describe("dropZone exit with a null or foreign destination", () => {
     el.dispatchEvent(e);
   };
 
-  it("a null destination after nested enters ends the hover", () => {
-    const dz = dropZone(() => zone, { onDrop: () => {} });
-    fire(zone, "dragenter", document.body);
-    fire(child, "dragenter", zone);
-    fire(child, "dragleave", null);
-    expect(dz.isOver()).toBe(false);
-    dz.dispose();
+  it("a null destination after nested enters ends the hover once the drag does not reappear", () => {
+    vi.useFakeTimers();
+    try {
+      const dz = dropZone(() => zone, { onDrop: () => {} });
+      fire(zone, "dragenter", document.body);
+      fire(child, "dragenter", zone);
+      fire(child, "dragleave", null);
+      vi.advanceTimersByTime(1_000);
+      expect(dz.isOver()).toBe(false);
+      dz.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Safari-style null destinations while moving between children keep the hover", () => {
+    vi.useFakeTimers();
+    try {
+      const other = document.createElement("span");
+      zone.appendChild(other);
+      const dz = dropZone(() => zone, { onDrop: () => {} });
+      fire(zone, "dragenter", null);
+      fire(child, "dragenter", null);
+      // Browser order: enter the new child, then leave the old one — all null.
+      fire(other, "dragenter", null);
+      fire(child, "dragleave", null);
+      expect(dz.isOver()).toBe(true);
+      // dragover keeps firing while the pointer is inside the zone.
+      for (let i = 0; i < 5; i++) {
+        vi.advanceTimersByTime(300);
+        fire(other, "dragover", null);
+      }
+      expect(dz.isOver()).toBe(true);
+      dz.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("a destination in another document ends the hover", () => {

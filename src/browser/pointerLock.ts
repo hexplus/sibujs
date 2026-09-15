@@ -21,8 +21,10 @@ export function pointerLock(): {
   /**
    * Request pointer lock on `element`. Resolves once the browser grants it and
    * rejects with the browser's own error (e.g. missing user activation), so the
-   * failure can be caught and shown. Rejects if the element has no Pointer Lock
-   * support. During SSR it resolves without doing anything.
+   * failure can be caught and shown. Resolves without doing anything when the
+   * element has no Pointer Lock support (e.g. iOS Safari) or during SSR, so a
+   * fire-and-forget `onclick: () => lock.request(el)` never raises an unhandled
+   * rejection there; check `locked()` to see whether the lock took effect.
    */
   request: (element: Element) => Promise<void>;
   exit: () => void;
@@ -46,7 +48,7 @@ export function pointerLock(): {
 
   function request(element: Element): Promise<void> {
     if (typeof element.requestPointerLock !== "function") {
-      return Promise.reject(new Error("[pointerLock] The Pointer Lock API is not supported on this element"));
+      return Promise.resolve();
     }
     // Modern browsers return a promise that rejects on refusal; discarding it
     // turned permission failures into unhandled rejections nobody could catch.

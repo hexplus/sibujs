@@ -372,7 +372,11 @@ describe("pointerLock request promise", () => {
     expect(el.requestPointerLock).toHaveBeenCalled();
   });
 
-  it("rejects when the element does not support pointer lock", async () => {
-    await expect(pointerLock().request({} as Element)).rejects.toThrow(/not supported/);
+  it("resolves without doing anything when the element does not support pointer lock", async () => {
+    // A fire-and-forget `onclick: () => lock.request(el)` must not raise an
+    // unhandled rejection on browsers without Pointer Lock (e.g. iOS Safari).
+    const lock = pointerLock();
+    await expect(lock.request({} as Element)).resolves.toBeUndefined();
+    expect(lock.locked()).toBe(false);
   });
 });
