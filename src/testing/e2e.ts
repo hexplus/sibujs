@@ -113,8 +113,14 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
   // describe it. The bytes come from a clone, so the caller's Request stays
   // unconsumed, and are re-wrapped under the effective type for decoding.
   const bodyFromRequest = async (request: Request, type: string): Promise<unknown> => {
-    const bytes = await request.clone().arrayBuffer();
-    const effective = new Response(bytes, type ? { headers: { "content-type": type } } : undefined);
+    const clone = request.clone();
+    // Decode the clone directly when its own type is already the effective one;
+    // re-wrapping bytes is only needed for an override (and older runtimes, such
+    // as Node 22.3's fetch, fail to parse multipart from a re-wrapped buffer).
+    const effective =
+      (request.headers.get("content-type") ?? "") === type
+        ? clone
+        : new Response(await clone.arrayBuffer(), type ? { headers: { "content-type": type } } : undefined);
     if (/^multipart\/form-data\b/i.test(type)) return effective.formData();
     if (isTextLike(type) || isFormEncoded(type)) return decodeText(await effective.text(), type);
     return effective.blob();
