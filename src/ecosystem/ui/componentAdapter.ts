@@ -1,5 +1,7 @@
 import type { TagProps } from "../../core/rendering/tagFactory";
 import { tagFactory } from "../../core/rendering/tagFactory";
+import type { NodeChildren } from "../../core/rendering/types";
+import { effect } from "../../core/signals/effect";
 import { signal } from "../../core/signals/signal";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +24,13 @@ export interface ThemeAPI {
   setTheme: (config: Partial<ThemeConfig>) => void;
   /** Resolve a component class name using prefix and overrides */
   resolveClass: (component: string, variant?: string) => string;
+  /**
+   * Install the theme's CSS variables on `root` (the theme root — typically the
+   * app container) and keep them in sync: variables added, changed or removed by
+   * `setTheme()` are reflected, and custom properties the theme never set are left
+   * alone. Returns a function that stops syncing and removes what it installed.
+   */
+  applyTo: (root: HTMLElement) => () => void;
 }
 
 /**
@@ -46,7 +55,30 @@ export function createTheme(initial: ThemeConfig): ThemeAPI {
     setConfig((prev) => ({ ...prev, ...partial }));
   }
 
-  return { config: getConfig, setTheme, resolveClass };
+  function applyTo(root: HTMLElement): () => void {
+    let installed: string[] = [];
+    const clearInstalled = () => {
+      for (const name of installed) root.style.removeProperty(name);
+      installed = [];
+    };
+    const stop = effect(() => {
+      const variables = getConfig().variables ?? {};
+      clearInstalled();
+      for (const [name, value] of Object.entries(variables)) {
+        root.style.setProperty(name, value);
+        installed.push(name);
+      }
+    });
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      stop();
+      clearInstalled();
+    };
+  }
+
+  return { config: getConfig, setTheme, resolveClass, applyTo };
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +114,12 @@ export interface AdaptedComponentProps extends TagProps {
   size?: string;
 }
 
-export type AdaptedComponent = (props?: AdaptedComponentProps) => Element;
+/**
+ * A component produced by {@link componentAdapter}. Children may be passed
+ * positionally, exactly like a tag factory: `Button({ variant: "primary" }, "Save")`.
+ * Positional children take precedence over a `nodes` prop.
+ */
+export type AdaptedComponent = (props?: AdaptedComponentProps, children?: NodeChildren) => Element;
 
 /**
  * Creates a set of SibuJS components from a CSS framework's class mappings.
@@ -113,35 +150,48 @@ export function componentAdapter(config: AdapterConfig): {
 } {
   const theme = createTheme({ prefix: config.prefix });
 
+  // Classes in a mapping are written with the adapter's configured prefix
+  // (`tui-button`). When the theme prefix changes, that leading prefix is
+  // swapped for the current one, so `setTheme({ prefix })` restyles output.
+  const reprefix = (cls: string, prefix: string): string =>
+    prefix !== config.prefix && cls.startsWith(`${config.prefix}-`)
+      ? `${prefix}-${cls.slice(config.prefix.length + 1)}`
+      : cls;
+
   const components: Record<string, AdaptedComponent> = {};
 
   for (const [name, mapping] of Object.entries(config.components)) {
     const factory = tagFactory(mapping.tag || "div");
 
-    components[name] = (props: AdaptedComponentProps = {}): Element => {
+    components[name] = (props: AdaptedComponentProps = {}, children?: NodeChildren): Element => {
       const { variant, size, class: userClass, ...rest } = props;
 
-      const classes: string[] = [mapping.baseClass];
+      // Read the theme inside the class getter, so components reflect the
+      // theme's overrides and prefix at creation AND whenever it changes. The
+      // returned theme was previously never consulted by any component.
+      // Override keys: `<Component>` replaces the base class, `<Component>-<variant>`
+      // the variant class and `<Component>-<size>` the size class.
+      const themeClasses = (): string => {
+        const current = theme.config();
+        const overrides = current.classOverrides ?? {};
+        const pick = (key: string, fallback: string): string =>
+          Object.hasOwn(overrides, key) ? overrides[key] : reprefix(fallback, current.prefix);
 
-      if (variant && mapping.variants?.[variant]) {
-        classes.push(mapping.variants[variant]);
-      }
+        const classes: string[] = [pick(name, mapping.baseClass)];
+        if (variant && mapping.variants?.[variant]) {
+          classes.push(pick(`${name}-${variant}`, mapping.variants[variant]));
+        }
+        if (size && mapping.sizes?.[size]) {
+          classes.push(pick(`${name}-${size}`, mapping.sizes[size]));
+        }
+        return classes.filter(Boolean).join(" ");
+      };
 
-      if (size && mapping.sizes?.[size]) {
-        classes.push(mapping.sizes[size]);
-      }
-
-      let finalClass: string | (() => string);
-      if (typeof userClass === "function") {
-        finalClass = () => {
-          const extra = (userClass as () => string)();
-          return extra ? `${classes.join(" ")} ${extra}` : classes.join(" ");
-        };
-      } else if (typeof userClass === "string" && userClass) {
-        finalClass = `${classes.join(" ")} ${userClass}`;
-      } else {
-        finalClass = classes.join(" ");
-      }
+      const finalClass = (): string => {
+        const base = themeClasses();
+        const extra = typeof userClass === "function" ? (userClass as () => string)() : userClass;
+        return typeof extra === "string" && extra ? `${base} ${extra}` : base;
+      };
 
       const mergedProps: TagProps = {
         ...mapping.defaultProps,
@@ -149,7 +199,8 @@ export function componentAdapter(config: AdapterConfig): {
         class: finalClass,
       };
 
-      return factory(mergedProps);
+      // Forward positional children; tagFactory gives them precedence over `nodes`.
+      return children === undefined ? factory(mergedProps) : factory(mergedProps, children);
     };
   }
 

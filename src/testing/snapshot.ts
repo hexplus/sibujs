@@ -4,58 +4,16 @@
  */
 
 import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { serializeDom } from "./serializeDom";
 
 // ─── DOM Serialization ──────────────────────────────────────────────────────
 
 /**
- * Serialize an element to a deterministic, indented string.
- * Attributes are sorted alphabetically to ensure consistent output.
+ * Serialize an element to a deterministic, indented string (attributes sorted,
+ * values, text and comments escaped).
  */
 function serializeElement(el: Element, indent: number): string {
-  const pad = "  ".repeat(indent);
-  const tag = el.tagName.toLowerCase();
-
-  // Sort attributes alphabetically for deterministic output
-  const attrs = Array.from(el.attributes)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((a) => `${a.name}="${a.value}"`)
-    .join(" ");
-
-  const open = attrs ? `${pad}<${tag} ${attrs}>` : `${pad}<${tag}>`;
-
-  const children = Array.from(el.childNodes);
-
-  // Self-closing / empty element
-  if (children.length === 0) {
-    return `${open}</${tag}>`;
-  }
-
-  // Single text node child — keep inline
-  if (children.length === 1 && children[0].nodeType === 3) {
-    const text = children[0].textContent?.trim() || "";
-    return `${open}${text}</${tag}>`;
-  }
-
-  // Multiple children — each on its own line
-  const childStr = children
-    .map((child) => {
-      if (child.nodeType === 3) {
-        const text = child.textContent?.trim();
-        return text ? `${"  ".repeat(indent + 1)}${text}` : "";
-      }
-      if (child.nodeType === 1) {
-        return serializeElement(child as Element, indent + 1);
-      }
-      // Comment nodes
-      if (child.nodeType === 8) {
-        return `${"  ".repeat(indent + 1)}<!-- ${child.textContent?.trim() || ""} -->`;
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-
-  return `${open}\n${childStr}\n${pad}</${tag}>`;
+  return serializeDom(el, indent, { comments: true });
 }
 
 // ─── Simple Diff ────────────────────────────────────────────────────────────

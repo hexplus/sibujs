@@ -25,10 +25,15 @@ export interface Migration {
   down?: () => void | Promise<void>;
 }
 
+// Stamped from package.json at build time (tsup.config.ts, vitest.config.ts).
+declare const __SIBU_VERSION__: string | undefined;
+
 /**
- * Framework version constant.
+ * Framework version: the published package version, stamped at build time.
+ * Only raw, unbundled source reports "dev". (It was hard-coded to "1.0.0", so
+ * compatibility checks compared against a version the package never had.)
  */
-export const VERSION = "1.0.0";
+export const VERSION: string = typeof __SIBU_VERSION__ !== "undefined" ? __SIBU_VERSION__ : "dev";
 
 // ─── SemVer Parsing ─────────────────────────────────────────────────────────
 
@@ -301,7 +306,9 @@ export function createMigrationRunner(config: {
 
     /**
      * Run all pending migrations in order. Concurrent calls (and calls racing
-     * `rollback()`) run one after another, each recomputing what is pending.
+     * `rollback()`) on this runner run one after another, each recomputing what
+     * is pending. The lock is per runner: separate runners sharing a storage key
+     * are not coordinated.
      */
     migrate(): Promise<{
       applied: string[];
@@ -362,14 +369,18 @@ export function createMigrationRunner(config: {
           .filter((m) => compareSemVer(m.version, targetVersion) > 0 && compareSemVer(m.version, appliedVersion) <= 0)
           .reverse();
 
+        // Preflight: every step must be reversible BEFORE anything is reversed.
+        // Discovering a missing down() part-way left earlier steps already undone.
         for (const migration of toRollback) {
           if (!migration.down) {
             throw new Error(
               `[Versioning] Migration ${migration.version} ("${migration.description}") does not have a down() function and cannot be rolled back.`,
             );
           }
+        }
 
-          await migration.down();
+        for (const migration of toRollback) {
+          await (migration.down as () => void | Promise<void>)();
           rolledBack.push(migration.version);
 
           // Checkpoint: the newest migration below this one is now the applied

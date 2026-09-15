@@ -590,7 +590,7 @@ export function renderToDocument(
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    ${options.title ? `<title>${escapeHtml(options.title)}</title>` : ""}
+    ${options.title !== undefined ? `<title>${escapeHtml(options.title)}</title>` : ""}
     ${metaTags}
     ${linkTags}
     ${options.headExtra || ""}

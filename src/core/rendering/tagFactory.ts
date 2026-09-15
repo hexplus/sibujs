@@ -5,6 +5,7 @@ import { reactiveBinding } from "../../reactivity/track";
 import { isEventHandlerAttr, sanitizeCSSValue, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
+import type { ListenerRecord } from "./eventRegistry";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
@@ -426,6 +427,8 @@ export const tagFactory = (tag: string, ns?: string) => {
         const handler = pOn[ev];
         if (typeof handler === "function") {
           el.addEventListener(ev, handler as EventListener);
+          // Dev-only record for a11y tooling (eventRegistry.ts); folds away in production.
+          if (DEV) ((el as ListenerRecord).__sibuListeners ??= new Set()).add(ev);
         } else if (DEV) {
           devWarn(
             `tagFactory: on.${ev} handler is not a function (got ${typeof handler}). Event listener was not attached.`,

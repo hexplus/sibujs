@@ -6,6 +6,15 @@
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { queryAllByAttribute, queryByAttribute } from "./queries";
 
+/**
+ * Escape a value for a double-quoted CSS attribute selector (`[attr="..."]`).
+ * Interpolating raw values produced invalid selectors for quotes, backslashes
+ * and newlines, and let a crafted value widen the match.
+ */
+function escapeAttrValue(value: string): string {
+  return value.replace(/[\\"]/g, "\\$&").replace(/\n/g, "\\a ").replace(/\r/g, "\\d ").replace(/\0/g, "\\fffd ");
+}
+
 // ─── Jest Adapter ───────────────────────────────────────────────────────────
 
 /**
@@ -210,11 +219,11 @@ export function createCypressAdapter() {
     /** Generate Cypress custom commands for SibuJS */
     commands: {
       /** Find by data-testid */
-      getByTestId: (id: string): string => `[data-testid="${id}"]`,
+      getByTestId: (id: string): string => `[data-testid="${escapeAttrValue(id)}"]`,
       /** Find by text */
-      getByText: (text: string): string => `:contains("${text}")`,
+      getByText: (text: string): string => `:contains("${escapeAttrValue(text)}")`,
       /** Find by role */
-      getByRole: (role: string): string => `[role="${role}"]`,
+      getByRole: (role: string): string => `[role="${escapeAttrValue(role)}"]`,
     },
   };
 }
@@ -229,10 +238,11 @@ export function createPlaywrightAdapter() {
   return {
     /** Selectors for common SibuJS patterns */
     selectors: {
-      byTestId: (id: string): string => `[data-testid="${id}"]`,
-      byRole: (role: string): string => `[role="${role}"]`,
-      byAriaLabel: (label: string): string => `[aria-label="${label}"]`,
-      byDataAttr: (attr: string, value?: string): string => (value ? `[data-${attr}="${value}"]` : `[data-${attr}]`),
+      byTestId: (id: string): string => `[data-testid="${escapeAttrValue(id)}"]`,
+      byRole: (role: string): string => `[role="${escapeAttrValue(role)}"]`,
+      byAriaLabel: (label: string): string => `[aria-label="${escapeAttrValue(label)}"]`,
+      byDataAttr: (attr: string, value?: string): string =>
+        value ? `[data-${attr}="${escapeAttrValue(value)}"]` : `[data-${attr}]`,
     },
 
     /** Generate a page object for a SibuJS component */

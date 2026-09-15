@@ -81,19 +81,28 @@ export function socket(
     }
 
     setStatus("connecting");
-    ws = new WebSocket(safeUrl, protocols);
+    const instance = new WebSocket(safeUrl, protocols);
+    ws = instance;
 
-    ws.onopen = () => {
+    // Every handler is identity-checked: events still arriving from a socket
+    // that has since been replaced (after a reconnect) must not touch state.
+    instance.onopen = () => {
+      if (ws !== instance) return;
       setStatus("open");
       reconnectCount = 0;
       startHeartbeat();
     };
 
-    ws.onmessage = (event: MessageEvent) => {
+    instance.onmessage = (event: MessageEvent) => {
+      if (ws !== instance) return;
       setData(event.data);
     };
 
-    ws.onclose = () => {
+    instance.onclose = () => {
+      if (ws !== instance) return;
+      // Release the closed instance, so a later close() knows there is nothing
+      // left to close instead of reporting "closing" forever.
+      ws = null;
       setStatus("closed");
       stopHeartbeat();
       const wasManual = manuallyClosed;
@@ -114,7 +123,7 @@ export function socket(
       }
     };
 
-    ws.onerror = () => {
+    instance.onerror = () => {
       // Error will be followed by close event
     };
   }
@@ -149,7 +158,18 @@ export function socket(
       reconnectTimer = null;
     }
     stopHeartbeat();
-    if (ws) {
+    if (!ws) {
+      // Nothing open: already closed (remotely or before), so it stays closed.
+      setStatus("closed");
+      return;
+    }
+    if (ws.readyState === WebSocket.CLOSED) {
+      // Closed without our handler having run: no close event will follow.
+      ws = null;
+      setStatus("closed");
+      return;
+    }
+    if (ws.readyState !== WebSocket.CLOSING) {
       setStatus("closing");
       ws.close();
     }

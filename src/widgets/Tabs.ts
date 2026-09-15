@@ -1,3 +1,4 @@
+import { createId, idSegment } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
@@ -108,6 +109,11 @@ export function tabs(options: TabsOptions): {
       if (prevTablistRole === null) els.tablist.removeAttribute("role");
       else els.tablist.setAttribute("role", prevTablistRole);
     });
+    // One unique prefix per binding. Ids derived from the item id alone collided
+    // across widgets with the same item ids (aria-controls then pointed at another
+    // widget's panel), and item ids with whitespace produced multi-token ARIA
+    // references. Author-provided element ids are kept and referenced as-is.
+    const idPrefix = createId("sibu-tabs");
     for (const def of tabDefs) {
       const tabEl = els.tabs[def.id];
       if (!tabEl) continue;
@@ -116,7 +122,7 @@ export function tabs(options: TabsOptions): {
       const prevDisabled = tabEl.getAttribute("aria-disabled");
       const prevControls = tabEl.getAttribute("aria-controls");
       tabEl.setAttribute("role", "tab");
-      tabEl.setAttribute("id", `sibu-tab-${def.id}`);
+      if (!prevId) tabEl.id = `${idPrefix}-tab-${idSegment(def.id)}`;
       if (def.disabled) tabEl.setAttribute("aria-disabled", "true");
       const panelEl = els.panels?.[def.id];
       let prevPanelRole: string | null = null;
@@ -130,9 +136,9 @@ export function tabs(options: TabsOptions): {
         prevPanelLabelledBy = panelEl.getAttribute("aria-labelledby");
         prevPanelHidden = panelEl.hidden;
         panelEl.setAttribute("role", "tabpanel");
-        panelEl.setAttribute("id", `sibu-tabpanel-${def.id}`);
-        panelEl.setAttribute("aria-labelledby", `sibu-tab-${def.id}`);
-        tabEl.setAttribute("aria-controls", `sibu-tabpanel-${def.id}`);
+        if (!prevPanelId) panelEl.id = `${idPrefix}-panel-${idSegment(def.id)}`;
+        panelEl.setAttribute("aria-labelledby", tabEl.id);
+        tabEl.setAttribute("aria-controls", panelEl.id);
       }
       restore.push(() => {
         if (prevRole === null) tabEl.removeAttribute("role");

@@ -215,6 +215,20 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
     return reconcileOptions();
   }
 
+  // An option exposed as unavailable is not actionable: navigation skips it and
+  // selection refuses it. Read live, so a changed aria-disabled takes effect.
+  function isDisabled(opt: Element): boolean {
+    return opt.getAttribute("aria-disabled") === "true" || opt.hasAttribute("disabled");
+  }
+
+  function enabledOptions(): HTMLElement[] {
+    return getOptions().filter((opt) => !isDisabled(opt) && opt.dataset.value !== undefined);
+  }
+
+  function optionByValue(value: string): HTMLElement | undefined {
+    return getOptions().find((opt) => opt.dataset.value === value);
+  }
+
   function setActive(value: string | null, known?: HTMLElement[]): void {
     activeValueRef = value;
     setActiveValue(value);
@@ -235,6 +249,8 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   }
 
   function select(value: string): void {
+    const target = optionByValue(value);
+    if (!target || isDisabled(target)) return;
     // Snapshot the previous selection once and compute the next collection from
     // it, so DOM reconciliation never reads the signal back. Multiple selection used to live in a CSV string re-split on every toggle,
     // which merged "a,b" with "a" + "b" and dropped "" — so the collection, not
@@ -264,10 +280,10 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   }
 
   function moveActive(delta: number): void {
-    const opts = getOptions();
+    const opts = enabledOptions();
     if (opts.length === 0) return;
-    const currentIdx = opts.findIndex((o) => o.dataset.value === activeValue());
-    let next = currentIdx + delta;
+    const currentIdx = opts.findIndex((o) => o.dataset.value === activeValueRef);
+    let next = currentIdx === -1 ? (delta > 0 ? 0 : opts.length - 1) : currentIdx + delta;
     if (next < 0) next = opts.length - 1;
     if (next >= opts.length) next = 0;
     const nextValue = opts[next].dataset.value ?? null;
@@ -291,13 +307,13 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
         break;
       case "Home": {
         e.preventDefault();
-        const opts = getOptions();
+        const opts = enabledOptions();
         if (opts.length > 0) setActive(opts[0].dataset.value ?? null);
         break;
       }
       case "End": {
         e.preventDefault();
-        const opts = getOptions();
+        const opts = enabledOptions();
         if (opts.length > 0) setActive(opts[opts.length - 1].dataset.value ?? null);
         break;
       }
@@ -313,7 +329,7 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
 
   function onClick(e: MouseEvent): void {
     const target = (e.target as HTMLElement).closest(optionSelector) as HTMLElement | null;
-    if (!target || !container.contains(target)) return;
+    if (!target || !container.contains(target) || isDisabled(target)) return;
     const value = target.dataset.value ?? null;
     if (value !== null) {
       setActive(value);

@@ -187,7 +187,7 @@ describe("rollback() checkpoints after every down()", () => {
     expect(runner.getAppliedVersion()).toBe("1.0.0");
   });
 
-  it("a missing down() stops with the checkpoint of the last completed rollback", async () => {
+  it("a missing down() is detected before any rollback step runs", async () => {
     const runner = runnerWith([
       { version: "1.0.0", description: "one", up: () => {}, down: () => {} },
       { version: "2.0.0", description: "irreversible", up: () => {} },
@@ -196,7 +196,8 @@ describe("rollback() checkpoints after every down()", () => {
     localStorage.setItem(KEY, "3.0.0");
 
     await expect(runner.rollback("0.0.0")).rejects.toThrow("does not have a down()");
-    expect(runner.getAppliedVersion()).toBe("2.0.0");
+    // Preflight: nothing was reversed, so storage still reflects every migration.
+    expect(runner.getAppliedVersion()).toBe("3.0.0");
   });
 
   it("rolling back the only applied migration removes the key", async () => {

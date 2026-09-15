@@ -187,6 +187,28 @@ export function datePicker(options?: DatePickerOptions): {
     // real focus to the newly-current cell (not just the roving tabindex).
     let pendingFocus = false;
 
+    // Original state of every cell this binding has written to, captured on
+    // first touch. Cells no longer displayed are restored as soon as they leave
+    // (month navigation), and teardown restores the rest — previously cells kept
+    // role="gridcell", the picker's ARIA state and a roving tabindex forever.
+    interface CellSnapshot {
+      role: string | null;
+      selected: string | null;
+      disabled: string | null;
+      tabindex: string | null;
+    }
+    const touchedCells = new Map<HTMLElement, CellSnapshot>();
+    const restoreAttr = (el: HTMLElement, name: string, value: string | null) => {
+      if (value === null) el.removeAttribute(name);
+      else el.setAttribute(name, value);
+    };
+    const restoreCell = (cell: HTMLElement, snap: CellSnapshot) => {
+      restoreAttr(cell, "role", snap.role);
+      restoreAttr(cell, "aria-selected", snap.selected);
+      restoreAttr(cell, "aria-disabled", snap.disabled);
+      restoreAttr(cell, "tabindex", snap.tabindex);
+    };
+
     const fxTeardown = domBinding(() => {
       const sel = selectedDate();
       const view = viewDate();
@@ -194,9 +216,19 @@ export function datePicker(options?: DatePickerOptions): {
       // Give the grid an accessible name reflecting the month on display.
       els.grid.setAttribute("aria-label", view.toLocaleDateString(undefined, { month: "long", year: "numeric" }));
       let viewCell: HTMLElement | null = null;
+      const displayed = new Set<HTMLElement>();
       for (const d of days) {
         const cell = els.cell(d.date);
         if (!cell) continue;
+        displayed.add(cell);
+        if (!touchedCells.has(cell)) {
+          touchedCells.set(cell, {
+            role: cell.getAttribute("role"),
+            selected: cell.getAttribute("aria-selected"),
+            disabled: cell.getAttribute("aria-disabled"),
+            tabindex: cell.getAttribute("tabindex"),
+          });
+        }
         cell.setAttribute("role", "gridcell");
         cell.setAttribute("aria-selected", sel && isSameCalendarDay(sel, d.date) ? "true" : "false");
         if (d.isDisabled) cell.setAttribute("aria-disabled", "true");
@@ -205,6 +237,12 @@ export function datePicker(options?: DatePickerOptions): {
         const isView = isSameCalendarDay(view, d.date);
         cell.tabIndex = isView ? 0 : -1;
         if (isView) viewCell = cell;
+      }
+      for (const [cell, snap] of touchedCells) {
+        if (!displayed.has(cell)) {
+          restoreCell(cell, snap);
+          touchedCells.delete(cell);
+        }
       }
       // After a keyboard move, follow the roving tabindex with real focus so
       // screen-reader / keyboard users land on the day they navigated to.
@@ -292,6 +330,8 @@ export function datePicker(options?: DatePickerOptions): {
       else els.grid.setAttribute("tabindex", prevGridTabIndex);
       if (prevGridLabel === null) els.grid.removeAttribute("aria-label");
       else els.grid.setAttribute("aria-label", prevGridLabel);
+      for (const [cell, snap] of touchedCells) restoreCell(cell, snap);
+      touchedCells.clear();
     };
     boundDatePickers.set(els.grid, teardown);
     return teardown;

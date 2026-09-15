@@ -13,6 +13,7 @@
 // Negative cases use `@ts-expect-error`, which fails the build if the error
 // STOPS occurring — so a constraint that is later relaxed cannot silently drift.
 import { describe, expect, it } from "vitest";
+import { formatCurrency } from "../../src/browser/format";
 import { action, copyOnClick } from "../../src/core/rendering/action";
 import { input } from "../../src/core/rendering/html";
 import { signal } from "../../src/core/signals/signal";
@@ -23,7 +24,7 @@ import { query } from "../../src/data/query";
 import { throttle } from "../../src/data/throttle";
 import type { defineComponent } from "../../src/patterns/componentProps";
 import type { validateProps } from "../../src/patterns/contracts";
-import type { withDefaults } from "../../src/patterns/hoc";
+import { withDefaults } from "../../src/patterns/hoc";
 import type { machine } from "../../src/patterns/machine";
 import { persisted } from "../../src/patterns/persist";
 import { normalize, normalizedStore } from "../../src/performance/normalize";
@@ -333,5 +334,39 @@ describe("public API type contracts", () => {
     // Everything else is available on every handle.
     expectType<() => boolean>(numeric.pending);
     expect(typeof numeric.run).toBe("function");
+  });
+
+  // withDefaults() used to return Component<Partial<P>>, so a required prop
+  // without a default could be omitted and arrive as `undefined`.
+  it("withDefaults keeps non-defaulted required props required", () => {
+    const Raw = (props: { label: string; size: number; tone?: string }) => {
+      const el = document.createElement("button");
+      el.textContent = `${props.label}:${props.size}:${props.tone ?? ""}`;
+      return el;
+    };
+    const Button = withDefaults(Raw, { size: 10 });
+
+    // Defaulted required key becomes optional; originally optional stays optional.
+    expect(Button({ label: "ok" }).textContent).toBe("ok:10:");
+    Button({ label: "ok", size: 2, tone: "dark" });
+
+    // @ts-expect-error `label` has no default and is still required
+    Button({});
+    // @ts-expect-error excess props are rejected
+    Button({ label: "ok", bogus: true });
+    // @ts-expect-error a default for a key the component does not accept
+    withDefaults(Raw, { nope: 1 });
+    // @ts-expect-error a default of the wrong type
+    withDefaults(Raw, { size: "big" });
+  });
+
+  // formatCurrency's positional currency and currency style cannot be overridden.
+  it("formatCurrency options exclude style and currency", () => {
+    expectType<string>(formatCurrency(1, "USD", { locale: "en-US", maximumFractionDigits: 0 }));
+    // @ts-expect-error currency is the positional argument
+    formatCurrency(1, "USD", { currency: "EUR" });
+    // @ts-expect-error style is always "currency"
+    formatCurrency(1, "USD", { style: "percent" });
+    expect(true).toBe(true);
   });
 });

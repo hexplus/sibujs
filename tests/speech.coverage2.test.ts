@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { speech } from "../src/browser/speech";
+import { __resetSpeechCoordinator, speech } from "../src/browser/speech";
 
 class FakeUtterance {
   text: string;
@@ -52,6 +52,7 @@ describe("speech (coverage2)", () => {
   let utterances: FakeUtterance[];
 
   beforeEach(() => {
+    __resetSpeechCoordinator();
     vi.useFakeTimers();
     synth = makeSynth();
     utterances = [];
@@ -104,89 +105,70 @@ describe("speech (coverage2)", () => {
     expect(synth.spokenUtterances[0].voice).toBe(null);
   });
 
-  it("start/end/error listeners update reactive state", () => {
+  it("end/error of this controller's utterances update reactive state", () => {
     const tts = speech();
     tts.speak("text");
-    const u = utterances[0];
-    u.fire("start");
     expect(tts.speaking()).toBe(true);
-    u.fire("end");
+    utterances[0].fire("end");
     expect(tts.speaking()).toBe(false);
     expect(tts.paused()).toBe(false);
 
     tts.speak("again");
-    const u2 = utterances[1];
-    u2.fire("error");
-    expect(tts.speaking()).toBe(false);
-    expect(tts.paused()).toBe(false);
-  });
-
-  it("polling syncs speaking/paused and stops when idle", () => {
-    const tts = speech();
-    synth.speaking = true;
-    tts.speak("text");
-    // First tick: still speaking
-    vi.advanceTimersByTime(200);
     expect(tts.speaking()).toBe(true);
-
-    synth.paused = true;
-    synth.speaking = false;
-    vi.advanceTimersByTime(200);
-    expect(tts.paused()).toBe(true);
-    expect(tts.speaking()).toBe(false);
-
-    // Now idle -> interval should clear itself
-    synth.paused = false;
-    vi.advanceTimersByTime(200);
+    utterances[1].fire("error");
     expect(tts.speaking()).toBe(false);
     expect(tts.paused()).toBe(false);
   });
 
-  it("startPolling is idempotent (no second interval while active)", () => {
+  it("speaking stays true while utterances are waiting, and hands them over in order", () => {
     const tts = speech();
-    synth.speaking = true;
     tts.speak("one");
-    tts.speak("two"); // second startPolling() should early-return
-    vi.advanceTimersByTime(200);
+    tts.speak("two");
+    expect(synth.spokenUtterances.map((u) => u.text)).toEqual(["one"]);
+    utterances[0].fire("end");
     expect(tts.speaking()).toBe(true);
+    expect(synth.spokenUtterances.map((u) => u.text)).toEqual(["one", "two"]);
+    utterances[1].fire("end");
+    expect(tts.speaking()).toBe(false);
   });
 
-  it("pause/resume/cancel delegate to synth", () => {
+  it("pause/resume/cancel delegate to synth only for this controller's active utterance", () => {
     const tts = speech();
+    tts.speak("text");
     tts.pause();
+    expect(tts.paused()).toBe(true);
     tts.resume();
+    expect(tts.paused()).toBe(false);
     tts.cancel();
     expect(synth.pauseCalls).toBe(1);
     expect(synth.resumeCalls).toBe(1);
     expect(synth.cancelCalls).toBe(1);
+    expect(tts.speaking()).toBe(false);
   });
 
-  it("dispose clears interval, cancels synth, and blocks later writes", () => {
+  it("dispose cancels this controller's speech and blocks later writes", () => {
     const tts = speech();
-    synth.speaking = true;
     tts.speak("text");
     const u = utterances[0];
     tts.dispose();
     expect(synth.cancelCalls).toBe(1);
+    expect(tts.speaking()).toBe(false);
 
     // disposed guard: speak is a no-op
     const before = synth.spokenUtterances.length;
     tts.speak("ignored");
     expect(synth.spokenUtterances.length).toBe(before);
 
-    // queued events after dispose must not flip state
+    // late native events after dispose must not flip state
     u.fire("start");
     u.fire("end");
     u.fire("error");
-    expect(tts.speaking()).toBe(true); // unchanged from pre-dispose
-
-    // interval cleared: advancing timers does nothing
-    vi.advanceTimersByTime(1000);
+    expect(tts.speaking()).toBe(false);
   });
 
-  it("dispose is safe when nothing is speaking (interval null)", () => {
+  it("dispose does not touch the synth when nothing of this controller is speaking", () => {
     const tts = speech();
     expect(() => tts.dispose()).not.toThrow();
-    expect(synth.cancelCalls).toBe(1);
+    expect(synth.cancelCalls).toBe(0);
   });
 });

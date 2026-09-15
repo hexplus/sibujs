@@ -14,7 +14,7 @@
 export interface IntervalHandle {
   /** Stop the interval. Safe to call multiple times. */
   stop: () => void;
-  /** Pause (preserving remaining ticks until `resume()`). */
+  /** Pause, preserving the time remaining until the next tick for `resume()`. */
   pause: () => void;
   /** Resume a paused interval. */
   resume: () => void;
@@ -36,29 +36,72 @@ export interface IntervalHandle {
  * ```
  */
 export function interval(fn: () => void, ms: number): IntervalHandle {
-  let id: ReturnType<typeof setInterval> | null = null;
+  let intervalId: ReturnType<typeof setInterval> | null = null;
+  // One-shot timer used to finish a partially elapsed period after resume().
+  let resumeId: ReturnType<typeof setTimeout> | null = null;
   let running = false;
+  // When the next tick is due, and how much of the period was left at pause().
+  let nextDue = 0;
+  let remaining = ms;
 
-  function start() {
-    if (running) return;
-    id = setInterval(fn, ms);
-    running = true;
+  function tick() {
+    nextDue = Date.now() + ms;
+    fn();
   }
 
-  function stop() {
-    if (id !== null) {
-      clearInterval(id);
-      id = null;
+  function clearTimers() {
+    if (intervalId !== null) {
+      clearInterval(intervalId);
+      intervalId = null;
     }
+    if (resumeId !== null) {
+      clearTimeout(resumeId);
+      resumeId = null;
+    }
+  }
+
+  function startRegular() {
+    nextDue = Date.now() + ms;
+    intervalId = setInterval(tick, ms);
+  }
+
+  function resume() {
+    if (running) return;
+    running = true;
+    if (remaining >= ms) {
+      startRegular();
+      return;
+    }
+    // Finish the period that was interrupted, then continue on the regular
+    // cadence. Restarting a full interval on every resume drifted each time.
+    nextDue = Date.now() + remaining;
+    resumeId = setTimeout(() => {
+      resumeId = null;
+      startRegular();
+      fn();
+    }, remaining);
+  }
+
+  function pause() {
+    if (!running) return;
+    remaining = Math.min(ms, Math.max(0, nextDue - Date.now()));
+    clearTimers();
     running = false;
   }
 
-  start();
+  function stop() {
+    clearTimers();
+    running = false;
+    // A stopped interval starts a full period if resumed.
+    remaining = ms;
+  }
+
+  resume();
 
   return {
     stop,
-    pause: stop,
-    resume: start,
+    pause,
+    resume,
     isRunning: () => running,
   };
 }

@@ -3,6 +3,7 @@ import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
+import type { ListenerRecord } from "./eventRegistry";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
 
@@ -426,6 +427,8 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         const fn = values[attr.idx];
         if (typeof fn === "function") {
           el.addEventListener(attr.name, fn as EventListener);
+          // Dev-only record for a11y tooling (eventRegistry.ts); folds away in production.
+          if (DEV) ((el as ListenerRecord).__sibuListeners ??= new Set()).add(attr.name);
         } else if (DEV) {
           devWarn(
             `html: on:${attr.name} handler is not a function (got ${typeof fn}). Event listener was not attached.`,

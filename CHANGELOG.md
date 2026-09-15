@@ -9,6 +9,247 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — adapted components ignored positional children
+
+Components from `componentAdapter()` accepted only a props object, so
+`Button({ variant: "primary" }, "Save")` rendered an empty button. They now take
+children positionally like every tag factory; positional children take precedence
+over `nodes`.
+
+### Fixed — the adapter theme never reached its components
+
+`setTheme()` updated a signal that no component read, so `classOverrides` and
+`prefix` had no effect. Component classes are now reactive: `<Component>`,
+`<Component>-<variant>` and `<Component>-<size>` overrides replace the matching
+classes, a prefix change re-prefixes the mapping's classes, user classes are kept,
+and existing components update. The new `theme.applyTo(root)` installs the theme's
+CSS variables on a root element, keeps them in sync, and returns a release function.
+
+### Fixed — `createHttpMock()` diverged from `fetch()`
+
+- A `Request` input is read like `fetch()` reads it: method, headers, body (from a
+  clone, so the caller's request stays unconsumed) and signal, each overridable by
+  `init`. FormData and other structured bodies reach the route unchanged.
+- Abort signals are honoured: an already-aborted signal rejects immediately, and an
+  abort during a handler or `delay` rejects with an `AbortError` instead of
+  resolving later.
+- String routes match exactly. A path route compares the request's pathname (plus
+  its query when the route has one), and an absolute route the full URL;
+  `"/api/users"` no longer matches `https://host/evil/api/users`.
+
+### Fixed — DOM snapshots and fingerprints could collide
+
+`createDOMSnapshot()`, `assertDOMEquals()`, `snapshotComponent()` and
+`captureFingerprint()` interpolated attribute values and text raw, so an attribute
+`a='x" b="y'` serialized exactly like two attributes, and text `<span>` like an
+element. Attribute values, text and comments are now escaped.
+
+### Fixed — test selector builders produced invalid or widened selectors
+
+The Cypress `commands` and Playwright `selectors` builders interpolated values raw.
+Quotes, backslashes and newlines are now escaped, so every value yields a valid
+selector that matches exactly that value.
+
+### Fixed — accessibility checks skipped the root element
+
+Every check used `root.querySelectorAll()`, which never includes the root, so
+running `checkA11y()` directly on an input, image, button or `<main>` passed or
+misreported. The root is now checked along with its descendants, once.
+
+### Fixed — keyboard checks missed framework event handlers
+
+`checkKeyboardAccess()` only saw `onclick` attributes, never `on: { click }`.
+In development builds the framework now records the event types it attaches, and
+the check treats click and pointer listeners as activation and key listeners as
+keyboard support. Production bundles are unaffected.
+
+### Fixed — visual fingerprints ignored computed styles
+
+A stylesheet-only change produced an identical fingerprint. Fingerprints now carry
+`computedStyles`, the appearance-relevant computed properties of every element,
+which feed the hash and are reported by `compareFingerprints()` as `"computed"`
+changes.
+
+### Fixed — `VERSION` reported a version the package never had
+
+`VERSION` from the versioning plugin was hard-coded to `"1.0.0"`, so compatibility
+checks compared against a false framework version. It is now the published package
+version, stamped at build time.
+
+### Fixed — `rollback()` could reverse steps before finding an irreversible one
+
+A missing `down()` was discovered only when the rollback reached it, after newer
+steps had already been reversed. Every step is now checked for a `down()` before
+any is run, so an irreversible migration fails the rollback without changing
+anything. Combined with the per-step checkpoints, storage always describes what is
+actually applied.
+
+### Fixed — route loader data leaked between routes and SSR requests
+
+Loader data lived in one application-global context: every `executeLoader()`
+replaced it, nothing restored it, and disposal left it discoverable, so a route's
+component could read another route's data and concurrent SSR requests saw each
+other's. Loader data is now scoped per SSR request, and the new
+`renderWithLoader(resource, render)` sets the data `loaderData()` sees for exactly
+the duration of a route component's construction (restoring the previous scope,
+even if rendering throws). `executeLoader()` still provides ambient data for
+unscoped callers, but a disposed resource stops being discoverable, and disposing a
+superseded loader never clears the current one.
+
+### Fixed — `createListbox()` activated and selected disabled options
+
+Options marked `aria-disabled="true"` (or `disabled`) were reachable by arrow keys,
+Home and End, and selectable by Enter or click. Navigation now skips them (with
+wraparound), selection and clicks refuse them, `aria-disabled` is read live so a
+change takes effect immediately, and an all-disabled listbox has no active option.
+
+### Fixed — concurrent `clipboard().copy()` calls published in completion order
+
+Writes can settle out of order, and every write that resolved updated `text()` and
+replaced the `copied` reset timer, so an older copy finishing late overwrote the
+newer value. Only the most recent `copy()` now publishes state or owns the timer;
+a superseded write still resolves (or rejects) for its own caller, and `dispose()`
+invalidates every pending write.
+
+### Fixed — `socket().close()` after a remote close reported `"closing"` forever
+
+The native close handler never released the closed socket, and closing a `CLOSED`
+socket fires no further event, so `status()` stuck at `"closing"`. The handler now
+releases its instance, `close()` inspects `readyState` (a closed socket stays
+`"closed"`, a closing one is left alone), and every handler ignores events from a
+socket that has since been replaced by a reconnect.
+
+### Fixed — single-file `fileUpload()` reported files it did not keep
+
+In single mode only the last valid file is retained, but `onFiles` received every
+valid file, so consumers processed files the widget had discarded. `onFiles` now
+receives exactly the committed selection.
+
+### Fixed — empty `accept` tokens admitted files of unknown type
+
+A trailing or doubled comma (`"image/png,"`) produced an empty pattern that equalled
+a file's empty MIME type, letting any file of unknown type through. Empty and
+whitespace-only tokens are now dropped; an `accept` string with no valid tokens
+applies no restriction, like the HTML attribute.
+
+### Fixed — `formatCurrency()` options could override currency and style
+
+Options were spread after `style: "currency"` and `currency`, so
+`{ currency: "EUR" }` or `{ style: "percent" }` defeated the positional currency.
+The fixed fields are now applied last, and options are typed as the new
+`CurrencyFormatOptions` (`Intl.NumberFormatOptions` without `style` / `currency`).
+
+### Fixed — resource hints were deduplicated by URL alone
+
+`prefetch()` and `preloadResource()` shared one URL-keyed cache, so a prefetch
+suppressed a later preload of the same URL, and one `as` value suppressed another.
+Hints are now deduplicated by `rel`, `as`, `crossorigin` and URL together; exact
+duplicates are still created once.
+
+### Fixed — Tabs and Accordion generated duplicate document ids
+
+Element ids were derived from the caller's item id alone, so two widgets with the
+same item ids both created `sibu-tab-details` / `sibu-tabpanel-details` (and the
+accordion equivalents): `aria-controls` and `aria-labelledby` resolved to another
+widget's elements, and item ids containing whitespace produced multi-token ARIA
+references. Each `bind()` now allocates a unique prefix with `createId()` and
+appends an encoded, collision-free form of the item id; ids the author already set
+on the elements are kept and referenced as-is, and teardown removes only generated
+ids.
+
+### Fixed — datePicker teardown left cell accessibility state behind
+
+`bind()` wrote `role`, `aria-selected`, `aria-disabled` and `tabindex` to every
+cell, but teardown restored only the grid, so reused cells kept `role="gridcell"`,
+stale ARIA state and a roving tabindex. Each cell's original attributes are now
+captured on first touch; cells that leave the displayed month are restored
+immediately, and teardown restores the rest.
+
+### Fixed — `draggable()` permanently changed relinquished elements
+
+Retargeting and disposal removed only the listeners: the previous element stayed
+`draggable`, and `isDragging()` could stay `true`. The element's original
+`draggable` attribute is now restored on retarget and disposal, `isDragging` is
+cleared when the active target is detached, and `dispose()` is idempotent.
+
+### Fixed — `dropZone()` flickered while moving between child elements
+
+Every bubbling `dragleave` cleared `isOver`, including the one fired when moving
+from one child to another inside the zone. Enter/leave events are now balanced
+with a depth counter (a leave into an element outside the zone ends the hover
+outright), and the state resets on drop, retarget and disposal.
+
+### Fixed — `pointerLock().request()` discarded the browser's result
+
+Modern `requestPointerLock()` returns a promise that rejects on refusal, but the
+wrapper ignored it, so permission and user-activation failures became unhandled
+rejections. `request()` now returns `Promise<void>`, resolving when the lock is
+granted and rejecting with the browser's original error; synchronous throws and
+legacy `void` implementations are normalized, and an element without Pointer Lock
+support rejects.
+
+### Fixed — `throttle()` emitted twice in quick succession after a trailing update
+
+A trailing emission ended the cooldown, so a change 1 ms later emitted
+immediately — two updates back-to-back despite "at most once per interval". Every
+emission, leading or trailing, now opens a full cooldown window.
+
+### Fixed — `withDefaults()` made every prop optional
+
+It returned `Component<Partial<P>>`, so a required prop without a default could be
+omitted and arrive as `undefined`. The returned component now takes
+`WithDefaultsProps<P, D>` (exported): keys with a default become optional, all other
+keys keep their original required/optional status, and defaults for keys the
+component does not accept — or of the wrong type — are compile errors.
+
+### Fixed — `interval().pause()` did not preserve the remaining delay
+
+`pause()` cleared the interval and `resume()` started a fresh full period,
+contradicting the documented contract and drifting on every pause. `resume()` now
+finishes the interrupted period first, then continues on the regular cadence; time
+spent paused does not count. `pause()` and `resume()` are idempotent, and `stop()`
+leaves nothing scheduled.
+
+### Fixed — `swipe()` combined different touches and ignored cancelled gestures
+
+The end of a gesture was read from `changedTouches[0]`, so an unrelated finger
+could complete it, and `touchcancel` was ignored. A gesture is now tracked by the
+initiating touch's `identifier`: its end is matched by identifier, `touchcancel`
+ends it, and a gesture that becomes multi-touch is abandoned. `dispose()` also
+removes the new cancel listener.
+
+### Fixed — disposing one `speech()` controller cancelled every controller's speech
+
+Controllers called the global `speechSynthesis` `cancel()` / `pause()` / `resume()`
+directly, so unmounting one component cancelled or paused speech from every other
+controller and from application code. Utterances from all controllers now go
+through a shared owner-aware queue and are handed to the native queue one at a time.
+`cancel()`, `pause()`, `resume()` and `dispose()` affect only that controller's
+utterances, and native methods are called only while its utterance is the one
+speaking. `speaking()` now means "this controller has an utterance playing or
+waiting", and the 200 ms state polling is gone.
+
+### Fixed — a failed `scrollLock().lock()` corrupted the shared lock count
+
+Ownership and the shared count were committed before the body styles were applied,
+so a lock that threw (no `document.body` yet, a failing style write) left the count
+at 1 with no handle able to release it, and every later lock skipped the body. The
+DOM work now runs first, all-or-nothing, and ownership is committed only after it
+succeeds.
+
+### Fixed — `Head({ title: "" })` could not clear the title
+
+The static title path tested truthiness, so an empty title was ignored while a
+reactive getter returning `""` worked. Both now apply any defined title, and the SSR
+document shell renders an empty `<title>` the same way.
+
+### Fixed — `setStructuredData()` deleted valid JSON-LD before serializing
+
+The existing script was removed before `JSON.stringify` ran, so a payload that fails
+to serialize — a cycle, a `BigInt`, a throwing getter or `toJSON` — destroyed the
+previously published metadata. The replacement is now built first and swapped in
+place with `replaceWith()` only after serialization succeeds.
+
 ### Fixed — `createId()` was not request-scoped during SSR
 
 The suspense counter was request-scoped but `createId()` incremented one

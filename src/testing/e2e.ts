@@ -6,6 +6,7 @@
 import { reportError } from "../core/errors";
 import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { queryAllByAttribute, queryByAttribute } from "./queries";
+import { serializeDom } from "./serializeDom";
 
 // ─── HTTP Mock ──────────────────────────────────────────────────────────────
 
@@ -36,29 +37,75 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
   const requestLog: Array<{ url: string; method: string; body: unknown; timestamp: number }> = [];
   const mockRoutes = [...routes];
 
+  // String routes match exactly — `url.endsWith(route)` let "/api/users" match
+  // "https://x/evil/api/users". An absolute route is compared to the full URL
+  // (without its fragment); a path route to the request's pathname, plus its
+  // query when the route itself contains one. RegExp routes see the full URL.
+  function matchesStringRoute(route: string, url: string): boolean {
+    if (url === route) return true;
+    let target: URL;
+    try {
+      target = new URL(url, "http://localhost");
+    } catch {
+      return false;
+    }
+    if (/^[a-z][a-z\d+.-]*:/i.test(route)) {
+      return `${target.origin}${target.pathname}${target.search}` === route || target.href === route;
+    }
+    const hashIndex = route.indexOf("#");
+    const bare = hashIndex === -1 ? route : route.slice(0, hashIndex);
+    return bare.includes("?") ? `${target.pathname}${target.search}` === bare : target.pathname === bare;
+  }
+
   function matchRoute(url: string, method: string): MockRoute | undefined {
     return mockRoutes.find((route) => {
       const methodMatch = !route.method || route.method.toUpperCase() === method.toUpperCase();
       if (!methodMatch) return false;
-      if (typeof route.url === "string") return url === route.url || url.endsWith(route.url);
+      if (typeof route.url === "string") return matchesStringRoute(route.url, url);
+      route.url.lastIndex = 0;
       return route.url.test(url);
     });
   }
 
-  const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = init?.method || "GET";
-    let body: unknown;
-    if (init?.body != null) {
-      const raw = String(init.body);
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        // Non-JSON body (plain text, form-encoded, stringified FormData) — keep
-        // the raw value instead of throwing and breaking the mock.
-        body = raw;
-      }
+  const abortError = (signal: AbortSignal): unknown => {
+    const reason = signal.reason;
+    if (reason instanceof Error && reason.name === "AbortError") return reason;
+    return new DOMException("The operation was aborted.", "AbortError");
+  };
+
+  const parseBody = (raw: unknown): unknown => {
+    if (raw == null) return undefined;
+    // Structured bodies (FormData, URLSearchParams, Blob, buffers, streams) are
+    // handed to the route as-is; stringifying them lost their contents.
+    if (typeof raw !== "string") return raw;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // Non-JSON text (plain, form-encoded) stays as the raw string.
+      return raw;
     }
+  };
+
+  const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    // Mirror fetch(): a Request supplies method, headers, body and signal, and
+    // `init` overrides each of them. Previously a Request input was treated as a
+    // bare GET with no headers or body, and signals were ignored entirely.
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : undefined;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
+    const headers = new Headers(init?.headers ?? request?.headers);
+    const signal = init?.signal ?? request?.signal ?? undefined;
+
+    if (signal?.aborted) throw abortError(signal);
+
+    let body: unknown;
+    if (init && init.body != null) {
+      body = parseBody(init.body);
+    } else if (request && request.body !== null && !request.bodyUsed) {
+      // Read a clone so the caller's Request stays unconsumed.
+      body = parseBody(await request.clone().text());
+    }
+    if (signal?.aborted) throw abortError(signal);
 
     requestLog.push({ url, method, body, timestamp: Date.now() });
 
@@ -67,33 +114,60 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
       return new Response(JSON.stringify({ error: "Not mocked" }), { status: 404 });
     }
 
-    // Wrap response resolution in try/finally so a user-supplied response
-    // callback throwing does not leave the mock in a partially-applied state.
+    // Races `work` against the signal, so an abort rejects immediately with an
+    // AbortError; the listener is removed once either side settles.
+    const abortable = <T>(work: Promise<T>): Promise<T> => {
+      if (!signal) return work;
+      if (signal.aborted) return Promise.reject(abortError(signal));
+      return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(abortError(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        work.then(
+          (value) => {
+            signal.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
+          (err) => {
+            signal.removeEventListener("abort", onAbort);
+            reject(err);
+          },
+        );
+      });
+    };
+
     let mockResponse: MockResponse;
     try {
       if (typeof route.response === "function") {
-        mockResponse = await route.response({ url, method, body, headers: new Headers(init?.headers) });
+        const handler = route.response;
+        mockResponse = await abortable(Promise.resolve().then(() => handler({ url, method, body, headers })));
       } else {
         mockResponse = route.response;
       }
-
-      if (mockResponse.delay) {
-        await new Promise((r) => setTimeout(r, mockResponse.delay));
-      }
-
-      return new Response(
-        typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body),
-        {
-          status: mockResponse.status || 200,
-          statusText: mockResponse.statusText || "OK",
-          headers: mockResponse.headers,
-        },
-      );
     } catch (err) {
+      if (signal?.aborted) throw abortError(signal);
       // Surface response-handler errors as a synthetic 500 so tests see them
       // instead of an unhandled rejection leaking past the mock boundary.
       return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
     }
+
+    if (mockResponse.delay) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await abortable(
+          new Promise<void>((r) => {
+            timer = setTimeout(r, mockResponse.delay);
+          }),
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    return new Response(typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body), {
+      status: mockResponse.status || 200,
+      statusText: mockResponse.statusText || "OK",
+      headers: mockResponse.headers,
+    });
   };
 
   const restore = (): void => {
@@ -307,51 +381,11 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
  * Create a serializable snapshot of a DOM element for comparison testing.
  */
 export function createDOMSnapshot(element: Element): string {
-  return serializeElement(element, 0);
-}
-
-function serializeElement(el: Element, indent: number): string {
-  const pad = "  ".repeat(indent);
-  const tag = el.tagName.toLowerCase();
-
-  // Attributes
-  const attrs = Array.from(el.attributes)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((a) => `${a.name}="${a.value}"`)
-    .join(" ");
-
-  const open = attrs ? `${pad}<${tag} ${attrs}>` : `${pad}<${tag}>`;
-
-  // Children
-  const children = Array.from(el.childNodes);
-  if (children.length === 0) {
-    return `${open}</${tag}>`;
-  }
-
-  if (children.length === 1 && children[0].nodeType === 3) {
-    const text = children[0].textContent?.trim() || "";
-    return `${open}${text}</${tag}>`;
-  }
-
-  const childStr = children
-    .map((child) => {
-      if (child.nodeType === 3) {
-        const text = child.textContent?.trim();
-        return text ? `${"  ".repeat(indent + 1)}${text}` : "";
-      }
-      if (child.nodeType === 1) {
-        return serializeElement(child as Element, indent + 1);
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-
-  return `${open}\n${childStr}\n${pad}</${tag}>`;
+  return serializeDom(element);
 }
 
 /**
- * Assert that two DOM trees are structurally equivalent.
+ * Assert two DOM elements have the same structure.
  */
 export function assertDOMEquals(actual: Element, expected: Element): void {
   const actualSnapshot = createDOMSnapshot(actual);

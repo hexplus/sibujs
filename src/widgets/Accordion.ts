@@ -1,3 +1,4 @@
+import { createId, idSegment } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
@@ -114,13 +115,16 @@ export function accordion(options: AccordionOptions): {
       if (existing) return existing;
     }
     const restore: Array<() => void> = [];
+    // One unique prefix per binding (see Tabs): ids from the item id alone
+    // collided across accordions and broke on whitespace. Author ids are kept.
+    const idPrefix = createId("sibu-accordion");
     for (const item of itemDefs) {
       const trig = els.triggers[item.id];
       const panel = els.panels[item.id];
       if (!trig) continue;
       const prevTrigId = trig.id;
       const prevTrigControls = trig.getAttribute("aria-controls");
-      trig.id = `sibu-accordion-trigger-${item.id}`;
+      if (!prevTrigId) trig.id = `${idPrefix}-trigger-${idSegment(item.id)}`;
       let prevPanelRole: string | null = null;
       let prevPanelId = "";
       let prevPanelLabelledBy: string | null = null;
@@ -132,7 +136,7 @@ export function accordion(options: AccordionOptions): {
         prevPanelLabelledBy = panel.getAttribute("aria-labelledby");
         prevPanelHidden = panel.hidden;
         panel.setAttribute("role", "region");
-        panel.id = `sibu-accordion-panel-${item.id}`;
+        if (!prevPanelId) panel.id = `${idPrefix}-panel-${idSegment(item.id)}`;
         panel.setAttribute("aria-labelledby", trig.id);
         trig.setAttribute("aria-controls", panel.id);
       }

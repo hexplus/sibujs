@@ -40,8 +40,21 @@ export function withWrapper<P>(
  * Button("Click"); // type="button", disabled=false automatically
  * ```
  */
-export function withDefaults<P extends object>(component: Component<P>, defaults: Partial<P>): Component<Partial<P>> {
-  return (props: Partial<P>) => component({ ...defaults, ...props } as P);
+/**
+ * Props accepted by a {@link withDefaults} component: every key that has a
+ * default becomes optional; every other key keeps its original required or
+ * optional status.
+ */
+export type WithDefaultsProps<P, D> = Omit<P, keyof D> & Partial<Pick<P, Extract<keyof P, keyof D>>>;
+
+export function withDefaults<P extends object, const D extends Partial<P> = Partial<P>>(
+  component: Component<P>,
+  // Reject default keys the component does not accept.
+  defaults: D & { [K in Exclude<keyof D, keyof P>]: never },
+): Component<WithDefaultsProps<P, D>> {
+  // Returning `Component<Partial<P>>` made EVERY prop optional, so a required
+  // prop without a default could be omitted and arrive as `undefined`.
+  return (props: WithDefaultsProps<P, D>) => component({ ...defaults, ...props } as unknown as P);
 }
 
 /**

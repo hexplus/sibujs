@@ -56,3 +56,22 @@ export function createId(prefix = "sibu"): string {
 export function __resetIdCounter(): void {
   _counter.n = 0;
 }
+
+/**
+ * Encode an arbitrary key (an item id supplied by the caller) as a segment that
+ * is safe inside an element id and a space-separated ARIA id reference.
+ *
+ * Letters, digits and `-` pass through; every other character — whitespace,
+ * punctuation, Unicode, and `_` itself — becomes `_<hex code point>_`. Escaping
+ * `_` keeps the mapping injective, so distinct keys never produce the same
+ * segment (`"a b"`, `"a_b"` and `"a-b"` stay distinct).
+ *
+ * @internal
+ */
+export function idSegment(key: string): string {
+  let out = "";
+  for (const ch of String(key)) {
+    out += /[A-Za-z0-9-]/.test(ch) ? ch : `_${(ch.codePointAt(0) ?? 0).toString(16)}_`;
+  }
+  return out;
+}

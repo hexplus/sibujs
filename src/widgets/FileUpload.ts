@@ -45,7 +45,15 @@ export function fileUpload(options?: FileUploadOptions): {
   function isAccepted(file: File): boolean {
     if (!accept) return true;
 
-    const acceptedTypes = accept.split(",").map((t) => t.trim().toLowerCase());
+    // Empty tokens (a trailing or doubled comma, a whitespace-only entry) are
+    // dropped: an empty pattern used to equal a file's empty MIME type, letting
+    // any file of unknown type through. With no valid tokens left there is no
+    // restriction, matching the HTML `accept` attribute.
+    const acceptedTypes = accept
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length > 0);
+    if (acceptedTypes.length === 0) return true;
     const fileName = file.name.toLowerCase();
     const fileType = file.type.toLowerCase();
 
@@ -81,17 +89,22 @@ export function fileUpload(options?: FileUploadOptions): {
       validFiles.push(file);
     }
 
+    // The files this call actually commits — reported to onFiles as-is. Single
+    // mode keeps only the last valid file, and onFiles used to receive every
+    // valid file anyway, so consumers processed files the widget had discarded.
+    const committed = multiple ? validFiles : validFiles.slice(-1);
+
     batch(() => {
       setErrors(newErrors);
-      if (validFiles.length > 0) {
+      if (committed.length > 0) {
         if (multiple) {
-          setFiles((prev) => [...prev, ...validFiles]);
+          setFiles((prev) => [...prev, ...committed]);
         } else {
           // Single mode: replace with the last valid file
-          setFiles([validFiles[validFiles.length - 1]]);
+          setFiles(committed);
         }
         if (onFiles) {
-          onFiles(validFiles);
+          onFiles(committed);
         }
       }
     });

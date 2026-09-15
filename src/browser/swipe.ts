@@ -45,20 +45,45 @@ export function swipe(
 
   let startX = 0;
   let startY = 0;
-  let tracking = false;
+  // The initiating touch. A gesture is ONE touch: its end is matched by
+  // identifier, a cancel ends it, and a second finger abandons it. Comparing
+  // against `changedTouches[0]` used to pair unrelated fingers, and ignoring
+  // `touchcancel` let a browser-cancelled gesture complete later.
+  let trackedId: number | null = null;
+
+  const idOf = (t: Touch): number => t.identifier ?? 0;
+  const findTracked = (list: TouchList | undefined): Touch | null => {
+    if (!list) return null;
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (idOf(t) === trackedId) return t;
+    }
+    return null;
+  };
 
   const onStart = (e: TouchEvent) => {
-    if (e.touches.length === 0) return;
-    startX = e.touches[0].clientX;
-    startY = e.touches[0].clientY;
-    tracking = true;
+    if (trackedId !== null || e.touches.length !== 1) {
+      // Became (or started as) multi-touch: not a swipe.
+      trackedId = null;
+      return;
+    }
+    const touch = e.changedTouches?.[0] ?? e.touches[0];
+    if (!touch) return;
+    trackedId = idOf(touch);
+    startX = touch.clientX;
+    startY = touch.clientY;
+  };
+
+  const onCancel = (e: TouchEvent) => {
+    if (trackedId !== null && findTracked(e.changedTouches)) trackedId = null;
   };
 
   const onEnd = (e: TouchEvent) => {
-    if (!tracking) return;
-    tracking = false;
-    const touch = e.changedTouches[0];
+    if (trackedId === null) return;
+    const touch = findTracked(e.changedTouches);
+    // Another finger lifted; the tracked touch is still down.
     if (!touch) return;
+    trackedId = null;
     const dx = touch.clientX - startX;
     const dy = touch.clientY - startY;
     const absX = Math.abs(dx);
@@ -77,10 +102,13 @@ export function swipe(
 
   target.addEventListener("touchstart", onStart, { passive: true });
   target.addEventListener("touchend", onEnd, { passive: true });
+  target.addEventListener("touchcancel", onCancel, { passive: true });
 
   function dispose() {
     target.removeEventListener("touchstart", onStart);
     target.removeEventListener("touchend", onEnd);
+    target.removeEventListener("touchcancel", onCancel);
+    trackedId = null;
   }
 
   return { direction, dispose };
