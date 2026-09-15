@@ -25,7 +25,10 @@ A status subscriber closing or disposing the socket while `"connecting"` or
 `WebSocket` was still constructed, or a heartbeat started. `close()` now
 invalidates the lifecycle, which is rechecked after each status publication and
 around socket construction; a socket created for an invalidated lifecycle is
-closed immediately.
+closed immediately. The lifecycle is captured before the URL getter runs, every
+invalidated path leaves the status `"closed"`, and a throwing URL getter is
+reported (status `"closed"`) instead of escaping the constructor or reconnect
+timer.
 
 ### Fixed — `imageLoader()` could continue a load interrupted by disposal
 
@@ -38,8 +41,15 @@ detached.
 
 A listener that dispatched or reset during a notification had the newer state
 delivered first and the rest of the older round afterwards, so listeners saw
-history backwards. Notification rounds are now queued and run to completion in
-commit order; listener isolation and unsubscribe-during-delivery are unchanged.
+history backwards, and a listener handling one state could read a newer one from
+`getState()`. Store operations are now queued: a `dispatch()` or `reset()`
+requested while another is running (from a listener, middleware or action) runs
+after the current one has committed and delivered, so every listener's state
+equals `getState()` and rounds arrive in commit order. The caller's own failing
+action still throws; a queued one that fails is reported. Subscriptions are
+tracked as records, so a callback unsubscribed and re-subscribed during a round
+starts with the next update; subscribing an already-subscribed callback still
+returns the existing subscription. Listener isolation is unchanged.
 
 ### Fixed — `select()` Home/End highlighted disabled options
 

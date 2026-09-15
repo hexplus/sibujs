@@ -1,3 +1,4 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
 
 /**
@@ -70,6 +71,11 @@ export function socket(
 
   function connect(): void {
     if (disposed) return;
+    // Captured before any user code (the URL getter, status subscribers) runs:
+    // each of them may close or dispose this handle, and every path that notices
+    // must leave the status "closed".
+    const generation = lifecycle;
+    const invalidated = () => disposed || generation !== lifecycle;
     // WebSocket is absent under SSR and some edge runtimes — degrade to a
     // closed socket instead of throwing at construction.
     if (typeof WebSocket === "undefined") {
@@ -77,19 +83,35 @@ export function socket(
       return;
     }
 
-    const safeUrl = validateWsUrl(getUrl());
+    let rawUrl: string;
+    try {
+      rawUrl = getUrl();
+    } catch (error) {
+      // A throwing URL getter fails this attempt, not the caller (or a timer).
+      setStatus("closed");
+      reportError(error, { phase: "async", name: "socket" });
+      return;
+    }
+    if (invalidated()) {
+      setStatus("closed");
+      return;
+    }
+    const safeUrl = validateWsUrl(rawUrl);
     if (safeUrl === null) {
       // Unsafe URL — stay closed and do not attempt a connection.
       setStatus("closed");
       return;
     }
 
-    const generation = lifecycle;
     setStatus("connecting");
-    if (disposed || generation !== lifecycle) return;
+    if (invalidated()) {
+      setStatus("closed");
+      return;
+    }
     const instance = new WebSocket(safeUrl, protocols);
-    if (disposed || generation !== lifecycle) {
+    if (invalidated()) {
       instance.close();
+      setStatus("closed");
       return;
     }
     ws = instance;

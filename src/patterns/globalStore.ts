@@ -87,48 +87,72 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
 }): GlobalStore<S, A> {
   const initialState = deepClone(config.state);
   const [getState, setState] = signal<S>({ ...initialState });
-  const listeners: Set<(state: S) => void> = new Set();
+  // One record per subscription. Delivery snapshots RECORDS, not callbacks, so a
+  // callback unsubscribed and re-subscribed during a round is a new record that
+  // starts with the next update instead of passing for the old subscription.
+  // Subscribing the same callback again while subscribed returns the existing
+  // subscription (the previous Set semantics).
+  interface Subscription {
+    callback: (state: S) => void;
+    active: boolean;
+  }
+  const subscriptions = new Map<(state: S) => void, Subscription>();
   const middlewares = config.middleware || [];
 
   /**
-   * Deliver a committed state to every listener.
-   *
-   * State is already committed when this runs, so a listener failure must not
-   * look like a failed dispatch or cost the listeners after it the update: each
-   * one is isolated and its error reported. Delivery walks a snapshot, so a
-   * listener subscribed during notification starts with the NEXT update —
-   * iterating the live Set would run it now, and a listener that subscribes on
-   * every call would keep iteration from terminating. A listener unsubscribed
-   * by an earlier one in the same round is skipped.
+   * Deliver the committed state to every subscription that existed when the
+   * round started. Each listener is isolated and its error reported; one
+   * unsubscribed earlier in the round is skipped.
    */
-  // Notification rounds run to completion in commit order. A listener that
-  // dispatches (or resets) during a round queues the new state's round behind
-  // the current one; nesting it delivered the newer state first and then resumed
-  // the older round, so listeners saw history backwards.
-  const pendingRounds: S[] = [];
-  let draining = false;
-
   function notifyListeners(state: S): void {
-    pendingRounds.push(state);
-    if (draining) return;
-    draining = true;
+    if (subscriptions.size === 0) return;
+    for (const subscription of Array.from(subscriptions.values())) {
+      if (!subscription.active) continue;
+      try {
+        subscription.callback(state);
+      } catch (err) {
+        reportError(err, { phase: "event", name: "globalStore(subscribe)" });
+      }
+    }
+  }
+
+  // Store operations (dispatch, reset) run to completion in call order. An
+  // operation requested while another is running — from a listener, a
+  // middleware or an action — is queued and runs after the current one has
+  // committed AND delivered. Committing nested operations immediately let a
+  // listener handling state N read state N+1 from getState(), and delivered
+  // rounds out of order.
+  const operations: Array<() => void> = [];
+  let running = false;
+
+  function perform(operation: () => void): void {
+    operations.push(operation);
+    if (running) return;
+    running = true;
+    let callerError: unknown;
+    let callerFailed = false;
     try {
-      while (pendingRounds.length > 0) {
-        const roundState = pendingRounds.shift() as S;
-        if (listeners.size === 0) continue;
-        const snapshot = Array.from(listeners);
-        for (const listener of snapshot) {
-          if (!listeners.has(listener)) continue;
-          try {
-            listener(roundState);
-          } catch (err) {
-            reportError(err, { phase: "event", name: "globalStore(subscribe)" });
+      let first = true;
+      while (operations.length > 0) {
+        const next = operations.shift() as () => void;
+        try {
+          next();
+        } catch (err) {
+          // The caller's own operation rethrows to the caller, as before; a
+          // queued operation's caller has already returned, so it is reported.
+          if (first) {
+            callerFailed = true;
+            callerError = err;
+          } else {
+            reportError(err, { phase: "event", name: "globalStore(dispatch)" });
           }
         }
+        first = false;
       }
     } finally {
-      draining = false;
+      running = false;
     }
+    if (callerFailed) throw callerError;
   }
 
   function dispatch<K extends keyof A>(action: K, payload?: Parameters<A[K]>[1]): void {
@@ -150,33 +174,37 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
       notifyListeners(getState());
     };
 
-    if (middlewares.length === 0) {
-      execute();
-      return;
-    }
-
-    // Run middleware chain. Each middleware receives its OWN `next`, usable
-    // once. A single shared `next` over one index let a middleware that called
-    // it twice run the action twice, and let the second call skip past every
-    // middleware after it straight to the action.
-    const runFrom = (index: number): void => {
-      if (index >= middlewares.length) {
+    perform(() => {
+      if (middlewares.length === 0) {
         execute();
         return;
       }
-      let called = false;
-      const next = () => {
-        if (called) {
-          if (DEV)
-            devWarn(`globalStore: middleware ${index} next() called more than once for "${String(action)}"; ignored.`);
+
+      // Run middleware chain. Each middleware receives its OWN `next`, usable
+      // once. A single shared `next` over one index let a middleware that called
+      // it twice run the action twice, and let the second call skip past every
+      // middleware after it straight to the action.
+      const runFrom = (index: number): void => {
+        if (index >= middlewares.length) {
+          execute();
           return;
         }
-        called = true;
-        runFrom(index + 1);
+        let called = false;
+        const next = () => {
+          if (called) {
+            if (DEV)
+              devWarn(
+                `globalStore: middleware ${index} next() called more than once for "${String(action)}"; ignored.`,
+              );
+            return;
+          }
+          called = true;
+          runFrom(index + 1);
+        };
+        middlewares[index](getState(), String(action), payload, next);
       };
-      middlewares[index](getState(), String(action), payload, next);
-    };
-    runFrom(0);
+      runFrom(0);
+    });
   }
 
   function select<R>(selector: Selector<S, R>): () => R {
@@ -189,13 +217,24 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
   }
 
   function subscribe(callback: (state: S) => void): () => void {
-    listeners.add(callback);
-    return () => listeners.delete(callback);
+    let subscription = subscriptions.get(callback);
+    if (!subscription) {
+      subscription = { callback, active: true };
+      subscriptions.set(callback, subscription);
+    }
+    const own = subscription;
+    return () => {
+      if (subscriptions.get(callback) !== own) return;
+      own.active = false;
+      subscriptions.delete(callback);
+    };
   }
 
   function reset(): void {
-    setState({ ...initialState } as S);
-    notifyListeners(getState());
+    perform(() => {
+      setState({ ...initialState } as S);
+      notifyListeners(getState());
+    });
   }
 
   return { getState, select, dispatch, subscribe, reset };
