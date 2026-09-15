@@ -194,26 +194,9 @@ describe("createHttpMock fetch fidelity", () => {
     mock.restore();
   });
 
-  it("passes FormData bodies through", async () => {
-    let received: unknown;
-    const mock = createHttpMock([
-      {
-        method: "POST",
-        url: "/form",
-        response: ({ body }) => {
-          received = body;
-          return {};
-        },
-      },
-    ]);
-    mock.install();
-    const form = new FormData();
-    form.append("name", "Ada");
-    await fetch("/form", { method: "POST", body: form });
-    expect(received).toBeInstanceOf(FormData);
-    expect((received as FormData).get("name")).toBe("Ada");
-    mock.restore();
-  });
+  // FormData, URLSearchParams and Blob bodies are covered in
+  // http-mock-bodies.test.ts, which runs under Node: jsdom's implementations of
+  // those classes are not accepted by the runtime's Request.
 
   it("rejects immediately for a pre-aborted signal", async () => {
     const handler = vi.fn(() => ({ body: "x" }));

@@ -45,8 +45,12 @@ sets it the value and priority the element had before are restored.
 - Handlers receive the same body type for equivalent requests, whether the body
   came from `init` or a `Request`: multipart → `FormData`, form-encoded →
   `URLSearchParams`, text and JSON types → parsed JSON or the string, anything
-  else (binary, untyped) → `Blob`. The body is interpreted by the effective
-  content type, so `init.headers` supersedes the `Request`'s own.
+  else (binary, untyped) → `Blob`. Every call is normalized into one effective
+  `Request` built exactly as `fetch()` builds it (a `Request` input is cloned and
+  `init` overrides it), so method, headers and body always agree: `init.headers`
+  supersedes the `Request`'s own, an explicit content type decides how the body
+  is decoded, and handlers see the `Content-Type` `fetch()` generates for
+  `FormData` (with boundary), `URLSearchParams` and typed `Blob` bodies.
 - Abort signals are honoured: an already-aborted signal rejects immediately, and an
   abort during a handler or `delay` rejects with an `AbortError` instead of
   resolving later.

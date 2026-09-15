@@ -138,6 +138,81 @@ describe("createHttpMock gives handlers the same body type for equivalent reques
     expect(await (seen[1].body as Blob).text()).toBe('{"value":2}');
   });
 
+  it("a typed Blob with an overriding content type is decoded by the override through both overloads", async () => {
+    const headers = { "content-type": "application/octet-stream" };
+    const make = () => new Blob(["hello"], { type: "text/plain" });
+    const direct = await capture(URL_, { method: "POST", headers, body: make() });
+    const request = new Request(URL_, { method: "POST", headers, body: make() });
+    const wrapped = await capture(request);
+
+    for (const body of [direct, wrapped]) {
+      expect(body).toBeInstanceOf(Blob);
+      expect(await (body as Blob).text()).toBe("hello");
+    }
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  it("FormData with an explicit non-multipart type is decoded by that type", async () => {
+    const make = () => {
+      const form = new FormData();
+      form.append("name", "Ada");
+      return form;
+    };
+    const headers = { "content-type": "application/octet-stream" };
+    const direct = await capture(URL_, { method: "POST", headers, body: make() });
+    const request = new Request(URL_, { method: "POST", headers, body: make() });
+    const wrapped = await capture(request);
+
+    for (const body of [direct, wrapped]) {
+      expect(body).toBeInstanceOf(Blob);
+      expect(await (body as Blob).text()).toContain('name="name"');
+    }
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  it("URLSearchParams with an overriding type is decoded by that type", async () => {
+    const headers = { "content-type": "text/plain" };
+    const direct = await capture(URL_, { method: "POST", headers, body: new URLSearchParams("a=1") });
+    const request = new Request(URL_, { method: "POST", headers, body: new URLSearchParams("a=1") });
+    const wrapped = await capture(request);
+
+    expect(direct).toBe("a=1");
+    expect(wrapped).toBe("a=1");
+    expect(request.bodyUsed).toBe(false);
+  });
+
+  it("handlers see the Content-Type fetch generates for structured bodies", async () => {
+    const seen: Array<string | null> = [];
+    const mock = createHttpMock([
+      {
+        method: "POST",
+        url: "/upload",
+        response: ({ headers }) => {
+          seen.push(headers.get("content-type"));
+          return { body: "ok" };
+        },
+      },
+    ]);
+    mock.install();
+    const form = new FormData();
+    form.append("name", "Ada");
+    const request = new Request(URL_, { method: "POST", body: new Blob(["x"], { type: "image/png" }) });
+    try {
+      await fetch(URL_, { method: "POST", body: form });
+      await fetch(URL_, { method: "POST", body: new URLSearchParams("a=1") });
+      await fetch(URL_, { method: "POST", body: new Blob(["x"], { type: "image/png" }) });
+      await fetch(request);
+    } finally {
+      mock.restore();
+    }
+
+    expect(seen[0]).toMatch(/^multipart\/form-data; boundary=.+/);
+    expect(seen[1]).toMatch(/^application\/x-www-form-urlencoded/);
+    expect(seen[2]).toBe("image/png");
+    expect(seen[3]).toBe("image/png");
+    expect(request.bodyUsed).toBe(false);
+  });
+
   it("text-typed blobs decode as text either way", async () => {
     const make = () => new Blob(["plain"], { type: "text/plain" });
     expect(await capture(URL_, { method: "POST", body: make() })).toBe("plain");

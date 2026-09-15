@@ -73,9 +73,13 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     return new DOMException("The operation was aborted.", "AbortError");
   };
 
-  // ── Request bodies ──
-  // Handlers receive the same body type for equivalent requests, whether the body
-  // came from `init` or from a Request (which can only be read as bytes):
+  // ── Request normalization ──
+  // Every call is turned into ONE effective Request, exactly as fetch() would
+  // build it: a Request input is cloned (so the caller's stays unconsumed) and
+  // `init` overrides its method, headers and body. Method, headers and body are
+  // then all read from that request, so the handler's `headers` — including the
+  // Content-Type fetch generates for FormData, URLSearchParams and typed Blobs —
+  // always describe the body it receives. The body is decoded by that type:
   //   multipart/form-data               → FormData
   //   application/x-www-form-urlencoded → URLSearchParams
   //   text-like (text/*, JSON, XML)     → parsed JSON, else the string
@@ -92,58 +96,46 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     }
   };
 
-  const bodyFromInit = async (raw: BodyInit, type: string): Promise<unknown> => {
-    if (typeof raw === "string") return decodeText(raw, type);
-    if (typeof FormData !== "undefined" && raw instanceof FormData) return raw;
-    if (raw instanceof URLSearchParams) return raw;
-    if (typeof Blob !== "undefined" && raw instanceof Blob) {
-      const blobType = raw.type || type;
-      return isTextLike(blobType) || isFormEncoded(blobType) ? decodeText(await raw.text(), blobType) : raw;
+  const toEffectiveRequest = (input: RequestInfo | URL, request: Request | undefined, init?: RequestInit): Request => {
+    const overrides: RequestInit & { duplex?: "half" } = {};
+    if (init?.method !== undefined) overrides.method = init.method;
+    if (init?.headers !== undefined) overrides.headers = init.headers;
+    if (init?.body != null) {
+      overrides.body = init.body;
+      // Streaming bodies must declare half-duplex.
+      if (typeof ReadableStream !== "undefined" && init.body instanceof ReadableStream) overrides.duplex = "half";
     }
-    if (raw instanceof ArrayBuffer || ArrayBuffer.isView(raw)) {
-      if (isTextLike(type) || isFormEncoded(type)) return decodeText(new TextDecoder().decode(raw), type);
-      return new Blob([raw as BlobPart], type ? { type } : undefined);
-    }
-    // Streams and other exotic bodies are handed over untouched.
-    return raw;
+    if (request) return new Request(request.clone(), overrides);
+    // Relative URLs resolve like a page's fetch() would; the original string is
+    // still what routes match and the log records.
+    const base = (globalThis as { location?: { href?: string } }).location?.href || "http://localhost";
+    const href = new URL(input instanceof URL ? input.href : (input as string), base).href;
+    return new Request(href, overrides);
   };
 
-  // `type` is the EFFECTIVE content type — `init.headers` supersedes the
-  // Request's own — so the body is interpreted the way the handler's `headers`
-  // describe it. The bytes come from a clone, so the caller's Request stays
-  // unconsumed, and are re-wrapped under the effective type for decoding.
-  const bodyFromRequest = async (request: Request, type: string): Promise<unknown> => {
-    const clone = request.clone();
-    // Decode the clone directly when its own type is already the effective one;
-    // re-wrapping bytes is only needed for an override (and older runtimes, such
-    // as Node 22.3's fetch, fail to parse multipart from a re-wrapped buffer).
-    const effective =
-      (request.headers.get("content-type") ?? "") === type
-        ? clone
-        : new Response(await clone.arrayBuffer(), type ? { headers: { "content-type": type } } : undefined);
+  const decodeBody = async (effective: Request): Promise<unknown> => {
+    if (effective.body === null) return undefined;
+    const type = effective.headers.get("content-type") ?? "";
     if (/^multipart\/form-data\b/i.test(type)) return effective.formData();
     if (isTextLike(type) || isFormEncoded(type)) return decodeText(await effective.text(), type);
     return effective.blob();
   };
 
   const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    // Mirror fetch(): a Request supplies method, headers, body and signal, and
-    // `init` overrides each of them. Previously a Request input was treated as a
-    // bare GET with no headers or body, and signals were ignored entirely.
     const request = typeof Request !== "undefined" && input instanceof Request ? input : undefined;
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = (init?.method ?? request?.method ?? "GET").toUpperCase();
-    const headers = new Headers(init?.headers ?? request?.headers);
+    // The signal is kept separately: it is honoured below, and is not copied into
+    // the effective request (a foreign-realm signal would be rejected there).
     const signal = init?.signal ?? request?.signal ?? undefined;
 
     if (signal?.aborted) throw abortError(signal);
 
-    let body: unknown;
-    if (init && init.body != null) {
-      body = await bodyFromInit(init.body, headers.get("content-type") ?? "");
-    } else if (request && request.body !== null && !request.bodyUsed) {
-      body = await bodyFromRequest(request, headers.get("content-type") ?? "");
-    }
+    // Construction errors (a GET with a body, an invalid URL) reject exactly as
+    // fetch() does.
+    const effective = toEffectiveRequest(input, request, init);
+    const method = effective.method.toUpperCase();
+    const headers = effective.headers;
+    const body = await decodeBody(effective);
     if (signal?.aborted) throw abortError(signal);
 
     requestLog.push({ url, method, body, timestamp: Date.now() });
