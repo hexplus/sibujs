@@ -73,7 +73,7 @@ unhandled rejections, and a synchronous throw from any callback aborted `track()
 part-way. Every callback now runs isolated: throws and rejections are reported
 through the runtime error handler with the element as `node`, and the remaining
 elements are still processed. A returned thenable's `then` is read exactly once
-and adopted through the Promise constructor.
+and invoked in a later microtask, as native promise assimilation does.
 
 ### Fixed — `form.handleSubmit()` swallowed submit failures
 
@@ -81,8 +81,10 @@ A rejected async submit reset `submitting` but discarded the error, so a failed
 save looked successful. Synchronous throws, rejections and thenables whose `then`
 throws are now reported with `phase: "async"` and `name: "form.handleSubmit"`,
 and `submitting` is always released. A returned thenable's `then` is read
-exactly once, so a stateful accessor cannot skip the adoption. **Behavior change:** a synchronous throw
-from the submit callback is reported instead of propagating to the caller.
+exactly once, so a stateful accessor cannot skip the adoption, and it is invoked
+only after `submitting` is raised, so a synchronous thenable cannot re-enter the
+submit handler. **Behavior change:** a synchronous throw from the submit callback
+is reported instead of propagating to the caller.
 
 ### Fixed — failed-render rollback left cleanup registered during rollback attached
 

@@ -264,6 +264,52 @@ describe("thenable handling reads then exactly once", () => {
     });
   }
 
+  it("form: a synchronous thenable cannot re-enter handleSubmit before submitting is raised", async () => {
+    const f = form({ name: { initial: "x" } });
+    let calls = 0;
+    const order: string[] = [];
+    const submit: () => void = f.handleSubmit(() => {
+      calls++;
+      if (calls > 1) return;
+      return {
+        // biome-ignore lint/suspicious/noThenProperty: a reentrant thenable is the subject under test
+        get then() {
+          order.push(`getter (submitting=${f.submitting()})`);
+          return (resolve: () => void) => {
+            order.push(`invoke (submitting=${f.submitting()})`);
+            submit();
+            resolve();
+          };
+        },
+      } as unknown as Promise<void>;
+    });
+
+    submit();
+    order.push(`after submit (submitting=${f.submitting()})`);
+    await macrotask();
+
+    expect(calls).toBe(1);
+    expect(order).toEqual(["getter (submitting=false)", "after submit (submitting=true)", "invoke (submitting=true)"]);
+    expect(f.submitting()).toBe(false);
+  });
+
+  it("a callable then with an overridden .call property still works", async () => {
+    const then = (resolve: () => void) => resolve();
+    Object.defineProperty(then, "call", { value: null });
+    const f = submitWith({ then });
+    await macrotask();
+    expect(f.submitting()).toBe(false);
+    expect(handler).not.toHaveBeenCalled();
+
+    const rejecting = (_resolve: () => void, reject: (e: unknown) => void) => reject(new Error("via apply"));
+    Object.defineProperty(rejecting, "call", { value: null });
+    // biome-ignore lint/suspicious/noThenProperty: a thenable with an overridden call is the subject under test
+    enterWith({ then: rejecting });
+    await macrotask();
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toMatchObject({ message: "via apply" });
+  });
+
   it("form: submitting is released after a multiply-settling then resolves first", async () => {
     const f = submitWith({
       // biome-ignore lint/suspicious/noThenProperty: a hostile thenable is the subject under test
