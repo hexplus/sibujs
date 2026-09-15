@@ -29,10 +29,12 @@ import { persisted } from "../../src/patterns/persist";
 import { normalize, normalizedStore } from "../../src/performance/normalize";
 import type { createSharedScope } from "../../src/platform/microfrontend";
 import type { wasm } from "../../src/platform/wasm";
+import { lazyModule } from "../../src/plugins/modular";
 import type { AsyncComponent, Component, LazyComponent, RouteDef } from "../../src/plugins/router";
 import { createMemoryRouter, createRouter } from "../../src/plugins/router";
 import { eventBus } from "../../src/ui/eventBus";
 import { bindField, form } from "../../src/ui/form";
+import { formAction } from "../../src/ui/formAction";
 
 /** Compile-time assertion helper — no runtime cost, no new dependency. */
 const expectType = <T>(_value: T): void => undefined;
@@ -293,5 +295,43 @@ describe("public API type contracts", () => {
     expectType<number>(plain());
     setSource(2);
     expect(typeof debounced.dispose).toBe("function");
+  });
+
+  // `loaded` is backed by a getter with no setter: assigning it throws in
+  // strict mode at runtime, so the type must not allow it.
+  it("lazyModule().loaded is read-only", () => {
+    const mod = lazyModule(async () => 42);
+    expectType<boolean>(mod.loaded);
+    expect(() => {
+      // @ts-expect-error loaded is read-only
+      mod.loaded = true;
+    }).toThrow(TypeError);
+    expect(mod.loaded).toBe(false);
+  });
+
+  // `onSubmit` forwards exactly one FormData. It must only exist on handles
+  // whose action accepts that call.
+  it("formAction exposes onSubmit only for FormData actions", () => {
+    const save = formAction(async (data: FormData) => data.get("title"));
+    expectType<(e: Event) => void>(save.onSubmit);
+
+    const optional = formAction(async (data?: FormData) => data);
+    expectType<(e: Event) => void>(optional.onSubmit);
+
+    const numeric = formAction(async (count: number) => count * 2);
+    // @ts-expect-error a numeric action cannot be a submit handler
+    void numeric.onSubmit;
+
+    const none = formAction(async () => "ok");
+    // @ts-expect-error a zero-argument action cannot be a submit handler
+    void none.onSubmit;
+
+    const multi = formAction(async (data: FormData, extra: string) => `${data}${extra}`);
+    // @ts-expect-error onSubmit passes one argument; this action requires two
+    void multi.onSubmit;
+
+    // Everything else is available on every handle.
+    expectType<() => boolean>(numeric.pending);
+    expect(typeof numeric.run).toBe("function");
   });
 });

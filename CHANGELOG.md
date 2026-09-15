@@ -9,6 +9,228 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `normalize()` permitted prototype pollution
+
+The entity registry and tables were ordinary objects keyed by schema names and
+ids, so a schema named `__proto__` wrote the normalized entity onto
+`Object.prototype`, and ids such as `constructor` or `toString` collided with
+inherited members that `denormalize()` then returned. `normalize()`,
+`denormalize()` and `normalizedStore()` now keep their tables as null-prototype
+objects, read only own properties, and define every write as an own property, so
+every schema name, relation field and id is literal data.
+
+### Fixed — normalized stores lost entities with missing ids and allowed re-keying
+
+Ids came from `String(entity[idKey])`, so an entity without an id was stored
+under `"undefined"` and each later one silently overwrote it. Ids are now
+validated: only strings and finite numbers are accepted, and anything else throws
+a `TypeError` naming the entity type and `idKey` — in `normalize()`, `add()` and
+`addMany()`, where one invalid entity rejects the whole batch. An `update()` that
+would change the entity's id field throws and leaves the store unchanged (remove
+and re-add instead); repeating the same id is allowed.
+
+### Fixed — `store()` could not hold an own `__proto__` state key
+
+The signal registry and snapshots were filled by assignment, so a `__proto__` key
+(valid in JSON) replaced the registry's prototype and disappeared from reads,
+updates, resets, snapshots and `subscribeKey()`. The registry is now a
+null-prototype object and entries and snapshot keys are defined as own properties.
+
+### Fixed — `deepEqual()` treated distinct opaque objects as equal
+
+After the handled built-ins it compared enumerable keys, so objects whose state is
+not in enumerable keys — `new Number(1)` vs `new Number(2)`, two different `URL`s,
+`Error`s with different messages — compared equal and `deepSignal` suppressed the
+update. Boxed primitives now compare by value, `URL`s by `href`, and `Error`s by
+name, message, cause and own enumerable fields. Only plain (or null-prototype)
+records fall back to key comparison; any other distinct instance — a `Promise`, a
+`WeakMap`, a class instance — is unequal.
+
+### Fixed — reactive `splice(start)` ignored the missing `deleteCount`
+
+`array()` and `reactiveArray()` defaulted an omitted `deleteCount` to `0`, so
+`splice(2)` removed nothing, while native `splice(start)` deletes through the
+end. Both now forward exactly the arguments given, matching
+`Array.prototype.splice` for omitted and explicit `undefined` counts and for
+negative or out-of-range starts. `array()` also no longer notifies for a
+`splice()` that neither removes nor inserts anything.
+
+### Fixed — prop defaults overwrote an explicit `null`
+
+`validateProps()` (and so `defineStrictComponent()`) applied a default whenever
+the value was `== null`, replacing an explicit `null` even when the prop's
+validator accepts it. Defaults now apply only to absent or `undefined` props, in
+both development and production. `false`, `0` and `""` were already kept.
+
+### Fixed — `urlState()` erased `history.state` and instances drifted apart
+
+- `setParams()` and `setHash()` passed `null` as the history state, silently
+  erasing router metadata, scroll-restoration data and application state on the
+  entry. The current `history.state` is now kept — on a replaced entry and carried
+  onto a pushed one, falsy values included. The new `state` option in
+  `UrlStateOptions` sets state deliberately.
+- Setters updated only their own instance, and History API writes fire no
+  `popstate`, so separately mounted `urlState()` instances disagreed about the
+  URL. Every framework URL write now resynchronizes all live instances (shared
+  across duplicate module copies); a disposed instance stops receiving updates,
+  and `dispose()` is idempotent.
+
+### Fixed — migration runner races, rollback checkpoints and loose SemVer parsing
+
+- **Serialized operations.** `migrate()` computed its pending list before awaiting
+  any migration, so concurrent calls ran the same `up()` twice. `migrate()` and
+  `rollback()` now run one at a time per runner, each re-reading the stored
+  version when it starts; a failed operation releases the queue.
+- **Rollback checkpoints.** The applied version was written only after every
+  `down()` succeeded, so a part-way failure left storage claiming reversed
+  migrations were still applied and a retry ran their `down()` again. The version
+  is now checkpointed after every successful `down()` (the key is removed when
+  nothing remains applied).
+- **Storage failures are distinct.** A failed storage write now surfaces as the new
+  `MigrationStorageError` (with the migration's `version`) instead of being
+  reported as a failed `up()` — `migrate()` lists it in `errors`, `rollback()`
+  throws it.
+- **Strict `parseSemVer()`.** It used `parseInt`, accepting `1.2.3garbage`,
+  `1.2.3.4` and an empty prerelease. It now uses an anchored SemVer 2.0.0 grammar
+  that rejects trailing characters, extra components, empty or illegal
+  identifiers and numeric leading zeros, and parses build metadata into the new
+  `SemVer.build` field. The `v` prefix and abbreviated `1` / `1.2` forms still
+  work.
+
+### Fixed — `eventBus()` and `createSharedScope()` did not isolate subscribers
+
+Both iterated the live listener set and called user callbacks without
+containment: one throwing listener stopped delivery to every later listener and
+escaped to the caller, listeners added during delivery ran in the same dispatch,
+and a listener that kept adding listeners never let it finish. Delivery now walks
+a snapshot, isolates each callback and reports failures through the runtime error
+pipeline (`phase: "event"`). Listeners added during a dispatch start with the next
+one; listeners removed or cleared during it are skipped; a dispatch started from a
+listener completes before the outer one continues.
+
+### Fixed — startup caches exceeded their size bounds
+
+`createSSRCache()` and `prerenderRoutes()` evicted before checking whether the key
+already existed, so overwriting a key at capacity discarded an unrelated entry;
+`maxSize: 0` still stored one item; an oldest key of `""` was never evicted; and
+valid entries were evicted while expired ones remained. Overwrites no longer
+evict, expired entries are removed before valid ones, `0` disables caching, and a
+negative or non-integer limit throws a `RangeError`.
+
+### Fixed — `deferNonCritical()` could starve forever
+
+It scheduled `requestIdleCallback` without a timeout and, given a deadline with
+under 1 ms left — which is always the case for a timed-out callback — rescheduled
+without running anything. It now passes a finite timeout and runs at least one task
+per callback, chunking the rest to the remaining idle budget. A failing task is
+reported through the runtime error pipeline instead of `console.error`.
+
+### Fixed — a synchronous `ssrSuspense()` content throw bypassed the fallback
+
+`content()` was called as an argument to `Promise.race()`, so a synchronous throw
+escaped `ssrSuspense()` and crashed the request, while an async rejection became
+fallback output. Every failure to produce content HTML — a synchronous throw, a
+rejection, a hostile thenable, the timeout, or rendering the resolved element
+throwing — now resolves the boundary with the fallback HTML. A timer handle of
+`0` is now cleared.
+
+### Fixed — testing queries broke on attribute values with special characters
+
+`queryByTestId`, `queryByRole` and `queryByLabel` interpolated values into CSS
+selectors, so a quote, backslash, bracket or newline produced an invalid selector
+or a wrong match, and a `findBy*()` whose query then threw on a later poll never
+settled. Queries now match attribute values exactly via the new
+`queryByAttribute()` / `queryAllByAttribute()` helpers — also used by `render()`,
+the Jest/Cypress/Playwright adapters, the e2e helpers and the label check in the
+a11y audit — and a throwing poll rejects the `findBy*()` promise.
+
+### Fixed — `broadcast().post()` threw after `dispose()`
+
+Disposal closed the native channel but `post()` kept calling it, throwing
+`InvalidStateError`. After `dispose()`, `post()` is now a no-op and `last()` no
+longer changes; `dispose()` is idempotent. Errors from `post()` before disposal,
+such as a `DataCloneError`, still propagate.
+
+### Fixed — failed plugin installation left a partially active plugin
+
+`install()` wrote hooks and providers straight into the live registry, and the
+plugin was marked installed only after `install()` returned. A throwing install
+left its hooks and providers active while `installedPlugins` said it was not
+installed; retrying registered every surviving hook again; and a plugin that
+installed itself — directly or through a dependency — recursed until the stack
+overflowed.
+
+Installation is now a transaction. Hooks and providers are staged and committed
+only when `install()` returns, so a failed install leaves the registry unchanged
+and can be retried. The plugin is marked installed before its init hooks run.
+Installing a plugin whose `install()` is already running throws a
+recursive-installation error. Each `plugin()` call is its own transaction: a
+dependency installed successfully by a nested `plugin()` call stays installed
+even if the outer installation fails.
+
+### Fixed — `lazyModule().get()` did not deduplicate concurrent loads
+
+The cache was filled only after the loader resolved, so every `get()` made before
+then started another load, with duplicated side effects and a cached value decided
+by settlement order. Concurrent calls now share one in-flight load. A rejected
+load clears the shared slot (only if it still owns it) so the next `get()`
+retries.
+
+`lazyModule()` now returns the new `LazyModule<T>` type, whose `loaded` is
+`readonly` — assigning it compiled but threw at runtime, since it is a getter.
+
+### Fixed — `packageInfo` described a package layout that does not exist
+
+It reported `name: "sibu"`, `version: "1.0.0"`, `.mjs` import targets, source
+paths that do not exist and subpaths the package does not export. It now reports
+`sibujs` with the version stamped at build time, lists the real module entry
+points, and `generateExportsMap()` produces exactly the `exports` map in
+package.json — including the CDN subpaths, which map to `{ default }`. Its return
+type is now `Record<string, PackageExportTarget>`. Tests fail if the entry list,
+the build script and package.json drift apart, and check every target exists in
+a built `dist`.
+
+### Fixed — `contentEditable.setContent(string)` kept raw HTML
+
+The string form is documented as `{ html, sanitize: true }` but stored the string
+unchanged, so `content()` rendered as HTML carried live markup. It is now
+sanitized exactly like `{ html }`. Sanitization also repeats until the text is
+stable, so HTML-encoded payloads (`&lt;img onerror=…&gt;`) cannot decode into
+markup. `{ html, sanitize: false }` remains the only raw-HTML path.
+
+### Fixed — scoped `contentEditable` formatting unwrapped DOM outside the editor
+
+The selection was checked to be inside the editor, but the search for an existing
+wrapper kept climbing past it, so `bold()` / `italic()` / `underline()` could
+unwrap an element that contained the editor and rewrite unrelated siblings. The
+search now stops at the bound editor and at the nearest editing host
+(`contenteditable` other than `"false"`); neither the boundary nor anything above
+it is ever unwrapped.
+
+### Fixed — `formAction().onSubmit` was typed for every action
+
+`onSubmit` passes exactly one `FormData`, but it was on every handle, so a numeric
+or multi-argument action compiled as a submit handler and received a `FormData`
+at runtime. `FormActionHandle` now includes `onSubmit` only when a single-FormData
+call is valid for the action; the shared members are `FormActionState`, and
+`onSubmit` is `FormActionSubmit`. This is a type-level change for code that read
+`onSubmit` on a non-FormData action.
+
+### Fixed — `accordion()` and `tabs()` accepted invalid initial state
+
+- `accordion()` now drops unknown `defaultExpanded` ids and, in single mode, keeps
+  only the first valid one.
+- `tabs()` uses `defaultTab` only when it names an enabled tab; otherwise the first
+  enabled tab is active, and when every tab is disabled no tab is active (`""`).
+
+### Fixed — widget `bind()` teardown did not restore mutated DOM
+
+Tabs and Accordion toggled each panel's `hidden` without restoring it, and
+FileUpload overwrote the input's `accept` and `multiple`, the error region's text
+and the drop zone's `data-drag-over`. Teardown now restores every one of those to
+its value before `bind()` — removing attributes that did not exist — and the
+teardown functions are idempotent.
+
 ### Fixed — a middleware calling `next()` twice ran the action twice
 
 Every `globalStore` middleware shared one `next` closure over a single chain

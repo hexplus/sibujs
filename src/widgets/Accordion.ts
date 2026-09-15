@@ -36,10 +36,16 @@ export function accordion(options: AccordionOptions): {
   isExpanded: (id: string) => boolean;
   bind: AccordionAriaBinding["bind"];
 } {
-  // (no-op — kept structure)
   const { items: itemDefs, multiple = false, defaultExpanded = [] } = options;
 
-  const [expandedIds, setExpandedIds] = signal<Set<string>>(new Set(defaultExpanded));
+  // Seed state through the same invariants expand() enforces: unknown ids are
+  // dropped, and single mode keeps only the first valid default. Seeding from
+  // `defaultExpanded` verbatim let single mode start with several panels open.
+  const knownIds = new Set(itemDefs.map((item) => item.id));
+  const validDefaults = defaultExpanded.filter((id) => knownIds.has(id));
+  const initialExpanded = multiple ? validDefaults : validDefaults.slice(0, 1);
+
+  const [expandedIds, setExpandedIds] = signal<Set<string>>(new Set(initialExpanded));
 
   const items = derived(() =>
     itemDefs.map((item) => ({
@@ -118,10 +124,13 @@ export function accordion(options: AccordionOptions): {
       let prevPanelRole: string | null = null;
       let prevPanelId = "";
       let prevPanelLabelledBy: string | null = null;
+      // The expansion binding below toggles `hidden`; teardown puts it back.
+      let prevPanelHidden = false;
       if (panel) {
         prevPanelRole = panel.getAttribute("role");
         prevPanelId = panel.id;
         prevPanelLabelledBy = panel.getAttribute("aria-labelledby");
+        prevPanelHidden = panel.hidden;
         panel.setAttribute("role", "region");
         panel.id = `sibu-accordion-panel-${item.id}`;
         panel.setAttribute("aria-labelledby", trig.id);
@@ -140,6 +149,7 @@ export function accordion(options: AccordionOptions): {
           else panel.id = prevPanelId;
           if (prevPanelLabelledBy === null) panel.removeAttribute("aria-labelledby");
           else panel.setAttribute("aria-labelledby", prevPanelLabelledBy);
+          panel.hidden = prevPanelHidden;
         }
       });
     }
@@ -172,7 +182,10 @@ export function accordion(options: AccordionOptions): {
       handlers.push({ el: trig, click, key });
     }
 
+    let tornDown = false;
     const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
       if (idempotencyKey) boundAccordions.delete(idempotencyKey);
       fxTeardown();
       for (const { el, click, key } of handlers) {

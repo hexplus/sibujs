@@ -1,3 +1,4 @@
+import { reportError } from "../core/errors";
 import { registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span } from "../core/rendering/html";
 import { signal } from "../core/signals/signal";
@@ -329,11 +330,19 @@ export function createSharedScope<T extends object>(initialState: T): SharedScop
     ensureSignal(key);
     signals.get(key)?.set(value);
 
-    // Notify plain subscribers
+    // Notify plain subscribers from a snapshot, each isolated. A throwing
+    // subscriber (another micro-frontend, typically) is reported and the rest
+    // still receive the value; subscribers added during delivery start with the
+    // next set(), and ones removed during it are skipped.
     const subs = subscribers.get(key);
-    if (subs) {
-      for (const cb of subs) {
-        cb(value);
+    if (subs && subs.size > 0) {
+      for (const cb of Array.from(subs)) {
+        if (!subs.has(cb)) continue;
+        try {
+          cb(value);
+        } catch (err) {
+          reportError(err, { phase: "event", name: `sharedScope(${String(key)})` });
+        }
       }
     }
   }

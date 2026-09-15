@@ -101,3 +101,24 @@ describe("a11y focus() blur", () => {
     dispose();
   });
 });
+
+describe("formAction onSubmit argument forwarding", () => {
+  it("passes exactly one FormData argument to the action", async () => {
+    const calls: unknown[][] = [];
+    const handle = formAction(async (...args: [FormData]) => {
+      calls.push(args);
+    });
+
+    const formEl = document.createElement("form");
+    formEl.addEventListener("submit", handle.onSubmit);
+    document.body.appendChild(formEl);
+    const event = new Event("submit", { cancelable: true });
+    formEl.dispatchEvent(event);
+    await Promise.resolve();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(1);
+    expect(calls[0][0]).toBeInstanceOf(FormData);
+  });
+});

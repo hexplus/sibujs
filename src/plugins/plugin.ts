@@ -46,29 +46,63 @@ export function createPluginRegistry(): PluginRegistry {
   const installedPlugins = new Set<string>();
   const hooks: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
   const provided = new Map<string, unknown>();
+  // Names whose `install()` is currently on the stack. A plugin that installs
+  // itself — directly, or through a dependency that installs it back — is
+  // rejected instead of recursing until the stack overflows.
+  const installing = new Set<string>();
 
   const registry: PluginRegistry = {
     installedPlugins,
     hooks,
     provided,
+    /**
+     * Install a plugin as a transaction.
+     *
+     * Hooks and providers registered through `ctx` are staged and committed
+     * only if `install()` returns; a throwing install leaves the registry
+     * exactly as it found it (and can simply be retried). The plugin is marked
+     * installed at commit, before its init hooks run.
+     *
+     * Each `plugin()` call is its own transaction: a dependency installed by a
+     * nested `plugin()` call commits on its own and stays installed even if the
+     * outer installation later fails.
+     */
     plugin(p, options) {
       if (installedPlugins.has(p.name)) {
         console.warn(`[Plugin] "${p.name}" is already installed.`);
         return;
       }
+      if (installing.has(p.name)) {
+        throw new Error(`[Plugin] "${p.name}" is already being installed (recursive installation).`);
+      }
+
+      const staged: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
+      const stagedProvided = new Map<string, unknown>();
       const ctx: PluginContext = {
-        onInit: (cb) => hooks.init.push(cb),
-        onMount: (cb) => hooks.mount.push(cb),
-        onUnmount: (cb) => hooks.unmount.push(cb),
-        onError: (cb) => hooks.error.push(cb),
-        provide: (key, value) => provided.set(key, value),
+        onInit: (cb) => staged.init.push(cb),
+        onMount: (cb) => staged.mount.push(cb),
+        onUnmount: (cb) => staged.unmount.push(cb),
+        onError: (cb) => staged.error.push(cb),
+        provide: (key, value) => stagedProvided.set(key, value),
       };
-      const initHooksBefore = hooks.init.length;
-      p.install(ctx, options);
+
+      installing.add(p.name);
+      try {
+        p.install(ctx, options);
+      } finally {
+        installing.delete(p.name);
+      }
+
+      // Commit.
+      hooks.init.push(...staged.init);
+      hooks.mount.push(...staged.mount);
+      hooks.unmount.push(...staged.unmount);
+      hooks.error.push(...staged.error);
+      for (const [key, value] of stagedProvided) provided.set(key, value);
       installedPlugins.add(p.name);
-      // Snapshot only the init hooks added by this plugin, then iterate the copy
-      const justAdded = hooks.init.slice(initHooksBefore);
-      for (const cb of justAdded) {
+
+      // Run only this plugin's init hooks, from the staged copy.
+      for (const cb of staged.init) {
         try {
           cb();
         } catch (e) {

@@ -53,6 +53,17 @@ export interface ArrayActions<T> {
 }
 
 /**
+ * Call `Array.prototype.splice` with exactly the arguments the caller passed.
+ *
+ * Native `splice(start)` deletes through the end, while `splice(start, undefined)`
+ * deletes nothing. A `deleteCount = 0` default erased that difference and made
+ * `splice(start)` a no-op, so the argument count is forwarded as-is.
+ */
+function nativeSplice<T>(target: T[], start: number, rest: [deleteCount?: number, ...items: T[]]): T[] {
+  return rest.length === 0 ? target.splice(start) : target.splice(start, ...(rest as [number, ...T[]]));
+}
+
+/**
  * A signal holding an array, plus mutation helpers that write a NEW array each
  * time so the signal actually notifies.
  *
@@ -92,12 +103,13 @@ export function array<T>(initial: T[] = []): [Accessor<T[]>, ArrayActions<T>] {
       setArr((prev) => [...items, ...prev]);
     },
 
-    splice(start: number, deleteCount = 0, ...items: T[]) {
+    splice(start: number, ...rest: [deleteCount?: number, ...items: T[]]) {
       let removed: T[] = [];
       setArr((prev) => {
         const copy = [...prev];
-        removed = copy.splice(start, deleteCount, ...items);
-        return copy;
+        removed = nativeSplice(copy, start, rest);
+        // Nothing removed or inserted: keep the same array so no update fires.
+        return removed.length === 0 && rest.length <= 1 ? prev : copy;
       });
       return removed;
     },
@@ -241,9 +253,9 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
       notify();
     },
 
-    splice(start: number, deleteCount = 0, ...items: T[]) {
-      const removed = data.splice(start, deleteCount, ...items);
-      if (removed.length > 0 || items.length > 0) {
+    splice(start: number, ...rest: [deleteCount?: number, ...items: T[]]) {
+      const removed = nativeSplice(data, start, rest);
+      if (removed.length > 0 || rest.length > 1) {
         notify();
       }
       return removed;

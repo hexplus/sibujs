@@ -1,4 +1,18 @@
 import { signal } from "../core/signals/signal";
+import { globalSingleton } from "../utils/globalSingleton";
+
+// Every live urlState() instance, keyed by its sync function. History API writes
+// do not fire `popstate`, so after a framework write every instance is told to
+// re-read the location — otherwise independently mounted instances disagree
+// about the URL until the next native navigation. Shared through
+// globalSingleton so duplicate copies of this module coordinate too.
+const _url = globalSingleton(Symbol.for("sibujs.urlState.v1"), () => ({
+  instances: new Set<() => void>(),
+}));
+
+function notifyUrlWrite(): void {
+  for (const sync of Array.from(_url.instances)) sync();
+}
 
 /**
  * urlState returns reactive getters for the current URL's search params and
@@ -29,6 +43,13 @@ import { signal } from "../core/signals/signal";
 export interface UrlStateOptions {
   /** Use `replaceState` instead of `pushState`. Default: false */
   replace?: boolean;
+  /**
+   * The history entry's state. When omitted, the current `history.state` is
+   * kept — on a replaced entry and carried forward onto a pushed one — so router
+   * metadata, scroll restoration data and application state are not erased.
+   * Pass it (including `null`) only to set new state deliberately.
+   */
+  state?: unknown;
 }
 
 export function urlState(): {
@@ -71,29 +92,42 @@ export function urlState(): {
 
   window.addEventListener("popstate", syncFromLocation);
   window.addEventListener("hashchange", syncFromLocation);
+  _url.instances.add(syncFromLocation);
+
+  function writeHistory(newUrl: string, opts: UrlStateOptions) {
+    // `in` rather than `!== undefined`: an explicit `state: undefined` is still
+    // an explicit choice. Falsy existing states (0, false, "") are kept as-is.
+    const state = "state" in opts ? opts.state : window.history.state;
+    if (opts.replace) window.history.replaceState(state, "", newUrl);
+    else window.history.pushState(state, "", newUrl);
+  }
 
   function setParams(next: URLSearchParams | Record<string, string>, opts: UrlStateOptions = {}) {
     const p = next instanceof URLSearchParams ? next : new URLSearchParams(next);
     const query = p.toString();
     const newUrl = `${window.location.pathname}${query ? `?${query}` : ""}${window.location.hash}`;
-    if (opts.replace) window.history.replaceState(null, "", newUrl);
-    else window.history.pushState(null, "", newUrl);
+    writeHistory(newUrl, opts);
     lastSearch = window.location.search;
     setParamsSignal(new URLSearchParams(p));
+    notifyUrlWrite();
   }
 
   function setHash(next: string, opts: UrlStateOptions = {}) {
     const normalized = next && next !== "#" ? (next.startsWith("#") ? next : `#${next}`) : "";
     const newUrl = `${window.location.pathname}${window.location.search}${normalized}`;
-    if (opts.replace) window.history.replaceState(null, "", newUrl);
-    else window.history.pushState(null, "", newUrl);
+    writeHistory(newUrl, opts);
     lastHash = normalized;
     setHashSignal(normalized);
+    notifyUrlWrite();
   }
 
+  let disposed = false;
   function dispose() {
+    if (disposed) return;
+    disposed = true;
     window.removeEventListener("popstate", syncFromLocation);
     window.removeEventListener("hashchange", syncFromLocation);
+    _url.instances.delete(syncFromLocation);
   }
 
   return { params, hash, setParams, setHash, dispose };

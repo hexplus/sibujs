@@ -888,6 +888,11 @@ function noop(): void {}
  *
  * The returned element contains the fallback UI with a `data-sibu-suspense-id`
  * marker. The promise resolves to `{ id, html }` once async content is ready.
+ *
+ * The promise never rejects. Any failure to produce the content HTML — the
+ * content factory throwing synchronously, its promise rejecting, the timeout,
+ * or rendering the resolved element throwing — resolves it with the fallback
+ * HTML, so the stream still produces a deterministic swap payload.
  */
 export function ssrSuspense(props: {
   fallback: () => HTMLElement;
@@ -914,18 +919,42 @@ export function ssrSuspense(props: {
     timer = setTimeout(() => reject(new Error(`[SibuJS SSR] ssrSuspense timed out after ${timeoutMs}ms`)), timeoutMs);
   });
 
-  const raced = Promise.race([props.content(), timeoutPromise]);
+  // Evaluate the content factory inside a guard. Passing `props.content()`
+  // straight to Promise.race() let a synchronous throw escape ssrSuspense()
+  // itself — crashing the request — while an async rejection of the same
+  // content became fallback output. `Promise.resolve` also contains a thenable
+  // whose `then` getter throws (it becomes a rejection).
+  let contentPromise: Promise<HTMLElement>;
+  try {
+    contentPromise = Promise.resolve(props.content());
+  } catch (err) {
+    contentPromise = Promise.reject(err);
+  }
+
+  const toFallback = (err: unknown) => {
+    // Emit the fallback HTML on timeout/error so the stream still
+    // produces a deterministic swap payload instead of hanging.
+    if (DEV) console.warn("[SibuJS SSR] ssrSuspense rejected:", err);
+    return { id, html: fallbackHtml };
+  };
+  // `!== undefined`: a timer handle of 0 is a real handle and must be cleared.
+  const clearTimer = () => {
+    if (timer !== undefined) clearTimeout(timer);
+  };
+
+  const raced = Promise.race([contentPromise, timeoutPromise]);
   const promise = raced.then(
     (resolvedEl) => {
-      if (timer) clearTimeout(timer);
-      return { id, html: renderToString(resolvedEl) };
+      clearTimer();
+      try {
+        return { id, html: renderToString(resolvedEl) };
+      } catch (err) {
+        return toFallback(err);
+      }
     },
     (err) => {
-      if (timer) clearTimeout(timer);
-      // Emit the fallback HTML on timeout/error so the stream still
-      // produces a deterministic swap payload instead of hanging.
-      if (DEV) console.warn("[SibuJS SSR] ssrSuspense rejected:", err);
-      return { id, html: fallbackHtml };
+      clearTimer();
+      return toFallback(err);
     },
   );
 

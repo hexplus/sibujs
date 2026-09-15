@@ -102,7 +102,40 @@ export function deepEqual(a: unknown, b: unknown, seen?: Map<object, Set<object>
     return a.every((val, i) => deepEqual(val, (b as unknown[])[i], seen));
   }
 
-  // Plain object
+  // Boxed primitives: their value lives in an internal slot, not in keys.
+  if (a instanceof Number || a instanceof String || a instanceof Boolean) {
+    return Object.is(a.valueOf(), (b as { valueOf(): unknown }).valueOf());
+  }
+
+  // URL: all state lives behind accessors; the serialized href captures it.
+  if (typeof URL !== "undefined" && a instanceof URL) {
+    return a.href === (b as URL).href;
+  }
+
+  // Error: compare the observable identity of the failure. `stack` is excluded
+  // (it differs between otherwise identical errors created on different lines).
+  if (a instanceof Error) {
+    const eb = b as Error;
+    return (
+      a.name === eb.name &&
+      a.message === eb.message &&
+      deepEqual((a as { cause?: unknown }).cause, (eb as { cause?: unknown }).cause, seen) &&
+      plainKeysEqual(objA, objB, seen)
+    );
+  }
+
+  // Only plain records compare structurally. For any other instance — Promise,
+  // WeakMap, a class holding private fields — enumerable keys say nothing about
+  // its state, so two distinct instances used to compare equal and a deepSignal
+  // swallowed real updates. Distinct opaque instances are unequal.
+  const proto = Object.getPrototypeOf(objA);
+  if (proto !== Object.prototype && proto !== null) return false;
+
+  return plainKeysEqual(objA, objB, seen);
+}
+
+/** Structural comparison of own enumerable string keys. */
+function plainKeysEqual(objA: object, objB: object, seen: Map<object, Set<object>>): boolean {
   const keysA = Object.keys(objA as Record<string, unknown>);
   const keysB = Object.keys(objB as Record<string, unknown>);
   if (keysA.length !== keysB.length) return false;

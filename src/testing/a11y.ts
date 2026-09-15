@@ -3,14 +3,7 @@
  * Provides automated a11y checks and WCAG compliance validation.
  */
 
-/**
- * Escape a value for safe interpolation inside an `[attr="..."]` selector — only
- * `"` and `\` are significant. Prevents a DOM-derived value (e.g. an element id)
- * with special characters from breaking the selector or throwing.
- */
-function escSel(value: string): string {
-  return value.replace(/["\\]/g, "\\$&");
-}
+import { queryAllByAttribute } from "./queries";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -357,7 +350,7 @@ function checkInputHasLabel(input: Element, root: Element): boolean {
   // Check for <label for="id">
   const id = input.getAttribute("id");
   if (id) {
-    const label = root.querySelector(`label[for="${escSel(id)}"]`);
+    const label = queryAllByAttribute(root, "for", id).find((el) => el.tagName === "LABEL");
     if (label?.textContent?.trim()) return true;
   }
 

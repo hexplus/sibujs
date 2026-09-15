@@ -124,8 +124,17 @@ export function fileUpload(options?: FileUploadOptions): {
 
     const id = createId("sibu-fileupload");
     const restore: Array<() => void> = [];
+    // Snapshot the input attributes bind() overwrites so teardown can put back,
+    // or remove, exactly what was there.
+    const prevAccept = els.input.getAttribute("accept");
+    const prevMultiple = els.input.hasAttribute("multiple");
     if (accept) els.input.accept = accept;
     els.input.multiple = multiple;
+    restore.push(() => {
+      if (prevAccept === null) els.input.removeAttribute("accept");
+      else els.input.setAttribute("accept", prevAccept);
+      els.input.multiple = prevMultiple;
+    });
     let hintId: string | null = null;
     if (els.hint) {
       const assignedHintId = !els.hint.id;
@@ -149,6 +158,8 @@ export function fileUpload(options?: FileUploadOptions): {
       // Use status+polite for non-blocking validation errors per APG.
       const prevRole = els.errorRegion.getAttribute("role");
       const prevLive = els.errorRegion.getAttribute("aria-live");
+      // The error binding replaces the region's text; teardown restores it.
+      const prevText = els.errorRegion.textContent;
       els.errorRegion.setAttribute("role", "status");
       els.errorRegion.setAttribute("aria-live", "polite");
       restore.push(() => {
@@ -156,12 +167,14 @@ export function fileUpload(options?: FileUploadOptions): {
         else els.errorRegion!.setAttribute("role", prevRole);
         if (prevLive === null) els.errorRegion!.removeAttribute("aria-live");
         else els.errorRegion!.setAttribute("aria-live", prevLive);
+        els.errorRegion!.textContent = prevText;
       });
     }
     if (els.dropZone) {
       const prevDzRole = els.dropZone.getAttribute("role");
       const prevDzLabel = els.dropZone.getAttribute("aria-label");
       const prevDzTabindex = els.dropZone.hasAttribute("tabindex") ? els.dropZone.getAttribute("tabindex") : null;
+      const prevDzDragOver = els.dropZone.getAttribute("data-drag-over");
       els.dropZone.setAttribute("role", "button");
       els.dropZone.setAttribute("aria-label", "File drop zone — click or press Enter to browse");
       if (els.dropZone.tabIndex < 0) els.dropZone.tabIndex = 0;
@@ -172,6 +185,8 @@ export function fileUpload(options?: FileUploadOptions): {
         else els.dropZone!.setAttribute("aria-label", prevDzLabel);
         if (prevDzTabindex === null) els.dropZone!.removeAttribute("tabindex");
         else els.dropZone!.setAttribute("tabindex", prevDzTabindex);
+        if (prevDzDragOver === null) els.dropZone!.removeAttribute("data-drag-over");
+        else els.dropZone!.setAttribute("data-drag-over", prevDzDragOver);
       });
     }
 
@@ -211,7 +226,10 @@ export function fileUpload(options?: FileUploadOptions): {
       els.dropZone.addEventListener("drop", onDrop);
     }
 
+    let tornDown = false;
     const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
       boundFileUploads.delete(els.input);
       fxTeardown();
       els.input.removeEventListener("change", onChange);

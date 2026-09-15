@@ -1,5 +1,52 @@
 import { signal } from "../core/signals/signal";
 
+// ─── Literal-key helpers ────────────────────────────────────────────────────
+//
+// Schema names and entity ids are DATA, often untrusted. On an ordinary `{}`,
+// `obj["__proto__"] = x` replaces the prototype (pollution) and `obj.constructor`
+// / `obj.toString` read inherited members. So every registry and table is a
+// null-prototype object, every read is guarded by an own-property check, and
+// every write to an arbitrary key defines an own property.
+
+/** A fresh object with no prototype, optionally copying `source`'s own entries. */
+function dict<V>(source?: Record<string, V>): Record<string, V> {
+  const out = Object.create(null) as Record<string, V>;
+  if (source) {
+    for (const key of Object.keys(source)) defineOwn(out, key, source[key]);
+  }
+  return out;
+}
+
+/** Own-property read; inherited members never count as entries. */
+function ownGet<V>(obj: Record<string, V> | undefined, key: string): V | undefined {
+  return obj !== undefined && Object.hasOwn(obj, key) ? obj[key] : undefined;
+}
+
+/** Write `key` as an own data property, even when it is "__proto__". */
+function defineOwn(obj: object, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
+/**
+ * Read and validate an entity's id. Only strings and finite numbers identify an
+ * entity; anything else — a missing field, `null`, an object — used to become
+ * the key `"undefined"` / `"null"` / `"[object Object]"`, silently merging
+ * unrelated entities.
+ */
+function readEntityId(entity: unknown, idKey: string, typeName: string): string {
+  const raw =
+    entity !== null && typeof entity === "object" && Object.hasOwn(entity, idKey)
+      ? (entity as Record<string, unknown>)[idKey]
+      : undefined;
+  if (typeof raw === "string") return raw;
+  if (typeof raw === "number" && Number.isFinite(raw)) return String(raw);
+  throw new TypeError(
+    `[normalize] "${typeName}" entity has no valid "${idKey}" (expected a string or finite number, got ${
+      raw === null ? "null" : typeof raw
+    })`,
+  );
+}
+
 // ============================================================================
 // STATE NORMALIZATION FOR ENTITY RELATIONSHIP MANAGEMENT
 // ============================================================================
@@ -71,48 +118,46 @@ export interface NormalizedStoreActions<T> {
 export function normalizedStore<T extends object>(schema: NormalizedSchema): NormalizedStoreActions<T> {
   const idKey = schema.idKey || "id";
 
+  // `entities` is a null-prototype table (see the literal-key helpers above).
   const [getState, setState] = signal<NormalizedState<T>>({
     ids: [],
-    entities: {},
+    entities: dict<T>(),
   });
 
-  // `idKey` is a runtime string, so reading it off `T` is unchecked either way —
-  // the previous `T extends object` constraint did not make it
-  // sound, it only excluded entities declared as interfaces. The cast is local
-  // and honest about that; the constraint now matches what callers may pass.
-  const idOf = (entity: T): string => String((entity as Record<string, unknown>)[idKey]);
+  // Validated before any state is touched, so a bad entity changes nothing.
+  const idOf = (entity: T): string => readEntityId(entity, idKey, schema.name);
 
   function add(entity: T): void {
     const id = idOf(entity);
     setState((prev) => {
-      const ids = prev.ids.includes(id) ? prev.ids : [...prev.ids, id];
-      return {
-        ids,
-        entities: { ...prev.entities, [id]: entity },
-      };
+      const ids = Object.hasOwn(prev.entities, id) ? prev.ids : [...prev.ids, id];
+      const entities = dict(prev.entities);
+      defineOwn(entities, id, entity);
+      return { ids, entities };
     });
   }
 
   function addMany(entities: T[]): void {
+    // Validate every id first: one invalid entity rejects the whole batch.
+    const ids = entities.map(idOf);
     setState((prev) => {
       const nextIds = [...prev.ids];
-      const nextEntities = { ...prev.entities };
+      const nextEntities = dict(prev.entities);
 
-      for (const entity of entities) {
-        const id = idOf(entity);
-        if (!nextIds.includes(id)) {
+      entities.forEach((entity, i) => {
+        const id = ids[i];
+        if (!Object.hasOwn(nextEntities, id)) {
           nextIds.push(id);
         }
-        nextEntities[id] = entity;
-      }
+        defineOwn(nextEntities, id, entity);
+      });
 
       return { ids: nextIds, entities: nextEntities };
     });
   }
 
   function get(id: string): T | undefined {
-    const state = getState();
-    return state.entities[id];
+    return ownGet(getState().entities, id);
   }
 
   function getAll(): T[] {
@@ -120,29 +165,41 @@ export function normalizedStore<T extends object>(schema: NormalizedSchema): Nor
     return state.ids.map((id) => state.entities[id]);
   }
 
+  /**
+   * Merge `partial` into the entity stored under `id`. Changing the entity's
+   * own id field is rejected: the storage key would no longer match the id,
+   * breaking lookup, removal and relation resolution.
+   */
   function update(id: string, partial: Partial<T>): void {
-    setState((prev) => {
-      const existing = prev.entities[id];
-      if (!existing) return prev;
+    const prev = getState();
+    if (!Object.hasOwn(prev.entities, id)) return;
+    if (partial !== null && typeof partial === "object" && Object.hasOwn(partial, idKey)) {
+      const nextId = readEntityId(partial, idKey, schema.name);
+      if (nextId !== id) {
+        throw new Error(
+          `[normalizedStore] update("${id}") cannot change "${idKey}" to "${nextId}"; remove and re-add the entity instead.`,
+        );
+      }
+    }
 
-      return {
-        ids: prev.ids,
-        entities: {
-          ...prev.entities,
-          [id]: { ...existing, ...partial },
-        },
-      };
+    setState((current) => {
+      const existing = ownGet(current.entities, id);
+      if (!existing) return current;
+      const entities = dict(current.entities);
+      defineOwn(entities, id, { ...existing, ...partial });
+      return { ids: current.ids, entities };
     });
   }
 
   function remove(id: string): void {
     setState((prev) => {
-      if (!prev.entities[id]) return prev;
+      if (!Object.hasOwn(prev.entities, id)) return prev;
 
-      const { [id]: _, ...remainingEntities } = prev.entities;
+      const entities = dict(prev.entities);
+      delete entities[id];
       return {
         ids: prev.ids.filter((existingId) => existingId !== id),
-        entities: remainingEntities,
+        entities,
       };
     });
   }
@@ -206,26 +263,30 @@ export interface NormalizeResult {
  * ```
  */
 export function normalize<T extends object>(data: T | T[], schema: NormalizedSchema): NormalizeResult {
-  const entities: NormalizedEntities = {};
+  // Null-prototype registry and tables: schema names and ids are literal keys.
+  const entities: NormalizedEntities = dict<Record<string, unknown>>();
 
   function ensureTable(name: string): Record<string, unknown> {
-    if (!entities[name]) {
-      entities[name] = {};
+    let table = ownGet(entities, name);
+    if (!table) {
+      table = dict<unknown>();
+      defineOwn(entities, name, table);
     }
-    return entities[name];
+    return table;
   }
 
   function normalizeEntity(entity: Record<string, unknown>, entitySchema: NormalizedSchema): string {
     const entityIdKey = entitySchema.idKey || "id";
-    const id = String(entity[entityIdKey]);
+    const id = readEntityId(entity, entityIdKey, entitySchema.name);
     const table = ensureTable(entitySchema.name);
 
-    // Shallow copy to avoid mutating original data
+    // Shallow copy to avoid mutating original data. Object spread defines own
+    // properties, so an own "__proto__" key in the input stays an own key.
     const flat: Record<string, unknown> = { ...entity };
 
     if (entitySchema.relations) {
       for (const [field, relationType] of Object.entries(entitySchema.relations)) {
-        const value = entity[field];
+        const value = Object.hasOwn(entity, field) ? entity[field] : undefined;
         if (value == null) continue;
 
         // Relation schema: simple schema with just the type name. Children
@@ -234,14 +295,18 @@ export function normalize<T extends object>(data: T | T[], schema: NormalizedSch
         const relSchema: NormalizedSchema = { name: relationType };
 
         if (Array.isArray(value)) {
-          flat[field] = value.map((item) => normalizeEntity(item as Record<string, unknown>, relSchema));
+          defineOwn(
+            flat,
+            field,
+            value.map((item) => normalizeEntity(item as Record<string, unknown>, relSchema)),
+          );
         } else if (typeof value === "object") {
-          flat[field] = normalizeEntity(value as Record<string, unknown>, relSchema);
+          defineOwn(flat, field, normalizeEntity(value as Record<string, unknown>, relSchema));
         }
       }
     }
 
-    table[id] = flat;
+    defineOwn(table, id, flat);
     return id;
   }
 
@@ -277,26 +342,32 @@ export function denormalize<T extends object>(
   entities: NormalizedEntities,
   schema: NormalizedSchema,
 ): T | undefined {
-  const table = entities[schema.name];
+  // Own-property lookups only: an inherited name such as "constructor" is not a
+  // table or an entity.
+  const table = ownGet(entities, schema.name);
   if (!table) return undefined;
 
-  const entity = table[id];
+  const entity = ownGet(table, id);
   if (!entity) return undefined;
 
   const result: Record<string, unknown> = { ...(entity as Record<string, unknown>) };
 
   if (schema.relations) {
     for (const [field, relationType] of Object.entries(schema.relations)) {
-      const value = (entity as Record<string, unknown>)[field];
+      const value = ownGet(entity as Record<string, unknown>, field);
       if (value == null) continue;
 
       // Children default to "id"; see the matching note in normalize().
       const relSchema: NormalizedSchema = { name: relationType };
 
       if (Array.isArray(value)) {
-        result[field] = value.map((relId: string) => denormalize(relId, entities, relSchema));
+        defineOwn(
+          result,
+          field,
+          value.map((relId: string) => denormalize(relId, entities, relSchema)),
+        );
       } else if (typeof value === "string") {
-        result[field] = denormalize(value, entities, relSchema);
+        defineOwn(result, field, denormalize(value, entities, relSchema));
       }
     }
   }

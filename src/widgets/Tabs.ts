@@ -30,8 +30,13 @@ export function tabs(options: TabsOptions): {
 } {
   const { tabs: tabDefs, defaultTab } = options;
 
-  // Default to the first non-disabled tab, or the explicit default
-  const initialTab = defaultTab ?? tabDefs.find((t) => !t.disabled)?.id ?? tabDefs[0]?.id ?? "";
+  // The active tab is never disabled (setActiveTab() and keyboard navigation
+  // enforce that), so the initial state must not be either. `defaultTab` is
+  // used only when it names an enabled tab; otherwise the first enabled tab is
+  // active, and when every tab is disabled no tab is active ("").
+  const firstEnabled = tabDefs.find((t) => !t.disabled)?.id ?? "";
+  const initialTab =
+    defaultTab !== undefined && tabDefs.some((t) => t.id === defaultTab && !t.disabled) ? defaultTab : firstEnabled;
 
   const [activeTab, setActiveTabState] = signal<string>(initialTab);
 
@@ -117,10 +122,13 @@ export function tabs(options: TabsOptions): {
       let prevPanelRole: string | null = null;
       let prevPanelId = "";
       let prevPanelLabelledBy: string | null = null;
+      // The active-tab binding toggles `hidden`; teardown puts it back.
+      let prevPanelHidden = false;
       if (panelEl) {
         prevPanelRole = panelEl.getAttribute("role");
         prevPanelId = panelEl.id;
         prevPanelLabelledBy = panelEl.getAttribute("aria-labelledby");
+        prevPanelHidden = panelEl.hidden;
         panelEl.setAttribute("role", "tabpanel");
         panelEl.setAttribute("id", `sibu-tabpanel-${def.id}`);
         panelEl.setAttribute("aria-labelledby", `sibu-tab-${def.id}`);
@@ -144,6 +152,7 @@ export function tabs(options: TabsOptions): {
           else panelEl.id = prevPanelId;
           if (prevPanelLabelledBy === null) panelEl.removeAttribute("aria-labelledby");
           else panelEl.setAttribute("aria-labelledby", prevPanelLabelledBy);
+          panelEl.hidden = prevPanelHidden;
         }
       });
     }
@@ -200,7 +209,10 @@ export function tabs(options: TabsOptions): {
       clickHandlers.push({ el: tabEl, fn });
     }
 
+    let tornDown = false;
     const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
       boundTablists.delete(els.tablist);
       fxTeardown();
       els.tablist.removeEventListener("keydown", onKey);

@@ -3,6 +3,8 @@
  * Provides DOM fakes, HTTP mocks, and testing helpers for CI/CD integration.
  */
 
+import { queryAllByAttribute, queryByAttribute } from "./queries";
+
 // ─── HTTP Mock ──────────────────────────────────────────────────────────────
 
 export interface MockResponse {
@@ -367,10 +369,10 @@ export function testComponent(
     element,
     container,
     getByTestId(id: string) {
-      return container.querySelector(`[data-testid="${id}"]`);
+      return queryByAttribute(container, "data-testid", id);
     },
     getAllByTestId(id: string) {
-      return Array.from(container.querySelectorAll(`[data-testid="${id}"]`));
+      return queryAllByAttribute(container, "data-testid", id);
     },
     getByText(text: string) {
       const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
