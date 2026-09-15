@@ -318,8 +318,14 @@ export function datePicker(options?: DatePickerOptions): {
     };
     els.grid.addEventListener("keydown", onKey);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundDatePickers.delete(els.grid);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundDatePickers.get(els.grid) === teardown) boundDatePickers.delete(els.grid);
       fxTeardown();
       els.grid.removeEventListener("keydown", onKey);
       // Restore the grid attributes bind() mutated so the element can be

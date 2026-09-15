@@ -6,6 +6,23 @@ import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
 import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
+/**
+ * Split a router URL into path, query and hash at the FIRST `#` and then the
+ * first `?` before it. Everything after a delimiter belongs to that part, so a
+ * query value like `redirect=/login?next=home` and a fragment like
+ * `section#details` survive intact — array destructuring over `split()` used to
+ * keep only the first two pieces and silently drop the rest.
+ */
+function splitRouteUrl(url: string): { path: string; query: string; hash: string } {
+  const hashIndex = url.indexOf("#");
+  const beforeHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? "" : url.slice(hashIndex + 1);
+  const queryIndex = beforeHash.indexOf("?");
+  const path = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
+  const query = queryIndex === -1 ? "" : beforeHash.slice(queryIndex + 1);
+  return { path, query, hash };
+}
+
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
 // Block `javascript:`, `data:`, `vbscript:`, and `blob:` URIs from ever
@@ -36,23 +53,6 @@ import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars 
  * Internal, not public. Single source of truth for every target decision in
  * this module, so the rules cannot drift between entrypoints. (NAV-001)
  */
-/**
- * Split a router URL into path, query and hash at the FIRST `#` and then the
- * first `?` before it. Everything after a delimiter belongs to that part, so a
- * query value like `redirect=/login?next=home` and a fragment like
- * `section#details` survive intact — array destructuring over `split()` used to
- * keep only the first two pieces and silently drop the rest.
- */
-function splitRouteUrl(url: string): { path: string; query: string; hash: string } {
-  const hashIndex = url.indexOf("#");
-  const beforeHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
-  const hash = hashIndex === -1 ? "" : url.slice(hashIndex + 1);
-  const queryIndex = beforeHash.indexOf("?");
-  const path = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
-  const query = queryIndex === -1 ? "" : beforeHash.slice(queryIndex + 1);
-  return { path, query, hash };
-}
-
 type NavigationTargetKind = "internal" | "external" | "unsafe";
 
 function classifyNavigationTarget(path: string): NavigationTargetKind {

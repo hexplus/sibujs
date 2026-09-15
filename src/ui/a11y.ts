@@ -231,7 +231,8 @@ function isApplePlatform(): boolean {
  * Combo modifiers: `ctrl`/`control`, `shift`, `alt`/`option`,
  * `meta`/`cmd`/`command`, and `mod` — Cmd on Apple platforms, Ctrl
  * everywhere else. An unknown modifier throws, because dropping it would
- * make the shortcut fire on the bare key.
+ * make the shortcut fire on the bare key. The `+` key is written as a
+ * trailing plus: `hotkey("+", h)`, `hotkey("ctrl++", h)`.
  */
 export function hotkey(
   combo: string,
@@ -250,10 +251,17 @@ export function hotkey(
   let needAlt = options.alt ?? false;
   let needMeta = options.meta ?? false;
 
-  // Parse "ctrl+shift+z" combo syntax
-  if (combo.includes("+")) {
-    const parts = combo.toLowerCase().split("+");
+  // Parse "ctrl+shift+z" combo syntax. The `+` key itself is written as a
+  // trailing "+" ("+", "ctrl++"); splitting would otherwise yield empty parts
+  // that read as an unknown modifier.
+  if (combo === "+") {
+    key = "+";
+  } else if (combo.includes("+")) {
+    const literalPlus = combo.endsWith("++");
+    const parts = (literalPlus ? combo.slice(0, -2) : combo).toLowerCase().split("+");
+    if (literalPlus) parts.push("+");
     key = parts[parts.length - 1];
+    if (key === "") throw new Error(`hotkey("${combo}"): missing key`);
     for (let i = 0; i < parts.length - 1; i++) {
       const mod = parts[i];
       if (mod === "ctrl" || mod === "control") needCtrl = true;

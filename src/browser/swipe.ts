@@ -62,11 +62,17 @@ export function swipe(
   };
 
   const onStart = (e: TouchEvent) => {
-    if (trackedId !== null || e.touches.length !== 1) {
+    // Count only touches on this element: a finger resting elsewhere on the
+    // screen must not block swipes here.
+    const onTarget = e.targetTouches ?? e.touches;
+    if (onTarget.length > 1) {
       // Became (or started as) multi-touch: not a swipe.
       trackedId = null;
       return;
     }
+    // A single touch starting while an older one is still "tracked" means that
+    // gesture's touchend/touchcancel was missed; start over with this touch
+    // instead of dropping it.
     const touch = e.changedTouches?.[0] ?? e.touches[0];
     if (!touch) return;
     trackedId = idOf(touch);

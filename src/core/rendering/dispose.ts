@@ -43,8 +43,29 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 // Dev-mode only: track active bindings to detect orphans.
 let activeBindingCount = 0;
 
-// Open registration captures, innermost last. See `withDisposerRollback`.
-const registrationCaptures: [Node, () => void][][] = [];
+// Open registration captures, innermost last. See `withDisposerRollback`. A
+// `null` frame pauses capturing (see `pauseDisposerCapture`).
+const registrationCaptures: ([Node, () => void][] | null)[] = [];
+
+/**
+ * Stop recording disposer registrations until {@link resumeDisposerCapture}.
+ * The reactive runtime calls this around its notification drain: an effect
+ * re-run triggered by a signal written during a render belongs to that effect's
+ * own owner, not to the render — capturing it let a failed render tear down
+ * live bindings elsewhere on the page. Returns whether a frame was pushed.
+ *
+ * @internal
+ */
+export function pauseDisposerCapture(): boolean {
+  if (registrationCaptures.length === 0) return false;
+  registrationCaptures.push(null);
+  return true;
+}
+
+/** @internal Undo a {@link pauseDisposerCapture} that returned `true`. */
+export function resumeDisposerCapture(): void {
+  registrationCaptures.pop();
+}
 
 /**
  * Register a teardown function for a DOM node.
@@ -58,9 +79,8 @@ export function registerDisposer(node: Node, teardown: () => void): void {
   }
   disposers.push(teardown);
   if (DEV) activeBindingCount++;
-  if (registrationCaptures.length > 0) {
-    registrationCaptures[registrationCaptures.length - 1].push([node, teardown]);
-  }
+  const capture = registrationCaptures[registrationCaptures.length - 1];
+  if (capture) capture.push([node, teardown]);
 }
 
 /**

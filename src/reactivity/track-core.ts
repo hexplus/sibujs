@@ -1,4 +1,5 @@
 import { type RuntimeErrorPhase, reportError } from "../core/errors";
+import { pauseDisposerCapture, resumeDisposerCapture } from "../core/rendering/dispose";
 import type { ReactiveSignal } from "./signal";
 
 // ---------------------------------------------------------------------------
@@ -860,6 +861,17 @@ function absoluteDrainError(): void {
 // ---------- Drain ---------------------------------------------------------
 
 function drainQueue(): void {
+  // Registrations made by re-running subscribers are not part of any render
+  // transaction that happens to be open (see pauseDisposerCapture).
+  const paused = pauseDisposerCapture();
+  try {
+    drainPending();
+  } finally {
+    if (paused) resumeDisposerCapture();
+  }
+}
+
+function drainPending(): void {
   let i = 0;
   while (i < pendingQueue.length) {
     if (i >= maxDrainIterations) {

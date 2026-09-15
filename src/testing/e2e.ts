@@ -67,11 +67,11 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     });
   }
 
-  const abortError = (signal: AbortSignal): unknown => {
-    const reason = signal.reason;
-    if (reason instanceof Error && reason.name === "AbortError") return reason;
-    return new DOMException("The operation was aborted.", "AbortError");
-  };
+  // Like fetch(), reject with the signal's reason — a TimeoutError from
+  // AbortSignal.timeout() or a custom reason passed to abort() — and fall back
+  // to an AbortError only when no reason is available.
+  const abortError = (signal: AbortSignal): unknown =>
+    signal.reason !== undefined ? signal.reason : new DOMException("The operation was aborted.", "AbortError");
 
   // ── Request normalization ──
   // Every call is turned into ONE effective Request, exactly as fetch() would
@@ -111,7 +111,11 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     return "http://localhost";
   };
 
-  const toEffectiveRequest = (input: RequestInfo | URL, request: Request | undefined, init?: RequestInit): Request => {
+  const toEffectiveRequest = (
+    input: RequestInfo | URL,
+    request: Request | undefined,
+    init?: RequestInit,
+  ): { effective: Request; rawBody: BodyInit | null | undefined } => {
     const overrides: RequestInit & { duplex?: "half" } = {};
     // Each member is read once (accessors must not answer twice differently).
     const method = init?.method;
@@ -124,12 +128,30 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
       // Streaming bodies must declare half-duplex.
       if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) overrides.duplex = "half";
     }
-    if (request) return new Request(request.clone(), overrides);
+    if (request) return { effective: new Request(request.clone(), overrides), rawBody: body };
     // Relative URLs resolve like a page's fetch() would; the original string is
     // still what routes match and the log records.
     const raw = input instanceof URL ? input.href : (input as string);
     const href = new URL(raw, httpBase()).href;
-    return new Request(href, overrides);
+    return { effective: new Request(href, overrides), rawBody: body };
+  };
+
+  // A structured body from ANOTHER realm — jsdom's FormData, URLSearchParams or
+  // Blob handed to the runtime's own Request, as in a jsdom test environment —
+  // is not recognised: the runtime stringifies it ("[object FormData]") and
+  // labels it text/plain. Detect that and hand the original object through.
+  const FOREIGN_CONTENT_TYPE: Record<string, (raw: unknown) => string | null> = {
+    FormData: () => "multipart/form-data",
+    URLSearchParams: () => "application/x-www-form-urlencoded;charset=UTF-8",
+    Blob: (raw) => (raw as Blob).type || null,
+    File: (raw) => (raw as Blob).type || null,
+  };
+  const foreignStructuredBody = async (raw: unknown, effective: Request): Promise<string | null> => {
+    if (raw === null || typeof raw !== "object") return null;
+    const tag = Object.prototype.toString.call(raw).slice(8, -1);
+    if (!Object.hasOwn(FOREIGN_CONTENT_TYPE, tag)) return null;
+    if (!/^text\/plain;charset=utf-8$/i.test(effective.headers.get("content-type") ?? "")) return null;
+    return (await effective.clone().text()) === String(raw) ? tag : null;
   };
 
   const decodeBody = async (effective: Request): Promise<unknown> => {
@@ -156,10 +178,20 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
     // Construction errors (a GET with a body, an invalid URL) reject exactly as
     // fetch() does.
-    const effective = toEffectiveRequest(input, request, init);
+    const { effective, rawBody } = toEffectiveRequest(input, request, init);
     const method = effective.method.toUpperCase();
-    const headers = effective.headers;
-    const body = await decodeBody(effective);
+    let headers = effective.headers;
+    let body: unknown;
+    const foreign = await foreignStructuredBody(rawBody, effective);
+    if (foreign) {
+      body = rawBody;
+      headers = new Headers(headers);
+      const type = FOREIGN_CONTENT_TYPE[foreign](rawBody);
+      if (type) headers.set("content-type", type);
+      else headers.delete("content-type");
+    } else {
+      body = await decodeBody(effective);
+    }
     if (signal?.aborted) throw abortError(signal);
 
     requestLog.push({ url, method, body, timestamp: Date.now() });

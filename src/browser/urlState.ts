@@ -46,10 +46,26 @@ export interface UrlStateOptions {
   /**
    * The history entry's state. When omitted, the current `history.state` is
    * kept — on a replaced entry and carried forward onto a pushed one — so router
-   * metadata, scroll restoration data and application state are not erased.
+   * metadata, scroll restoration data and application state are not erased. A
+   * pushed entry does not inherit `scrollRestoration()`'s entry identity
+   * (`__sibuScrollKey`), which belongs to the entry it was set on.
    * Pass it (including `null`) only to set new state deliberately.
    */
   state?: unknown;
+}
+
+/**
+ * Default history-state slot `scrollRestoration()` uses to identify an entry.
+ * Carrying it onto a NEW entry would give two entries the same identity, so
+ * both would restore the same scroll position.
+ */
+const SCROLL_ENTRY_KEY = "__sibuScrollKey";
+
+/** Carried-forward state for a pushed entry, minus per-entry identity. */
+function withoutEntryIdentity(state: unknown): unknown {
+  if (state === null || typeof state !== "object" || !Object.hasOwn(state, SCROLL_ENTRY_KEY)) return state;
+  const { [SCROLL_ENTRY_KEY]: _identity, ...rest } = state as Record<string, unknown>;
+  return rest;
 }
 
 export function urlState(): {
@@ -99,7 +115,7 @@ export function urlState(): {
     // an explicit choice. Falsy existing states (0, false, "") are kept as-is.
     const state = "state" in opts ? opts.state : window.history.state;
     if (opts.replace) window.history.replaceState(state, "", newUrl);
-    else window.history.pushState(state, "", newUrl);
+    else window.history.pushState("state" in opts ? state : withoutEntryIdentity(state), "", newUrl);
   }
 
   function setParams(next: URLSearchParams | Record<string, string>, opts: UrlStateOptions = {}) {

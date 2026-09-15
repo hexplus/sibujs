@@ -274,12 +274,16 @@ function hasAccessibleName(el: Element): boolean {
  */
 function isNativeInteractive(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
-  if (["button", "select", "textarea"].includes(tag)) return true;
+  if (["button", "select", "textarea", "summary", "label"].includes(tag)) return true;
   if (tag === "input" && el.getAttribute("type") !== "hidden") return true;
   if (tag === "a" && el.hasAttribute("href")) return true;
   if (tag === "area" && el.hasAttribute("href")) return true;
   return false;
 }
+
+/** Keyboard-reachable descendants that a delegating click listener may serve. */
+const INTERACTIVE_DESCENDANTS =
+  'button, select, textarea, summary, a[href], area[href], input:not([type="hidden"]), [tabindex]:not([tabindex="-1"])';
 
 // ─── Individual Checks ──────────────────────────────────────────────────────
 
@@ -386,7 +390,12 @@ function checkInputHasLabel(input: Element, root: Element): boolean {
   // Check for <label for="id">
   const id = input.getAttribute("id");
   if (id) {
-    const label = queryAllByAttribute(root, "for", id).find((el) => el.tagName === "LABEL");
+    // Look in the input's document (or shadow root), not just inside `root`:
+    // checking an input directly — or a fragment of a form — must still see a
+    // <label for> that sits outside the checked subtree.
+    const scope = input.getRootNode() as ParentNode;
+    const searchIn = typeof scope.querySelectorAll === "function" ? scope : root;
+    const label = queryAllByAttribute(searchIn, "for", id).find((el) => el.tagName === "LABEL");
     if (label?.textContent?.trim()) return true;
   }
 
@@ -550,6 +559,9 @@ export function checkKeyboardAccess(root: Element): A11yViolation[] {
   const clickElements = selectAll(root, "*").filter(hasActivationHandler);
   for (const el of clickElements) {
     if (isNativeInteractive(el)) continue;
+    // A container whose listener delegates activation to keyboard-accessible
+    // descendants (a list of buttons, a menu of links) is not itself a control.
+    if (el.querySelector(INTERACTIVE_DESCENDANTS)) continue;
 
     const hasTabindex = el.hasAttribute("tabindex");
     const hasRole = el.hasAttribute("role");

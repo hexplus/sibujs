@@ -202,8 +202,14 @@ export function combobox<T>(options: ComboboxOptions<T>): {
     els.input.addEventListener("blur", onBlur);
     els.listbox.addEventListener("mousedown", onListboxPointerDown);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundComboboxes.delete(els.input);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundComboboxes.get(els.input) === teardown) boundComboboxes.delete(els.input);
       fxTeardown();
       els.input.removeEventListener("input", onInput);
       els.input.removeEventListener("keydown", onKey);

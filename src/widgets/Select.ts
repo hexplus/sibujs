@@ -217,8 +217,14 @@ export function select<T>(options: SelectOptions<T>): {
     };
     els.listbox.addEventListener("keydown", onKey);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundSelects.delete(els.listbox);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundSelects.get(els.listbox) === teardown) boundSelects.delete(els.listbox);
       fxTeardown();
       els.listbox.removeEventListener("keydown", onKey);
       if (typeTimer !== null) clearTimeout(typeTimer);

@@ -22,6 +22,9 @@ export interface CustomElementOptions {
   // advertised support that did not exist. Removed rather than faked.
 }
 
+/** Consecutive renders allowed while a component keeps changing its own observed attributes. */
+const MAX_RENDER_PASSES = 10;
+
 /**
  * defineElement creates a Web Component wrapping a SibuJS component function.
  */
@@ -36,7 +39,6 @@ export function defineElement(
 
   class SibuElement extends HTMLElement {
     private _root: HTMLElement | ShadowRoot;
-    private _rendered: HTMLElement | null = null;
 
     static get observedAttributes(): string[] {
       return observed;
@@ -51,18 +53,36 @@ export function defineElement(
       }
     }
 
+    // Re-rendering is keyed on connection, not on a previous render: a first render
+    // that throws leaves nothing rendered, and the element must still re-render
+    // when a later attribute change fixes the input.
+    private _connected = false;
+    // A render in progress, and whether an attribute changed during it. The
+    // component may write its host's observed attributes while rendering; with
+    // the old subtree kept during the build, rendering again from inside the
+    // callback recursed until the stack overflowed.
+    private _rendering = false;
+    private _dirty = false;
+
     connectedCallback(): void {
+      this._connected = true;
       this._render();
     }
 
     disconnectedCallback(): void {
+      this._connected = false;
       this._teardown();
     }
 
-    attributeChangedCallback(): void {
-      if (this._rendered) {
-        this._render();
+    attributeChangedCallback(_name: string, oldValue: string | null, newValue: string | null): void {
+      // Browsers call this even when the value is unchanged; a component that
+      // mirrors state onto its host would otherwise re-render on every write.
+      if (oldValue === newValue || !this._connected) return;
+      if (this._rendering) {
+        this._dirty = true;
+        return;
       }
+      this._render();
     }
 
     private _teardown(): void {
@@ -71,7 +91,6 @@ export function defineElement(
       // inside the user component leak across reconnects. Routed through the
       // disposal-aware replacement primitive so the ordering guarantee lives in
       // one place rather than being re-derived per call site.
-      this._rendered = null;
       replaceChildrenSafely(this._root);
     }
 
@@ -85,6 +104,32 @@ export function defineElement(
      * claim it.
      */
     private _render(): void {
+      this._rendering = true;
+      try {
+        // Attribute changes made during a render are applied by one more pass
+        // after it commits. A component whose every render changes an observed
+        // attribute would never settle, so the passes are bounded and reported.
+        let passes = 0;
+        do {
+          this._dirty = false;
+          if (++passes > MAX_RENDER_PASSES) {
+            reportError(
+              new Error(
+                `[SibuJS] defineElement(${name}): the component changed its own observed attributes on ${MAX_RENDER_PASSES} consecutive renders; stopped re-rendering.`,
+              ),
+              { phase: "render", name: `defineElement(${name})`, node: this },
+            );
+            break;
+          }
+          this._renderOnce();
+        } while (this._dirty && this._connected);
+      } finally {
+        this._rendering = false;
+        this._dirty = false;
+      }
+    }
+
+    private _renderOnce(): void {
       const props = this._getProps();
 
       let el: HTMLElement;
@@ -105,7 +150,6 @@ export function defineElement(
 
       // Disposes the previous subtree exactly once, then commits the new one.
       replaceChildrenSafely(this._root, ...next);
-      this._rendered = el;
     }
 
     private _getProps(): Record<string, unknown> {

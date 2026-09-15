@@ -73,6 +73,12 @@ export function createISR<T>(options: ISROptions<T>): {
         setStale(false);
       });
       armDeadline();
+    } catch (err) {
+      // A failed fetch keeps the data stale and retries after the same period;
+      // arming only on success stopped automatic revalidation for good after a
+      // single transient error.
+      if (!disposed && !controller.signal.aborted) armDeadline();
+      throw err;
     } finally {
       inFlight = false;
     }
@@ -80,7 +86,7 @@ export function createISR<T>(options: ISROptions<T>): {
 
   // Initial fetch: fire-and-forget, so attach .catch to surface fetcher
   // rejections without becoming unhandled rejections. A failed revalidation
-  // leaves the data stale; the next explicit revalidate() can retry.
+  // leaves the data stale and is retried after `revalidateAfter`.
   if (initialData === undefined) {
     revalidate().catch((err) => {
       if (typeof console !== "undefined") console.warn("[SibuJS ISR] initial fetch failed", err);

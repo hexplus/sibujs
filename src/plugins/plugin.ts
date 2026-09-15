@@ -78,12 +78,17 @@ export function createPluginRegistry(): PluginRegistry {
 
       const staged: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
       const stagedProvided = new Map<string, unknown>();
+      // Staging covers only the install() call itself. Once committed, `ctx`
+      // writes to the live registry again, so hooks and providers registered
+      // later — from an init hook, an async install, a timer — are not lost.
+      let committed = false;
+      const target = () => (committed ? hooks : staged);
       const ctx: PluginContext = {
-        onInit: (cb) => staged.init.push(cb),
-        onMount: (cb) => staged.mount.push(cb),
-        onUnmount: (cb) => staged.unmount.push(cb),
-        onError: (cb) => staged.error.push(cb),
-        provide: (key, value) => stagedProvided.set(key, value),
+        onInit: (cb) => target().init.push(cb),
+        onMount: (cb) => target().mount.push(cb),
+        onUnmount: (cb) => target().unmount.push(cb),
+        onError: (cb) => target().error.push(cb),
+        provide: (key, value) => (committed ? provided : stagedProvided).set(key, value),
       };
 
       installing.add(p.name);
@@ -100,9 +105,11 @@ export function createPluginRegistry(): PluginRegistry {
       hooks.error.push(...staged.error);
       for (const [key, value] of stagedProvided) provided.set(key, value);
       installedPlugins.add(p.name);
+      committed = true;
 
-      // Run only this plugin's init hooks, from the staged copy.
-      for (const cb of staged.init) {
+      // Run only this plugin's init hooks registered during install(), from a
+      // snapshot (an init hook registering another does not run it now).
+      for (const cb of staged.init.slice()) {
         try {
           cb();
         } catch (e) {

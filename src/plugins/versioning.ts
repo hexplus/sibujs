@@ -350,9 +350,21 @@ export function createMigrationRunner(config: {
       errors: Array<{ version: string; error: Error }>;
     }> {
       return serialize(async () => {
-        const pending = getPending();
         const applied: string[] = [];
         const errors: Array<{ version: string; error: Error }> = [];
+        let pending: Migration[];
+        try {
+          pending = getPending();
+        } catch (e) {
+          // An unparseable stored version (written by an older, looser parser,
+          // or by hand) is reported in `errors` instead of rejecting migrate();
+          // nothing runs, since what is applied is unknown.
+          errors.push({
+            version: getAppliedVersion() ?? "",
+            error: e instanceof Error ? e : new Error(String(e)),
+          });
+          return { applied, errors };
+        }
 
         for (const migration of pending) {
           try {

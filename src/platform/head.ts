@@ -232,9 +232,9 @@ export function Head(props: HeadProps): Comment {
     // than assigned. Assigning meant a Head never gave the title back on
     // dispose (the page kept a title belonging to an unmounted component) and
     // that overlapping Heads/`title()` calls silently overwrote each other.
-    // `!== undefined`, not truthiness: an empty string is a deliberate title
+    // `!= null`, not truthiness: an empty string is a deliberate title
     // (clearing a stale one), and a reactive getter returning "" already worked.
-    if (props.title !== undefined) {
+    if (props.title != null) {
       if (typeof props.title === "function") {
         const getter = props.title as () => string;
         let lease: ResourceLease<string> | null = null;

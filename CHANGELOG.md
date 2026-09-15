@@ -9,6 +9,81 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `defineElement()` re-rendered recursively when a component wrote its host's attributes
+
+A component that set one of its own observed attributes while rendering started a
+nested render from `attributeChangedCallback`, recursing until the stack
+overflowed. Attribute changes during a render now trigger one follow-up pass after
+it commits, unchanged values are ignored, and a component that changes its own
+attributes on every render is stopped after 10 passes and reported. A first render
+that throws is also retried on the next attribute change instead of leaving the
+element blank until it is reconnected.
+
+### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
+
+`withDisposerRollback()` recorded every disposer registered while a build ran,
+including those registered by effects the build's signal writes re-ran elsewhere
+on the page, so a failed render tore down live bindings it did not own. Capturing
+is now paused while the reactive runtime drains its notification queue.
+
+### Fixed — plugin hooks and providers registered after `install()` were lost
+
+The staged install context kept writing to its staging area after the commit, so
+`ctx.provide()` / `ctx.onMount()` called from an init hook, an async install or a
+timer never reached the registry. Once committed, the context writes to the live
+registry again; an init hook registered by an init hook is recorded but not run in
+the same pass.
+
+### Fixed — ISR stopped revalidating after one failed fetch
+
+A failed revalidation (including the initial fetch) now keeps the data stale and
+retries after `revalidateAfter`, instead of never refreshing again.
+
+### Fixed — `TransitionGroup.remove()` rejected on a failing `leave`
+
+A throwing or rejecting `leave` is now reported with the element (like `add()`
+and `track()`), `remove()` resolves, and the element is removed from the group so
+a later `track()` does not run `leave` for it again.
+
+### Fixed — accessibility checks reported false positives
+
+`checkKeyboardAccess()` no longer flags a container whose click listener delegates
+to keyboard-reachable descendants (buttons, links, inputs, focusable elements), and
+treats `summary` and `label` as natively interactive. `checkFormLabels()` finds a
+`<label for>` anywhere in the input's document or shadow root, so checking an input
+directly no longer reports it as unlabeled.
+
+### Fixed — `createHttpMock()` gaps in jsdom and with abort reasons
+
+A `FormData`, `URLSearchParams` or `Blob` from another realm (jsdom's classes with
+the runtime's `Request`) is passed to the handler as-is with a matching
+`Content-Type`, instead of arriving as `"[object FormData]"`. An abort rejects with
+the signal's reason — a `TimeoutError`, or a custom value — like `fetch()`.
+
+### Fixed — `swipe()` lost gestures
+
+A single touch that starts while an earlier touch is still tracked (its
+`touchend` was missed) now starts a new gesture instead of being dropped, and only
+touches on the target element count toward the multi-touch check, so a finger
+resting elsewhere no longer blocks swipes.
+
+### Fixed — `urlState()` pushes copied scroll-restoration identity
+
+A pushed entry carries the current `history.state` forward without
+`scrollRestoration()`'s `__sibuScrollKey`, so two entries no longer share one
+identity and restore the same position. Replaced entries and an explicit `state`
+are unchanged.
+
+### Fixed — smaller gaps
+
+- `Head({ title: null })` and `renderToDocument({ title: null })` no longer render
+  the literal title "null".
+- `migrate()` reports a stored version the strict SemVer parser rejects (for
+  example `"1.0.0.1"`) in `errors` and runs nothing, instead of rejecting.
+- `datePicker`, `tooltip`, `popover`, `select` and `combobox` teardowns are
+  idempotent: calling an old teardown again after rebinding no longer undoes the
+  new binding.
+
 ### Fixed — `transition()` stayed pending when reading a result's `then` threw
 
 The body's result was checked with `result.then` outside any `try`, so a throwing
@@ -266,7 +341,7 @@ one is restored even if rendering throws). `withLoader(loader, context, render)`
 executes and renders in one step, disposing the resource if rendering throws. A
 disposed resource cannot be read or scoped. Scopes are per SSR request.
 
-**Behavior change:** calling `loaderData()` after `executeLoader()` without
+**Breaking:** calling `loaderData()` after `executeLoader()` without
 `renderWithLoader()` / `withLoader()` now throws.
 
 ### Fixed — `createListbox()` activated and selected disabled options
@@ -702,9 +777,10 @@ a built `dist`.
 
 The string form is documented as `{ html, sanitize: true }` but stored the string
 unchanged, so `content()` rendered as HTML carried live markup. It is now
-sanitized exactly like `{ html }`. Sanitization also repeats until the text is
-stable, so HTML-encoded payloads (`&lt;img onerror=…&gt;`) cannot decode into
-markup. `{ html, sanitize: false }` remains the only raw-HTML path.
+sanitized exactly like `{ html }`. Any `<` that would open a tag after stripping
+is re-escaped, so HTML-encoded payloads (`&lt;img onerror=…&gt;`) cannot decode
+into markup, while intentionally encoded text is kept rather than deleted.
+`{ html, sanitize: false }` remains the only raw-HTML path.
 
 ### Fixed — scoped `contentEditable` formatting unwrapped DOM outside the editor
 
@@ -1050,6 +1126,8 @@ on every plain "s" (including inside text inputs) and never on Ctrl+S or Cmd+S.
 - **`option`** is accepted as an alias for `alt`.
 - **Unknown modifiers throw** — `hotkey("hyper+s", fn)` now throws
   `hotkey("hyper+s"): unknown modifier "hyper"` instead of matching the bare key.
+- **The `+` key** is written as a trailing plus: `hotkey("+", fn)`,
+  `hotkey("ctrl++", fn)`. A combo with no key (`"ctrl+"`) throws.
 
 ### Fixed — widget DOM updates bypassed `ErrorBoundary`
 

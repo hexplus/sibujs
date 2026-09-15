@@ -52,15 +52,29 @@ describe("setContent(string) sanitizes", () => {
 
       const value = editor.content();
       expect(value).not.toMatch(/<[a-z!/?]/i);
-      expect(value).not.toContain("onerror=");
-      expect(value).not.toContain("onload=");
 
-      // Rendering the stored value as HTML creates no elements at all.
+      // Rendering the stored value as HTML creates no elements at all. (Encoded
+      // payloads survive as inert TEXT — re-escaped rather than deleted, so
+      // intentionally encoded content is not lost.)
       const probe = document.createElement("div");
       probe.innerHTML = value;
       expect(probe.children).toHaveLength(0);
+      const reparsed = document.createElement("div");
+      reparsed.innerHTML = probe.innerHTML;
+      expect(reparsed.children).toHaveLength(0);
     });
   }
+
+  it("keeps intentionally encoded text instead of deleting it", () => {
+    const editor = contentEditable();
+    editor.setContent({ html: "<p>use &amp;lt;b&amp;gt; for bold, a &lt;b c</p>" });
+    const value = editor.content();
+    expect(value).toContain("for bold");
+    const probe = document.createElement("div");
+    probe.innerHTML = value;
+    expect(probe.children).toHaveLength(0);
+    expect(probe.textContent).toContain("<b");
+  });
 
   it("keeps the text content of formatted markup", () => {
     const editor = contentEditable();

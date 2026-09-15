@@ -1,26 +1,19 @@
 import { signal } from "../core/signals/signal";
 import { stripHtml } from "../utils/sanitize";
 
-/** Upper bound on strip passes; real payloads settle in two or three. */
-const MAX_STRIP_PASSES = 8;
-
 /**
  * Reduce an HTML string to text that stays inert if it is rendered as HTML
  * again.
  *
- * One `stripHtml` pass removes tags but DECODES entities, so an encoded payload
- * (`&lt;img onerror=…&gt;`) comes out as live markup. Passes repeat until the
- * text is stable, and anything still shaped like a tag opener after the cap is
- * neutralized, so the result never contains a parseable element.
+ * One `stripHtml` pass removes the markup and decodes entities, so an encoded
+ * payload (`&lt;img onerror=…&gt;`) comes out shaped like a tag. Stripping
+ * again until stable made it inert, but also deleted text that was encoded on
+ * purpose (`&amp;lt;b&amp;gt;` — "the <b> tag" — vanished). Instead, every `<`
+ * that would open a tag is re-escaped: nothing is lost, and rendering the
+ * result as HTML still creates no element.
  */
 function toInertText(html: string): string {
-  let out = String(html);
-  for (let i = 0; i < MAX_STRIP_PASSES; i++) {
-    const next = stripHtml(out);
-    if (next === out) return out;
-    out = next;
-  }
-  return out.replace(/<(?=[a-z!/?])/gi, "");
+  return stripHtml(String(html)).replace(/<(?=[a-z!/?])/gi, "&lt;");
 }
 
 /**

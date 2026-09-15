@@ -107,8 +107,14 @@ export function tooltip(options?: { delay?: number; hideDelay?: number }): {
     els.tooltip.addEventListener("pointerenter", onTooltipEnter);
     els.tooltip.addEventListener("pointerleave", onTooltipLeave);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundTriggers.delete(els.trigger);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundTriggers.get(els.trigger) === teardown) boundTriggers.delete(els.trigger);
       fxTeardown();
       els.trigger.removeEventListener("pointerenter", onTriggerEnter);
       els.trigger.removeEventListener("pointerleave", onTriggerLeave);

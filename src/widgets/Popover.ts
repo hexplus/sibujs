@@ -87,8 +87,14 @@ export function popover(): {
     els.trigger.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onDocPointer);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundPopovers.delete(els.trigger);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundPopovers.get(els.trigger) === teardown) boundPopovers.delete(els.trigger);
       fxTeardown();
       els.trigger.removeEventListener("click", onTriggerClick);
       els.popover.removeEventListener("keydown", onKey);

@@ -41,14 +41,22 @@ export function TransitionGroup(options: TransitionGroupOptions): {
   }
 
   async function remove(el: HTMLElement): Promise<void> {
-    if (options.leave) {
-      await options.leave(el);
+    try {
+      if (options.leave) {
+        // Same isolation as add()/track(): a throwing or rejecting leave is
+        // reported with the element instead of rejecting remove() — and the
+        // element is still removed, so a later track() does not run leave again.
+        await adoptThenable(options.leave(el));
+      }
+    } catch (error) {
+      reportError(error, { phase: "async", name: "TransitionGroup.leave", node: el });
+    } finally {
+      // Drop the cached rect too — otherwise an element removed via remove()
+      // (rather than track(), which clears the whole map) lingers in `positions`
+      // for the group's lifetime.
+      positions.delete(el);
+      setElements((prev) => prev.filter((e) => e !== el));
     }
-    // Drop the cached rect too — otherwise an element removed via remove()
-    // (rather than track(), which clears the whole map) lingers in `positions`
-    // for the group's lifetime.
-    positions.delete(el);
-    setElements((prev) => prev.filter((e) => e !== el));
   }
 
   function track(newElements: HTMLElement[]): void {
