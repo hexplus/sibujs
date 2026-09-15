@@ -9,6 +9,45 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `transition()` stayed pending when reading a result's `then` threw
+
+The body's result was checked with `result.then` outside any `try`, so a throwing
+getter escaped the idle callback and `pending()` never returned to `false`. The
+result is now adopted with `then` read exactly once and invoked in a microtask;
+fulfillment, rejection, a throwing getter and a throwing invocation all settle the
+start, and failures (including a throwing body) are reported with
+`phase: "async"` and `name: "transition"`.
+
+### Fixed — `socket()` opened a connection or heartbeat after reentrant disposal
+
+A status subscriber closing or disposing the socket while `"connecting"` or
+`"open"` was published did not stop the interrupted code: a replacement
+`WebSocket` was still constructed, or a heartbeat started. `close()` now
+invalidates the lifecycle, which is rechecked after each status publication and
+around socket construction; a socket created for an invalidated lifecycle is
+closed immediately.
+
+### Fixed — `imageLoader()` could continue a load interrupted by disposal
+
+`start()` published `"pending"` and then created an `Image` unconditionally. Each
+start now carries a token and stops if the loader was disposed or a newer start
+began during that publication; abandoned requests are always aborted and
+detached.
+
+### Fixed — reentrant `globalStore` dispatches delivered states out of order
+
+A listener that dispatched or reset during a notification had the newer state
+delivered first and the rest of the older round afterwards, so listeners saw
+history backwards. Notification rounds are now queued and run to completion in
+commit order; listener isolation and unsubscribe-during-delivery are unchanged.
+
+### Fixed — `select()` Home/End highlighted disabled options
+
+Home and End jumped to the literal first and last options. They now move to the
+first and last enabled option (and leave the highlight alone when every option is
+disabled), and `aria-activedescendant` never identifies a disabled option, even if
+the disabled predicate changes after highlighting.
+
 ### Fixed — `gamepad()` kept disconnected and replaced controllers
 
 When the last controller disconnected, polling stopped without publishing, so
@@ -42,8 +81,10 @@ reactive registries.
 
 ### Changed — default CDN gzip budget baseline
 
-The baseline was raised from 26,450 B to 26,500 B for the two core fixes above
-(+64 B after trimming); the raw budget is unchanged.
+The baseline was raised from 26,450 B to 26,500 B for the `copyOnClick` and
+component-registry fixes (+64 B after trimming), and then to 26,600 B for safe
+thenable adoption in `transition()` and the `imageLoader` reentrancy guard
+(+106 B); the raw budget is unchanged.
 
 ### Fixed — `springSignal()` restarted after disposal and crashed during SSR
 

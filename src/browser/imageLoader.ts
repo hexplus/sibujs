@@ -58,6 +58,9 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
   // cancelled: a loaded element may already be held and displayed by a caller.
   let currentSettled = false;
   let disposed = false;
+  // Identifies the latest start(); a start interrupted by a reentrant dispose or
+  // source change (through the "pending" publication) must not continue.
+  let startToken = 0;
 
   // Every field describes the CURRENT source, so they are reset together — a
   // pending or failed load must never report the previous image's dimensions.
@@ -83,8 +86,12 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
   }
 
   function start(url: string) {
+    const token = ++startToken;
     abandonCurrent();
     resetState();
+    // resetState() notifies subscribers synchronously; one may have disposed the
+    // loader or started a newer load. Neither may be followed by a request here.
+    if (disposed || token !== startToken) return;
     const img = new Image();
     current = img;
     currentSettled = false;
@@ -121,6 +128,7 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    startToken++;
     if (srcEffectTeardown) {
       srcEffectTeardown();
       srcEffectTeardown = null;

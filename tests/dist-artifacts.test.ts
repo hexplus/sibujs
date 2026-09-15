@@ -197,7 +197,10 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // scoped ids), which added ~570 B gzip while raw stayed under 80,202 B.
     // It was raised again to 26,500 B for reported `copyOnClick` clipboard
     // failures and the duplicate-instance-safe component registry (+64 B after
-    // trimming), which otherwise left under 5 B of headroom.
+    // trimming), which otherwise left under 5 B of headroom. It was raised to
+    // 26,600 B for `transition()` adopting hostile thenables safely (single
+    // `then` read, deferred invocation, reported failures) and the reentrancy
+    // guards in `imageLoader` (+106 B).
     //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
@@ -207,7 +210,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_500 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_600 * 1.02));
   });
 });
 

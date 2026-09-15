@@ -59,6 +59,10 @@ export function socket(
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let disposed = false;
   let manuallyClosed = false;
+  // Bumped by close()/dispose(): code that publishes a status re-checks it, so a
+  // subscriber closing or disposing during that publication is noticed before
+  // any socket or timer is acquired.
+  let lifecycle = 0;
 
   function getUrl(): string {
     return typeof url === "function" ? url() : url;
@@ -80,15 +84,24 @@ export function socket(
       return;
     }
 
+    const generation = lifecycle;
     setStatus("connecting");
+    if (disposed || generation !== lifecycle) return;
     const instance = new WebSocket(safeUrl, protocols);
+    if (disposed || generation !== lifecycle) {
+      instance.close();
+      return;
+    }
     ws = instance;
 
     // Every handler is identity-checked: events still arriving from a socket
     // that has since been replaced (after a reconnect) must not touch state.
     instance.onopen = () => {
       if (ws !== instance) return;
+      const openGeneration = lifecycle;
       setStatus("open");
+      // A subscriber that closed or disposed on "open" must not get a heartbeat.
+      if (disposed || openGeneration !== lifecycle || ws !== instance) return;
       reconnectCount = 0;
       startHeartbeat();
     };
@@ -103,9 +116,10 @@ export function socket(
       // Release the closed instance, so a later close() knows there is nothing
       // left to close instead of reporting "closing" forever.
       ws = null;
+      const closeGeneration = lifecycle;
       setStatus("closed");
       stopHeartbeat();
-      const wasManual = manuallyClosed;
+      const wasManual = manuallyClosed || closeGeneration !== lifecycle;
       // Reset BEFORE scheduling so close() during the timer window correctly
       // re-sets manuallyClosed and the scheduled reconnect short-circuits.
       manuallyClosed = false;
@@ -152,6 +166,7 @@ export function socket(
   }
 
   function close(): void {
+    lifecycle++;
     manuallyClosed = true;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);

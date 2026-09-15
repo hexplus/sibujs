@@ -168,9 +168,12 @@ export function select<T>(options: SelectOptions<T>): {
         if (!optEl.id) optEl.id = `${listboxId}-opt-${i}`;
         optEl.setAttribute("role", "option");
         optEl.setAttribute("aria-selected", sel.includes(items[i]) ? "true" : "false");
-        if (isItemDisabled(items[i])) optEl.setAttribute("aria-disabled", "true");
+        const disabled = isItemDisabled(items[i]);
+        if (disabled) optEl.setAttribute("aria-disabled", "true");
         else optEl.removeAttribute("aria-disabled");
-        if (i === idx) activeId = optEl.id;
+        // A disabled option is never the active descendant, even if the
+        // predicate changed after it was highlighted.
+        if (i === idx && !disabled) activeId = optEl.id;
       }
       if (activeId) els.listbox.setAttribute("aria-activedescendant", activeId);
       else els.listbox.removeAttribute("aria-activedescendant");
@@ -187,11 +190,15 @@ export function select<T>(options: SelectOptions<T>): {
         e.preventDefault();
         highlightPrev();
       } else if (e.key === "Home") {
+        // First / last ENABLED option, like arrows and typeahead; with every
+        // option disabled the highlight is left as it is.
         e.preventDefault();
-        if (items.length > 0) setHighlightedIndex(0);
+        const first = nextEnabled(-1, 1);
+        if (first !== -1) setHighlightedIndex(first);
       } else if (e.key === "End") {
         e.preventDefault();
-        if (items.length > 0) setHighlightedIndex(items.length - 1);
+        const last = nextEnabled(items.length, -1);
+        if (last !== -1) setHighlightedIndex(last);
       } else if (e.key === "Enter" || e.key === " ") {
         if (highlightedIndex() >= 0) {
           e.preventDefault();

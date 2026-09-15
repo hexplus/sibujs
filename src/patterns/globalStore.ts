@@ -101,16 +101,33 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
    * every call would keep iteration from terminating. A listener unsubscribed
    * by an earlier one in the same round is skipped.
    */
+  // Notification rounds run to completion in commit order. A listener that
+  // dispatches (or resets) during a round queues the new state's round behind
+  // the current one; nesting it delivered the newer state first and then resumed
+  // the older round, so listeners saw history backwards.
+  const pendingRounds: S[] = [];
+  let draining = false;
+
   function notifyListeners(state: S): void {
-    if (listeners.size === 0) return;
-    const snapshot = Array.from(listeners);
-    for (const listener of snapshot) {
-      if (!listeners.has(listener)) continue;
-      try {
-        listener(state);
-      } catch (err) {
-        reportError(err, { phase: "event", name: "globalStore(subscribe)" });
+    pendingRounds.push(state);
+    if (draining) return;
+    draining = true;
+    try {
+      while (pendingRounds.length > 0) {
+        const roundState = pendingRounds.shift() as S;
+        if (listeners.size === 0) continue;
+        const snapshot = Array.from(listeners);
+        for (const listener of snapshot) {
+          if (!listeners.has(listener)) continue;
+          try {
+            listener(roundState);
+          } catch (err) {
+            reportError(err, { phase: "event", name: "globalStore(subscribe)" });
+          }
+        }
       }
+    } finally {
+      draining = false;
     }
   }
 

@@ -1,4 +1,6 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
+import { adoptThenable } from "../utils/adoptThenable";
 import { track } from "./track";
 
 // ============================================================================
@@ -154,23 +156,21 @@ export function transition(): TransitionState {
       if (outstanding === 0) setPending(false);
     };
 
+    // Failures are reported and still settle this start: a throwing body, a
+    // rejection, a throwing `then` getter (read outside any try before, which
+    // left pending() stuck) or a throwing `then` invocation.
+    const fail = (error: unknown) => {
+      finish();
+      reportError(error, { phase: "async", name: "transition" });
+    };
+
     scheduleIdle(() => {
-      let result: void | Promise<void>;
       try {
-        result = fn();
-      } catch {
-        finish();
-        return;
-      }
-      if (result && typeof (result as Promise<void>).then === "function") {
-        try {
-          (result as Promise<void>).then(finish, finish);
-        } catch {
-          // A thenable whose `then` throws will never call back.
-          finish();
-        }
-      } else {
-        finish();
+        // adoptThenable reads `then` exactly once and settles at most once.
+        const adopted = adoptThenable(fn());
+        adopted ? adopted.then(finish, fail) : finish();
+      } catch (error) {
+        fail(error);
       }
     });
   }
