@@ -125,7 +125,13 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
   const operations: Array<() => void> = [];
   let running = false;
 
-  function perform(operation: () => void): void {
+  /**
+   * Run `operation` through the queue. `rethrowOwn` decides what happens when
+   * the operation itself throws: a direct dispatch()/reset() rethrows to its
+   * caller; a delayed middleware continuation (a timer or promise) has no caller
+   * to receive it, so its error is reported instead.
+   */
+  function perform(operation: () => void, rethrowOwn = true): void {
     operations.push(operation);
     if (running) return;
     running = true;
@@ -140,7 +146,7 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
         } catch (err) {
           // The caller's own operation rethrows to the caller, as before; a
           // queued operation's caller has already returned, so it is reported.
-          if (first) {
+          if (first && rethrowOwn) {
             callerFailed = true;
             callerError = err;
           } else {
@@ -190,6 +196,11 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
           return;
         }
         let called = false;
+        // True only while the middleware itself is running. A next() called
+        // later — from a timer, a promise or after an await — runs after this
+        // operation has left the queue, so it must re-enter through perform();
+        // continuing directly let reentrant dispatches commit out of order again.
+        let synchronous = true;
         const next = () => {
           if (called) {
             if (DEV)
@@ -199,9 +210,14 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
             return;
           }
           called = true;
-          runFrom(index + 1);
+          if (synchronous) runFrom(index + 1);
+          else perform(() => runFrom(index + 1), false);
         };
-        middlewares[index](getState(), String(action), payload, next);
+        try {
+          middlewares[index](getState(), String(action), payload, next);
+        } finally {
+          synchronous = false;
+        }
       };
       runFrom(0);
     });

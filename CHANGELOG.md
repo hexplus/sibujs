@@ -28,7 +28,9 @@ around socket construction; a socket created for an invalidated lifecycle is
 closed immediately. The lifecycle is captured before the URL getter runs, every
 invalidated path leaves the status `"closed"`, and a throwing URL getter is
 reported (status `"closed"`) instead of escaping the constructor or reconnect
-timer.
+timer. The same applies when the `WebSocket` constructor itself throws (a URL the
+browser rejects, invalid or duplicate protocols, CSP or policy blocks); such a
+failure does not schedule a reconnect.
 
 ### Fixed — `imageLoader()` could continue a load interrupted by disposal
 
@@ -49,7 +51,10 @@ equals `getState()` and rounds arrive in commit order. The caller's own failing
 action still throws; a queued one that fails is reported. Subscriptions are
 tracked as records, so a callback unsubscribed and re-subscribed during a round
 starts with the next update; subscribing an already-subscribed callback still
-returns the existing subscription. Listener isolation is unchanged.
+returns the existing subscription. A middleware `next()` called after the
+middleware has returned (from a timer, a promise or after an `await`) re-enters
+the same queue, and an error from such a delayed continuation is reported.
+Listener isolation is unchanged.
 
 ### Fixed — `select()` Home/End highlighted disabled options
 

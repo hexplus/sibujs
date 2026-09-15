@@ -108,7 +108,18 @@ export function socket(
       setStatus("closed");
       return;
     }
-    const instance = new WebSocket(safeUrl, protocols);
+    let instance: WebSocket;
+    try {
+      instance = new WebSocket(safeUrl, protocols);
+    } catch (error) {
+      // The constructor throws synchronously for URLs the browser rejects,
+      // invalid or duplicate protocols, and CSP/policy blocks. Such a failure
+      // is deterministic, so no reconnect is scheduled; it used to escape the
+      // caller or the reconnect timer and leave the status "connecting".
+      setStatus("closed");
+      reportError(error, { phase: "async", name: "socket" });
+      return;
+    }
     if (invalidated()) {
       instance.close();
       setStatus("closed");
