@@ -66,36 +66,49 @@ export function stream(
     }
 
     setStatus("connecting");
-    source = new EventSource(safeUrl, {
+    const instance = new EventSource(safeUrl, {
       withCredentials: options?.withCredentials ?? false,
     });
+    source = instance;
+    // Every handler checks it still belongs to the live source: callbacks from a
+    // closed, disposed or replaced EventSource used to reopen the status, publish
+    // late data, or (onerror) act on the NEW source's state.
+    const live = () => !disposed && source === instance;
 
-    source.onopen = () => {
+    instance.onopen = () => {
+      if (!live()) return;
       setStatus("open");
       attempts = 0; // successful connection resets backoff
     };
 
-    source.onmessage = (evt: MessageEvent) => {
+    instance.onmessage = (evt: MessageEvent) => {
+      if (!live()) return;
       setData(evt.data);
       setEvent(evt.type);
     };
 
-    source.onerror = () => {
-      if (source && source.readyState === EventSource.CLOSED) {
-        setStatus("closed");
-        source = null;
-        if (autoReconnect && !disposed && attempts < maxReconnects) {
-          // Exponential backoff with jitter, capped at reconnectMaxMs.
-          const delay = Math.min(maxMs, baseMs * 2 ** attempts);
-          const jittered = delay * (0.5 + Math.random() * 0.5);
-          attempts++;
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connect();
-          }, jittered);
-        }
+    instance.onerror = () => {
+      if (!live() || instance.readyState !== EventSource.CLOSED) return;
+      detach(instance);
+      source = null;
+      setStatus("closed");
+      if (autoReconnect && attempts < maxReconnects) {
+        // Exponential backoff with jitter, capped at reconnectMaxMs.
+        const delay = Math.min(maxMs, baseMs * 2 ** attempts);
+        const jittered = delay * (0.5 + Math.random() * 0.5);
+        attempts++;
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          connect();
+        }, jittered);
       }
     };
+  }
+
+  function detach(instance: EventSource): void {
+    instance.onopen = null;
+    instance.onmessage = null;
+    instance.onerror = null;
   }
 
   function close(): void {
@@ -103,10 +116,14 @@ export function stream(
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
-    if (source) {
-      source.close();
-      setStatus("closed");
+    const instance = source;
+    if (instance) {
+      // Invalidate and detach before the native close, so nothing it (or a
+      // queued event) delivers can reach this stream's state.
       source = null;
+      detach(instance);
+      instance.close();
+      setStatus("closed");
     }
   }
 

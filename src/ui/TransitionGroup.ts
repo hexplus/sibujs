@@ -1,3 +1,4 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
 
 /**
@@ -19,11 +20,26 @@ export function TransitionGroup(options: TransitionGroupOptions): {
   const [elements, setElements] = signal<HTMLElement[]>([]);
   const positions = new Map<HTMLElement, DOMRect>();
 
+  // Runs a user animation callback without letting it break the group: a
+  // synchronous throw is reported and iteration continues, and a returned
+  // thenable is observed so a rejection is reported (with the element) instead
+  // of surfacing as a global unhandled rejection.
+  function runCallback(name: string, callback: (el: HTMLElement) => unknown, el: HTMLElement): void {
+    const report = (error: unknown) =>
+      reportError(error, { phase: "async", name: `TransitionGroup.${name}`, node: el });
+    try {
+      const result = callback(el);
+      if (result != null && typeof (result as PromiseLike<unknown>).then === "function") {
+        Promise.resolve(result).then(undefined, report);
+      }
+    } catch (error) {
+      report(error);
+    }
+  }
+
   function add(el: HTMLElement): void {
     setElements((prev) => [...prev, el]);
-    if (options.enter) {
-      options.enter(el);
-    }
+    if (options.enter) runCallback("enter", options.enter, el);
   }
 
   async function remove(el: HTMLElement): Promise<void> {
@@ -50,9 +66,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     const currentSet = new Set(elements());
     for (const el of newElements) {
       if (!currentSet.has(el)) {
-        if (options.enter) {
-          options.enter(el);
-        }
+        if (options.enter) runCallback("enter", options.enter, el);
       }
     }
 
@@ -60,9 +74,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     const newSet = new Set(newElements);
     for (const el of elements()) {
       if (!newSet.has(el)) {
-        if (options.leave) {
-          options.leave(el);
-        }
+        if (options.leave) runCallback("leave", options.leave, el);
       }
     }
 
@@ -76,7 +88,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
         if (oldRect && typeof el.getBoundingClientRect === "function") {
           const newRect = el.getBoundingClientRect();
           if (oldRect.left !== newRect.left || oldRect.top !== newRect.top) {
-            options.move(el);
+            runCallback("move", options.move, el);
           }
         }
       }

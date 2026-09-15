@@ -56,7 +56,9 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
     for (let i = 0; i < a.length; i++) {
       const pa = a[i];
       const pb = b[i];
-      if (pa.index !== pb.index || pa.connected !== pb.connected) return false;
+      // Identity matters: a different controller at the same index with
+      // identical inputs is still a different device.
+      if (pa.index !== pb.index || pa.id !== pb.id || pa.connected !== pb.connected) return false;
       if (pa.buttons.length !== pb.buttons.length) return false;
       for (let j = 0; j < pa.buttons.length; j++) {
         if (pa.buttons[j].pressed !== pb.buttons[j].pressed) return false;
@@ -70,13 +72,17 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
     return true;
   }
 
-  function poll() {
-    const raw = navigator.getGamepads();
-    const snap = Array.from(raw)
+  /** Read the connected pads and publish them if anything changed. */
+  function publish(): GamepadSnapshot[] {
+    const snap = Array.from(navigator.getGamepads())
       .filter((g): g is Gamepad => g !== null)
       .map(snapshot);
-    const current = pads();
-    if (!equal(current, snap)) setPads(snap);
+    if (!equal(pads(), snap)) setPads(snap);
+    return snap;
+  }
+
+  function poll() {
+    publish();
     rafId = requestAnimationFrame(poll);
   }
 
@@ -93,10 +99,9 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
 
   const onConnect = () => startPolling();
   const onDisconnect = () => {
-    // Stop polling only when all pads are gone
-    const raw = navigator.getGamepads();
-    const hasAny = Array.from(raw).some((g) => g !== null);
-    if (!hasAny) stopPolling();
+    // Publish the remaining set first — stopping without it left the last
+    // controller in pads() forever — then stop polling once all pads are gone.
+    if (publish().length === 0) stopPolling();
   };
 
   window.addEventListener("gamepadconnected", onConnect);

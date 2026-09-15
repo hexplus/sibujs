@@ -98,12 +98,16 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
   const toEffectiveRequest = (input: RequestInfo | URL, request: Request | undefined, init?: RequestInit): Request => {
     const overrides: RequestInit & { duplex?: "half" } = {};
-    if (init?.method !== undefined) overrides.method = init.method;
-    if (init?.headers !== undefined) overrides.headers = init.headers;
-    if (init?.body != null) {
-      overrides.body = init.body;
+    // Each member is read once (accessors must not answer twice differently).
+    const method = init?.method;
+    const headers = init?.headers;
+    const body = init?.body;
+    if (method !== undefined) overrides.method = method;
+    if (headers !== undefined) overrides.headers = headers;
+    if (body != null) {
+      overrides.body = body;
       // Streaming bodies must declare half-duplex.
-      if (typeof ReadableStream !== "undefined" && init.body instanceof ReadableStream) overrides.duplex = "half";
+      if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) overrides.duplex = "half";
     }
     if (request) return new Request(request.clone(), overrides);
     // Relative URLs resolve like a page's fetch() would; the original string is
@@ -128,7 +132,10 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     // the effective request (a foreign-realm signal would be rejected there).
     // An explicit `signal: null` detaches from the input Request's signal, as in
     // fetch(); only an omitted or undefined signal inherits it.
-    const signal = init?.signal === null ? undefined : (init?.signal ?? request?.signal);
+    // `init.signal` is read once, like fetch() reads the dictionary member: an
+    // accessor must not be able to answer differently on a second read.
+    const initSignal = init?.signal;
+    const signal = initSignal === null ? undefined : (initSignal ?? request?.signal);
 
     if (signal?.aborted) throw abortError(signal);
 

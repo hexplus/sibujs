@@ -248,6 +248,38 @@ describe("createHttpMock gives handlers the same body type for equivalent reques
       });
     });
 
+    it("init members are read once, so an accessor cannot answer differently on a second read", async () => {
+      await withMock(async (handler) => {
+        const live = new AbortController();
+        const aborted = new AbortController();
+        aborted.abort();
+        const reads = { signal: 0, method: 0, headers: 0, body: 0 };
+        const init = {
+          get signal() {
+            reads.signal++;
+            return reads.signal === 1 ? live.signal : aborted.signal;
+          },
+          get method() {
+            reads.method++;
+            return "GET";
+          },
+          get headers() {
+            reads.headers++;
+            return { "x-read": String(reads.headers) };
+          },
+          get body() {
+            reads.body++;
+            return undefined;
+          },
+        };
+
+        const response = await fetch("https://example.test/x", init as RequestInit);
+        expect(await response.text()).toBe("ok");
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(reads).toEqual({ signal: 1, method: 1, headers: 1, body: 1 });
+      });
+    });
+
     it("an explicit non-null signal overrides the input's", async () => {
       await withMock(async (handler) => {
         const live = new AbortController();

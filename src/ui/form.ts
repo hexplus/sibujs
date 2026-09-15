@@ -1,3 +1,4 @@
+import { reportError } from "../core/errors";
 import { registerDisposer } from "../core/rendering/dispose";
 import { type DerivedAccessor, derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
@@ -414,12 +415,29 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
         field.touch();
       }
       if (isValid()) {
-        const result = onSubmit(values());
-        if (result && typeof (result as Promise<void>).then === "function") {
+        // Failures — a synchronous throw, a rejection, or a thenable whose
+        // `then` itself throws — are reported (they used to be swallowed, so a
+        // failed save looked successful) and always release `submitting`.
+        const report = (error: unknown) => reportError(error, { phase: "async", name: "form.handleSubmit" });
+        let result: unknown;
+        let thenable = false;
+        try {
+          result = onSubmit(values());
+          thenable = result != null && typeof (result as PromiseLike<void>).then === "function";
+        } catch (error) {
+          report(error);
+          return;
+        }
+        if (thenable) {
           setSubmitting(true);
-          (result as Promise<void>).then(
+          // Promise.resolve() adopts the thenable inside a job, so a throwing
+          // `then` becomes a rejection instead of escaping with submitting stuck.
+          Promise.resolve(result).then(
             () => setSubmitting(false),
-            () => setSubmitting(false),
+            (error) => {
+              setSubmitting(false);
+              report(error);
+            },
           );
         }
       }

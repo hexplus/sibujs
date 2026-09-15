@@ -9,6 +9,73 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `gamepad()` kept disconnected and replaced controllers
+
+When the last controller disconnected, polling stopped without publishing, so
+`pads()` kept reporting it as connected. Snapshot comparison also ignored the
+device `id`, so a different controller at the same index with identical inputs
+kept the previous identity. Disconnection now publishes the remaining set before
+polling stops, and snapshots compare `id`.
+
+### Fixed — `infiniteQuery` fetches mutated state after `dispose()`
+
+`refetch()` cleared the pages before the fetch noticed the query was disposed,
+leaving `pages()` empty while the disposed `data()` kept its last value.
+`refetch()`, `fetchNextPage()` and `fetchPreviousPage()` are now no-ops after
+disposal.
+
+### Fixed — `copyOnClick` leaked clipboard failures as uncaught errors
+
+The clipboard write's promise was discarded, and a missing Clipboard API or a
+throwing text getter threw from the raw click listener. Every failure is now
+reported through the runtime error handler with `phase: "async"`,
+`name: "copyOnClick"` and the element as `node`.
+
+### Fixed — dynamic components registered through one package copy were not found through another
+
+`registerComponent()` used a module-local map, so with duplicated SibuJS copies a
+component registered through one could not be resolved through the other. The
+registry is now shared through a versioned global symbol, like the action and
+reactive registries.
+
+### Changed — default CDN gzip budget baseline
+
+The baseline was raised from 26,450 B to 26,500 B for the two core fixes above
+(+64 B after trimming); the raw budget is unchanged.
+
+### Fixed — `springSignal()` restarted after disposal and crashed during SSR
+
+`dispose()` had no terminal state: a later `set()` started the animation again,
+and a subscriber disposing the spring during a frame still got another frame
+scheduled. Disposal is now terminal — `set()` does nothing, a frame checks it on
+entry and again after publishing before rescheduling, and repeated disposal is
+safe. Without `requestAnimationFrame` (SSR, bare Node) the setter snaps to the
+target, like reduced motion, instead of throwing.
+
+### Fixed — `stream()` accepted events from closed, disposed or replaced sources
+
+EventSource handlers never checked whether they still belonged to the live
+connection, so a closed or disposed stream could report `"open"` again or publish
+late data, and an old source's `onerror` could act on its replacement. Every
+handler now ignores events unless its source is the current one and the stream is
+not disposed, and `close()` detaches the handlers before closing the source.
+
+### Fixed — `TransitionGroup` dropped rejected async callbacks
+
+`enter` and `leave` may return promises, but their rejections became global
+unhandled rejections, and a synchronous throw from any callback aborted `track()`
+part-way. Every callback now runs isolated: throws and rejections are reported
+through the runtime error handler with the element as `node`, and the remaining
+elements are still processed.
+
+### Fixed — `form.handleSubmit()` swallowed submit failures
+
+A rejected async submit reset `submitting` but discarded the error, so a failed
+save looked successful. Synchronous throws, rejections and thenables whose `then`
+throws are now reported with `phase: "async"` and `name: "form.handleSubmit"`,
+and `submitting` is always released. **Behavior change:** a synchronous throw
+from the submit callback is reported instead of propagating to the caller.
+
 ### Fixed — failed-render rollback left cleanup registered during rollback attached
 
 `withDisposerRollback()` stopped capturing registrations before running the
