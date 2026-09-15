@@ -59,9 +59,11 @@ directly no longer reports it as unlabeled.
 ### Fixed — `createHttpMock()` gaps in jsdom and with abort reasons
 
 A `FormData`, `URLSearchParams` or `Blob` from another realm (jsdom's classes with
-the runtime's `Request`) is passed to the handler as-is with a matching
-`Content-Type` (an explicit one from the caller is kept), instead of arriving as
-`"[object FormData]"`. An abort rejects with
+the runtime's `Request`) reaches the handler readable instead of as
+`"[object FormData]"`: a body the runtime rejects or stringifies is passed
+through as-is with a `Content-Type` describing it (an explicit one from the
+caller is kept), while a body the runtime understands keeps decoding exactly as
+the same bytes in a `Request` input would. An abort rejects with
 the signal's reason — a `TimeoutError`, or a custom value — like `fetch()`.
 
 ### Fixed — `swipe()` lost gestures

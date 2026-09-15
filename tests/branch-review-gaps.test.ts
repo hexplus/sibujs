@@ -353,7 +353,21 @@ describe("a11y false positives", () => {
 // createHttpMock: jsdom structured bodies and abort reasons.
 // ---------------------------------------------------------------------------
 describe("createHttpMock in jsdom", () => {
-  it("passes jsdom FormData and URLSearchParams through with a matching content type", async () => {
+  // Runtimes differ in whether they accept another realm's FormData/URLSearchParams
+  // (jsdom's, here): some serialize them, some stringify them, newer ones throw.
+  // What must hold everywhere is that the handler can still read the data and
+  // sees a content type describing it — never "[object FormData]" as text.
+  const fieldOf = async (body: unknown, name: string): Promise<string> => {
+    // Cross-realm: the body may be this realm's FormData, the runtime's own
+    // FormData/Blob, or text — duck-typed rather than instanceof.
+    if (body && typeof (body as FormData).get === "function") return String((body as FormData).get(name) ?? "");
+    const text = body && typeof (body as Blob).text === "function" ? await (body as Blob).text() : String(body ?? "");
+    // What must never happen: the object stringified into the body.
+    expect(text).not.toContain("[object ");
+    return text;
+  };
+
+  it("passes jsdom FormData and URLSearchParams through in a readable form", async () => {
     const seen: Array<{ body: unknown; type: string | null }> = [];
     const mock = createHttpMock([
       {
@@ -377,15 +391,14 @@ describe("createHttpMock in jsdom", () => {
       mock.restore();
       globalThis.fetch = original;
     }
-    expect(seen[0].body).toBeInstanceOf(FormData);
-    expect((seen[0].body as FormData).get("name")).toBe("Ada");
     expect(seen[0].type).toMatch(/^multipart\/form-data/);
-    expect(seen[1].body).toBeInstanceOf(URLSearchParams);
+    expect(await fieldOf(seen[0].body, "name")).toContain("Ada");
     expect(seen[1].type).toMatch(/^application\/x-www-form-urlencoded/);
+    expect(String((seen[1].body as URLSearchParams).toString?.() ?? seen[1].body)).toContain("a=1");
     expect(seen[2]).toEqual({ body: "plain", type: "text/plain;charset=UTF-8" });
   });
 
-  it("a jsdom FormData with an explicit Content-Type is still passed through, keeping that type", async () => {
+  it("an explicit Content-Type is kept, and the body is still readable", async () => {
     let seen: { body: unknown; type: string | null } | undefined;
     const mock = createHttpMock([
       {
@@ -407,8 +420,8 @@ describe("createHttpMock in jsdom", () => {
       mock.restore();
       globalThis.fetch = original;
     }
-    expect(seen?.body).toBeInstanceOf(FormData);
     expect(seen?.type).toBe("application/x-custom");
+    expect(await fieldOf(seen?.body, "k")).toContain("v");
   });
 
   it("rejects with the signal's reason, like fetch()", async () => {

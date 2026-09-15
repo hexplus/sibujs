@@ -111,54 +111,68 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     return "http://localhost";
   };
 
-  const toEffectiveRequest = (
-    input: RequestInfo | URL,
-    request: Request | undefined,
-    init?: RequestInit,
-  ): { effective: Request; rawBody: BodyInit | null | undefined } => {
-    const overrides: RequestInit & { duplex?: "half" } = {};
-    // Each member is read once (accessors must not answer twice differently).
-    const method = init?.method;
-    const headers = init?.headers;
-    const body = init?.body;
-    if (method !== undefined) overrides.method = method;
-    if (headers !== undefined) overrides.headers = headers;
-    if (body != null) {
-      overrides.body = body;
-      // Streaming bodies must declare half-duplex.
-      if (typeof ReadableStream !== "undefined" && body instanceof ReadableStream) overrides.duplex = "half";
-    }
-    if (request) return { effective: new Request(request.clone(), overrides), rawBody: body };
-    // Relative URLs resolve like a page's fetch() would; the original string is
-    // still what routes match and the log records.
-    const raw = input instanceof URL ? input.href : (input as string);
-    const href = new URL(raw, httpBase()).href;
-    return { effective: new Request(href, overrides), rawBody: body };
-  };
-
-  // A structured body from ANOTHER realm — jsdom's FormData, URLSearchParams or
-  // Blob handed to the runtime's own Request, as in a jsdom test environment —
-  // is not recognised: the runtime stringifies it ("[object FormData]") and
-  // labels it text/plain. Detect that and hand the original object through.
-  const FOREIGN_CONTENT_TYPE: Record<string, (raw: unknown) => string | null> = {
+  // Structured bodies the runtime's own Request cannot serialize — jsdom's
+  // FormData / URLSearchParams / Blob in a jsdom test environment — are handed
+  // to the handler unchanged. Runtimes differ in HOW they reject them: some
+  // stringify ("[object FormData]", labelled text/plain), newer ones throw from
+  // the constructor. Both are detected here, and a body the runtime DOES
+  // understand keeps taking the normal path, so decoding stays identical to a
+  // Request input carrying the same bytes.
+  const STRUCTURED_CONTENT_TYPE: Record<string, (raw: unknown) => string | null> = {
     FormData: () => "multipart/form-data",
     URLSearchParams: () => "application/x-www-form-urlencoded;charset=UTF-8",
     Blob: (raw) => (raw as Blob).type || null,
     File: (raw) => (raw as Blob).type || null,
   };
   const AUTO_TEXT_TYPE = /^text\/plain;charset=utf-8$/i;
-  const foreignStructuredBody = async (raw: unknown): Promise<string | null> => {
+
+  /** The structured tag of `raw`, or null when it is not one of the above. */
+  const structuredTag = (raw: unknown): string | null => {
     if (raw === null || typeof raw !== "object") return null;
     const tag = Object.prototype.toString.call(raw).slice(8, -1);
-    if (!Object.hasOwn(FOREIGN_CONTENT_TYPE, tag)) return null;
-    // Probe without the caller's headers, so an explicit Content-Type cannot
-    // hide the runtime's own verdict: a recognised body gets its own type (or
-    // none), an unrecognised one is stringified as text/plain.
-    const probe = new Request("http://localhost/", { method: "POST", body: raw as BodyInit });
-    if (!AUTO_TEXT_TYPE.test(probe.headers.get("content-type") ?? "")) return null;
-    // A native URLSearchParams is always labelled form-encoded; the others must
-    // also have been serialized as their "[object …]" tag.
-    return tag === "URLSearchParams" || (await probe.text()) === String(raw) ? tag : null;
+    return Object.hasOwn(STRUCTURED_CONTENT_TYPE, tag) ? tag : null;
+  };
+
+  /** Whether this runtime refuses (or mangles) `raw` as a Request body. */
+  const unusableBody = async (raw: unknown, tag: string): Promise<boolean> => {
+    let probe: Request;
+    try {
+      // Probed without the caller's headers, so an explicit Content-Type cannot
+      // hide the runtime's verdict.
+      probe = new Request("http://localhost/", { method: "POST", body: raw as BodyInit });
+    } catch {
+      return true; // rejected outright
+    }
+    if (!AUTO_TEXT_TYPE.test(probe.headers.get("content-type") ?? "")) return false;
+    // Labelled text/plain: a recognised URLSearchParams never is, and the others
+    // were stringified when the body equals their "[object …]" tag.
+    return tag === "URLSearchParams" || (await probe.text()) === String(raw);
+  };
+
+  const toEffectiveRequest = (
+    input: RequestInfo | URL,
+    request: Request | undefined,
+    init: RequestInit | undefined,
+    rawBody: BodyInit | null | undefined,
+    omitBody: boolean,
+  ): Request => {
+    const overrides: RequestInit & { duplex?: "half" } = {};
+    // Each member is read once (accessors must not answer twice differently).
+    const method = init?.method;
+    const headers = init?.headers;
+    if (method !== undefined) overrides.method = method;
+    if (headers !== undefined) overrides.headers = headers;
+    if (rawBody != null && !omitBody) {
+      overrides.body = rawBody;
+      // Streaming bodies must declare half-duplex.
+      if (typeof ReadableStream !== "undefined" && rawBody instanceof ReadableStream) overrides.duplex = "half";
+    }
+    if (request) return new Request(request.clone(), overrides);
+    // Relative URLs resolve like a page's fetch() would; the original string is
+    // still what routes match and the log records.
+    const raw = input instanceof URL ? input.href : (input as string);
+    const href = new URL(raw, httpBase()).href;
+    return new Request(href, overrides);
   };
 
   const decodeBody = async (effective: Request): Promise<unknown> => {
@@ -183,22 +197,26 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
     if (signal?.aborted) throw abortError(signal);
 
+    const rawBody = init?.body;
+    const tag = structuredTag(rawBody);
+    const passThrough = tag !== null && (await unusableBody(rawBody, tag));
+
     // Construction errors (a GET with a body, an invalid URL) reject exactly as
     // fetch() does.
-    const { effective, rawBody } = toEffectiveRequest(input, request, init);
+    const effective = toEffectiveRequest(input, request, init, rawBody, passThrough);
     const method = effective.method.toUpperCase();
     let headers = effective.headers;
     let body: unknown;
-    const foreign = await foreignStructuredBody(rawBody);
-    if (foreign) {
+    if (passThrough && tag) {
       body = rawBody;
-      // Replace only the runtime's stringified label; an explicit Content-Type
-      // from the caller is kept.
-      if (AUTO_TEXT_TYPE.test(headers.get("content-type") ?? "")) {
-        headers = new Headers(headers);
-        const type = FOREIGN_CONTENT_TYPE[foreign](rawBody);
-        if (type) headers.set("content-type", type);
-        else headers.delete("content-type");
+      // The request carries no body, so supply the type this body implies —
+      // unless the caller set one explicitly.
+      if (!headers.has("content-type")) {
+        const type = STRUCTURED_CONTENT_TYPE[tag](rawBody);
+        if (type) {
+          headers = new Headers(headers);
+          headers.set("content-type", type);
+        }
       }
     } else {
       body = await decodeBody(effective);
