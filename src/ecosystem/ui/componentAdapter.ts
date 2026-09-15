@@ -3,6 +3,7 @@ import { tagFactory } from "../../core/rendering/tagFactory";
 import type { NodeChildren } from "../../core/rendering/types";
 import { effect } from "../../core/signals/effect";
 import { signal } from "../../core/signals/signal";
+import { globalSingleton } from "../../utils/globalSingleton";
 
 // ---------------------------------------------------------------------------
 // Theme System
@@ -17,6 +18,61 @@ export interface ThemeConfig {
   classOverrides?: Record<string, string>;
 }
 
+// ─── Theme variable layers ──────────────────────────────────────────────────
+//
+// Several applyTo() handles may set the same variable on the same root, and are
+// released in any order. Each (root, property) keeps the value and priority it
+// had before the first layer, plus one layer per handle in application order.
+// The most recently applied live layer wins; releasing any layer recomputes the
+// property, and releasing the last one restores the original.
+
+interface PropertyLayers {
+  original: { value: string; priority: string };
+  layers: Array<{ handle: object; value: string }>;
+}
+
+const _themeLayers = globalSingleton(
+  Symbol.for("sibujs.themeLayers.v1"),
+  () => new WeakMap<HTMLElement, Map<string, PropertyLayers>>(),
+);
+
+function commitThemeProperty(root: HTMLElement, name: string, record: PropertyLayers): void {
+  const top = record.layers[record.layers.length - 1];
+  if (top) {
+    root.style.setProperty(name, top.value);
+    return;
+  }
+  _themeLayers.get(root)?.delete(name);
+  if (record.original.value === "") root.style.removeProperty(name);
+  else root.style.setProperty(name, record.original.value, record.original.priority);
+}
+
+function setThemeLayer(root: HTMLElement, name: string, handle: object, value: string): void {
+  let properties = _themeLayers.get(root);
+  if (!properties) _themeLayers.set(root, (properties = new Map()));
+  let record = properties.get(name);
+  if (!record) {
+    record = {
+      original: { value: root.style.getPropertyValue(name), priority: root.style.getPropertyPriority(name) },
+      layers: [],
+    };
+    properties.set(name, record);
+  }
+  const layer = record.layers.find((l) => l.handle === handle);
+  if (layer) layer.value = value;
+  else record.layers.push({ handle, value });
+  commitThemeProperty(root, name, record);
+}
+
+function removeThemeLayer(root: HTMLElement, name: string, handle: object): void {
+  const record = _themeLayers.get(root)?.get(name);
+  if (!record) return;
+  const index = record.layers.findIndex((l) => l.handle === handle);
+  if (index === -1) return;
+  record.layers.splice(index, 1);
+  commitThemeProperty(root, name, record);
+}
+
 export interface ThemeAPI {
   /** Get the current theme config reactively */
   config: () => ThemeConfig;
@@ -28,9 +84,10 @@ export interface ThemeAPI {
    * Install the theme's CSS variables on `root` (the theme root — typically the
    * app container) and keep them in sync: variables added, changed or removed by
    * `setTheme()` are reflected, and custom properties the theme never set are left
-   * alone. A property that already had a value keeps a snapshot of it (and its
-   * priority), restored when the theme drops the variable or on release.
-   * Returns a function that stops syncing and restores every property it set.
+   * alone. Handles may overlap on one root and be released in any order: the
+   * most recently applied live handle's value wins, and when no handle sets a
+   * property any more, the value and priority it had before are restored.
+   * Returns a function that stops syncing and releases this handle.
    */
   applyTo: (root: HTMLElement) => () => void;
 }
@@ -58,38 +115,24 @@ export function createTheme(initial: ThemeConfig): ThemeAPI {
   }
 
   function applyTo(root: HTMLElement): () => void {
-    // Value and priority each property had before the theme first set it, so a
-    // variable dropped from the theme — or every variable, on release — goes
-    // back to what the element had instead of being deleted.
-    const originals = new Map<string, { value: string; priority: string }>();
-    const restore = (name: string) => {
-      const original = originals.get(name);
-      if (!original) return;
-      originals.delete(name);
-      if (original.value === "") root.style.removeProperty(name);
-      else root.style.setProperty(name, original.value, original.priority);
-    };
+    const handle = {};
+    let applied = new Set<string>();
     const stop = effect(() => {
       const variables = getConfig().variables ?? {};
-      for (const name of [...originals.keys()]) {
-        if (!Object.hasOwn(variables, name)) restore(name);
+      const next = new Set(Object.keys(variables));
+      for (const name of applied) {
+        if (!next.has(name)) removeThemeLayer(root, name, handle);
       }
-      for (const [name, value] of Object.entries(variables)) {
-        if (!originals.has(name)) {
-          originals.set(name, {
-            value: root.style.getPropertyValue(name),
-            priority: root.style.getPropertyPriority(name),
-          });
-        }
-        root.style.setProperty(name, value);
-      }
+      for (const [name, value] of Object.entries(variables)) setThemeLayer(root, name, handle, value);
+      applied = next;
     });
     let released = false;
     return () => {
       if (released) return;
       released = true;
       stop();
-      for (const name of [...originals.keys()]) restore(name);
+      for (const name of applied) removeThemeLayer(root, name, handle);
+      applied.clear();
     };
   }
 

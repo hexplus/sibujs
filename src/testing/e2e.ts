@@ -108,13 +108,16 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     return raw;
   };
 
-  const bodyFromRequest = async (request: Request): Promise<unknown> => {
-    // Read a clone so the caller's Request stays unconsumed.
-    const clone = request.clone();
-    const type = request.headers.get("content-type") ?? "";
-    if (/^multipart\/form-data\b/i.test(type)) return clone.formData();
-    if (isTextLike(type) || isFormEncoded(type)) return decodeText(await clone.text(), type);
-    return clone.blob();
+  // `type` is the EFFECTIVE content type — `init.headers` supersedes the
+  // Request's own — so the body is interpreted the way the handler's `headers`
+  // describe it. The bytes come from a clone, so the caller's Request stays
+  // unconsumed, and are re-wrapped under the effective type for decoding.
+  const bodyFromRequest = async (request: Request, type: string): Promise<unknown> => {
+    const bytes = await request.clone().arrayBuffer();
+    const effective = new Response(bytes, type ? { headers: { "content-type": type } } : undefined);
+    if (/^multipart\/form-data\b/i.test(type)) return effective.formData();
+    if (isTextLike(type) || isFormEncoded(type)) return decodeText(await effective.text(), type);
+    return effective.blob();
   };
 
   const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -133,7 +136,7 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     if (init && init.body != null) {
       body = await bodyFromInit(init.body, headers.get("content-type") ?? "");
     } else if (request && request.body !== null && !request.bodyUsed) {
-      body = await bodyFromRequest(request);
+      body = await bodyFromRequest(request, headers.get("content-type") ?? "");
     }
     if (signal?.aborted) throw abortError(signal);
 

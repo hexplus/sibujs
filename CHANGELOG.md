@@ -33,8 +33,9 @@ over `nodes`.
 classes, a prefix change re-prefixes the mapping's classes, user classes are kept,
 and existing components update. The new `theme.applyTo(root)` installs the theme's
 CSS variables on a root element, keeps them in sync, and returns a release function.
-A property the element already had keeps a snapshot of its value and priority, which
-is restored when the theme drops the variable or on release.
+Handles may overlap on one root and be released in any order: each property keeps
+one layer per handle, the most recently applied live layer wins, and once no layer
+sets it the value and priority the element had before are restored.
 
 ### Fixed — `createHttpMock()` diverged from `fetch()`
 
@@ -44,7 +45,8 @@ is restored when the theme drops the variable or on release.
 - Handlers receive the same body type for equivalent requests, whether the body
   came from `init` or a `Request`: multipart → `FormData`, form-encoded →
   `URLSearchParams`, text and JSON types → parsed JSON or the string, anything
-  else (binary, untyped) → `Blob`.
+  else (binary, untyped) → `Blob`. The body is interpreted by the effective
+  content type, so `init.headers` supersedes the `Request`'s own.
 - Abort signals are honoured: an already-aborted signal rejects immediately, and an
   abort during a handler or `delay` rejects with an `AbortError` instead of
   resolving later.
@@ -77,7 +79,9 @@ misreported. The root is now checked along with its descendants, once.
 Loading the testing utilities now enables listener tracking (also available as
 `enableListenerTracking()`), which records element listeners below the framework —
 tag factories, `html` templates and `addEventListener` alike, in development and
-production builds. The check treats click and pointer listeners as activation and
+production builds. It follows DOM listener identity — `(type, callback, capture)`,
+duplicates counted once — and forgets `once` listeners after they fire and
+`signal` listeners when the signal aborts. The check treats click and pointer listeners as activation and
 key listeners as keyboard support. The core bundle carries no tracking code.
 
 ### Fixed — visual fingerprints ignored computed styles

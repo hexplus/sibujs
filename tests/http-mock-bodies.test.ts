@@ -99,6 +99,45 @@ describe("createHttpMock gives handlers the same body type for equivalent reques
     expect(await capture(new Request(URL_, { method: "POST", body: "hello" }))).toBe("hello");
   });
 
+  it("init headers supersede the Request's content type for body interpretation", async () => {
+    const seen: Array<{ type: string | null; body: unknown }> = [];
+    const mock = createHttpMock([
+      {
+        method: "POST",
+        url: "/upload",
+        response: ({ body, headers }) => {
+          seen.push({ type: headers.get("content-type"), body });
+          return { body: "ok" };
+        },
+      },
+    ]);
+    mock.install();
+    try {
+      const binaryTyped = new Request(URL_, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: JSON.stringify({ value: 1 }),
+      });
+      await fetch(binaryTyped, { headers: { "content-type": "application/json" } });
+      expect(binaryTyped.bodyUsed).toBe(false);
+
+      const jsonTyped = new Request(URL_, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: 2 }),
+      });
+      await fetch(jsonTyped, { headers: { "content-type": "application/octet-stream" } });
+      expect(jsonTyped.bodyUsed).toBe(false);
+    } finally {
+      mock.restore();
+    }
+
+    expect(seen[0]).toEqual({ type: "application/json", body: { value: 1 } });
+    expect(seen[1].type).toBe("application/octet-stream");
+    expect(seen[1].body).toBeInstanceOf(Blob);
+    expect(await (seen[1].body as Blob).text()).toBe('{"value":2}');
+  });
+
   it("text-typed blobs decode as text either way", async () => {
     const make = () => new Blob(["plain"], { type: "text/plain" });
     expect(await capture(URL_, { method: "POST", body: make() })).toBe("plain");
