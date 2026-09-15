@@ -15,7 +15,9 @@ When the last controller disconnected, polling stopped without publishing, so
 `pads()` kept reporting it as connected. Snapshot comparison also ignored the
 device `id`, so a different controller at the same index with identical inputs
 kept the previous identity. Disconnection now publishes the remaining set before
-polling stops, and snapshots compare `id`.
+polling stops, and snapshots compare `id`. Disposal is terminal: a `pads()`
+subscriber disposing during a frame, or a stale frame firing afterwards, can no
+longer restart polling.
 
 ### Fixed — `infiniteQuery` fetches mutated state after `dispose()`
 
@@ -59,6 +61,10 @@ connection, so a closed or disposed stream could report `"open"` again or publis
 late data, and an old source's `onerror` could act on its replacement. Every
 handler now ignores events unless its source is the current one and the stream is
 not disposed, and `close()` detaches the handlers before closing the source.
+Closing or disposing from a status subscriber is also safe: a `"connecting"`
+subscriber prevents the replacement connection from being created, a `"closed"`
+subscriber prevents the reconnect timer, and `close()` always publishes
+`"closed"`.
 
 ### Fixed — `TransitionGroup` dropped rejected async callbacks
 
@@ -66,14 +72,16 @@ not disposed, and `close()` detaches the handlers before closing the source.
 unhandled rejections, and a synchronous throw from any callback aborted `track()`
 part-way. Every callback now runs isolated: throws and rejections are reported
 through the runtime error handler with the element as `node`, and the remaining
-elements are still processed.
+elements are still processed. A returned thenable's `then` is read exactly once
+and adopted through the Promise constructor.
 
 ### Fixed — `form.handleSubmit()` swallowed submit failures
 
 A rejected async submit reset `submitting` but discarded the error, so a failed
 save looked successful. Synchronous throws, rejections and thenables whose `then`
 throws are now reported with `phase: "async"` and `name: "form.handleSubmit"`,
-and `submitting` is always released. **Behavior change:** a synchronous throw
+and `submitting` is always released. A returned thenable's `then` is read
+exactly once, so a stateful accessor cannot skip the adoption. **Behavior change:** a synchronous throw
 from the submit callback is reported instead of propagating to the caller.
 
 ### Fixed — failed-render rollback left cleanup registered during rollback attached

@@ -49,6 +49,9 @@ export function stream(
   let disposed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let attempts = 0;
+  // Bumped by close(): lets code that published a status notice that a
+  // subscriber closed or disposed the stream during that publication.
+  let closeGeneration = 0;
 
   function connect(): void {
     if (disposed) return;
@@ -65,10 +68,18 @@ export function stream(
       return;
     }
 
+    const generation = closeGeneration;
     setStatus("connecting");
+    // A subscriber may have closed or disposed the stream while "connecting" was
+    // published; acquiring a connection now would leak it.
+    if (disposed || generation !== closeGeneration) return;
     const instance = new EventSource(safeUrl, {
       withCredentials: options?.withCredentials ?? false,
     });
+    if (disposed || generation !== closeGeneration) {
+      instance.close();
+      return;
+    }
     source = instance;
     // Every handler checks it still belongs to the live source: callbacks from a
     // closed, disposed or replaced EventSource used to reopen the status, publish
@@ -91,7 +102,11 @@ export function stream(
       if (!live() || instance.readyState !== EventSource.CLOSED) return;
       detach(instance);
       source = null;
+      const generation = closeGeneration;
       setStatus("closed");
+      // A subscriber that closed or disposed the stream during that publication
+      // must not get a reconnect timer installed behind its back.
+      if (disposed || generation !== closeGeneration) return;
       if (autoReconnect && attempts < maxReconnects) {
         // Exponential backoff with jitter, capped at reconnectMaxMs.
         const delay = Math.min(maxMs, baseMs * 2 ** attempts);
@@ -112,6 +127,7 @@ export function stream(
   }
 
   function close(): void {
+    closeGeneration++;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -123,8 +139,10 @@ export function stream(
       source = null;
       detach(instance);
       instance.close();
-      setStatus("closed");
     }
+    // Always published: a close while connecting (or between reconnects) has no
+    // source, yet the stream is closed.
+    setStatus("closed");
   }
 
   function dispose(): void {

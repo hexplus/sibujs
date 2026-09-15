@@ -40,6 +40,9 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
   }
 
   let rafId: number | null = null;
+  // Terminal: a disposed wrapper never polls again, even when dispose() runs
+  // from a pads() subscriber in the middle of a frame.
+  let disposed = false;
 
   function snapshot(pad: Gamepad): GamepadSnapshot {
     return {
@@ -82,12 +85,18 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
   }
 
   function poll() {
+    // This frame is no longer pending. A stale frame invoked after disposal
+    // stops here.
+    rafId = null;
+    if (disposed) return;
     publish();
-    rafId = requestAnimationFrame(poll);
+    // publish() notifies subscribers synchronously: one may have disposed the
+    // wrapper (or restarted polling), so schedule only if neither happened.
+    if (!disposed && rafId === null) rafId = requestAnimationFrame(poll);
   }
 
   function startPolling() {
-    if (rafId === null) poll();
+    if (!disposed && rafId === null) poll();
   }
 
   function stopPolling() {
@@ -112,6 +121,7 @@ export function gamepad(): { pads: () => GamepadSnapshot[]; dispose: () => void 
   if (initial) startPolling();
 
   function dispose() {
+    disposed = true;
     stopPolling();
     window.removeEventListener("gamepadconnected", onConnect);
     window.removeEventListener("gamepaddisconnected", onDisconnect);

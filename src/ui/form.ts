@@ -3,6 +3,7 @@ import { registerDisposer } from "../core/rendering/dispose";
 import { type DerivedAccessor, derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { adoptThenable } from "../utils/adoptThenable";
 
 // ============================================================================
 // TYPES
@@ -419,20 +420,18 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
         // `then` itself throws — are reported (they used to be swallowed, so a
         // failed save looked successful) and always release `submitting`.
         const report = (error: unknown) => reportError(error, { phase: "async", name: "form.handleSubmit" });
-        let result: unknown;
-        let thenable = false;
+        let pending: Promise<unknown> | null;
         try {
-          result = onSubmit(values());
-          thenable = result != null && typeof (result as PromiseLike<void>).then === "function";
+          // adoptThenable reads `then` once; a throwing accessor or invocation
+          // becomes a rejection instead of escaping with submitting stuck.
+          pending = adoptThenable(onSubmit(values()));
         } catch (error) {
           report(error);
           return;
         }
-        if (thenable) {
+        if (pending) {
           setSubmitting(true);
-          // Promise.resolve() adopts the thenable inside a job, so a throwing
-          // `then` becomes a rejection instead of escaping with submitting stuck.
-          Promise.resolve(result).then(
+          pending.then(
             () => setSubmitting(false),
             (error) => {
               setSubmitting(false);

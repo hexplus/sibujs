@@ -1,5 +1,6 @@
 import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
+import { adoptThenable } from "../utils/adoptThenable";
 
 /**
  * TransitionGroup manages enter/leave/move animations on a dynamic set of elements.
@@ -28,10 +29,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     const report = (error: unknown) =>
       reportError(error, { phase: "async", name: `TransitionGroup.${name}`, node: el });
     try {
-      const result = callback(el);
-      if (result != null && typeof (result as PromiseLike<unknown>).then === "function") {
-        Promise.resolve(result).then(undefined, report);
-      }
+      adoptThenable(callback(el))?.then(undefined, report);
     } catch (error) {
       report(error);
     }
