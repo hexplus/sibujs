@@ -9,6 +9,15 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — failed-render rollback left cleanup registered during rollback attached
+
+`withDisposerRollback()` stopped capturing registrations before running the
+captured teardowns, so a teardown that registered more cleanup left it attached to
+nodes the failed render never returned. Capture now stays open while rolling back
+and the queue is drained to stability (newest first), bounded by the same teardown
+ceiling as `dispose()` and reported when reached. Nested transactions and
+teardowns that both throw and register cleanup are covered.
+
 ### Fixed — adapted components ignored positional children
 
 Components from `componentAdapter()` accepted only a props object, so
@@ -24,12 +33,18 @@ over `nodes`.
 classes, a prefix change re-prefixes the mapping's classes, user classes are kept,
 and existing components update. The new `theme.applyTo(root)` installs the theme's
 CSS variables on a root element, keeps them in sync, and returns a release function.
+A property the element already had keeps a snapshot of its value and priority, which
+is restored when the theme drops the variable or on release.
 
 ### Fixed — `createHttpMock()` diverged from `fetch()`
 
 - A `Request` input is read like `fetch()` reads it: method, headers, body (from a
   clone, so the caller's request stays unconsumed) and signal, each overridable by
-  `init`. FormData and other structured bodies reach the route unchanged.
+  `init`.
+- Handlers receive the same body type for equivalent requests, whether the body
+  came from `init` or a `Request`: multipart → `FormData`, form-encoded →
+  `URLSearchParams`, text and JSON types → parsed JSON or the string, anything
+  else (binary, untyped) → `Blob`.
 - Abort signals are honoured: an already-aborted signal rejects immediately, and an
   abort during a handler or `delay` rejects with an `AbortError` instead of
   resolving later.
@@ -59,9 +74,11 @@ misreported. The root is now checked along with its descendants, once.
 ### Fixed — keyboard checks missed framework event handlers
 
 `checkKeyboardAccess()` only saw `onclick` attributes, never `on: { click }`.
-In development builds the framework now records the event types it attaches, and
-the check treats click and pointer listeners as activation and key listeners as
-keyboard support. Production bundles are unaffected.
+Loading the testing utilities now enables listener tracking (also available as
+`enableListenerTracking()`), which records element listeners below the framework —
+tag factories, `html` templates and `addEventListener` alike, in development and
+production builds. The check treats click and pointer listeners as activation and
+key listeners as keyboard support. The core bundle carries no tracking code.
 
 ### Fixed — visual fingerprints ignored computed styles
 
@@ -89,12 +106,15 @@ actually applied.
 Loader data lived in one application-global context: every `executeLoader()`
 replaced it, nothing restored it, and disposal left it discoverable, so a route's
 component could read another route's data and concurrent SSR requests saw each
-other's. Loader data is now scoped per SSR request, and the new
-`renderWithLoader(resource, render)` sets the data `loaderData()` sees for exactly
-the duration of a route component's construction (restoring the previous scope,
-even if rendering throws). `executeLoader()` still provides ambient data for
-unscoped callers, but a disposed resource stops being discoverable, and disposing a
-superseded loader never clears the current one.
+other's. There is no ambient loader any more: `loaderData()` resolves only inside
+the new `renderWithLoader(resource, render)`, which scopes the data for exactly
+the duration of a route component's construction (scopes nest, and the previous
+one is restored even if rendering throws). `withLoader(loader, context, render)`
+executes and renders in one step, disposing the resource if rendering throws. A
+disposed resource cannot be read or scoped. Scopes are per SSR request.
+
+**Behavior change:** calling `loaderData()` after `executeLoader()` without
+`renderWithLoader()` / `withLoader()` now throws.
 
 ### Fixed — `createListbox()` activated and selected disabled options
 
@@ -176,8 +196,9 @@ cleared when the active target is detached, and `dispose()` is idempotent.
 
 Every bubbling `dragleave` cleared `isOver`, including the one fired when moving
 from one child to another inside the zone. Enter/leave events are now balanced
-with a depth counter (a leave into an element outside the zone ends the hover
-outright), and the state resets on drop, retarget and disposal.
+with a depth counter, and the state resets on drop, retarget and disposal. A leave
+whose destination is not a node inside the zone — an outside element, another
+document, or no destination at all — ends the hover outright.
 
 ### Fixed — `pointerLock().request()` discarded the browser's result
 
@@ -407,8 +428,10 @@ both development and production. `false`, `0` and `""` were already kept.
 
 - **Serialized operations.** `migrate()` computed its pending list before awaiting
   any migration, so concurrent calls ran the same `up()` twice. `migrate()` and
-  `rollback()` now run one at a time per runner, each re-reading the stored
-  version when it starts; a failed operation releases the queue.
+  `rollback()` now run one at a time across every runner in the realm sharing the
+  same storage and storage key (runners on other keys stay independent), each
+  re-reading the stored version when it starts; a failed operation releases the
+  queue. The runner accepts a `storage` option (default `localStorage`).
 - **Rollback checkpoints.** The applied version was written only after every
   `down()` succeeded, so a part-way failure left storage claiming reversed
   migrations were still applied and a retry ran their `down()` again. The version
@@ -553,11 +576,13 @@ call is valid for the action; the shared members are `FormActionState`, and
 
 ### Fixed — widget `bind()` teardown did not restore mutated DOM
 
-Tabs and Accordion toggled each panel's `hidden` without restoring it, and
-FileUpload overwrote the input's `accept` and `multiple`, the error region's text
-and the drop zone's `data-drag-over`. Teardown now restores every one of those to
+Tabs and Accordion toggled each panel's `hidden` without restoring it and deleted
+author-written `aria-selected`, `tabindex` and `aria-expanded`, and FileUpload
+overwrote the input's `accept` and `multiple`, the error region's text and the drop
+zone's `data-drag-over`. Teardown now restores every attribute a binding touches to
 its value before `bind()` — removing attributes that did not exist — and the
-teardown functions are idempotent.
+teardown functions are idempotent. Tabs also reconciles `aria-disabled` with each
+tab definition in both directions while bound.
 
 ### Fixed — a middleware calling `next()` twice ran the action twice
 

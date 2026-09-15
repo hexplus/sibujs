@@ -7,6 +7,8 @@
  * Provides semantic version management, migration tooling, and compatibility checks.
  */
 
+import { globalSingleton } from "../utils/globalSingleton";
+
 /** Semantic version representation */
 export interface SemVer {
   major: number;
@@ -227,14 +229,32 @@ export class MigrationStorageError extends Error {
   }
 }
 
+// Operation queues shared by every runner in this realm (and every copy of the
+// module), keyed by storage identity and then storage key. A per-runner queue let
+// two runners over the same storage key compute the same pending list and run
+// each up() twice.
+const _migrationQueues = globalSingleton(
+  Symbol.for("sibujs.migrationQueues.v1"),
+  () => new WeakMap<object, Map<string, Promise<unknown>>>(),
+);
+// Stand-in identity when no storage is available.
+const NO_STORAGE = {};
+
 /**
  * Create a migration runner for managing schema/state version upgrades.
+ *
+ * `migrate()` and `rollback()` are serialized across ALL runners in this realm
+ * that use the same storage object and storage key; runners with a different
+ * key (or storage) run independently. Coordination does not extend across
+ * tabs or workers.
  */
 export function createMigrationRunner(config: {
   /** Current version of the app/data */
   currentVersion: string;
   /** Storage key for persisting applied migration version */
   storageKey?: string;
+  /** Storage holding the applied version (default: `localStorage`) */
+  storage?: Storage;
   /** Available migrations, sorted by version */
   migrations: Migration[];
 }) {
@@ -244,6 +264,7 @@ export function createMigrationRunner(config: {
   const sortedMigrations = [...config.migrations].sort((a, b) => compareSemVer(a.version, b.version));
 
   function getStorage(): Storage | null {
+    if (config.storage) return config.storage;
     try {
       return typeof localStorage !== "undefined" ? localStorage : null;
       // Accessing `localStorage` throws SecurityError in sandboxed iframes /
@@ -286,14 +307,28 @@ export function createMigrationRunner(config: {
     }
   }
 
-  // Serializes migrate() and rollback(). Each operation reads the stored version
-  // only after the previous one has fully finished, so concurrent calls can
-  // never compute — and run — the same pending migrations twice. A failed
-  // operation still releases the queue.
-  let operationQueue: Promise<unknown> = Promise.resolve();
+  // Serializes migrate() and rollback() per (storage, key) across runners. Each
+  // operation reads the stored version only after the previous one has fully
+  // finished, so concurrent calls can never compute — and run — the same pending
+  // migrations twice. A failed operation still releases the queue.
   function serialize<R>(operation: () => Promise<R>): Promise<R> {
-    const run = operationQueue.then(operation, operation);
-    operationQueue = run.catch(() => undefined);
+    const identity = getStorage() ?? NO_STORAGE;
+    let queues = _migrationQueues.get(identity);
+    if (!queues) {
+      queues = new Map();
+      _migrationQueues.set(identity, queues);
+    }
+    const run = (queues.get(storageKey) ?? Promise.resolve()).then(operation, operation);
+    const tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    queues.set(storageKey, tail);
+    // Drop the entry once idle so keys do not accumulate.
+    const settled = queues;
+    tail.then(() => {
+      if (settled.get(storageKey) === tail) settled.delete(storageKey);
+    });
     return run;
   }
 
@@ -306,9 +341,9 @@ export function createMigrationRunner(config: {
 
     /**
      * Run all pending migrations in order. Concurrent calls (and calls racing
-     * `rollback()`) on this runner run one after another, each recomputing what
-     * is pending. The lock is per runner: separate runners sharing a storage key
-     * are not coordinated.
+     * `rollback()`) run one after another, each recomputing what is pending —
+     * on this runner and on every other runner in this realm sharing its
+     * storage and storage key.
      */
     migrate(): Promise<{
       applied: string[];

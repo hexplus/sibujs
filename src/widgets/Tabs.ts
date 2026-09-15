@@ -2,6 +2,7 @@ import { createId, idSegment } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { snapshotAttributes } from "./attributeSnapshot";
 
 const boundTablists = new WeakMap<HTMLElement, () => void>();
 
@@ -101,14 +102,11 @@ export function tabs(options: TabsOptions): {
   }): () => void {
     const existing = boundTablists.get(els.tablist);
     if (existing) return existing;
-    // Snapshot prior attribute state so teardown can restore.
-    const restore: Array<() => void> = [];
-    const prevTablistRole = els.tablist.getAttribute("role");
+    // Snapshot every attribute the binding may touch — including the ones the
+    // reactive binding owns (aria-selected, tabindex, hidden) — so teardown puts
+    // author markup back exactly instead of deleting pre-existing ARIA state.
+    const restore: Array<() => void> = [snapshotAttributes(els.tablist, ["role"])];
     els.tablist.setAttribute("role", "tablist");
-    restore.push(() => {
-      if (prevTablistRole === null) els.tablist.removeAttribute("role");
-      else els.tablist.setAttribute("role", prevTablistRole);
-    });
     // One unique prefix per binding. Ids derived from the item id alone collided
     // across widgets with the same item ids (aria-controls then pointed at another
     // widget's panel), and item ids with whitespace produced multi-token ARIA
@@ -117,50 +115,23 @@ export function tabs(options: TabsOptions): {
     for (const def of tabDefs) {
       const tabEl = els.tabs[def.id];
       if (!tabEl) continue;
-      const prevRole = tabEl.getAttribute("role");
-      const prevId = tabEl.id;
-      const prevDisabled = tabEl.getAttribute("aria-disabled");
-      const prevControls = tabEl.getAttribute("aria-controls");
+      restore.push(
+        snapshotAttributes(tabEl, ["role", "id", "aria-disabled", "aria-controls", "aria-selected", "tabindex"]),
+      );
       tabEl.setAttribute("role", "tab");
-      if (!prevId) tabEl.id = `${idPrefix}-tab-${idSegment(def.id)}`;
+      if (!tabEl.id) tabEl.id = `${idPrefix}-tab-${idSegment(def.id)}`;
+      // Reconcile in both directions: the definition decides interactivity, so a
+      // stale aria-disabled="true" on an enabled tab must not stay exposed.
       if (def.disabled) tabEl.setAttribute("aria-disabled", "true");
+      else tabEl.removeAttribute("aria-disabled");
       const panelEl = els.panels?.[def.id];
-      let prevPanelRole: string | null = null;
-      let prevPanelId = "";
-      let prevPanelLabelledBy: string | null = null;
-      // The active-tab binding toggles `hidden`; teardown puts it back.
-      let prevPanelHidden = false;
       if (panelEl) {
-        prevPanelRole = panelEl.getAttribute("role");
-        prevPanelId = panelEl.id;
-        prevPanelLabelledBy = panelEl.getAttribute("aria-labelledby");
-        prevPanelHidden = panelEl.hidden;
+        restore.push(snapshotAttributes(panelEl, ["role", "id", "aria-labelledby", "hidden"]));
         panelEl.setAttribute("role", "tabpanel");
-        if (!prevPanelId) panelEl.id = `${idPrefix}-panel-${idSegment(def.id)}`;
+        if (!panelEl.id) panelEl.id = `${idPrefix}-panel-${idSegment(def.id)}`;
         panelEl.setAttribute("aria-labelledby", tabEl.id);
         tabEl.setAttribute("aria-controls", panelEl.id);
       }
-      restore.push(() => {
-        if (prevRole === null) tabEl.removeAttribute("role");
-        else tabEl.setAttribute("role", prevRole);
-        if (prevId === "") tabEl.removeAttribute("id");
-        else tabEl.id = prevId;
-        if (prevDisabled === null) tabEl.removeAttribute("aria-disabled");
-        else tabEl.setAttribute("aria-disabled", prevDisabled);
-        if (prevControls === null) tabEl.removeAttribute("aria-controls");
-        else tabEl.setAttribute("aria-controls", prevControls);
-        tabEl.removeAttribute("aria-selected");
-        tabEl.removeAttribute("tabindex");
-        if (panelEl) {
-          if (prevPanelRole === null) panelEl.removeAttribute("role");
-          else panelEl.setAttribute("role", prevPanelRole);
-          if (prevPanelId === "") panelEl.removeAttribute("id");
-          else panelEl.id = prevPanelId;
-          if (prevPanelLabelledBy === null) panelEl.removeAttribute("aria-labelledby");
-          else panelEl.setAttribute("aria-labelledby", prevPanelLabelledBy);
-          panelEl.hidden = prevPanelHidden;
-        }
-      });
     }
 
     // Roving tabindex + aria-selected reflect the active tab reactively.

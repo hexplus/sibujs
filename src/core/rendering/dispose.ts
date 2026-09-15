@@ -85,15 +85,29 @@ export function withDisposerRollback<T>(build: () => T): T {
   try {
     result = build();
   } catch (err) {
-    registrationCaptures.pop();
-    for (let i = captured.length - 1; i >= 0; i--) {
-      const [node, teardown] = captured[i];
-      unregisterDisposer(node, teardown);
-      try {
-        teardown();
-      } catch (cleanupErr) {
-        reportError(cleanupErr, { phase: "cleanup", name: "disposer" });
+    // The capture stays open while rolling back: a teardown that registers more
+    // cleanup lands in `captured` and is drained too (newest first), bounded by
+    // the same ceiling as dispose(). Popping it first left those registrations
+    // attached to nodes the failed render never returned.
+    let executed = 0;
+    try {
+      while (captured.length > 0) {
+        if (executed >= MAX_DRAIN_TEARDOWNS) {
+          // Leave the remainder registered (reachable via dispose/checkLeaks).
+          reportDrainRunaway("rollback", executed, captured.length);
+          break;
+        }
+        const [node, teardown] = captured.pop()!;
+        unregisterDisposer(node, teardown);
+        executed++;
+        try {
+          teardown();
+        } catch (cleanupErr) {
+          reportError(cleanupErr, { phase: "cleanup", name: "disposer" });
+        }
       }
+    } finally {
+      registrationCaptures.pop();
     }
     throw err;
   }

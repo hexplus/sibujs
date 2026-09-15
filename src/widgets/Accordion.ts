@@ -2,6 +2,7 @@ import { createId, idSegment } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { snapshotAttributes } from "./attributeSnapshot";
 
 // First trigger of an accordion identifies the binding instance for
 // idempotency — calling bind() twice on the same set returns the prior
@@ -114,6 +115,9 @@ export function accordion(options: AccordionOptions): {
       const existing = boundAccordions.get(idempotencyKey);
       if (existing) return existing;
     }
+    // Snapshot every attribute the binding may touch — including aria-expanded
+    // and hidden, which the reactive binding owns — so teardown restores author
+    // markup exactly instead of deleting pre-existing ARIA state.
     const restore: Array<() => void> = [];
     // One unique prefix per binding (see Tabs): ids from the item id alone
     // collided across accordions and broke on whitespace. Author ids are kept.
@@ -122,40 +126,15 @@ export function accordion(options: AccordionOptions): {
       const trig = els.triggers[item.id];
       const panel = els.panels[item.id];
       if (!trig) continue;
-      const prevTrigId = trig.id;
-      const prevTrigControls = trig.getAttribute("aria-controls");
-      if (!prevTrigId) trig.id = `${idPrefix}-trigger-${idSegment(item.id)}`;
-      let prevPanelRole: string | null = null;
-      let prevPanelId = "";
-      let prevPanelLabelledBy: string | null = null;
-      // The expansion binding below toggles `hidden`; teardown puts it back.
-      let prevPanelHidden = false;
+      restore.push(snapshotAttributes(trig, ["id", "aria-controls", "aria-expanded"]));
+      if (!trig.id) trig.id = `${idPrefix}-trigger-${idSegment(item.id)}`;
       if (panel) {
-        prevPanelRole = panel.getAttribute("role");
-        prevPanelId = panel.id;
-        prevPanelLabelledBy = panel.getAttribute("aria-labelledby");
-        prevPanelHidden = panel.hidden;
+        restore.push(snapshotAttributes(panel, ["role", "id", "aria-labelledby", "hidden"]));
         panel.setAttribute("role", "region");
-        if (!prevPanelId) panel.id = `${idPrefix}-panel-${idSegment(item.id)}`;
+        if (!panel.id) panel.id = `${idPrefix}-panel-${idSegment(item.id)}`;
         panel.setAttribute("aria-labelledby", trig.id);
         trig.setAttribute("aria-controls", panel.id);
       }
-      restore.push(() => {
-        if (prevTrigId === "") trig.removeAttribute("id");
-        else trig.id = prevTrigId;
-        if (prevTrigControls === null) trig.removeAttribute("aria-controls");
-        else trig.setAttribute("aria-controls", prevTrigControls);
-        trig.removeAttribute("aria-expanded");
-        if (panel) {
-          if (prevPanelRole === null) panel.removeAttribute("role");
-          else panel.setAttribute("role", prevPanelRole);
-          if (prevPanelId === "") panel.removeAttribute("id");
-          else panel.id = prevPanelId;
-          if (prevPanelLabelledBy === null) panel.removeAttribute("aria-labelledby");
-          else panel.setAttribute("aria-labelledby", prevPanelLabelledBy);
-          panel.hidden = prevPanelHidden;
-        }
-      });
     }
 
     const fxTeardown = domBinding(() => {

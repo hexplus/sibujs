@@ -28,7 +28,9 @@ export interface ThemeAPI {
    * Install the theme's CSS variables on `root` (the theme root — typically the
    * app container) and keep them in sync: variables added, changed or removed by
    * `setTheme()` are reflected, and custom properties the theme never set are left
-   * alone. Returns a function that stops syncing and removes what it installed.
+   * alone. A property that already had a value keeps a snapshot of it (and its
+   * priority), restored when the theme drops the variable or on release.
+   * Returns a function that stops syncing and restores every property it set.
    */
   applyTo: (root: HTMLElement) => () => void;
 }
@@ -56,17 +58,30 @@ export function createTheme(initial: ThemeConfig): ThemeAPI {
   }
 
   function applyTo(root: HTMLElement): () => void {
-    let installed: string[] = [];
-    const clearInstalled = () => {
-      for (const name of installed) root.style.removeProperty(name);
-      installed = [];
+    // Value and priority each property had before the theme first set it, so a
+    // variable dropped from the theme — or every variable, on release — goes
+    // back to what the element had instead of being deleted.
+    const originals = new Map<string, { value: string; priority: string }>();
+    const restore = (name: string) => {
+      const original = originals.get(name);
+      if (!original) return;
+      originals.delete(name);
+      if (original.value === "") root.style.removeProperty(name);
+      else root.style.setProperty(name, original.value, original.priority);
     };
     const stop = effect(() => {
       const variables = getConfig().variables ?? {};
-      clearInstalled();
+      for (const name of [...originals.keys()]) {
+        if (!Object.hasOwn(variables, name)) restore(name);
+      }
       for (const [name, value] of Object.entries(variables)) {
+        if (!originals.has(name)) {
+          originals.set(name, {
+            value: root.style.getPropertyValue(name),
+            priority: root.style.getPropertyPriority(name),
+          });
+        }
         root.style.setProperty(name, value);
-        installed.push(name);
       }
     });
     let released = false;
@@ -74,7 +89,7 @@ export function createTheme(initial: ThemeConfig): ThemeAPI {
       if (released) return;
       released = true;
       stop();
-      clearInstalled();
+      for (const name of [...originals.keys()]) restore(name);
     };
   }
 

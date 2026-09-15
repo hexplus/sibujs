@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { executeLoader, loaderData, preloadRoute } from "../src/data/routeLoader";
+import { executeLoader, loaderData, preloadRoute, renderWithLoader } from "../src/data/routeLoader";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -47,11 +47,11 @@ describe("routeLoader (coverage)", () => {
       res.dispose();
     });
 
-    it("makes the resource available via loaderData after execution", async () => {
+    it("makes the resource available via loaderData inside its render scope", async () => {
       const loader = vi.fn().mockResolvedValue({ name: "alice" });
       const res = executeLoader<{ name: string }>(loader, { params: {}, path: "/me" });
 
-      const ld = loaderData<{ name: string }>();
+      const ld = renderWithLoader(res, () => loaderData<{ name: string }>());
       await tick();
 
       expect(ld.data()).toEqual({ name: "alice" });
@@ -66,7 +66,7 @@ describe("routeLoader (coverage)", () => {
       const loader = vi.fn().mockResolvedValue("payload");
       const res = executeLoader(loader, { params: {}, path: "/p" });
 
-      const ld = loaderData();
+      const ld = renderWithLoader(res, () => loaderData());
       expect(ld.loading()).toBe(true);
       expect(ld.data()).toBe(undefined);
 
@@ -76,16 +76,17 @@ describe("routeLoader (coverage)", () => {
       res.dispose();
     });
 
-    // Note: LoaderContext is a global reactive store; once a loader runs it
-    // stays provided. This test only asserts the "happy path" provider exists.
-    it("returns getters backed by the most recently provided resource", async () => {
+    // There is no ambient loader: executing a later loader never changes what
+    // an earlier route's scope reads.
+    it("returns getters backed by the scoped resource, not the most recent one", async () => {
       const first = executeLoader(vi.fn().mockResolvedValue("first"), { params: {}, path: "/a" });
       await tick();
       const second = executeLoader(vi.fn().mockResolvedValue("second"), { params: {}, path: "/b" });
       await tick();
 
-      const ld = loaderData();
-      expect(ld.data()).toBe("second");
+      const ld = renderWithLoader(first, () => loaderData());
+      expect(ld.data()).toBe("first");
+      expect(() => loaderData()).toThrow();
       first.dispose();
       second.dispose();
     });

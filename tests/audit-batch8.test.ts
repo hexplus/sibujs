@@ -175,24 +175,25 @@ describe("route loader scoping", () => {
     failing.dispose();
   });
 
-  it("a disposed (superseded) loader is no longer discoverable", async () => {
+  it("a disposed loader is no longer readable", async () => {
     const old = executeLoader(async () => "old", { path: "/old", params: {} });
     await tick();
-    expect(loaderData<string>().data()).toBe("old");
+    expect(renderWithLoader(old, () => loaderData<string>().data())).toBe("old");
 
     old.dispose();
 
+    expect(() => renderWithLoader(old, () => loaderData())).toThrow(/disposed/);
     expect(() => loaderData()).toThrow(/loaderData must be used inside a route with a loader/);
   });
 
-  it("disposing a superseded loader does not clear the current one", async () => {
+  it("disposing another loader does not affect the current scope", async () => {
     const first = executeLoader(async () => "first", { path: "/1", params: {} });
     const second = executeLoader(async () => "second", { path: "/2", params: {} });
     await tick();
 
     first.dispose();
 
-    expect(loaderData<string>().data()).toBe("second");
+    expect(renderWithLoader(second, () => loaderData<string>().data())).toBe("second");
     second.dispose();
   });
 
@@ -201,7 +202,7 @@ describe("route loader scoping", () => {
       runInSSRContext(async () => {
         const res = executeLoader(async () => value, { path: `/${value}`, params: {} }, { initialValue: value });
         await tick();
-        const seen = loaderData<string>().data();
+        const seen = renderWithLoader(res, () => loaderData<string>().data());
         res.dispose();
         return seen;
       });

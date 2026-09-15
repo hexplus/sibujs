@@ -3,8 +3,16 @@
  * Provides automated a11y checks and WCAG compliance validation.
  */
 
-import { frameworkListenerTypes } from "../core/rendering/eventRegistry";
+import { enableListenerTracking, listenerTypes } from "./listenerTracking";
 import { queryAllByAttribute } from "./queries";
+
+// Loading the testing utilities turns on listener tracking, so handlers attached
+// with `on: { click }` (or addEventListener) are visible to checkKeyboardAccess()
+// in development AND production builds. Call enableListenerTracking() yourself
+// if elements get their listeners before this module loads.
+enableListenerTracking();
+
+export { enableListenerTracking };
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -220,17 +228,17 @@ function selectAll(root: Element, selector: string): Element[] {
 
 /**
  * Whether `el` has an activation handler: an `onclick` attribute or a click /
- * pointer listener attached through the framework (`on: { click }`).
+ * pointer listener (`on: { click }` or addEventListener, see listenerTracking.ts).
  */
 function hasActivationHandler(el: Element): boolean {
   if (el.hasAttribute("onclick")) return true;
-  const types = frameworkListenerTypes(el);
+  const types = listenerTypes(el);
   return ["click", "pointerdown", "pointerup", "mousedown", "mouseup"].some((t) => types.has(t));
 }
 
 function hasKeyboardHandler(el: Element): boolean {
   if (el.hasAttribute("onkeydown") || el.hasAttribute("onkeyup") || el.hasAttribute("onkeypress")) return true;
-  const types = frameworkListenerTypes(el);
+  const types = listenerTypes(el);
   return types.has("keydown") || types.has("keyup") || types.has("keypress");
 }
 
@@ -538,7 +546,7 @@ export function checkKeyboardAccess(root: Element): A11yViolation[] {
 
   // Elements with an activation handler that aren't natively interactive: an
   // onclick attribute, or click/pointer listeners attached via `on: { ... }`
-  // (recorded in development, where tests run).
+  // or addEventListener (recorded by listener tracking in any build).
   const clickElements = selectAll(root, "*").filter(hasActivationHandler);
   for (const el of clickElements) {
     if (isNativeInteractive(el)) continue;

@@ -151,9 +151,11 @@ export function dropZone(
     onDragLeave = (e: DragEvent) => {
       depth = Math.max(0, depth - 1);
       // A leave whose destination is outside the zone ends the hover outright,
-      // even if an enter was missed along the way.
+      // even if an enter was missed along the way. A null or non-node
+      // destination (leaving the window, another document's frame) is outside
+      // too; only a node inside the zone keeps the hover.
       const to = e.relatedTarget as Node | null;
-      const leftZone = to != null && typeof (to as Node).nodeType === "number" && !el.contains(to);
+      const leftZone = !(to != null && typeof (to as Node).nodeType === "number" && el.contains(to));
       if (depth === 0 || leftZone) resetOver();
     };
 

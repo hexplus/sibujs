@@ -73,17 +73,48 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     return new DOMException("The operation was aborted.", "AbortError");
   };
 
-  const parseBody = (raw: unknown): unknown => {
-    if (raw == null) return undefined;
-    // Structured bodies (FormData, URLSearchParams, Blob, buffers, streams) are
-    // handed to the route as-is; stringifying them lost their contents.
-    if (typeof raw !== "string") return raw;
+  // ── Request bodies ──
+  // Handlers receive the same body type for equivalent requests, whether the body
+  // came from `init` or from a Request (which can only be read as bytes):
+  //   multipart/form-data               → FormData
+  //   application/x-www-form-urlencoded → URLSearchParams
+  //   text-like (text/*, JSON, XML)     → parsed JSON, else the string
+  //   anything else (binary, untyped)   → Blob
+  const isFormEncoded = (type: string) => /^application\/x-www-form-urlencoded\b/i.test(type);
+  const isTextLike = (type: string) => /^text\/|[/+](?:json|xml|javascript)\b/i.test(type);
+
+  const decodeText = (text: string, type: string): unknown => {
+    if (isFormEncoded(type)) return new URLSearchParams(text);
     try {
-      return JSON.parse(raw);
+      return JSON.parse(text);
     } catch {
-      // Non-JSON text (plain, form-encoded) stays as the raw string.
-      return raw;
+      return text;
     }
+  };
+
+  const bodyFromInit = async (raw: BodyInit, type: string): Promise<unknown> => {
+    if (typeof raw === "string") return decodeText(raw, type);
+    if (typeof FormData !== "undefined" && raw instanceof FormData) return raw;
+    if (raw instanceof URLSearchParams) return raw;
+    if (typeof Blob !== "undefined" && raw instanceof Blob) {
+      const blobType = raw.type || type;
+      return isTextLike(blobType) || isFormEncoded(blobType) ? decodeText(await raw.text(), blobType) : raw;
+    }
+    if (raw instanceof ArrayBuffer || ArrayBuffer.isView(raw)) {
+      if (isTextLike(type) || isFormEncoded(type)) return decodeText(new TextDecoder().decode(raw), type);
+      return new Blob([raw as BlobPart], type ? { type } : undefined);
+    }
+    // Streams and other exotic bodies are handed over untouched.
+    return raw;
+  };
+
+  const bodyFromRequest = async (request: Request): Promise<unknown> => {
+    // Read a clone so the caller's Request stays unconsumed.
+    const clone = request.clone();
+    const type = request.headers.get("content-type") ?? "";
+    if (/^multipart\/form-data\b/i.test(type)) return clone.formData();
+    if (isTextLike(type) || isFormEncoded(type)) return decodeText(await clone.text(), type);
+    return clone.blob();
   };
 
   const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -100,10 +131,9 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
     let body: unknown;
     if (init && init.body != null) {
-      body = parseBody(init.body);
+      body = await bodyFromInit(init.body, headers.get("content-type") ?? "");
     } else if (request && request.body !== null && !request.bodyUsed) {
-      // Read a clone so the caller's Request stays unconsumed.
-      body = parseBody(await request.clone().text());
+      body = await bodyFromRequest(request);
     }
     if (signal?.aborted) throw abortError(signal);
 
