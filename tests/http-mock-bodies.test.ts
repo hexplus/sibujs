@@ -3,7 +3,7 @@
 // Runs under Node so FormData, Blob, URLSearchParams and Request are the same
 // (native) implementations, as they are in a browser or a Node test runner.
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHttpMock } from "../src/testing/e2e";
 
 const original = globalThis.fetch;
@@ -211,6 +211,55 @@ describe("createHttpMock gives handlers the same body type for equivalent reques
     expect(seen[2]).toBe("image/png");
     expect(seen[3]).toBe("image/png");
     expect(request.bodyUsed).toBe(false);
+  });
+
+  describe("signal inheritance from an input Request", () => {
+    const abortedRequest = () => {
+      const controller = new AbortController();
+      const request = new Request("https://example.test/x", { signal: controller.signal });
+      controller.abort();
+      return request;
+    };
+    const withMock = async (run: (handler: ReturnType<typeof vi.fn>) => Promise<void>) => {
+      const handler = vi.fn(() => ({ body: "ok" }));
+      const mock = createHttpMock([{ method: "GET", url: "/x", response: handler }]);
+      mock.install();
+      try {
+        await run(handler);
+      } finally {
+        mock.restore();
+      }
+    };
+
+    it("explicit signal: null detaches, so an aborted input Request still reaches the handler", async () => {
+      await withMock(async (handler) => {
+        const response = await fetch(abortedRequest(), { signal: null });
+        expect(await response.text()).toBe("ok");
+        expect(handler).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("an omitted or undefined signal inherits the input's abort", async () => {
+      await withMock(async (handler) => {
+        await expect(fetch(abortedRequest())).rejects.toMatchObject({ name: "AbortError" });
+        await expect(fetch(abortedRequest(), {})).rejects.toMatchObject({ name: "AbortError" });
+        await expect(fetch(abortedRequest(), { signal: undefined })).rejects.toMatchObject({ name: "AbortError" });
+        expect(handler).not.toHaveBeenCalled();
+      });
+    });
+
+    it("an explicit non-null signal overrides the input's", async () => {
+      await withMock(async (handler) => {
+        const live = new AbortController();
+        expect(await (await fetch(abortedRequest(), { signal: live.signal })).text()).toBe("ok");
+
+        const aborted = new AbortController();
+        aborted.abort();
+        const request = new Request("https://example.test/x");
+        await expect(fetch(request, { signal: aborted.signal })).rejects.toMatchObject({ name: "AbortError" });
+        expect(handler).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 
   it("text-typed blobs decode as text either way", async () => {

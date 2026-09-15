@@ -53,7 +53,9 @@ sets it the value and priority the element had before are restored.
   `FormData` (with boundary), `URLSearchParams` and typed `Blob` bodies.
 - Abort signals are honoured: an already-aborted signal rejects immediately, and an
   abort during a handler or `delay` rejects with an `AbortError` instead of
-  resolving later.
+  resolving later. As in `fetch()`, an input `Request`'s signal is inherited
+  when `init.signal` is omitted or `undefined`, and an explicit `signal: null`
+  detaches from it.
 - String routes match exactly. A path route compares the request's pathname (plus
   its query when the route has one), and an absolute route the full URL;
   `"/api/users"` no longer matches `https://host/evil/api/users`.

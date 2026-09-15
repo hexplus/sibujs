@@ -126,7 +126,9 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     // The signal is kept separately: it is honoured below, and is not copied into
     // the effective request (a foreign-realm signal would be rejected there).
-    const signal = init?.signal ?? request?.signal ?? undefined;
+    // An explicit `signal: null` detaches from the input Request's signal, as in
+    // fetch(); only an omitted or undefined signal inherits it.
+    const signal = init?.signal === null ? undefined : (init?.signal ?? request?.signal);
 
     if (signal?.aborted) throw abortError(signal);
 
