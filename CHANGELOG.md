@@ -54,6 +54,11 @@ starts with the next update; subscribing an already-subscribed callback still
 returns the existing subscription. A middleware `next()` called after the
 middleware has returned (from a timer, a promise or after an `await`) re-enters
 the same queue, and an error from such a delayed continuation is reported.
+Middleware may be `async` (`Middleware` now returns `void | PromiseLike<void>`):
+a rejection is reported with `phase: "async"` and
+`name: "globalStore(middleware)"`, and a middleware that throws or rejects before
+calling `next()` never continues, so an action whose dispatch failed cannot run
+later. The queue drains with a cursor, so a large reentrant burst stays linear.
 Listener isolation is unchanged.
 
 ### Fixed — `select()` Home/End highlighted disabled options

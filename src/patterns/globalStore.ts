@@ -1,6 +1,7 @@
 import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
+import { adoptThenable } from "../utils/adoptThenable";
 import { stripUnsafeKeys } from "../utils/guards";
 
 /**
@@ -48,7 +49,14 @@ function deepClone<T>(value: T): T {
 // GLOBAL STATE MANAGEMENT
 // ============================================================================
 
-export type Middleware<S> = (state: S, action: string, payload: unknown, next: () => void) => void;
+/**
+ * Store middleware. Call `next()` once to continue the chain — synchronously or
+ * later (after an `await`, from a timer). A middleware may be `async`: a
+ * rejection is reported through the runtime error handler, and a middleware
+ * that fails (throws, or rejects) before calling `next()` never continues —
+ * a later `next()` from it is ignored.
+ */
+export type Middleware<S> = (state: S, action: string, payload: unknown, next: () => void) => void | PromiseLike<void>;
 
 export type Selector<S, R> = (state: S) => R;
 
@@ -139,8 +147,12 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
     let callerFailed = false;
     try {
       let first = true;
-      while (operations.length > 0) {
-        const next = operations.shift() as () => void;
+      // A cursor, not shift(): shifting a growing array re-indexes it on every
+      // step, which made a large reentrant burst quadratic.
+      let cursor = 0;
+      while (cursor < operations.length) {
+        const next = operations[cursor];
+        operations[cursor++] = undefined as unknown as () => void;
         try {
           next();
         } catch (err) {
@@ -156,6 +168,8 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
         first = false;
       }
     } finally {
+      // Release processed closures on every path.
+      operations.length = 0;
       running = false;
     }
     if (callerFailed) throw callerError;
@@ -196,12 +210,25 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
           return;
         }
         let called = false;
+        // Set when the middleware fails (throws, or its promise rejects) before
+        // calling next(): its continuation is dead, so a later next() — from a
+        // timer it scheduled, or after the rejection — never runs the action
+        // that dispatch() already reported as failed.
+        let failed = false;
         // True only while the middleware itself is running. A next() called
         // later — from a timer, a promise or after an await — runs after this
         // operation has left the queue, so it must re-enter through perform();
         // continuing directly let reentrant dispatches commit out of order again.
         let synchronous = true;
         const next = () => {
+          if (failed && !called) {
+            if (DEV)
+              devWarn(
+                `globalStore: middleware ${index} next() called after it failed for "${String(action)}"; ignored.`,
+              );
+            called = true;
+            return;
+          }
           if (called) {
             if (DEV)
               devWarn(
@@ -213,10 +240,24 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
           if (synchronous) runFrom(index + 1);
           else perform(() => runFrom(index + 1), false);
         };
+        let pending: Promise<unknown> | null;
         try {
-          middlewares[index](getState(), String(action), payload, next);
+          // adoptThenable reads `then` once (a throwing getter becomes a
+          // rejection) and invokes it in a later microtask.
+          pending = adoptThenable(middlewares[index](getState(), String(action), payload, next));
+        } catch (err) {
+          failed = true;
+          throw err;
         } finally {
           synchronous = false;
+        }
+        if (pending) {
+          // Observed, so an async middleware failure reaches the runtime error
+          // handler instead of becoming an unhandled rejection.
+          pending.then(undefined, (err) => {
+            failed = true;
+            reportError(err, { phase: "async", name: "globalStore(middleware)" });
+          });
         }
       };
       runFrom(0);
