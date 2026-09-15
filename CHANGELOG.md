@@ -17,7 +17,10 @@ overflowed. Attribute changes during a render now trigger one follow-up pass aft
 it commits, unchanged values are ignored, and a component that changes its own
 attributes on every render is stopped after 10 passes and reported. A first render
 that throws is also retried on the next attribute change instead of leaving the
-element blank until it is reconnected.
+element blank until it is reconnected. A component that moves its host while
+rendering gets one follow-up render instead of a nested one, and one that removes
+its host has the fresh build disposed rather than committed into a disconnected
+element nothing would tear down.
 
 ### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
 
@@ -49,7 +52,7 @@ a later `track()` does not run `leave` for it again.
 
 `checkKeyboardAccess()` no longer flags a container whose click listener delegates
 to keyboard-reachable descendants (buttons, links, inputs, focusable elements), and
-treats `summary` and `label` as natively interactive. `checkFormLabels()` finds a
+treats `summary` as natively interactive. `checkFormLabels()` finds a
 `<label for>` anywhere in the input's document or shadow root, so checking an input
 directly no longer reports it as unlabeled.
 
@@ -57,7 +60,8 @@ directly no longer reports it as unlabeled.
 
 A `FormData`, `URLSearchParams` or `Blob` from another realm (jsdom's classes with
 the runtime's `Request`) is passed to the handler as-is with a matching
-`Content-Type`, instead of arriving as `"[object FormData]"`. An abort rejects with
+`Content-Type` (an explicit one from the caller is kept), instead of arriving as
+`"[object FormData]"`. An abort rejects with
 the signal's reason — a `TimeoutError`, or a custom value — like `fetch()`.
 
 ### Fixed — `swipe()` lost gestures

@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { reportError } from "../core/errors";
-import { replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
+import { dispose, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -66,6 +66,12 @@ export function defineElement(
 
     connectedCallback(): void {
       this._connected = true;
+      // Moved in the DOM by its own component while rendering: finish that
+      // render, then render again, instead of nesting.
+      if (this._rendering) {
+        this._dirty = true;
+        return;
+      }
       this._render();
     }
 
@@ -137,6 +143,14 @@ export function defineElement(
         el = withDisposerRollback(() => component(props, this));
       } catch (err) {
         reportError(err, { phase: "render", name: `defineElement(${name})`, node: this });
+        return;
+      }
+
+      // Disconnected while the component ran (it removed its own host): the
+      // disconnect teardown has already run, so committing would leave a live
+      // subtree nothing ever disposes. Release the fresh build instead.
+      if (!this._connected) {
+        dispose(el);
         return;
       }
 

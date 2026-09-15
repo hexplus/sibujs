@@ -146,12 +146,19 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     Blob: (raw) => (raw as Blob).type || null,
     File: (raw) => (raw as Blob).type || null,
   };
-  const foreignStructuredBody = async (raw: unknown, effective: Request): Promise<string | null> => {
+  const AUTO_TEXT_TYPE = /^text\/plain;charset=utf-8$/i;
+  const foreignStructuredBody = async (raw: unknown): Promise<string | null> => {
     if (raw === null || typeof raw !== "object") return null;
     const tag = Object.prototype.toString.call(raw).slice(8, -1);
     if (!Object.hasOwn(FOREIGN_CONTENT_TYPE, tag)) return null;
-    if (!/^text\/plain;charset=utf-8$/i.test(effective.headers.get("content-type") ?? "")) return null;
-    return (await effective.clone().text()) === String(raw) ? tag : null;
+    // Probe without the caller's headers, so an explicit Content-Type cannot
+    // hide the runtime's own verdict: a recognised body gets its own type (or
+    // none), an unrecognised one is stringified as text/plain.
+    const probe = new Request("http://localhost/", { method: "POST", body: raw as BodyInit });
+    if (!AUTO_TEXT_TYPE.test(probe.headers.get("content-type") ?? "")) return null;
+    // A native URLSearchParams is always labelled form-encoded; the others must
+    // also have been serialized as their "[object …]" tag.
+    return tag === "URLSearchParams" || (await probe.text()) === String(raw) ? tag : null;
   };
 
   const decodeBody = async (effective: Request): Promise<unknown> => {
@@ -182,13 +189,17 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     const method = effective.method.toUpperCase();
     let headers = effective.headers;
     let body: unknown;
-    const foreign = await foreignStructuredBody(rawBody, effective);
+    const foreign = await foreignStructuredBody(rawBody);
     if (foreign) {
       body = rawBody;
-      headers = new Headers(headers);
-      const type = FOREIGN_CONTENT_TYPE[foreign](rawBody);
-      if (type) headers.set("content-type", type);
-      else headers.delete("content-type");
+      // Replace only the runtime's stringified label; an explicit Content-Type
+      // from the caller is kept.
+      if (AUTO_TEXT_TYPE.test(headers.get("content-type") ?? "")) {
+        headers = new Headers(headers);
+        const type = FOREIGN_CONTENT_TYPE[foreign](rawBody);
+        if (type) headers.set("content-type", type);
+        else headers.delete("content-type");
+      }
     } else {
       body = await decodeBody(effective);
     }

@@ -100,6 +100,57 @@ describe("defineElement render reentrancy", () => {
     el.removeAttribute("bad");
     expect(el.textContent).toBe("ok");
   });
+
+  it("a component that removes its own host while rendering leaves no live subtree", () => {
+    const tag = uniqueTag();
+    const [label, setLabel] = signal("a");
+    let bindings = 0;
+    defineElement(
+      tag,
+      (_props, host) => {
+        host.remove();
+        const node = div(() => {
+          bindings++;
+          return label();
+        }) as HTMLElement;
+        return node;
+      },
+      { shadow: false },
+    );
+    const el = document.createElement(tag);
+    document.body.appendChild(el);
+
+    expect(el.isConnected).toBe(false);
+    expect(el.childNodes).toHaveLength(0);
+    const before = bindings;
+    expect(before).toBeGreaterThan(0);
+    // The discarded build was disposed: its binding no longer reacts.
+    setLabel("b");
+    expect(bindings).toBe(before);
+  });
+
+  it("a component that moves its own host while rendering renders again without nesting", () => {
+    const tag = uniqueTag();
+    const renders = vi.fn();
+    const parkA = document.createElement("section");
+    const parkB = document.createElement("section");
+    document.body.append(parkA, parkB);
+    defineElement(
+      tag,
+      (_props, host) => {
+        renders();
+        if (host.parentNode === parkA) parkB.appendChild(host);
+        return div("moved") as HTMLElement;
+      },
+      { shadow: false },
+    );
+    const el = document.createElement(tag);
+    expect(() => parkA.appendChild(el)).not.toThrow();
+    expect(el.parentNode).toBe(parkB);
+    expect(el.textContent).toBe("moved");
+    expect(renders.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(handler).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -332,6 +383,32 @@ describe("createHttpMock in jsdom", () => {
     expect(seen[1].body).toBeInstanceOf(URLSearchParams);
     expect(seen[1].type).toMatch(/^application\/x-www-form-urlencoded/);
     expect(seen[2]).toEqual({ body: "plain", type: "text/plain;charset=UTF-8" });
+  });
+
+  it("a jsdom FormData with an explicit Content-Type is still passed through, keeping that type", async () => {
+    let seen: { body: unknown; type: string | null } | undefined;
+    const mock = createHttpMock([
+      {
+        method: "POST",
+        url: "/x",
+        response: ({ body, headers }) => {
+          seen = { body, type: headers.get("content-type") };
+          return { body: "ok" };
+        },
+      },
+    ]);
+    const original = globalThis.fetch;
+    mock.install();
+    try {
+      const form = new FormData();
+      form.append("k", "v");
+      await fetch("/x", { method: "POST", body: form, headers: { "content-type": "application/x-custom" } });
+    } finally {
+      mock.restore();
+      globalThis.fetch = original;
+    }
+    expect(seen?.body).toBeInstanceOf(FormData);
+    expect(seen?.type).toBe("application/x-custom");
   });
 
   it("rejects with the signal's reason, like fetch()", async () => {

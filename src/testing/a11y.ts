@@ -274,7 +274,7 @@ function hasAccessibleName(el: Element): boolean {
  */
 function isNativeInteractive(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
-  if (["button", "select", "textarea", "summary", "label"].includes(tag)) return true;
+  if (["button", "select", "textarea", "summary"].includes(tag)) return true;
   if (tag === "input" && el.getAttribute("type") !== "hidden") return true;
   if (tag === "a" && el.hasAttribute("href")) return true;
   if (tag === "area" && el.hasAttribute("href")) return true;
