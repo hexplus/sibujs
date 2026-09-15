@@ -43,6 +43,9 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 // Dev-mode only: track active bindings to detect orphans.
 let activeBindingCount = 0;
 
+// Open registration captures, innermost last. See `withDisposerRollback`.
+const registrationCaptures: [Node, () => void][][] = [];
+
 /**
  * Register a teardown function for a DOM node.
  * When dispose(node) is called, all registered teardowns run.
@@ -55,6 +58,49 @@ export function registerDisposer(node: Node, teardown: () => void): void {
   }
   disposers.push(teardown);
   if (DEV) activeBindingCount++;
+  if (registrationCaptures.length > 0) {
+    registrationCaptures[registrationCaptures.length - 1].push([node, teardown]);
+  }
+}
+
+/**
+ * Run `build` as a render transaction.
+ *
+ * Every disposer registered while it runs is recorded. If `build` throws, those
+ * registrations — and only those — are run and unregistered in reverse order,
+ * then the error is rethrown; ownership that existed before the attempt (a host
+ * element's own disposers, say) is untouched. This is what lets a failed
+ * rebuild release the bindings and listeners it created before throwing, even
+ * though the half-built nodes were never returned to the caller.
+ *
+ * On success the registrations stay, and an enclosing transaction inherits
+ * them, so an outer failure rolls back nested successful work too.
+ *
+ * @internal
+ */
+export function withDisposerRollback<T>(build: () => T): T {
+  const captured: [Node, () => void][] = [];
+  registrationCaptures.push(captured);
+  let result: T;
+  try {
+    result = build();
+  } catch (err) {
+    registrationCaptures.pop();
+    for (let i = captured.length - 1; i >= 0; i--) {
+      const [node, teardown] = captured[i];
+      unregisterDisposer(node, teardown);
+      try {
+        teardown();
+      } catch (cleanupErr) {
+        reportError(cleanupErr, { phase: "cleanup", name: "disposer" });
+      }
+    }
+    throw err;
+  }
+  registrationCaptures.pop();
+  const parent = registrationCaptures[registrationCaptures.length - 1];
+  if (parent) parent.push(...captured);
+  return result;
 }
 
 /**

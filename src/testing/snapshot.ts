@@ -3,6 +3,8 @@
  * Capture and compare component output over time.
  */
 
+import { replaceChildrenSafely } from "../core/rendering/dispose";
+
 // ─── DOM Serialization ──────────────────────────────────────────────────────
 
 /**
@@ -166,8 +168,14 @@ export function snapshotComponent(component: () => HTMLElement): string {
   const element = component();
   container.appendChild(element);
 
-  // Serialize the rendered element (the component root), not the wrapper container
-  return serializeElement(element, 0);
+  try {
+    // Serialize the rendered element (the component root), not the wrapper container
+    return serializeElement(element, 0);
+  } finally {
+    // The render only exists to be serialized: dispose it so its bindings stop
+    // reacting — even when serialization throws.
+    replaceChildrenSafely(container);
+  }
 }
 
 // ─── Match Snapshot ─────────────────────────────────────────────────────────

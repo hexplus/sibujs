@@ -2,7 +2,8 @@
 // CUSTOM ELEMENTS (WEB COMPONENTS)
 // ============================================================================
 
-import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { reportError } from "../core/errors";
+import { replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -74,18 +75,36 @@ export function defineElement(
       replaceChildrenSafely(this._root);
     }
 
+    /**
+     * Render as a transaction: build the replacement first, commit only if that
+     * succeeds. Tearing the current subtree down before calling the factory
+     * meant a throwing rerender (an invalid attribute, say) left the element
+     * blank with its live state already disposed. Now a failure keeps the
+     * working subtree, releases whatever the failed attempt registered, and is
+     * reported with this element as its node so an enclosing ErrorBoundary can
+     * claim it.
+     */
     private _render(): void {
-      this._teardown();
       const props = this._getProps();
 
+      let el: HTMLElement;
+      try {
+        el = withDisposerRollback(() => component(props, this));
+      } catch (err) {
+        reportError(err, { phase: "render", name: `defineElement(${name})`, node: this });
+        return;
+      }
+
+      const next: Node[] = [];
       if (options.styles && this._root instanceof ShadowRoot) {
         const styleEl = document.createElement("style");
         styleEl.textContent = options.styles;
-        this._root.appendChild(styleEl);
+        next.push(styleEl);
       }
+      next.push(el);
 
-      const el = component(props, this);
-      this._root.appendChild(el);
+      // Disposes the previous subtree exactly once, then commits the new one.
+      replaceChildrenSafely(this._root, ...next);
       this._rendered = el;
     }
 

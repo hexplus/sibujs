@@ -131,6 +131,13 @@ export interface ListboxHandle {
   selectedValue: () => string | null;
   /** Stable id that can be used as `aria-activedescendant` on the trigger. */
   activeDescendantId: () => string | null;
+  /**
+   * Reconcile options added or removed since the last change: new options get a
+   * stable id and `aria-selected`, and a removed active option stops being the
+   * active descendant. Happens automatically (on DOM mutation and before every
+   * interaction); call it to reconcile synchronously.
+   */
+  refresh: () => void;
   /** Cleanup: removes listeners. */
   dispose: () => void;
 }
@@ -171,26 +178,47 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   const [selectedValues, setSelectedValues] = signal<readonly string[]>([]);
   const [selectedValue, setSelectedValue] = signal<string | null>(null);
   const [activeDescendantId, setActiveDescendantId] = signal<string | null>(null);
+  // Plain mirror of `activeValue` for reconciliation, which must not track it.
+  let activeValueRef: string | null = null;
 
-  // Stamp every option with a stable id so aria-activedescendant can point at
-  // it, and initialize aria-selected so options expose selection state before
-  // the first user selection (ARIA expects it on every role="option").
-  function stampIds(): void {
+  // The current selection, mirrored from the signal so reconciliation never
+  // reads (and subscribes to) it.
+  let currentSelection: readonly string[] = [];
+
+  // Give every option a stable id so aria-activedescendant can point at it,
+  // and aria-selected so options expose selection state (ARIA expects it on
+  // every role="option"). Stamping only once at creation left options inserted
+  // later without an id — navigation then set an empty active descendant — and
+  // without selection state. So options are reconciled whenever they may have
+  // changed: on DOM mutation, and synchronously before every interaction.
+  function reconcileOptions(): HTMLElement[] {
     const opts = Array.from(container.querySelectorAll<HTMLElement>(optionSelector));
+    const selectedSet = new Set(currentSelection);
+    let activeStillPresent = false;
+    const active = activeValueRef;
     for (const opt of opts) {
       if (!opt.id) opt.id = createId("listbox-option");
-      if (!opt.hasAttribute("aria-selected")) opt.setAttribute("aria-selected", "false");
+      const ov = opt.dataset.value;
+      // Only options without selection state are initialized; select() keeps
+      // the rest in sync, and markup-supplied state is not overwritten.
+      if (!opt.hasAttribute("aria-selected")) {
+        opt.setAttribute("aria-selected", ov !== undefined && selectedSet.has(ov) ? "true" : "false");
+      }
+      if (active !== null && ov === active) activeStillPresent = true;
     }
+    // The active option was removed: it can no longer be the active descendant.
+    if (active !== null && !activeStillPresent) setActive(null, opts);
+    return opts;
   }
-  stampIds();
 
   function getOptions(): HTMLElement[] {
-    return Array.from(container.querySelectorAll<HTMLElement>(optionSelector));
+    return reconcileOptions();
   }
 
-  function setActive(value: string | null): void {
+  function setActive(value: string | null, known?: HTMLElement[]): void {
+    activeValueRef = value;
     setActiveValue(value);
-    const opts = getOptions();
+    const opts = known ?? getOptions();
     for (const opt of opts) {
       if (opt.dataset.value === value) {
         opt.setAttribute("data-highlighted", "");
@@ -218,6 +246,7 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
     } else {
       next = [value];
     }
+    currentSelection = next;
     batch(() => {
       setSelectedValues(next);
       setSelectedValue(multiple ? next.join(",") : value);
@@ -295,6 +324,17 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
   container.addEventListener("keydown", onKeyDown);
   container.addEventListener("click", onClick);
 
+  reconcileOptions();
+  // Reconcile options inserted or removed without any interaction, so ARIA
+  // state is valid for assistive technology before the user navigates.
+  let observer: MutationObserver | null = null;
+  if (typeof MutationObserver !== "undefined") {
+    observer = new MutationObserver(() => {
+      if (!disposed) reconcileOptions();
+    });
+    observer.observe(container, { childList: true, subtree: true });
+  }
+
   let disposed = false;
   function dispose(): void {
     if (disposed) return;
@@ -303,13 +343,15 @@ export function createListbox(container: HTMLElement, options: ListboxOptions = 
     // listbox on a long-lived container does not accumulate dead closures. A
     // no-op when dispose(node) is the caller — its entry is already removed.
     unregisterDisposer(container, dispose);
+    observer?.disconnect();
+    observer = null;
     container.removeEventListener("keydown", onKeyDown);
     container.removeEventListener("click", onClick);
   }
 
   registerDisposer(container, dispose);
 
-  return { activeValue, selectedValues, selectedValue, activeDescendantId, dispose };
+  return { activeValue, selectedValues, selectedValue, activeDescendantId, refresh: reconcileOptions, dispose };
 }
 
 // ─── dialogAria ───────────────────────────────────────────────────────────

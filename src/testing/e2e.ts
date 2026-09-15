@@ -3,6 +3,8 @@
  * Provides DOM fakes, HTTP mocks, and testing helpers for CI/CD integration.
  */
 
+import { reportError } from "../core/errors";
+import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { queryAllByAttribute, queryByAttribute } from "./queries";
 
 // ─── HTTP Mock ──────────────────────────────────────────────────────────────
@@ -151,6 +153,18 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
 // ─── Timer Mock ─────────────────────────────────────────────────────────────
 
+/** Smallest interval period the fake timer uses, in fake milliseconds. */
+const MIN_INTERVAL_MS = 1;
+
+/**
+ * Normalize an interval period. Zero, negative and non-finite delays become
+ * `MIN_INTERVAL_MS`: they stay recurring (real runtimes clamp rather than
+ * turning them into one-shot timers) without an infinite same-timestamp loop.
+ */
+function normalizeIntervalDelay(delay: number): number {
+  return Number.isFinite(delay) && delay >= MIN_INTERVAL_MS ? delay : MIN_INTERVAL_MS;
+}
+
 /**
  * Create a fake timer system for testing time-dependent code.
  * Mocks setTimeout, setInterval, requestAnimationFrame.
@@ -188,7 +202,8 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
       };
       (globalThis as unknown as Record<string, unknown>).setInterval = (cb: () => void, interval: number) => {
         const id = nextId++;
-        timers.push({ id, callback: cb, time: currentTime + interval, interval });
+        const period = normalizeIntervalDelay(interval);
+        timers.push({ id, callback: cb, time: currentTime + period, interval: period });
         return id;
       };
       (globalThis as unknown as Record<string, unknown>).clearTimeout = (id: number) => {
@@ -232,7 +247,9 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
         if (!next) break;
         currentTime = next.time;
         const idx = timers.indexOf(next);
-        if (next.interval) {
+        // `!== undefined`: an interval's period can never be 0 here (see
+        // normalizeIntervalDelay), but kind must not hinge on truthiness.
+        if (next.interval !== undefined) {
           next.time += next.interval;
         } else {
           timers.splice(idx, 1);
@@ -249,12 +266,22 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
         timers.sort((a, b) => a.time - b.time);
         const next = timers[0];
         currentTime = next.time;
-        if (next.interval) {
+        if (next.interval !== undefined) {
           next.time += next.interval;
         } else {
           timers.shift();
         }
         next.callback();
+      }
+      // A recurring interval never drains. Stopping at the cap is correct, but
+      // it must not look like a completed flush.
+      if (timers.length > 0 && i > maxIterations) {
+        reportError(
+          new Error(
+            `[createTimerMock] flush() stopped after ${maxIterations} timer runs with ${timers.length} still pending — likely a recurring interval.`,
+          ),
+          { phase: "scheduler", name: "createTimerMock.flush" },
+        );
       }
     },
     /** Get current fake time */
@@ -395,6 +422,9 @@ export function testComponent(
       await new Promise((r) => setTimeout(r, 0));
     },
     destroy() {
+      // Run framework disposal before detaching, so the component's effects and
+      // listeners do not outlive the test.
+      replaceChildrenSafely(container);
       if (container.parentNode) container.parentNode.removeChild(container);
     },
   };

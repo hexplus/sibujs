@@ -14,52 +14,66 @@
  * Supports lazy initialization and automatic dependency resolution.
  */
 export function createModuleRegistry() {
-  const modules = new Map<string, { factory: () => unknown; deps: string[]; loaded: boolean; value?: unknown }>();
+  type ModuleState = "unloaded" | "resolving" | "loaded";
+  const modules = new Map<string, { factory: () => unknown; deps: string[]; state: ModuleState; value?: unknown }>();
+  // Names currently being resolved, in order — shared by every resolve() call,
+  // including ones a factory makes. A per-call stack used to be dropped before
+  // the factory ran, so a factory resolving its own module started a fresh
+  // stack and recursed until the call stack overflowed.
+  const resolving: string[] = [];
 
   /**
-   * Topologically resolve a module, detecting circular dependencies.
+   * Resolve a module, detecting circular dependencies through both declared
+   * dependencies and `resolve()` calls made from inside factories.
    */
-  function resolveInternal(name: string, stack: Set<string>): unknown {
+  function resolveInternal(name: string): unknown {
     const entry = modules.get(name);
     if (!entry) {
       throw new Error(`[ModuleRegistry] Module "${name}" is not registered.`);
     }
 
     // Return cached value if already loaded
-    if (entry.loaded) {
+    if (entry.state === "loaded") {
       return entry.value;
     }
 
     // Circular dependency detection
-    if (stack.has(name)) {
-      const cycle = [...stack, name].join(" -> ");
+    if (entry.state === "resolving") {
+      const cycle = [...resolving.slice(resolving.indexOf(name)), name].join(" -> ");
       throw new Error(`[ModuleRegistry] Circular dependency detected: ${cycle}`);
     }
 
-    stack.add(name);
-
-    // Resolve dependencies first
-    for (const dep of entry.deps) {
-      resolveInternal(dep, stack);
+    entry.state = "resolving";
+    resolving.push(name);
+    try {
+      // Resolve dependencies first
+      for (const dep of entry.deps) {
+        resolveInternal(dep);
+      }
+      // Initialize the module
+      entry.value = entry.factory();
+      entry.state = "loaded";
+      return entry.value;
+    } catch (err) {
+      // A failed initialization (including a detected cycle) leaves the module
+      // resolvable again rather than stuck in "resolving".
+      entry.state = "unloaded";
+      entry.value = undefined;
+      throw err;
+    } finally {
+      resolving.pop();
     }
-
-    stack.delete(name);
-
-    // Initialize the module
-    entry.value = entry.factory();
-    entry.loaded = true;
-    return entry.value;
   }
 
   return {
     /** Register a module with its factory function and optional dependencies */
     register(name: string, factory: () => unknown, deps: string[] = []): void {
-      modules.set(name, { factory, deps, loaded: false });
+      modules.set(name, { factory, deps, state: "unloaded" });
     },
 
     /** Resolve a module, loading its dependencies first */
     resolve<T = unknown>(name: string): T {
-      return resolveInternal(name, new Set<string>()) as T;
+      return resolveInternal(name) as T;
     },
 
     /** Check if a module is registered */
@@ -101,7 +115,7 @@ export function createModuleRegistry() {
     /** Reset all loaded modules back to unloaded state (useful for testing) */
     reset(): void {
       for (const entry of modules.values()) {
-        entry.loaded = false;
+        entry.state = "unloaded";
         entry.value = undefined;
       }
     },

@@ -3,6 +3,7 @@
  * Provides integration with Jest, Cypress, and Playwright.
  */
 
+import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { queryAllByAttribute, queryByAttribute } from "./queries";
 
 // ─── Jest Adapter ───────────────────────────────────────────────────────────
@@ -26,7 +27,9 @@ export function createJestAdapter() {
     /** Call in afterEach to clean up */
     teardown(): void {
       if (container) {
-        container.innerHTML = "";
+        // Dispose, don't just detach: `innerHTML = ""` skipped framework
+        // teardown, so effects and listeners leaked into later tests.
+        replaceChildrenSafely(container);
         if (container.parentNode) {
           container.parentNode.removeChild(container);
         }
@@ -182,15 +185,26 @@ export function createCypressAdapter() {
     ): {
       element: HTMLElement;
       container: HTMLElement;
+      /** Dispose the mounted component and remove the container this call created. Idempotent. */
+      unmount: () => void;
     } {
+      const ownsContainer = !options?.container;
       const container = options?.container || document.createElement("div");
-      if (!options?.container) {
+      if (ownsContainer) {
         container.setAttribute("data-testenv", "cypress");
         document.body.appendChild(container);
       }
       const element = typeof component === "function" ? component() : component;
       container.appendChild(element);
-      return { element, container };
+      let unmounted = false;
+      const unmount = () => {
+        if (unmounted) return;
+        unmounted = true;
+        dispose(element);
+        element.parentNode?.removeChild(element);
+        if (ownsContainer) container.parentNode?.removeChild(container);
+      };
+      return { element, container, unmount };
     },
 
     /** Generate Cypress custom commands for SibuJS */
@@ -270,7 +284,9 @@ export function createUniversalAdapter() {
     /** Teardown test environment */
     teardown(): void {
       if (container) {
-        container.innerHTML = "";
+        // Dispose, don't just detach: `innerHTML = ""` skipped framework
+        // teardown, so effects and listeners leaked into later tests.
+        replaceChildrenSafely(container);
         if (container.parentNode) {
           container.parentNode.removeChild(container);
         }

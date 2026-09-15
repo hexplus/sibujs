@@ -1,3 +1,5 @@
+import { getRequestStore } from "../ssr-context";
+
 // The id counter is shared across duplicate copies of this module (as a bundler
 // can produce under dependency pre-bundling) via a globalThis registry. Without
 // this, two copies would each count from 0 and hand out colliding ids like
@@ -12,6 +14,11 @@ const _counter: { n: number } = ((globalThis as typeof globalThis & { [COUNTER_K
  * (`aria-labelledby`, `htmlFor` + `id`, etc.).
  *
  * Each call returns a fresh incrementing id. Optionally accepts a prefix.
+ *
+ * Inside an SSR request (`runInSSRContext`) the counter belongs to that request,
+ * so every request's ids start from 1 — independent of earlier or concurrent
+ * requests, and identical to a fresh client's sequence for hydration. Outside a
+ * request the shared client counter is used.
  *
  * IDs are plain strings (not reactive) — call once per component instance
  * and reuse the returned value for both sides of the association.
@@ -31,6 +38,11 @@ const _counter: { n: number } = ((globalThis as typeof globalThis & { [COUNTER_K
  * ```
  */
 export function createId(prefix = "sibu"): string {
+  const request = getRequestStore();
+  if (request) {
+    request.idCounter = (request.idCounter ?? 0) + 1;
+    return `${prefix}-${request.idCounter}`;
+  }
   _counter.n++;
   return `${prefix}-${_counter.n}`;
 }

@@ -9,6 +9,93 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `createId()` was not request-scoped during SSR
+
+The suspense counter was request-scoped but `createId()` incremented one
+process-global counter, so a server render's ids depended on earlier and
+concurrent requests and could differ from a fresh client's — breaking `for`,
+`aria-labelledby`, `aria-describedby` and hydration. Inside `runInSSRContext` the
+counter now lives on the request store (shared by duplicate module copies through
+the same request), so every request's ids start from 1 and match a fresh client
+sequence. Outside a request the shared client counter is used as before.
+
+### Fixed — module factories bypassed circular-dependency detection
+
+A module left the resolution stack before its factory ran, and a factory calling
+`resolve()` started a fresh stack, so a factory cycle recursed until the call stack
+overflowed. Modules now move through `unloaded` → `resolving` → `loaded`, detected
+across every `resolve()` call including those made from factories, so direct and
+indirect factory cycles throw the documented circular-dependency error. A module
+whose initialization throws returns to `unloaded` and can be retried; a successful
+factory still runs once.
+
+### Fixed — a failing custom-element rerender destroyed the working component
+
+`defineElement()` tore the current subtree down before calling the component
+factory, so a throwing rerender — typically an invalid attribute — left the element
+blank with its live state disposed. Rendering is now a transaction: the replacement
+is built first and committed only on success, disposing the old subtree exactly
+once. On failure the working subtree stays, disposers the failed attempt registered
+are rolled back, and the error is reported with the element as its node
+(`phase: "render"`), so an enclosing `ErrorBoundary` can claim it.
+
+### Fixed — router parsing dropped `?` and `#` after the first one
+
+Route parsing destructured `split("#")` and `split("?")`, keeping only the first two
+pieces: `/callback?redirect=/login?next=home#section#details` lost `?next=home` and
+`#details`. URLs are now split at the first `#`, then the first `?` before it, and
+everything after a delimiter belongs to that part — for `navigate()` and for
+`RouterLink` active-state matching alike.
+
+### Fixed — testing utilities detached components without disposing them
+
+The Jest and universal adapters cleared containers with `innerHTML = ""`,
+`testComponent().destroy()` removed its container directly, and
+`snapshotComponent()` never disposed its temporary render, so effects, listeners and
+subscriptions leaked across tests. All of them now run framework disposal first;
+`snapshotComponent()` does so even when serialization throws. The Cypress adapter's
+`mount()` now returns an idempotent, disposal-aware `unmount()`.
+
+### Fixed — the fake timer turned zero-delay intervals into one-shot timers
+
+`createTimerMock()` decided a timer was an interval by the truthiness of its period,
+so `setInterval(fn, 0)` ran once — and `advance()` could spin forever on a zero
+period. Interval kind is now checked explicitly, zero, negative and non-finite
+periods are normalized to a 1 ms minimum so they stay recurring, and `flush()`
+reports hitting its iteration limit instead of stopping silently.
+
+### Fixed — `getSlot()` returned inherited members as slots
+
+`getSlot({}, "toString")` returned `Object.prototype.toString`, so reserved-looking
+slot names bypassed fallback rendering. Only an own, function-valued entry is now
+returned.
+
+### Fixed — `timeline()` accepted capacities that corrupted its state
+
+`timeline(0, 0)` evicted the current value on the first `set()`, leaving an empty
+history, an index of `-1` and an `undefined` value. `maxHistory` must now be a
+positive safe integer; anything else throws a `RangeError`.
+
+### Fixed — ISR `isStale()` did not react to time passing
+
+`isStale()` compared a timestamp signal with `Date.now()`, so nothing reactive
+changed when the deadline passed and subscribed UI stayed stale-unaware. Staleness
+is now a signal flipped by a deadline timer: it becomes `true` when
+`revalidateAfter` elapses (starting revalidation), stays `true` while revalidation
+is pending or after it fails, and returns to `false` on success, which re-arms the
+deadline. Disposal cancels the deadline, and a non-positive or non-finite
+`revalidateAfter` throws a `RangeError`.
+
+### Fixed — dynamically added listbox options had incomplete ARIA state
+
+`createListbox()` stamped option ids and `aria-selected` only once, so options
+inserted later had no id — keyboard navigation set an empty
+`aria-activedescendant` — and no selection state. Options are now reconciled on DOM
+mutation and before every interaction: new options get an id and `aria-selected`
+reflecting the current selection, and removing the active option clears the active
+descendant. The handle gains `refresh()` for synchronous reconciliation, and
+`dispose()` stops observing.
+
 ### Fixed — `normalize()` permitted prototype pollution
 
 The entity registry and tables were ordinary objects keyed by schema names and
