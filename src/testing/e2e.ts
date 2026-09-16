@@ -153,12 +153,12 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     input: RequestInfo | URL,
     request: Request | undefined,
     init: RequestInit | undefined,
+    method: string | undefined,
     rawBody: BodyInit | null | undefined,
     omitBody: boolean,
   ): Request => {
     const overrides: RequestInit & { duplex?: "half" } = {};
     // Each member is read once (accessors must not answer twice differently).
-    const method = init?.method;
     const headers = init?.headers;
     if (method !== undefined) overrides.method = method;
     if (headers !== undefined) overrides.headers = headers;
@@ -198,12 +198,21 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
     if (signal?.aborted) throw abortError(signal);
 
     const rawBody = init?.body;
+    const initMethod = init?.method;
     const tag = structuredTag(rawBody);
     const passThrough = tag !== null && (await unusableBody(rawBody, tag));
+    if (passThrough) {
+      // The Request below is built without the body, so its own validation
+      // cannot see it: refuse a body on GET/HEAD here, as fetch() does.
+      const intended = (initMethod ?? request?.method ?? "GET").toUpperCase();
+      if (intended === "GET" || intended === "HEAD") {
+        throw new TypeError(`Request with ${intended} method cannot have body.`);
+      }
+    }
 
     // Construction errors (a GET with a body, an invalid URL) reject exactly as
     // fetch() does.
-    const effective = toEffectiveRequest(input, request, init, rawBody, passThrough);
+    const effective = toEffectiveRequest(input, request, init, initMethod, rawBody, passThrough);
     const method = effective.method.toUpperCase();
     let headers = effective.headers;
     let body: unknown;

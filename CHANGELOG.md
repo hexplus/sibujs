@@ -26,8 +26,10 @@ element nothing would tear down.
 
 `withDisposerRollback()` recorded every disposer registered while a build ran,
 including those registered by effects the build's signal writes re-ran elsewhere
-on the page, so a failed render tore down live bindings it did not own. Capturing
-is now paused while the reactive runtime drains its notification queue.
+on the page, so a failed render tore down live bindings it did not own. Every
+subscriber now remembers the render transaction it was created in: its re-runs
+register into that transaction (and roll back with it), and a subscriber created
+outside one never registers into whatever transaction happens to be open.
 
 ### Fixed — plugin hooks and providers registered after `install()` were lost
 
@@ -36,6 +38,13 @@ The staged install context kept writing to its staging area after the commit, so
 timer never reached the registry. Once committed, the context writes to the live
 registry again; an init hook registered by an init hook is recorded but not run in
 the same pass.
+
+`install()` may now return a promise (`void | PromiseLike<void>`), and `plugin()`
+returns it: an async install commits only when it fulfils — everything registered
+before and after an `await` commits together — while a rejection commits nothing,
+is reported with `phase: "async"` and leaves the plugin installable again. The
+name stays reserved while the install is in flight, so a concurrent attempt is
+refused, and ignoring the returned promise never produces an unhandled rejection.
 
 ### Fixed — ISR stopped revalidating after one failed fetch
 
@@ -50,9 +59,11 @@ a later `track()` does not run `leave` for it again.
 
 ### Fixed — accessibility checks reported false positives
 
-`checkKeyboardAccess()` no longer flags a container whose click listener delegates
-to keyboard-reachable descendants (buttons, links, inputs, focusable elements), and
-treats `summary` as natively interactive. `checkFormLabels()` finds a
+`checkKeyboardAccess()` no longer flags a container whose click listener only
+delegates to its own controls — declared with `data-a11y-delegates` or the new
+`delegatesActivation` option, never inferred from the descendants, so a clickable
+card wrapping a button is still reported — and treats `summary` as natively
+interactive. `checkFormLabels()` finds a
 `<label for>` anywhere in the input's document or shadow root, so checking an input
 directly no longer reports it as unlabeled.
 
@@ -63,7 +74,8 @@ the runtime's `Request`) reaches the handler readable instead of as
 `"[object FormData]"`: a body the runtime rejects or stringifies is passed
 through as-is with a `Content-Type` describing it (an explicit one from the
 caller is kept), while a body the runtime understands keeps decoding exactly as
-the same bytes in a `Request` input would. An abort rejects with
+the same bytes in a `Request` input would. A body on a GET or HEAD request is
+refused on that path too, as `fetch()` does. An abort rejects with
 the signal's reason — a `TimeoutError`, or a custom value — like `fetch()`.
 
 ### Fixed — `swipe()` lost gestures
@@ -183,9 +195,10 @@ reactive registries.
 ### Changed — default CDN gzip budget baseline
 
 The baseline was raised from 26,450 B to 26,500 B for the `copyOnClick` and
-component-registry fixes (+64 B after trimming), and then to 26,600 B for safe
-thenable adoption in `transition()` and the `imageLoader` reentrancy guard
-(+106 B); the raw budget is unchanged.
+component-registry fixes (+64 B after trimming), to 26,600 B for safe thenable
+adoption in `transition()` and the `imageLoader` reentrancy guard (+106 B), and
+to 26,700 B for per-subscriber render-transaction ownership in the disposal and
+reactive core (+85 B); the raw budget is unchanged.
 
 ### Fixed — `springSignal()` restarted after disposal and crashed during SSR
 

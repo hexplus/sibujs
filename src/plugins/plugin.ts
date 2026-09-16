@@ -2,6 +2,8 @@
 // PLUGIN ARCHITECTURE
 // ============================================================================
 
+import { reportError } from "../core/errors";
+import { adoptThenable } from "../utils/adoptThenable";
 import { globalSingleton } from "../utils/globalSingleton";
 
 export interface PluginContext {
@@ -16,7 +18,12 @@ export interface PluginContext {
 
 export interface SibuPlugin {
   name: string;
-  install: (ctx: PluginContext, options?: unknown) => void;
+  /**
+   * Register hooks and providers. May be async: the plugin is committed only
+   * when the returned promise fulfils, and a rejection commits nothing and
+   * leaves the plugin installable again.
+   */
+  install: (ctx: PluginContext, options?: unknown) => void | PromiseLike<void>;
 }
 
 interface PluginHooks {
@@ -30,7 +37,12 @@ export interface PluginRegistry {
   readonly installedPlugins: Set<string>;
   readonly hooks: PluginHooks;
   readonly provided: Map<string, unknown>;
-  plugin: (p: SibuPlugin, options?: unknown) => void;
+  /**
+   * Install a plugin. Returns a promise for an async `install()` — awaited, it
+   * settles when the plugin is committed (or rejects with the install failure);
+   * a synchronous install returns `undefined` and throws on failure.
+   */
+  plugin: (p: SibuPlugin, options?: unknown) => void | Promise<void>;
   inject: <T = unknown>(key: string, defaultValue?: T) => T;
   triggerMount: (element: HTMLElement) => void;
   triggerUnmount: (element: HTMLElement) => void;
@@ -78,9 +90,10 @@ export function createPluginRegistry(): PluginRegistry {
 
       const staged: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
       const stagedProvided = new Map<string, unknown>();
-      // Staging covers only the install() call itself. Once committed, `ctx`
-      // writes to the live registry again, so hooks and providers registered
-      // later — from an init hook, an async install, a timer — are not lost.
+      // Staging covers the whole installation — including the part after an
+      // `await`. Once committed, `ctx` writes to the live registry again, so
+      // hooks and providers registered later (from an init hook, a timer) are
+      // not lost.
       let committed = false;
       const target = () => (committed ? hooks : staged);
       const ctx: PluginContext = {
@@ -91,32 +104,61 @@ export function createPluginRegistry(): PluginRegistry {
         provide: (key, value) => (committed ? provided : stagedProvided).set(key, value),
       };
 
-      installing.add(p.name);
-      try {
-        p.install(ctx, options);
-      } finally {
+      const commit = (): void => {
+        hooks.init.push(...staged.init);
+        hooks.mount.push(...staged.mount);
+        hooks.unmount.push(...staged.unmount);
+        hooks.error.push(...staged.error);
+        for (const [key, value] of stagedProvided) provided.set(key, value);
+        installedPlugins.add(p.name);
+        committed = true;
         installing.delete(p.name);
-      }
 
-      // Commit.
-      hooks.init.push(...staged.init);
-      hooks.mount.push(...staged.mount);
-      hooks.unmount.push(...staged.unmount);
-      hooks.error.push(...staged.error);
-      for (const [key, value] of stagedProvided) provided.set(key, value);
-      installedPlugins.add(p.name);
-      committed = true;
-
-      // Run only this plugin's init hooks registered during install(), from a
-      // snapshot (an init hook registering another does not run it now).
-      for (const cb of staged.init.slice()) {
-        try {
-          cb();
-        } catch (e) {
-          console.error(`[Plugin] "${p.name}" init error:`, e);
+        // Run only this plugin's init hooks registered during install(), from a
+        // snapshot (an init hook registering another does not run it now).
+        for (const cb of staged.init.slice()) {
+          try {
+            cb();
+          } catch (e) {
+            console.error(`[Plugin] "${p.name}" init error:`, e);
+          }
         }
+      };
+
+      installing.add(p.name);
+      let pending: Promise<unknown> | null;
+      try {
+        // adoptThenable reads `then` once and turns a throwing getter or
+        // invocation into a rejection.
+        pending = adoptThenable(p.install(ctx, options));
+      } catch (err) {
+        // Synchronous failure: nothing is committed and the name is free again.
+        installing.delete(p.name);
+        throw err;
       }
+
+      if (!pending) {
+        commit();
+        return;
+      }
+
+      // Async install: the name stays in `installing` (so a concurrent attempt
+      // is rejected) until the promise settles. Only fulfilment commits.
+      const settled = pending.then(
+        () => commit(),
+        (err) => {
+          installing.delete(p.name);
+          reportError(err, { phase: "async", name: `plugin(${p.name})` });
+          throw err;
+        },
+      );
+      // Handled here so a caller that ignores the returned promise gets a
+      // reported error rather than an unhandled rejection; the promise this
+      // returns still rejects for a caller that awaits it.
+      settled.catch(() => {});
+      return settled;
     },
+
     inject<T = unknown>(key: string, defaultValue?: T): T {
       if (provided.has(key)) return provided.get(key) as T;
       if (defaultValue !== undefined) return defaultValue;
@@ -176,7 +218,10 @@ const _defaults = globalSingleton(Symbol.for("sibujs.plugins.defaultRegistry.v1"
 /**
  * Creates a plugin definition.
  */
-export function createPlugin(name: string, install: (ctx: PluginContext, options?: unknown) => void): SibuPlugin {
+export function createPlugin(
+  name: string,
+  install: (ctx: PluginContext, options?: unknown) => void | PromiseLike<void>,
+): SibuPlugin {
   return { name, install };
 }
 

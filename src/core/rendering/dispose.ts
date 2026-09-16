@@ -43,27 +43,46 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 // Dev-mode only: track active bindings to detect orphans.
 let activeBindingCount = 0;
 
-// Open registration captures, innermost last. See `withDisposerRollback`. A
-// `null` frame pauses capturing (see `pauseDisposerCapture`).
-const registrationCaptures: ([Node, () => void][] | null)[] = [];
-
 /**
- * Stop recording disposer registrations until {@link resumeDisposerCapture}.
- * The reactive runtime calls this around its notification drain: an effect
- * re-run triggered by a signal written during a render belongs to that effect's
- * own owner, not to the render — capturing it let a failed render tear down
- * live bindings elsewhere on the page. Returns whether a frame was pushed.
+ * One open render transaction's registration record. Frames are identities, not
+ * just arrays: a subscriber created inside a transaction keeps a reference to
+ * its frame, so its later re-runs register into that transaction (and are rolled
+ * back with it) while everything else stays out. A closed frame accepts nothing.
  *
  * @internal
  */
-export function pauseDisposerCapture(): boolean {
-  if (registrationCaptures.length === 0) return false;
-  registrationCaptures.push(null);
+export interface DisposerCapture {
+  entries: [Node, () => void][];
+  closed: boolean;
+}
+
+// Open captures, innermost last. A `null` frame suppresses capturing entirely.
+const registrationCaptures: (DisposerCapture | null)[] = [];
+
+/** The capture a subscriber created right now belongs to. @internal */
+export function currentDisposerCapture(): DisposerCapture | null {
+  const top = registrationCaptures[registrationCaptures.length - 1];
+  return top && !top.closed ? top : null;
+}
+
+/**
+ * Make `capture` (or no capture at all) the active one for the code that
+ * follows, and report whether a frame was pushed. The reactive runtime brackets
+ * every subscriber re-run with this: a re-run registers into the transaction
+ * that created the subscriber, and an unrelated subscriber's registrations do
+ * not leak into whatever transaction happens to be open.
+ *
+ * @internal
+ */
+export function beginDisposerCapture(capture: DisposerCapture | null): boolean {
+  // Nothing to isolate: no transaction is open and the subscriber owns none.
+  if (capture === null && registrationCaptures.length === 0) return false;
+  registrationCaptures.push(capture && !capture.closed ? capture : null);
   return true;
 }
 
-/** @internal Undo a {@link pauseDisposerCapture} that returned `true`. */
-export function resumeDisposerCapture(): void {
+/** Undo a {@link beginDisposerCapture} that returned `true`. @internal */
+export function endDisposerCapture(): void {
   registrationCaptures.pop();
 }
 
@@ -80,7 +99,7 @@ export function registerDisposer(node: Node, teardown: () => void): void {
   disposers.push(teardown);
   if (DEV) activeBindingCount++;
   const capture = registrationCaptures[registrationCaptures.length - 1];
-  if (capture) capture.push([node, teardown]);
+  if (capture && !capture.closed) capture.entries.push([node, teardown]);
 }
 
 /**
@@ -99,8 +118,9 @@ export function registerDisposer(node: Node, teardown: () => void): void {
  * @internal
  */
 export function withDisposerRollback<T>(build: () => T): T {
-  const captured: [Node, () => void][] = [];
-  registrationCaptures.push(captured);
+  const frame: DisposerCapture = { entries: [], closed: false };
+  const captured = frame.entries;
+  registrationCaptures.push(frame);
   let result: T;
   try {
     result = build();
@@ -129,17 +149,19 @@ export function withDisposerRollback<T>(build: () => T): T {
         }
       }
     } finally {
+      frame.closed = true;
       registrationCaptures.pop();
     }
     throw err;
   }
+  frame.closed = true;
   registrationCaptures.pop();
   const parent = registrationCaptures[registrationCaptures.length - 1];
-  if (parent) {
+  if (parent && !parent.closed) {
     // Hand up only registrations that are still live; ones a dispose() already
     // ran are not the enclosing transaction's to roll back.
     for (const entry of captured) {
-      if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.push(entry);
+      if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.entries.push(entry);
     }
   }
   return result;

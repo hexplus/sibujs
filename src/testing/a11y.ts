@@ -281,9 +281,22 @@ function isNativeInteractive(el: Element): boolean {
   return false;
 }
 
-/** Keyboard-reachable descendants that a delegating click listener may serve. */
-const INTERACTIVE_DESCENDANTS =
-  'button, select, textarea, summary, a[href], area[href], input:not([type="hidden"]), [tabindex]:not([tabindex="-1"])';
+/**
+ * Marks a container whose activation handler only delegates to the controls
+ * inside it, so the container itself is not a control. Containing a button is
+ * NOT evidence of that — a clickable card wrapping a button is still a control
+ * that keyboard users cannot reach — so delegation must be declared, either with
+ * this attribute or with the `delegatesActivation` option.
+ */
+const DELEGATES_ATTRIBUTE = "data-a11y-delegates";
+
+export interface KeyboardAccessOptions {
+  /**
+   * Recognise a container as delegating activation to its own controls, instead
+   * of marking it with `data-a11y-delegates`.
+   */
+  delegatesActivation?: (el: Element) => boolean;
+}
 
 // ─── Individual Checks ──────────────────────────────────────────────────────
 
@@ -550,7 +563,7 @@ export function checkColorContrast(root: Element): A11yViolation[] {
  * Check that interactive elements are keyboard accessible.
  * Elements with click handlers should have tabindex, role, and key handlers.
  */
-export function checkKeyboardAccess(root: Element): A11yViolation[] {
+export function checkKeyboardAccess(root: Element, options?: KeyboardAccessOptions): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Elements with an activation handler that aren't natively interactive: an
@@ -559,9 +572,8 @@ export function checkKeyboardAccess(root: Element): A11yViolation[] {
   const clickElements = selectAll(root, "*").filter(hasActivationHandler);
   for (const el of clickElements) {
     if (isNativeInteractive(el)) continue;
-    // A container whose listener delegates activation to keyboard-accessible
-    // descendants (a list of buttons, a menu of links) is not itself a control.
-    if (el.querySelector(INTERACTIVE_DESCENDANTS)) continue;
+    // Declared delegation only (attribute or option) — never inferred.
+    if (el.hasAttribute(DELEGATES_ATTRIBUTE) || options?.delegatesActivation?.(el)) continue;
 
     const hasTabindex = el.hasAttribute("tabindex");
     const hasRole = el.hasAttribute("role");

@@ -179,6 +179,77 @@ describe("withDisposerRollback scope", () => {
     stop();
   });
 
+  it("an effect created BY the build is rolled back, including a later re-run's cleanup", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+
+    expect(() =>
+      withDisposerRollback(() => {
+        const stop = effect(() => {
+          if (value() === 1) registerDisposer(node, cleanup);
+        });
+        registerDisposer(node, stop);
+        setValue(1); // the transaction's own effect re-runs here
+        throw new Error("render failed");
+      }),
+    ).toThrow("render failed");
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    // Exactly once: the rollback already ran it, so disposing the node does not.
+    dispose(node);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    // The effect itself was stopped by the rollback.
+    setValue(2);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("nested transactions keep the right owner for each effect", () => {
+    const node = document.createElement("div");
+    const order: string[] = [];
+    const [value, setValue] = signal(0);
+    let stopOuter = () => {};
+
+    withDisposerRollback(() => {
+      stopOuter = effect(() => {
+        if (value() > 0) registerDisposer(node, () => order.push("outer effect"));
+      });
+      expect(() =>
+        withDisposerRollback(() => {
+          const stopInner = effect(() => {
+            if (value() > 0) registerDisposer(node, () => order.push("inner effect"));
+          });
+          registerDisposer(node, stopInner);
+          setValue(1); // re-runs BOTH effects
+          throw new Error("inner failed");
+        }),
+      ).toThrow("inner failed");
+    });
+
+    // Only the inner transaction's registrations were rolled back.
+    expect(order).toEqual(["inner effect"]);
+    dispose(node);
+    expect(order).toEqual(["inner effect", "outer effect"]);
+    stopOuter();
+  });
+
+  it("a node disposed during the build is not torn down twice by an effect re-run", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+    expect(() =>
+      withDisposerRollback(() => {
+        effect(() => {
+          if (value() === 1) registerDisposer(node, cleanup);
+        });
+        setValue(1);
+        dispose(node); // runs the cleanup already
+        throw new Error("render failed");
+      }),
+    ).toThrow();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("registrations made directly by the build are still rolled back", () => {
     const node = document.createElement("div");
     const own = vi.fn();
@@ -219,6 +290,91 @@ describe("plugin context after commit", () => {
     saved?.onMount(mount);
     registry.triggerMount(document.createElement("div"));
     expect(mount).toHaveBeenCalledTimes(1);
+  });
+
+  it("an async install commits only after it fulfils", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const init = vi.fn();
+    const result = registry.plugin({
+      name: "async-ok",
+      async install(ctx) {
+        ctx.provide("early", 1);
+        ctx.onInit(init);
+        await gate;
+        ctx.provide("late", 2);
+      },
+    });
+    expect(registry.installedPlugins.has("async-ok")).toBe(false);
+    expect(registry.provided.has("early")).toBe(false);
+    expect(init).not.toHaveBeenCalled();
+
+    release();
+    await result;
+    // Registrations from before and after the await commit together.
+    expect(registry.inject("early")).toBe(1);
+    expect(registry.inject("late")).toBe(2);
+    expect(init).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rejected async install commits nothing, is reported, and stays retryable", async () => {
+    const registry = createPluginRegistry();
+    const install = vi.fn(async (ctx: { provide: (k: string, v: unknown) => void }) => {
+      ctx.provide("partial", true);
+      await Promise.resolve();
+      throw new Error("install failed");
+    });
+    const failing = { name: "flaky", install } as unknown as Parameters<typeof registry.plugin>[0];
+    // Ignoring the returned promise must not produce an unhandled rejection.
+    registry.plugin(failing);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registry.installedPlugins.has("flaky")).toBe(false);
+    expect(registry.provided.has("partial")).toBe(false);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][1]).toMatchObject({ phase: "async", name: "plugin(flaky)" });
+
+    // Retryable, and an awaited install still rejects.
+    handler.mockClear();
+    await expect(registry.plugin(failing)).rejects.toThrow("install failed");
+    expect(install).toHaveBeenCalledTimes(2);
+  });
+
+  it("a second install while the first is still pending is rejected", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const plugin = { name: "slow", install: async () => gate };
+    const first = registry.plugin(plugin);
+    expect(() => registry.plugin(plugin)).toThrow(/already being installed/);
+    release();
+    await first;
+    expect(registry.installedPlugins.has("slow")).toBe(true);
+  });
+
+  it("a hostile thenable from install() is reported and commits nothing", async () => {
+    const registry = createPluginRegistry();
+    registry.plugin({
+      name: "hostile",
+      install: (ctx) => {
+        ctx.provide("nope", 1);
+        return {
+          // biome-ignore lint/suspicious/noThenProperty: a hostile thenable is the subject under test
+          get then() {
+            throw new Error("hostile getter");
+          },
+        } as unknown as PromiseLike<void>;
+      },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(registry.installedPlugins.has("hostile")).toBe(false);
+    expect(registry.provided.has("nope")).toBe(false);
+    expect(handler).toHaveBeenCalledTimes(1);
   });
 
   it("a throwing install still commits nothing", () => {
@@ -324,7 +480,7 @@ describe("TransitionGroup.remove failures", () => {
 // a11y: delegated listeners and labels outside the checked root.
 // ---------------------------------------------------------------------------
 describe("a11y false positives", () => {
-  it("a container delegating clicks to real buttons is not a violation", () => {
+  const delegatingList = () => {
     const list = document.createElement("ul");
     for (let i = 0; i < 2; i++) {
       const li = document.createElement("li");
@@ -332,7 +488,26 @@ describe("a11y false positives", () => {
       list.appendChild(li);
     }
     list.addEventListener("click", () => {});
-    expect(checkKeyboardAccess(list)).toEqual([]);
+    return list;
+  };
+
+  it("declared delegation (attribute or option) is not a violation", () => {
+    const withAttribute = delegatingList();
+    withAttribute.setAttribute("data-a11y-delegates", "");
+    expect(checkKeyboardAccess(withAttribute)).toEqual([]);
+
+    const withOption = delegatingList();
+    expect(checkKeyboardAccess(withOption, { delegatesActivation: (el) => el === withOption })).toEqual([]);
+  });
+
+  it("containing a button is NOT evidence of delegation: a clickable card is still reported", () => {
+    const card = document.createElement("div");
+    card.setAttribute("onclick", "openCard()");
+    card.append("Open details ", document.createElement("button"));
+    expect(checkKeyboardAccess(card).some((v) => v.level === "error")).toBe(true);
+
+    const undeclared = delegatingList();
+    expect(checkKeyboardAccess(undeclared).length).toBeGreaterThan(0);
   });
 
   it("a clickable container with no keyboard-reachable content is still reported", () => {
@@ -422,6 +597,29 @@ describe("createHttpMock in jsdom", () => {
     }
     expect(seen?.type).toBe("application/x-custom");
     expect(await fieldOf(seen?.body, "k")).toContain("v");
+  });
+
+  it("refuses a body on GET and HEAD, like fetch(), without reaching a route", async () => {
+    const response = vi.fn(() => ({ body: "ok" }));
+    const mock = createHttpMock([{ method: "GET", url: "/x", response }]);
+    const original = globalThis.fetch;
+    mock.install();
+    try {
+      const form = new FormData();
+      form.append("a", "1");
+      for (const method of ["GET", "HEAD"]) {
+        await expect(fetch("/x", { method, body: form })).rejects.toThrow(/cannot have body/i);
+      }
+      expect(response).not.toHaveBeenCalled();
+      expect(mock.getRequests()).toEqual([]);
+
+      // POST with the same body is still served.
+      mock.addRoute({ method: "POST", url: "/x", response: () => ({ body: "posted" }) });
+      expect(await (await fetch("/x", { method: "POST", body: form })).text()).toBe("posted");
+    } finally {
+      mock.restore();
+      globalThis.fetch = original;
+    }
   });
 
   it("rejects with the signal's reason, like fetch()", async () => {
