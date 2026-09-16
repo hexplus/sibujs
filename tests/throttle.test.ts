@@ -102,7 +102,7 @@ describe("throttle", () => {
   it("dispose() stops the subscription and clears the cooldown timer", async () => {
     vi.useFakeTimers();
     const [n, setN] = signal(0);
-    const throttled = throttle(n, 100) as (() => number) & { dispose: () => void };
+    const throttled = throttle(n, 100);
     expect(typeof throttled.dispose).toBe("function");
 
     setN(1);

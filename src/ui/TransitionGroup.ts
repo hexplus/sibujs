@@ -1,4 +1,6 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
+import { adoptThenable } from "../utils/adoptThenable";
 
 /**
  * TransitionGroup manages enter/leave/move animations on a dynamic set of elements.
@@ -19,22 +21,42 @@ export function TransitionGroup(options: TransitionGroupOptions): {
   const [elements, setElements] = signal<HTMLElement[]>([]);
   const positions = new Map<HTMLElement, DOMRect>();
 
-  function add(el: HTMLElement): void {
-    setElements((prev) => [...prev, el]);
-    if (options.enter) {
-      options.enter(el);
+  // Runs a user animation callback without letting it break the group: a
+  // synchronous throw is reported and iteration continues, and a returned
+  // thenable is observed so a rejection is reported (with the element) instead
+  // of surfacing as a global unhandled rejection.
+  function runCallback(name: string, callback: (el: HTMLElement) => unknown, el: HTMLElement): void {
+    const report = (error: unknown) =>
+      reportError(error, { phase: "async", name: `TransitionGroup.${name}`, node: el });
+    try {
+      adoptThenable(callback(el))?.then(undefined, report);
+    } catch (error) {
+      report(error);
     }
   }
 
+  function add(el: HTMLElement): void {
+    setElements((prev) => [...prev, el]);
+    if (options.enter) runCallback("enter", options.enter, el);
+  }
+
   async function remove(el: HTMLElement): Promise<void> {
-    if (options.leave) {
-      await options.leave(el);
+    try {
+      if (options.leave) {
+        // Same isolation as add()/track(): a throwing or rejecting leave is
+        // reported with the element instead of rejecting remove() — and the
+        // element is still removed, so a later track() does not run leave again.
+        await adoptThenable(options.leave(el));
+      }
+    } catch (error) {
+      reportError(error, { phase: "async", name: "TransitionGroup.leave", node: el });
+    } finally {
+      // Drop the cached rect too — otherwise an element removed via remove()
+      // (rather than track(), which clears the whole map) lingers in `positions`
+      // for the group's lifetime.
+      positions.delete(el);
+      setElements((prev) => prev.filter((e) => e !== el));
     }
-    // Drop the cached rect too — otherwise an element removed via remove()
-    // (rather than track(), which clears the whole map) lingers in `positions`
-    // for the group's lifetime.
-    positions.delete(el);
-    setElements((prev) => prev.filter((e) => e !== el));
   }
 
   function track(newElements: HTMLElement[]): void {
@@ -50,9 +72,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     const currentSet = new Set(elements());
     for (const el of newElements) {
       if (!currentSet.has(el)) {
-        if (options.enter) {
-          options.enter(el);
-        }
+        if (options.enter) runCallback("enter", options.enter, el);
       }
     }
 
@@ -60,9 +80,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
     const newSet = new Set(newElements);
     for (const el of elements()) {
       if (!newSet.has(el)) {
-        if (options.leave) {
-          options.leave(el);
-        }
+        if (options.leave) runCallback("leave", options.leave, el);
       }
     }
 
@@ -76,7 +94,7 @@ export function TransitionGroup(options: TransitionGroupOptions): {
         if (oldRect && typeof el.getBoundingClientRect === "function") {
           const newRect = el.getBoundingClientRect();
           if (oldRect.left !== newRect.left || oldRect.top !== newRect.top) {
-            options.move(el);
+            runCallback("move", options.move, el);
           }
         }
       }

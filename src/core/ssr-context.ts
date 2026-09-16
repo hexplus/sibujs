@@ -28,6 +28,13 @@ export interface SSRStore {
   ssr: boolean;
   suspenseIdCounter: number;
   /**
+   * `createId()` counter for this request. Request-scoped for the same reason
+   * as `suspenseIdCounter`: a server render's ids must not depend on earlier or
+   * concurrent requests, and must match a fresh client's sequence. Optional so
+   * stores created elsewhere start it lazily at 0.
+   */
+  idCounter?: number;
+  /**
    * Per-request data caches (e.g. the query cache). Lazily created and keyed
    * by subsystem so request-scoped data never bleeds between concurrent
    * server renders. Typed loosely to avoid a dependency cycle with data/.
@@ -230,7 +237,7 @@ export function disableSSR(): void {
  * it falls back to mutating the module-global store.
  */
 export function runInSSRContext<T>(fn: () => T): T {
-  const store: SSRStore = { ssr: true, suspenseIdCounter: 0, locale: undefined };
+  const store: SSRStore = { ssr: true, suspenseIdCounter: 0, idCounter: 0, locale: undefined };
   if (als) {
     return als.run(store, fn);
   }
@@ -241,9 +248,11 @@ export function runInSSRContext<T>(fn: () => T): T {
   /* v8 ignore next 15 */
   const prevSSR = fallbackStore.ssr;
   const prevCounter = fallbackStore.suspenseIdCounter;
+  const prevIdCounter = fallbackStore.idCounter;
   const prevLocale = fallbackStore.locale;
   fallbackStore.ssr = true;
   fallbackStore.suspenseIdCounter = 0;
+  fallbackStore.idCounter = 0;
   fallbackStore.locale = undefined;
   _shared.fallbackDepth++;
   try {
@@ -252,6 +261,7 @@ export function runInSSRContext<T>(fn: () => T): T {
     _shared.fallbackDepth--;
     fallbackStore.ssr = prevSSR;
     fallbackStore.suspenseIdCounter = prevCounter;
+    fallbackStore.idCounter = prevIdCounter;
     fallbackStore.locale = prevLocale;
   }
 }

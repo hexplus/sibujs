@@ -23,10 +23,24 @@ export {
 export * from "./src/core/rendering/action";
 export * from "./src/core/rendering/catch";
 export * from "./src/core/rendering/context";
-export * from "./src/core/rendering/createId";
+// Explicit, not `export *`: `idSegment` is an internal helper for widget id
+// generation and is not part of the public surface.
+export { __resetIdCounter, createId } from "./src/core/rendering/createId";
 export * from "./src/core/rendering/directives";
 // Disposal (reactive binding cleanup)
-export * from "./src/core/rendering/dispose";
+// Explicit, not `export *`: the render-transaction machinery
+// (`withDisposerRollback`, the capture helpers and their type) is internal — an
+// unpaired `endDisposerCapture()` would corrupt an open transaction — and is
+// imported from the source module by the framework itself.
+export {
+  checkLeaks,
+  dispose,
+  MAX_DRAIN_TEARDOWNS,
+  registerDisposer,
+  replaceChildrenSafely,
+  reportDrainRunaway,
+  unregisterDisposer,
+} from "./src/core/rendering/dispose";
 export * from "./src/core/rendering/dynamic";
 export * from "./src/core/rendering/each";
 export * from "./src/core/rendering/fragment";

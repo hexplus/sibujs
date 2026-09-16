@@ -1,7 +1,7 @@
 import { createId } from "../core/rendering/createId";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundFileUploads = new WeakMap<HTMLElement, () => void>();
 
@@ -45,7 +45,15 @@ export function fileUpload(options?: FileUploadOptions): {
   function isAccepted(file: File): boolean {
     if (!accept) return true;
 
-    const acceptedTypes = accept.split(",").map((t) => t.trim().toLowerCase());
+    // Empty tokens (a trailing or doubled comma, a whitespace-only entry) are
+    // dropped: an empty pattern used to equal a file's empty MIME type, letting
+    // any file of unknown type through. With no valid tokens left there is no
+    // restriction, matching the HTML `accept` attribute.
+    const acceptedTypes = accept
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length > 0);
+    if (acceptedTypes.length === 0) return true;
     const fileName = file.name.toLowerCase();
     const fileType = file.type.toLowerCase();
 
@@ -81,17 +89,22 @@ export function fileUpload(options?: FileUploadOptions): {
       validFiles.push(file);
     }
 
+    // The files this call actually commits — reported to onFiles as-is. Single
+    // mode keeps only the last valid file, and onFiles used to receive every
+    // valid file anyway, so consumers processed files the widget had discarded.
+    const committed = multiple ? validFiles : validFiles.slice(-1);
+
     batch(() => {
       setErrors(newErrors);
-      if (validFiles.length > 0) {
+      if (committed.length > 0) {
         if (multiple) {
-          setFiles((prev) => [...prev, ...validFiles]);
+          setFiles((prev) => [...prev, ...committed]);
         } else {
           // Single mode: replace with the last valid file
-          setFiles([validFiles[validFiles.length - 1]]);
+          setFiles(committed);
         }
         if (onFiles) {
-          onFiles(validFiles);
+          onFiles(committed);
         }
       }
     });
@@ -124,8 +137,17 @@ export function fileUpload(options?: FileUploadOptions): {
 
     const id = createId("sibu-fileupload");
     const restore: Array<() => void> = [];
+    // Snapshot the input attributes bind() overwrites so teardown can put back,
+    // or remove, exactly what was there.
+    const prevAccept = els.input.getAttribute("accept");
+    const prevMultiple = els.input.hasAttribute("multiple");
     if (accept) els.input.accept = accept;
     els.input.multiple = multiple;
+    restore.push(() => {
+      if (prevAccept === null) els.input.removeAttribute("accept");
+      else els.input.setAttribute("accept", prevAccept);
+      els.input.multiple = prevMultiple;
+    });
     let hintId: string | null = null;
     if (els.hint) {
       const assignedHintId = !els.hint.id;
@@ -149,6 +171,8 @@ export function fileUpload(options?: FileUploadOptions): {
       // Use status+polite for non-blocking validation errors per APG.
       const prevRole = els.errorRegion.getAttribute("role");
       const prevLive = els.errorRegion.getAttribute("aria-live");
+      // The error binding replaces the region's text; teardown restores it.
+      const prevText = els.errorRegion.textContent;
       els.errorRegion.setAttribute("role", "status");
       els.errorRegion.setAttribute("aria-live", "polite");
       restore.push(() => {
@@ -156,12 +180,14 @@ export function fileUpload(options?: FileUploadOptions): {
         else els.errorRegion!.setAttribute("role", prevRole);
         if (prevLive === null) els.errorRegion!.removeAttribute("aria-live");
         else els.errorRegion!.setAttribute("aria-live", prevLive);
+        els.errorRegion!.textContent = prevText;
       });
     }
     if (els.dropZone) {
       const prevDzRole = els.dropZone.getAttribute("role");
       const prevDzLabel = els.dropZone.getAttribute("aria-label");
       const prevDzTabindex = els.dropZone.hasAttribute("tabindex") ? els.dropZone.getAttribute("tabindex") : null;
+      const prevDzDragOver = els.dropZone.getAttribute("data-drag-over");
       els.dropZone.setAttribute("role", "button");
       els.dropZone.setAttribute("aria-label", "File drop zone — click or press Enter to browse");
       if (els.dropZone.tabIndex < 0) els.dropZone.tabIndex = 0;
@@ -172,14 +198,16 @@ export function fileUpload(options?: FileUploadOptions): {
         else els.dropZone!.setAttribute("aria-label", prevDzLabel);
         if (prevDzTabindex === null) els.dropZone!.removeAttribute("tabindex");
         else els.dropZone!.setAttribute("tabindex", prevDzTabindex);
+        if (prevDzDragOver === null) els.dropZone!.removeAttribute("data-drag-over");
+        else els.dropZone!.setAttribute("data-drag-over", prevDzDragOver);
       });
     }
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const errs = errors();
       if (els.errorRegion) els.errorRegion.textContent = errs.join(". ");
       if (els.dropZone) els.dropZone.setAttribute("data-drag-over", isDragOver() ? "true" : "false");
-    });
+    }, els.input);
 
     const onChange = () => {
       if (els.input.files) addFiles(els.input.files);
@@ -211,7 +239,10 @@ export function fileUpload(options?: FileUploadOptions): {
       els.dropZone.addEventListener("drop", onDrop);
     }
 
+    let tornDown = false;
     const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
       boundFileUploads.delete(els.input);
       fxTeardown();
       els.input.removeEventListener("change", onChange);

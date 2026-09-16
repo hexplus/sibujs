@@ -3,14 +3,16 @@
  * Provides automated a11y checks and WCAG compliance validation.
  */
 
-/**
- * Escape a value for safe interpolation inside an `[attr="..."]` selector — only
- * `"` and `\` are significant. Prevents a DOM-derived value (e.g. an element id)
- * with special characters from breaking the selector or throwing.
- */
-function escSel(value: string): string {
-  return value.replace(/["\\]/g, "\\$&");
-}
+import { enableListenerTracking, listenerTypes } from "./listenerTracking";
+import { queryAllByAttribute } from "./queries";
+
+// Loading the testing utilities turns on listener tracking, so handlers attached
+// with `on: { click }` (or addEventListener) are visible to checkKeyboardAccess()
+// in development AND production builds. Call enableListenerTracking() yourself
+// if elements get their listeners before this module loads.
+enableListenerTracking();
+
+export { enableListenerTracking };
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -214,6 +216,33 @@ function getSelector(el: Element): string {
 }
 
 /**
+ * Select `root` itself (when it matches) followed by its matching descendants.
+ * `querySelectorAll` never includes the element it is called on, so checks run
+ * directly on an input, image, button or landmark silently passed.
+ */
+function selectAll(root: Element, selector: string): Element[] {
+  const matches = Array.from(root.querySelectorAll(selector));
+  if (root.matches(selector)) matches.unshift(root);
+  return matches;
+}
+
+/**
+ * Whether `el` has an activation handler: an `onclick` attribute or a click /
+ * pointer listener (`on: { click }` or addEventListener, see listenerTracking.ts).
+ */
+function hasActivationHandler(el: Element): boolean {
+  if (el.hasAttribute("onclick")) return true;
+  const types = listenerTypes(el);
+  return ["click", "pointerdown", "pointerup", "mousedown", "mouseup"].some((t) => types.has(t));
+}
+
+function hasKeyboardHandler(el: Element): boolean {
+  if (el.hasAttribute("onkeydown") || el.hasAttribute("onkeyup") || el.hasAttribute("onkeypress")) return true;
+  const types = listenerTypes(el);
+  return types.has("keydown") || types.has("keyup") || types.has("keypress");
+}
+
+/**
  * Check if an element has an accessible name via any supported mechanism.
  */
 function hasAccessibleName(el: Element): boolean {
@@ -245,11 +274,28 @@ function hasAccessibleName(el: Element): boolean {
  */
 function isNativeInteractive(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
-  if (["button", "select", "textarea"].includes(tag)) return true;
+  if (["button", "select", "textarea", "summary"].includes(tag)) return true;
   if (tag === "input" && el.getAttribute("type") !== "hidden") return true;
   if (tag === "a" && el.hasAttribute("href")) return true;
   if (tag === "area" && el.hasAttribute("href")) return true;
   return false;
+}
+
+/**
+ * Marks a container whose activation handler only delegates to the controls
+ * inside it, so the container itself is not a control. Containing a button is
+ * NOT evidence of that — a clickable card wrapping a button is still a control
+ * that keyboard users cannot reach — so delegation must be declared, either with
+ * this attribute or with the `delegatesActivation` option.
+ */
+const DELEGATES_ATTRIBUTE = "data-a11y-delegates";
+
+export interface KeyboardAccessOptions {
+  /**
+   * Recognise a container as delegating activation to its own controls, instead
+   * of marking it with `data-a11y-delegates`.
+   */
+  delegatesActivation?: (el: Element) => boolean;
 }
 
 // ─── Individual Checks ──────────────────────────────────────────────────────
@@ -259,7 +305,7 @@ function isNativeInteractive(el: Element): boolean {
  */
 export function checkImageAlt(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
-  const images = root.querySelectorAll("img");
+  const images = selectAll(root, "img");
 
   for (const img of Array.from(images)) {
     if (!img.hasAttribute("alt")) {
@@ -284,7 +330,7 @@ export function checkImageAlt(root: Element): A11yViolation[] {
   }
 
   // Also check elements with role="img"
-  const roleImgs = root.querySelectorAll('[role="img"]');
+  const roleImgs = selectAll(root, '[role="img"]');
   for (const el of Array.from(roleImgs)) {
     if (!hasAccessibleName(el)) {
       violations.push({
@@ -306,7 +352,7 @@ export function checkImageAlt(root: Element): A11yViolation[] {
  */
 export function checkFormLabels(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
-  const inputs = root.querySelectorAll("input, select, textarea");
+  const inputs = selectAll(root, "input, select, textarea");
 
   for (const input of Array.from(inputs)) {
     // Skip hidden inputs
@@ -357,7 +403,12 @@ function checkInputHasLabel(input: Element, root: Element): boolean {
   // Check for <label for="id">
   const id = input.getAttribute("id");
   if (id) {
-    const label = root.querySelector(`label[for="${escSel(id)}"]`);
+    // Look in the input's document (or shadow root), not just inside `root`:
+    // checking an input directly — or a fragment of a form — must still see a
+    // <label for> that sits outside the checked subtree.
+    const scope = input.getRootNode() as ParentNode;
+    const searchIn = typeof scope.querySelectorAll === "function" ? scope : root;
+    const label = queryAllByAttribute(searchIn, "for", id).find((el) => el.tagName === "LABEL");
     if (label?.textContent?.trim()) return true;
   }
 
@@ -376,7 +427,7 @@ function checkInputHasLabel(input: Element, root: Element): boolean {
  */
 export function checkHeadingHierarchy(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
-  const headings = root.querySelectorAll("h1, h2, h3, h4, h5, h6");
+  const headings = selectAll(root, "h1, h2, h3, h4, h5, h6");
 
   if (headings.length === 0) return violations;
 
@@ -434,7 +485,7 @@ export function checkColorContrast(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Check elements with role but no accessible name
-  const roledElements = root.querySelectorAll("[role]");
+  const roledElements = selectAll(root, "[role]");
   for (const el of Array.from(roledElements)) {
     const role = el.getAttribute("role");
     if (!role) continue;
@@ -476,7 +527,7 @@ export function checkColorContrast(root: Element): A11yViolation[] {
   }
 
   // Check for text content using inline styles with potentially problematic patterns
-  const inlineStyled = root.querySelectorAll("[style]");
+  const inlineStyled = selectAll(root, "[style]");
   for (const el of Array.from(inlineStyled)) {
     const style = el.getAttribute("style") || "";
     const hasColor = /(?:^|;)\s*color\s*:/i.test(style);
@@ -512,17 +563,21 @@ export function checkColorContrast(root: Element): A11yViolation[] {
  * Check that interactive elements are keyboard accessible.
  * Elements with click handlers should have tabindex, role, and key handlers.
  */
-export function checkKeyboardAccess(root: Element): A11yViolation[] {
+export function checkKeyboardAccess(root: Element, options?: KeyboardAccessOptions): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
-  // Check elements with onclick attribute that aren't natively interactive
-  const clickElements = root.querySelectorAll("[onclick]");
-  for (const el of Array.from(clickElements)) {
+  // Elements with an activation handler that aren't natively interactive: an
+  // onclick attribute, or click/pointer listeners attached via `on: { ... }`
+  // or addEventListener (recorded by listener tracking in any build).
+  const clickElements = selectAll(root, "*").filter(hasActivationHandler);
+  for (const el of clickElements) {
     if (isNativeInteractive(el)) continue;
+    // Declared delegation only (attribute or option) — never inferred.
+    if (el.hasAttribute(DELEGATES_ATTRIBUTE) || options?.delegatesActivation?.(el)) continue;
 
     const hasTabindex = el.hasAttribute("tabindex");
     const hasRole = el.hasAttribute("role");
-    const hasKeyHandler = el.hasAttribute("onkeydown") || el.hasAttribute("onkeyup") || el.hasAttribute("onkeypress");
+    const hasKeyHandler = hasKeyboardHandler(el);
 
     if (!hasTabindex) {
       violations.push({
@@ -557,7 +612,8 @@ export function checkKeyboardAccess(root: Element): A11yViolation[] {
   }
 
   // Check elements with role="button" or role="link" that aren't natively interactive
-  const interactiveRoles = root.querySelectorAll(
+  const interactiveRoles = selectAll(
+    root,
     '[role="button"], [role="link"], [role="tab"], [role="menuitem"], [role="option"]',
   );
   for (const el of Array.from(interactiveRoles)) {
@@ -587,7 +643,7 @@ export function checkAriaAttributes(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Check all elements with role attributes
-  const roledElements = root.querySelectorAll("[role]");
+  const roledElements = selectAll(root, "[role]");
   for (const el of Array.from(roledElements)) {
     const role = el.getAttribute("role");
     if (!role) continue;
@@ -620,7 +676,7 @@ export function checkAriaAttributes(root: Element): A11yViolation[] {
   }
 
   // Check all aria-* attributes on every element
-  const allElements = root.querySelectorAll("*");
+  const allElements = selectAll(root, "*");
   for (const el of Array.from(allElements)) {
     for (const attr of Array.from(el.attributes)) {
       if (!attr.name.startsWith("aria-")) continue;
@@ -692,20 +748,6 @@ export function checkAriaAttributes(root: Element): A11yViolation[] {
     }
   }
 
-  // Also check the root element itself
-  for (const attr of Array.from(root.attributes)) {
-    if (!attr.name.startsWith("aria-")) continue;
-    if (!VALID_ARIA_ATTRIBUTES.has(attr.name)) {
-      violations.push({
-        rule: "aria-valid-attr",
-        level: "error",
-        message: `Invalid ARIA attribute "${attr.name}" on root element. Must be a valid WAI-ARIA attribute.`,
-        element: root,
-        selector: getSelector(root),
-      });
-    }
-  }
-
   return violations;
 }
 
@@ -720,7 +762,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
 
   // Check for ARIA landmark roles
   for (const role of LANDMARK_ROLES) {
-    const elements = root.querySelectorAll(`[role="${role}"]`);
+    const elements = selectAll(root, `[role="${role}"]`);
     if (elements.length > 0) {
       foundLandmarks.add(role);
     }
@@ -728,7 +770,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
 
   // Check for HTML5 semantic landmark elements
   for (const [tag, role] of Object.entries(LANDMARK_ELEMENTS)) {
-    const elements = root.querySelectorAll(tag);
+    const elements = selectAll(root, tag);
     if (elements.length > 0) {
       foundLandmarks.add(role);
     }
@@ -745,7 +787,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
   }
 
   // Check for multiple main landmarks
-  const mainElements = root.querySelectorAll('main, [role="main"]');
+  const mainElements = selectAll(root, 'main, [role="main"]');
   if (mainElements.length > 1) {
     violations.push({
       rule: "landmark-unique",
@@ -756,7 +798,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
   }
 
   // Check for multiple banner landmarks
-  const bannerElements = root.querySelectorAll('header, [role="banner"]');
+  const bannerElements = selectAll(root, 'header, [role="banner"]');
   if (bannerElements.length > 1) {
     violations.push({
       rule: "landmark-unique",
@@ -767,7 +809,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
   }
 
   // Check for multiple contentinfo landmarks
-  const contentinfoElements = root.querySelectorAll('footer, [role="contentinfo"]');
+  const contentinfoElements = selectAll(root, 'footer, [role="contentinfo"]');
   if (contentinfoElements.length > 1) {
     violations.push({
       rule: "landmark-unique",
@@ -778,7 +820,7 @@ export function checkLandmarks(root: Element): A11yViolation[] {
   }
 
   // Check that navigation landmarks have labels when multiple exist
-  const navElements = root.querySelectorAll('nav, [role="navigation"]');
+  const navElements = selectAll(root, 'nav, [role="navigation"]');
   if (navElements.length > 1) {
     for (const nav of Array.from(navElements)) {
       if (!nav.getAttribute("aria-label") && !nav.getAttribute("aria-labelledby")) {
@@ -807,7 +849,7 @@ export function checkLinksAndButtons(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Check links
-  const links = root.querySelectorAll("a[href]");
+  const links = selectAll(root, "a[href]");
   for (const link of Array.from(links)) {
     if (!hasAccessibleName(link)) {
       violations.push({
@@ -857,7 +899,7 @@ export function checkLinksAndButtons(root: Element): A11yViolation[] {
   }
 
   // Check buttons
-  const buttons = root.querySelectorAll('button, [role="button"]');
+  const buttons = selectAll(root, 'button, [role="button"]');
   for (const button of Array.from(buttons)) {
     if (!hasAccessibleName(button)) {
       violations.push({
@@ -871,7 +913,7 @@ export function checkLinksAndButtons(root: Element): A11yViolation[] {
   }
 
   // Check input buttons (type="submit", type="reset", type="button")
-  const inputButtons = root.querySelectorAll('input[type="submit"], input[type="reset"], input[type="button"]');
+  const inputButtons = selectAll(root, 'input[type="submit"], input[type="reset"], input[type="button"]');
   for (const input of Array.from(inputButtons)) {
     const value = input.getAttribute("value");
     if (!value?.trim() && !input.getAttribute("aria-label") && !input.getAttribute("aria-labelledby")) {
@@ -895,7 +937,7 @@ export function checkListSemantics(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Check <ul> and <ol> direct children should be <li>
-  const lists = root.querySelectorAll("ul, ol");
+  const lists = selectAll(root, "ul, ol");
   for (const list of Array.from(lists)) {
     const children = Array.from(list.children);
     for (const child of children) {
@@ -925,7 +967,7 @@ export function checkListSemantics(root: Element): A11yViolation[] {
   }
 
   // Check <dl> direct children should be <dt>, <dd>, or <div>
-  const dlLists = root.querySelectorAll("dl");
+  const dlLists = selectAll(root, "dl");
   for (const dl of Array.from(dlLists)) {
     const children = Array.from(dl.children);
     for (const child of children) {
@@ -943,7 +985,7 @@ export function checkListSemantics(root: Element): A11yViolation[] {
   }
 
   // Check elements with role="list" have children with role="listitem"
-  const roleLists = root.querySelectorAll('[role="list"]');
+  const roleLists = selectAll(root, '[role="list"]');
   for (const list of Array.from(roleLists)) {
     const children = Array.from(list.children);
     const hasListItems = children.some(
@@ -972,7 +1014,7 @@ export function checkTabOrder(root: Element): A11yViolation[] {
   const violations: A11yViolation[] = [];
 
   // Check for positive tabindex values
-  const tabbable = root.querySelectorAll("[tabindex]");
+  const tabbable = selectAll(root, "[tabindex]");
   for (const el of Array.from(tabbable)) {
     const tabindex = parseInt(el.getAttribute("tabindex") ?? "", 10);
     if (!Number.isNaN(tabindex) && tabindex > 0) {
@@ -987,7 +1029,7 @@ export function checkTabOrder(root: Element): A11yViolation[] {
   }
 
   // Check for focus trap containers without accessible escape indication
-  const focusTraps = root.querySelectorAll('[data-sibu-focus-trap], [aria-modal="true"]');
+  const focusTraps = selectAll(root, '[data-sibu-focus-trap], [aria-modal="true"]');
   for (const trap of Array.from(focusTraps)) {
     // Modal dialogs should have a close mechanism
     const role = trap.getAttribute("role");

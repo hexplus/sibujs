@@ -6,6 +6,23 @@ import { signal } from "../core/signals/signal";
 import { track } from "../reactivity/track";
 import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
+/**
+ * Split a router URL into path, query and hash at the FIRST `#` and then the
+ * first `?` before it. Everything after a delimiter belongs to that part, so a
+ * query value like `redirect=/login?next=home` and a fragment like
+ * `section#details` survive intact — array destructuring over `split()` used to
+ * keep only the first two pieces and silently drop the rest.
+ */
+function splitRouteUrl(url: string): { path: string; query: string; hash: string } {
+  const hashIndex = url.indexOf("#");
+  const beforeHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
+  const hash = hashIndex === -1 ? "" : url.slice(hashIndex + 1);
+  const queryIndex = beforeHash.indexOf("?");
+  const path = queryIndex === -1 ? beforeHash : beforeHash.slice(0, queryIndex);
+  const query = queryIndex === -1 ? "" : beforeHash.slice(queryIndex + 1);
+  return { path, query, hash };
+}
+
 // ─── Navigation protocol guard ──────────────────────────────────────────────
 //
 // Block `javascript:`, `data:`, `vbscript:`, and `blob:` URIs from ever
@@ -1226,8 +1243,7 @@ export class SibuRouter {
   }
 
   private createRouteContext(fullPath: string): RouteContext {
-    const [pathWithQuery, hash = ""] = fullPath.split("#");
-    const [path, queryString = ""] = pathWithQuery.split("?");
+    const { path, query: queryString, hash } = splitRouteUrl(fullPath);
     const query = Object.fromEntries(new URLSearchParams(queryString));
 
     const match = this.matcher.match(path || "/");
@@ -2614,8 +2630,7 @@ export function RouterLink(
   const href = kind === "unsafe" ? "#" : rawHref;
   // Split exactly as `createRouteContext()` does — hash first, then query — so
   // both sides of every active-state comparison are normalized the same way.
-  const [hrefBeforeHash, hrefHash = ""] = href.split("#");
-  const [hrefPathRaw, hrefQueryRaw = ""] = hrefBeforeHash.split("?");
+  const { path: hrefPathRaw, query: hrefQueryRaw, hash: hrefHash } = splitRouteUrl(href);
   const targetPath = normalizePathname(hrefPathRaw);
   const targetQuery = normalizeQuery(hrefQueryRaw);
 

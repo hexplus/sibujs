@@ -1,9 +1,9 @@
 import { createId } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { watch } from "../core/signals/watch";
 import { batch } from "../reactivity/batch";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundComboboxes = new WeakMap<HTMLElement, () => void>();
 
@@ -126,7 +126,7 @@ export function combobox<T>(options: ComboboxOptions<T>): {
     els.input.setAttribute("aria-autocomplete", "list");
     els.input.setAttribute("aria-controls", listboxId);
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const open = isOpen();
       els.input.setAttribute("aria-expanded", open ? "true" : "false");
       els.listbox.hidden = !open;
@@ -145,7 +145,7 @@ export function combobox<T>(options: ComboboxOptions<T>): {
       }
       if (activeId) els.input.setAttribute("aria-activedescendant", activeId);
       else els.input.removeAttribute("aria-activedescendant");
-    });
+    }, els.input);
 
     const onInput = () => {
       setQuery(els.input.value);
@@ -202,8 +202,14 @@ export function combobox<T>(options: ComboboxOptions<T>): {
     els.input.addEventListener("blur", onBlur);
     els.listbox.addEventListener("mousedown", onListboxPointerDown);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundComboboxes.delete(els.input);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundComboboxes.get(els.input) === teardown) boundComboboxes.delete(els.input);
       fxTeardown();
       els.input.removeEventListener("input", onInput);
       els.input.removeEventListener("keydown", onKey);

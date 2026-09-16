@@ -1,8 +1,8 @@
 import { createId } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundSelects = new WeakMap<HTMLElement, () => void>();
 
@@ -158,7 +158,7 @@ export function select<T>(options: SelectOptions<T>): {
 
     const toStr = els.itemToString ?? itemToString ?? ((it: T) => String(it));
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const idx = highlightedIndex();
       const sel = selectedItems();
       let activeId = "";
@@ -168,13 +168,16 @@ export function select<T>(options: SelectOptions<T>): {
         if (!optEl.id) optEl.id = `${listboxId}-opt-${i}`;
         optEl.setAttribute("role", "option");
         optEl.setAttribute("aria-selected", sel.includes(items[i]) ? "true" : "false");
-        if (isItemDisabled(items[i])) optEl.setAttribute("aria-disabled", "true");
+        const disabled = isItemDisabled(items[i]);
+        if (disabled) optEl.setAttribute("aria-disabled", "true");
         else optEl.removeAttribute("aria-disabled");
-        if (i === idx) activeId = optEl.id;
+        // A disabled option is never the active descendant, even if the
+        // predicate changed after it was highlighted.
+        if (i === idx && !disabled) activeId = optEl.id;
       }
       if (activeId) els.listbox.setAttribute("aria-activedescendant", activeId);
       else els.listbox.removeAttribute("aria-activedescendant");
-    });
+    }, els.listbox);
 
     // Typeahead — printable chars accumulate within a 500ms window.
     let typeBuffer = "";
@@ -187,11 +190,15 @@ export function select<T>(options: SelectOptions<T>): {
         e.preventDefault();
         highlightPrev();
       } else if (e.key === "Home") {
+        // First / last ENABLED option, like arrows and typeahead; with every
+        // option disabled the highlight is left as it is.
         e.preventDefault();
-        if (items.length > 0) setHighlightedIndex(0);
+        const first = nextEnabled(-1, 1);
+        if (first !== -1) setHighlightedIndex(first);
       } else if (e.key === "End") {
         e.preventDefault();
-        if (items.length > 0) setHighlightedIndex(items.length - 1);
+        const last = nextEnabled(items.length, -1);
+        if (last !== -1) setHighlightedIndex(last);
       } else if (e.key === "Enter" || e.key === " ") {
         if (highlightedIndex() >= 0) {
           e.preventDefault();
@@ -210,8 +217,14 @@ export function select<T>(options: SelectOptions<T>): {
     };
     els.listbox.addEventListener("keydown", onKey);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundSelects.delete(els.listbox);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundSelects.get(els.listbox) === teardown) boundSelects.delete(els.listbox);
       fxTeardown();
       els.listbox.removeEventListener("keydown", onKey);
       if (typeTimer !== null) clearTimeout(typeTimer);

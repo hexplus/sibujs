@@ -17,6 +17,9 @@ import { signal } from "../core/signals/signal";
  * the local `last()` signal — BroadcastChannel doesn't deliver to its own
  * sender, matching the browser's native behavior.
  *
+ * After `dispose()`, `post()` is a no-op and `last()` no longer changes;
+ * `dispose()` may be called repeatedly.
+ *
  * @param channelName Name of the broadcast channel
  * @returns `{ last, post, dispose }`
  *
@@ -44,11 +47,20 @@ export function broadcast<T = unknown>(
   const handler = (ev: MessageEvent) => setLast(ev.data as T);
   channel.addEventListener("message", handler);
 
+  // Terminal. The native channel throws InvalidStateError once closed, so a
+  // retained `post()` must stop reaching it rather than start throwing.
+  let disposed = false;
+
   function post(message: T): void {
+    if (disposed) return;
+    // Errors before disposal (e.g. DataCloneError) still propagate; they do not
+    // end the channel's life.
     channel.postMessage(message);
   }
 
   function dispose(): void {
+    if (disposed) return;
+    disposed = true;
     channel.removeEventListener("message", handler);
     channel.close();
   }

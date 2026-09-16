@@ -2,6 +2,7 @@
 // PRIORITY-BASED UPDATE SCHEDULER
 // ============================================================================
 
+import { reportError } from "../core/errors";
 import { globalSingleton } from "../utils/globalSingleton";
 
 export const Priority = {
@@ -47,6 +48,23 @@ function insertTask(task: ScheduledTask): void {
   taskQueue.splice(i, 0, task);
 }
 
+/**
+ * Invoke one task callback, containing and reporting a failure.
+ *
+ * Every drain path goes through here. A task is user code: letting its
+ * exception escape aborts the drain and strands every task behind it — and
+ * `flushScheduler()` has already cancelled the wake-up that would have run
+ * them. The failure goes to the runtime error pipeline (boundary → configured
+ * handler → console) rather than being swallowed or logged ad hoc.
+ */
+function runTask(callback: () => void): void {
+  try {
+    callback();
+  } catch (err) {
+    reportError(err, { phase: "scheduler", name: "scheduleUpdate" });
+  }
+}
+
 function processQueue(): void {
   if (_sched.isProcessing || taskQueue.length === 0) return;
   _sched.isProcessing = true;
@@ -54,28 +72,26 @@ function processQueue(): void {
   const startTime = performance.now();
   const timeSlice = 5; // 5ms time slice per frame
 
-  while (taskQueue.length > 0) {
-    const task = taskQueue[0];
+  try {
+    while (taskQueue.length > 0) {
+      const task = taskQueue[0];
 
-    if (task.cancelled) {
+      if (task.cancelled) {
+        taskQueue.shift();
+        continue;
+      }
+
+      // For non-immediate tasks, check if we've exceeded our time slice
+      if (task.priority > Priority.IMMEDIATE && performance.now() - startTime > timeSlice) {
+        break;
+      }
+
       taskQueue.shift();
-      continue;
+      runTask(task.callback);
     }
-
-    // For non-immediate tasks, check if we've exceeded our time slice
-    if (task.priority > Priority.IMMEDIATE && performance.now() - startTime > timeSlice) {
-      break;
-    }
-
-    taskQueue.shift();
-    try {
-      task.callback();
-    } catch (e) {
-      console.error("[Scheduler] Task error:", e);
-    }
+  } finally {
+    _sched.isProcessing = false;
   }
-
-  _sched.isProcessing = false;
 
   // Schedule next frame if there are remaining tasks
   if (taskQueue.length > 0) {
@@ -174,11 +190,7 @@ export function scheduleUpdate(priority: PriorityLevel, callback: () => void): (
 
   if (priority === Priority.IMMEDIATE) {
     // Execute synchronously
-    try {
-      callback();
-    } catch (e) {
-      console.error("[Scheduler] Immediate task error:", e);
-    }
+    runTask(callback);
     return () => {};
   }
 
@@ -206,14 +218,17 @@ export function flushScheduler(): void {
   _sched.scheduledKind = null;
   _sched.microtaskScheduled = false;
 
-  while (taskQueue.length > 0) {
-    const task = taskQueue.shift();
-    if (!task) break;
-    if (!task.cancelled) {
-      task.callback();
+  try {
+    while (taskQueue.length > 0) {
+      const task = taskQueue.shift();
+      if (!task) break;
+      // A throwing task is reported and the drain continues, so the tasks
+      // behind it are not stranded without a scheduled wake-up.
+      if (!task.cancelled) runTask(task.callback);
     }
+  } finally {
+    _sched.isProcessing = false;
   }
-  _sched.isProcessing = false;
 }
 
 /**

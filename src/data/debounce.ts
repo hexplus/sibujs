@@ -1,5 +1,5 @@
 import { effect } from "../core/signals/effect";
-import { signal } from "../core/signals/signal";
+import { type DisposableAccessor, signal } from "../core/signals/signal";
 
 /**
  * Returns a debounced reactive getter that only updates after `delay` ms
@@ -7,7 +7,8 @@ import { signal } from "../core/signals/signal";
  *
  * @param getter A reactive getter to debounce
  * @param delay Debounce delay in milliseconds
- * @returns A reactive getter for the debounced value
+ * @returns A reactive getter for the debounced value, with `dispose()` to stop
+ *   tracking the source and cancel the pending timer
  *
  * @example
  * ```ts
@@ -16,7 +17,7 @@ import { signal } from "../core/signals/signal";
  * // debouncedSearch() only updates 300ms after the last setSearch call
  * ```
  */
-export function debounce<T>(getter: () => T, delay: number): () => T {
+export function debounce<T>(getter: () => T, delay: number): DisposableAccessor<T> {
   const [debounced, setDebounced] = signal<T>(getter());
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -43,5 +44,5 @@ export function debounce<T>(getter: () => T, delay: number): () => T {
     enumerable: false,
   });
 
-  return debounced;
+  return debounced as DisposableAccessor<T>;
 }

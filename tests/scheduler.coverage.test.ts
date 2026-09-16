@@ -113,6 +113,10 @@ describe("scheduler error handling", () => {
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    // Pin the clock: under a loaded test run, reporting the first failure can
+    // take longer than processQueue's 5ms time slice, which then yields before
+    // `good` runs and makes this assertion flaky.
+    const nowSpy = vi.spyOn(performance, "now").mockReturnValue(0);
 
     const good = vi.fn();
     scheduleUpdate(Priority.NORMAL, () => {
@@ -124,6 +128,7 @@ describe("scheduler error handling", () => {
     expect(good).toHaveBeenCalledOnce();
     expect(errSpy).toHaveBeenCalled();
     errSpy.mockRestore();
+    nowSpy.mockRestore();
   });
 
   it("logs when an IMMEDIATE task throws", () => {

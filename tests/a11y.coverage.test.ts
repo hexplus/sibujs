@@ -39,6 +39,43 @@ describe("hotkey combo parsing", () => {
     cleanup();
   });
 
+  it("maps mod to ctrl on non-Apple platforms", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Win32");
+    const handler = vi.fn();
+    const cleanup = hotkey("mod+s", handler);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", metaKey: true }));
+    expect(handler).not.toHaveBeenCalled();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s", ctrlKey: true }));
+    expect(handler).toHaveBeenCalledOnce();
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("maps mod to meta on Apple platforms", () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const handler = vi.fn();
+    const cleanup = hotkey("mod+shift+z", handler);
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "z", shiftKey: true }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "z", ctrlKey: true, shiftKey: true }));
+    expect(handler).not.toHaveBeenCalled();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "z", metaKey: true, shiftKey: true }));
+    expect(handler).toHaveBeenCalledOnce();
+    cleanup();
+    vi.restoreAllMocks();
+  });
+
+  it("throws on an unknown modifier instead of dropping it", () => {
+    const handler = vi.fn();
+    expect(() => hotkey("hyper+s", handler)).toThrow(/unknown modifier "hyper"/);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "s" }));
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it("ignores non-matching key", () => {
     const handler = vi.fn();
     const cleanup = hotkey("a", handler);

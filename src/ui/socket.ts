@@ -1,3 +1,4 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
 
 /**
@@ -59,6 +60,10 @@ export function socket(
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let disposed = false;
   let manuallyClosed = false;
+  // Bumped by close()/dispose(): code that publishes a status re-checks it, so a
+  // subscriber closing or disposing during that publication is noticed before
+  // any socket or timer is acquired.
+  let lifecycle = 0;
 
   function getUrl(): string {
     return typeof url === "function" ? url() : url;
@@ -66,6 +71,11 @@ export function socket(
 
   function connect(): void {
     if (disposed) return;
+    // Captured before any user code (the URL getter, status subscribers) runs:
+    // each of them may close or dispose this handle, and every path that notices
+    // must leave the status "closed".
+    const generation = lifecycle;
+    const invalidated = () => disposed || generation !== lifecycle;
     // WebSocket is absent under SSR and some edge runtimes — degrade to a
     // closed socket instead of throwing at construction.
     if (typeof WebSocket === "undefined") {
@@ -73,7 +83,20 @@ export function socket(
       return;
     }
 
-    const safeUrl = validateWsUrl(getUrl());
+    let rawUrl: string;
+    try {
+      rawUrl = getUrl();
+    } catch (error) {
+      // A throwing URL getter fails this attempt, not the caller (or a timer).
+      setStatus("closed");
+      reportError(error, { phase: "async", name: "socket" });
+      return;
+    }
+    if (invalidated()) {
+      setStatus("closed");
+      return;
+    }
+    const safeUrl = validateWsUrl(rawUrl);
     if (safeUrl === null) {
       // Unsafe URL — stay closed and do not attempt a connection.
       setStatus("closed");
@@ -81,22 +104,55 @@ export function socket(
     }
 
     setStatus("connecting");
-    ws = new WebSocket(safeUrl, protocols);
+    if (invalidated()) {
+      setStatus("closed");
+      return;
+    }
+    let instance: WebSocket;
+    try {
+      instance = new WebSocket(safeUrl, protocols);
+    } catch (error) {
+      // The constructor throws synchronously for URLs the browser rejects,
+      // invalid or duplicate protocols, and CSP/policy blocks. Such a failure
+      // is deterministic, so no reconnect is scheduled; it used to escape the
+      // caller or the reconnect timer and leave the status "connecting".
+      setStatus("closed");
+      reportError(error, { phase: "async", name: "socket" });
+      return;
+    }
+    if (invalidated()) {
+      instance.close();
+      setStatus("closed");
+      return;
+    }
+    ws = instance;
 
-    ws.onopen = () => {
+    // Every handler is identity-checked: events still arriving from a socket
+    // that has since been replaced (after a reconnect) must not touch state.
+    instance.onopen = () => {
+      if (ws !== instance) return;
+      const openGeneration = lifecycle;
       setStatus("open");
+      // A subscriber that closed or disposed on "open" must not get a heartbeat.
+      if (disposed || openGeneration !== lifecycle || ws !== instance) return;
       reconnectCount = 0;
       startHeartbeat();
     };
 
-    ws.onmessage = (event: MessageEvent) => {
+    instance.onmessage = (event: MessageEvent) => {
+      if (ws !== instance) return;
       setData(event.data);
     };
 
-    ws.onclose = () => {
+    instance.onclose = () => {
+      if (ws !== instance) return;
+      // Release the closed instance, so a later close() knows there is nothing
+      // left to close instead of reporting "closing" forever.
+      ws = null;
+      const closeGeneration = lifecycle;
       setStatus("closed");
       stopHeartbeat();
-      const wasManual = manuallyClosed;
+      const wasManual = manuallyClosed || closeGeneration !== lifecycle;
       // Reset BEFORE scheduling so close() during the timer window correctly
       // re-sets manuallyClosed and the scheduled reconnect short-circuits.
       manuallyClosed = false;
@@ -114,7 +170,7 @@ export function socket(
       }
     };
 
-    ws.onerror = () => {
+    instance.onerror = () => {
       // Error will be followed by close event
     };
   }
@@ -143,13 +199,25 @@ export function socket(
   }
 
   function close(): void {
+    lifecycle++;
     manuallyClosed = true;
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
     stopHeartbeat();
-    if (ws) {
+    if (!ws) {
+      // Nothing open: already closed (remotely or before), so it stays closed.
+      setStatus("closed");
+      return;
+    }
+    if (ws.readyState === WebSocket.CLOSED) {
+      // Closed without our handler having run: no close event will follow.
+      ws = null;
+      setStatus("closed");
+      return;
+    }
+    if (ws.readyState !== WebSocket.CLOSING) {
       setStatus("closing");
       ws.close();
     }

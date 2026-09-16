@@ -4,7 +4,7 @@
  */
 
 import { reportError } from "../core/errors";
-import { dispose } from "../core/rendering/dispose";
+import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { sanitizeUrl } from "../utils/sanitize";
 
 /** Dispose every child of `el` (running reactive teardowns) then detach it. */
@@ -390,16 +390,33 @@ export function lazyChunk(
       container.appendChild(fallback());
     }
 
+    // Terminal ownership, registered before the load starts (mirrors `lazy()`).
+    // A container disposed before settlement must never have a component built
+    // into it: that work would happen after the disposal traversal completed,
+    // so its bindings and listeners could never be released.
+    let disposed = false;
+    registerDisposer(container, () => {
+      disposed = true;
+    });
+
     registry
       .load(id, async () => {
         const mod = await loader();
         return typeof mod === "function" ? mod : (mod as { default: () => HTMLElement }).default;
       })
       .then((component) => {
+        if (disposed) return;
+        const node = component();
+        // Building the component may itself have torn the container down.
+        if (disposed) {
+          dispose(node);
+          return;
+        }
         clearChildren(container);
-        container.appendChild(component());
+        container.appendChild(node);
       })
       .catch((err) => {
+        if (disposed) return;
         clearChildren(container);
         const errorEl = document.createElement("div");
         errorEl.textContent = `Failed to load chunk '${id}': ${err.message}`;

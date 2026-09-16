@@ -232,7 +232,9 @@ export function Head(props: HeadProps): Comment {
     // than assigned. Assigning meant a Head never gave the title back on
     // dispose (the page kept a title belonging to an unmounted component) and
     // that overlapping Heads/`title()` calls silently overwrote each other.
-    if (props.title) {
+    // `!= null`, not truthiness: an empty string is a deliberate title
+    // (clearing a stale one), and a reactive getter returning "" already worked.
+    if (props.title != null) {
       if (typeof props.title === "function") {
         const getter = props.title as () => string;
         let lease: ResourceLease<string> | null = null;
@@ -326,15 +328,18 @@ export function Head(props: HeadProps): Comment {
  * both paths safe.
  */
 export function setStructuredData(data: Record<string, unknown>): void {
-  // Remove existing structured data
-  const existing = document.head.querySelector('script[type="application/ld+json"][data-sibu]');
-  if (existing) existing.remove();
-
+  // Serialize and build the replacement FIRST. Removing the existing element up
+  // front meant a payload that fails to serialize (a cycle, a BigInt, a throwing
+  // getter or toJSON) destroyed the previously published, valid JSON-LD.
+  const json = escapeScriptJsonLocal(JSON.stringify(data));
   const script = document.createElement("script");
   script.type = "application/ld+json";
   script.setAttribute("data-sibu", "true");
-  script.textContent = escapeScriptJsonLocal(JSON.stringify(data));
-  document.head.appendChild(script);
+  script.textContent = json;
+
+  const existing = document.head.querySelector('script[type="application/ld+json"][data-sibu]');
+  if (existing) existing.replaceWith(script);
+  else document.head.appendChild(script);
 }
 
 /**

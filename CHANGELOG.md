@@ -7,6 +7,1220 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Changed — internal render-transaction helpers are no longer exported from `sibujs`
+
+The root barrel re-exported every symbol of the disposal and id modules, so
+helpers added for the framework's own render transactions became public API:
+`withDisposerRollback`, `currentDisposerCapture`, `beginDisposerCapture`,
+`endDisposerCapture`, the `DisposerCapture` type and `idSegment`. An unpaired
+`endDisposerCapture()` can corrupt an open transaction, so these are now exported
+explicitly from their source modules for internal use only. The public disposal
+and id surface — `dispose`, `registerDisposer`, `unregisterDisposer`,
+`replaceChildrenSafely`, `checkLeaks`, `MAX_DRAIN_TEARDOWNS`,
+`reportDrainRunaway`, `createId`, `__resetIdCounter` — is unchanged.
+
+### Fixed — `defineElement()` re-rendered recursively when a component wrote its host's attributes
+
+A component that set one of its own observed attributes while rendering started a
+nested render from `attributeChangedCallback`, recursing until the stack
+overflowed. Attribute changes during a render now trigger one follow-up pass after
+it commits, unchanged values are ignored, and a component that changes its own
+attributes on every render is stopped after 10 passes and reported. A first render
+that throws is also retried on the next attribute change instead of leaving the
+element blank until it is reconnected. A component that moves its host while
+rendering gets one follow-up render instead of a nested one, and one that removes
+its host has that render rolled back as a failed transaction — releasing what it
+registered on the returned tree, on intermediate nodes and on the host itself —
+rather than committed into a disconnected element nothing would tear down.
+Disconnecting normally now also releases disposers registered directly against
+the host, not only those inside the rendered subtree — the host's own teardowns
+only, so a shadow element's light-DOM (slotted, consumer-owned) children keep
+their reactive lifecycle. A teardown that reconnects the element renders the next
+generation after every teardown has finished draining — counted, so a nested
+disconnect inside a teardown cannot release the outer one early — so the new
+generation's host-owned work is not torn down by the old one. An observed
+attribute written by a disposer defers its render the same way.
+
+### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
+
+`withDisposerRollback()` recorded every disposer registered while a build ran,
+including those registered by effects the build's signal writes re-ran elsewhere
+on the page, so a failed render tore down live bindings it did not own. Every
+subscriber now remembers the render transaction it was created in: its re-runs
+register into that transaction (and roll back with it), and a subscriber created
+outside one never registers into whatever transaction happens to be open. A
+nested transaction that succeeds hands its subscribers to the enclosing one, so
+an ancestor's failure still rolls back cleanup they register afterwards; once the
+outermost one finishes, later re-runs are captured by nobody. A finished frame
+also drops its own list, so a long-lived effect cannot retain the nodes and
+teardowns of the render it was created in.
+
+### Fixed — plugin hooks and providers registered after `install()` were lost
+
+The staged install context kept writing to its staging area after the commit, so
+`ctx.provide()` / `ctx.onMount()` called from an init hook, an async install or a
+timer never reached the registry. Once committed, the context writes to the live
+registry again; an init hook registered by an init hook is recorded but not run in
+the same pass.
+
+`install()` may now return a promise (`void | PromiseLike<void>`), and `plugin()`
+returns it: an async install commits only when it fulfils — everything registered
+before and after an `await` commits together — while a rejection commits nothing,
+is reported with `phase: "async"` and leaves the plugin installable again. The
+name stays reserved while the install is in flight, so a concurrent attempt is
+refused, and ignoring the returned promise never produces an unhandled rejection.
+The singleton `plugin()` returns that promise too, so applications using the
+default registry can await readiness or catch a failed install.
+
+`registry.reset()` is now terminal for everything issued before it: an install
+still in flight cannot commit, a context retained by an already-installed plugin
+stops writing to the registry, and the same plugin name can be installed again
+immediately — an older installation settling afterwards cannot disturb it. A
+cancelled installation rejects with the new `PluginInstallCancelledError` rather
+than reporting success it never achieved (a synchronous install that resets its
+own registry throws it); the cancellation is deliberate, so it is not reported as
+a runtime error. That error is branded with a global symbol and exported
+alongside `isPluginInstallCancelledError()`, so a cancellation raised by one copy
+of the module is recognised by another's `instanceof` — the default registry is
+shared across duplicate copies. An install that resets the registry itself never
+reserves its name, so the name stays installable even if that installation never
+settles. Recursion protection is independent of `reset()`: a plugin that resets
+the registry from inside its own `install()` still cannot install itself.
+
+### Fixed — ISR stopped revalidating after one failed fetch
+
+A failed revalidation (including the initial fetch) now keeps the data stale and
+retries after `revalidateAfter`, instead of never refreshing again.
+
+### Fixed — `TransitionGroup.remove()` rejected on a failing `leave`
+
+A throwing or rejecting `leave` is now reported with the element (like `add()`
+and `track()`), `remove()` resolves, and the element is removed from the group so
+a later `track()` does not run `leave` for it again.
+
+### Fixed — accessibility checks reported false positives
+
+`checkKeyboardAccess()` no longer flags a container whose click listener only
+delegates to its own controls — declared with `data-a11y-delegates` or the new
+`delegatesActivation` option, never inferred from the descendants, so a clickable
+card wrapping a button is still reported — and treats `summary` as natively
+interactive. `checkFormLabels()` finds a
+`<label for>` anywhere in the input's document or shadow root, so checking an input
+directly no longer reports it as unlabeled.
+
+### Fixed — `createHttpMock()` gaps in jsdom and with abort reasons
+
+A `FormData`, `URLSearchParams` or `Blob` from another realm (jsdom's classes with
+the runtime's `Request`) reaches the handler readable instead of as
+`"[object FormData]"`: a body the runtime rejects or stringifies is passed
+through as-is with a `Content-Type` describing it (an explicit one from the
+caller is kept), while a body the runtime understands keeps decoding exactly as
+the same bytes in a `Request` input would. A body on a GET or HEAD request is
+refused on that path too, as `fetch()` does. An abort rejects with
+the signal's reason — a `TimeoutError`, or a custom value — like `fetch()`.
+
+### Fixed — `swipe()` lost gestures
+
+A single touch that starts while an earlier touch is still tracked (its
+`touchend` was missed) now starts a new gesture instead of being dropped, and only
+touches on the target element count toward the multi-touch check, so a finger
+resting elsewhere no longer blocks swipes.
+
+### Fixed — `urlState()` pushes copied scroll-restoration identity
+
+A pushed entry carries the current `history.state` forward without
+`scrollRestoration()`'s `__sibuScrollKey`, so two entries no longer share one
+identity and restore the same position. Replaced entries and an explicit `state`
+are unchanged.
+
+### Fixed — smaller gaps
+
+- `Head({ title: null })` and `renderToDocument({ title: null })` no longer render
+  the literal title "null".
+- `migrate()` reports a stored version the strict SemVer parser rejects (for
+  example `"1.0.0.1"`) in `errors` and runs nothing, instead of rejecting.
+- `datePicker`, `tooltip`, `popover`, `select` and `combobox` teardowns are
+  idempotent: calling an old teardown again after rebinding no longer undoes the
+  new binding.
+
+### Fixed — `transition()` stayed pending when reading a result's `then` threw
+
+The body's result was checked with `result.then` outside any `try`, so a throwing
+getter escaped the idle callback and `pending()` never returned to `false`. The
+result is now adopted with `then` read exactly once and invoked in a microtask;
+fulfillment, rejection, a throwing getter and a throwing invocation all settle the
+start, and failures (including a throwing body) are reported with
+`phase: "async"` and `name: "transition"`.
+
+### Fixed — `socket()` opened a connection or heartbeat after reentrant disposal
+
+A status subscriber closing or disposing the socket while `"connecting"` or
+`"open"` was published did not stop the interrupted code: a replacement
+`WebSocket` was still constructed, or a heartbeat started. `close()` now
+invalidates the lifecycle, which is rechecked after each status publication and
+around socket construction; a socket created for an invalidated lifecycle is
+closed immediately. The lifecycle is captured before the URL getter runs, every
+invalidated path leaves the status `"closed"`, and a throwing URL getter is
+reported (status `"closed"`) instead of escaping the constructor or reconnect
+timer. The same applies when the `WebSocket` constructor itself throws (a URL the
+browser rejects, invalid or duplicate protocols, CSP or policy blocks); such a
+failure does not schedule a reconnect.
+
+### Fixed — `imageLoader()` could continue a load interrupted by disposal
+
+`start()` published `"pending"` and then created an `Image` unconditionally. Each
+start now carries a token and stops if the loader was disposed or a newer start
+began during that publication; abandoned requests are always aborted and
+detached.
+
+### Fixed — reentrant `globalStore` dispatches delivered states out of order
+
+A listener that dispatched or reset during a notification had the newer state
+delivered first and the rest of the older round afterwards, so listeners saw
+history backwards, and a listener handling one state could read a newer one from
+`getState()`. Store operations are now queued: a `dispatch()` or `reset()`
+requested while another is running (from a listener, middleware or action) runs
+after the current one has committed and delivered, so every listener's state
+equals `getState()` and rounds arrive in commit order. The caller's own failing
+action still throws; a queued one that fails is reported. Subscriptions are
+tracked as records, so a callback unsubscribed and re-subscribed during a round
+starts with the next update; subscribing an already-subscribed callback still
+returns the existing subscription. A middleware `next()` called after the
+middleware has returned (from a timer, a promise or after an `await`) re-enters
+the same queue, and an error from such a delayed continuation is reported.
+Middleware may be `async` (`Middleware` now returns `void | PromiseLike<void>`):
+a rejection is reported with `phase: "async"` and
+`name: "globalStore(middleware)"`, and a middleware that throws or rejects before
+calling `next()` never continues, so an action whose dispatch failed cannot run
+later. The queue drains with a cursor, so a large reentrant burst stays linear.
+Listener isolation is unchanged.
+
+### Fixed — `select()` Home/End highlighted disabled options
+
+Home and End jumped to the literal first and last options. They now move to the
+first and last enabled option (and leave the highlight alone when every option is
+disabled), and `aria-activedescendant` never identifies a disabled option, even if
+the disabled predicate changes after highlighting.
+
+### Fixed — `gamepad()` kept disconnected and replaced controllers
+
+When the last controller disconnected, polling stopped without publishing, so
+`pads()` kept reporting it as connected. Snapshot comparison also ignored the
+device `id`, so a different controller at the same index with identical inputs
+kept the previous identity. Disconnection now publishes the remaining set before
+polling stops, and snapshots compare `id`. Disposal is terminal: a `pads()`
+subscriber disposing during a frame, or a stale frame firing afterwards, can no
+longer restart polling.
+
+### Fixed — `infiniteQuery` fetches mutated state after `dispose()`
+
+`refetch()` cleared the pages before the fetch noticed the query was disposed,
+leaving `pages()` empty while the disposed `data()` kept its last value.
+`refetch()`, `fetchNextPage()` and `fetchPreviousPage()` are now no-ops after
+disposal.
+
+### Fixed — `copyOnClick` leaked clipboard failures as uncaught errors
+
+The clipboard write's promise was discarded, and a missing Clipboard API or a
+throwing text getter threw from the raw click listener. Every failure is now
+reported through the runtime error handler with `phase: "async"`,
+`name: "copyOnClick"` and the element as `node`.
+
+### Fixed — dynamic components registered through one package copy were not found through another
+
+`registerComponent()` used a module-local map, so with duplicated SibuJS copies a
+component registered through one could not be resolved through the other. The
+registry is now shared through a versioned global symbol, like the action and
+reactive registries.
+
+### Changed — default CDN gzip budget baseline
+
+The baseline was raised from 26,450 B to 26,500 B for the `copyOnClick` and
+component-registry fixes (+64 B after trimming), to 26,600 B for safe thenable
+adoption in `transition()` and the `imageLoader` reentrancy guard (+106 B), and
+to 26,800 B for per-subscriber render-transaction ownership in the disposal and
+reactive core (+111 B), and back to 26,600 B once the internal transaction
+helpers stopped being re-exported from the root barrel (−250 B); the raw budget
+is unchanged.
+
+### Fixed — `springSignal()` restarted after disposal and crashed during SSR
+
+`dispose()` had no terminal state: a later `set()` started the animation again,
+and a subscriber disposing the spring during a frame still got another frame
+scheduled. Disposal is now terminal — `set()` does nothing, a frame checks it on
+entry and again after publishing before rescheduling, and repeated disposal is
+safe. Without `requestAnimationFrame` (SSR, bare Node) the setter snaps to the
+target, like reduced motion, instead of throwing.
+
+### Fixed — `stream()` accepted events from closed, disposed or replaced sources
+
+EventSource handlers never checked whether they still belonged to the live
+connection, so a closed or disposed stream could report `"open"` again or publish
+late data, and an old source's `onerror` could act on its replacement. Every
+handler now ignores events unless its source is the current one and the stream is
+not disposed, and `close()` detaches the handlers before closing the source.
+Closing or disposing from a status subscriber is also safe: a `"connecting"`
+subscriber prevents the replacement connection from being created, a `"closed"`
+subscriber prevents the reconnect timer, and `close()` always publishes
+`"closed"`.
+
+### Fixed — `TransitionGroup` dropped rejected async callbacks
+
+`enter` and `leave` may return promises, but their rejections became global
+unhandled rejections, and a synchronous throw from any callback aborted `track()`
+part-way. Every callback now runs isolated: throws and rejections are reported
+through the runtime error handler with the element as `node`, and the remaining
+elements are still processed. A returned thenable's `then` is read exactly once
+and invoked in a later microtask, as native promise assimilation does.
+
+### Fixed — `form.handleSubmit()` swallowed submit failures
+
+A rejected async submit reset `submitting` but discarded the error, so a failed
+save looked successful. Synchronous throws, rejections and thenables whose `then`
+throws are now reported with `phase: "async"` and `name: "form.handleSubmit"`,
+and `submitting` is always released. A returned thenable's `then` is read
+exactly once, so a stateful accessor cannot skip the adoption, and it is invoked
+only after `submitting` is raised, so a synchronous thenable cannot re-enter the
+submit handler. **Behavior change:** a synchronous throw from the submit callback
+is reported instead of propagating to the caller.
+
+### Fixed — failed-render rollback left cleanup registered during rollback attached
+
+`withDisposerRollback()` stopped capturing registrations before running the
+captured teardowns, so a teardown that registered more cleanup left it attached to
+nodes the failed render never returned. Capture now stays open while rolling back
+and the queue is drained to stability (newest first), bounded by the same teardown
+ceiling as `dispose()` and reported when reached. Nested transactions and
+teardowns that both throw and register cleanup are covered. Cleanups that a
+`dispose()` already ran during the build are neither run again by the rollback
+nor handed to an enclosing transaction.
+
+### Fixed — adapted components ignored positional children
+
+Components from `componentAdapter()` accepted only a props object, so
+`Button({ variant: "primary" }, "Save")` rendered an empty button. They now take
+children positionally like every tag factory; positional children take precedence
+over `nodes`.
+
+### Fixed — the adapter theme never reached its components
+
+`setTheme()` updated a signal that no component read, so `classOverrides` and
+`prefix` had no effect. Component classes are now reactive: `<Component>`,
+`<Component>-<variant>` and `<Component>-<size>` overrides replace the matching
+classes, a prefix change re-prefixes the mapping's classes, user classes are kept,
+and existing components update. The new `theme.applyTo(root)` installs the theme's
+CSS variables on a root element, keeps them in sync, and returns a release function.
+Handles may overlap on one root and be released in any order: each property keeps
+one layer per handle, the most recently applied live layer wins, and once no layer
+sets it the value and priority the element had before are restored.
+
+### Fixed — `createHttpMock()` diverged from `fetch()`
+
+- A `Request` input is read like `fetch()` reads it: method, headers, body (from a
+  clone, so the caller's request stays unconsumed) and signal, each overridable by
+  `init`.
+- Handlers receive the same body type for equivalent requests, whether the body
+  came from `init` or a `Request`: multipart → `FormData`, form-encoded →
+  `URLSearchParams`, text and JSON types → parsed JSON or the string, anything
+  else (binary, untyped) → `Blob`. Every call is normalized into one effective
+  `Request` built exactly as `fetch()` builds it (a `Request` input is cloned and
+  `init` overrides it), so method, headers and body always agree: `init.headers`
+  supersedes the `Request`'s own, an explicit content type decides how the body
+  is decoded, and handlers see the `Content-Type` `fetch()` generates for
+  `FormData` (with boundary), `URLSearchParams` and typed `Blob` bodies.
+- Relative URLs resolve against the page location when it is an http(s) URL, and
+  against `http://localhost` otherwise (for example jsdom's default
+  `about:blank`), instead of rejecting with "Invalid URL".
+- Abort signals are honoured: an already-aborted signal rejects immediately, and an
+  abort during a handler or `delay` rejects with an `AbortError` instead of
+  resolving later. As in `fetch()`, an input `Request`'s signal is inherited
+  when `init.signal` is omitted or `undefined`, and an explicit `signal: null`
+  detaches from it.
+- String routes match exactly. A path route compares the request's pathname (plus
+  its query when the route has one), and an absolute route the full URL;
+  `"/api/users"` no longer matches `https://host/evil/api/users`.
+
+### Fixed — DOM snapshots and fingerprints could collide
+
+`createDOMSnapshot()`, `assertDOMEquals()`, `snapshotComponent()` and
+`captureFingerprint()` interpolated attribute values and text raw, so an attribute
+`a='x" b="y'` serialized exactly like two attributes, and text `<span>` like an
+element. Attribute values, text and comments are now escaped.
+
+### Fixed — test selector builders produced invalid or widened selectors
+
+The Cypress `commands` and Playwright `selectors` builders interpolated values raw.
+Quotes, backslashes and newlines are now escaped, so every value yields a valid
+selector that matches exactly that value.
+
+### Fixed — accessibility checks skipped the root element
+
+Every check used `root.querySelectorAll()`, which never includes the root, so
+running `checkA11y()` directly on an input, image, button or `<main>` passed or
+misreported. The root is now checked along with its descendants, once.
+
+### Fixed — keyboard checks missed framework event handlers
+
+`checkKeyboardAccess()` only saw `onclick` attributes, never `on: { click }`.
+Loading the testing utilities now enables listener tracking (also available as
+`enableListenerTracking()`), which records element listeners below the framework —
+tag factories, `html` templates and `addEventListener` alike, in development and
+production builds. It follows DOM listener identity — `(type, callback, capture)`,
+duplicates counted once — and forgets `once` listeners after they fire and
+`signal` listeners when the signal aborts. The check treats click and pointer listeners as activation and
+key listeners as keyboard support. The core bundle carries no tracking code.
+
+### Fixed — visual fingerprints ignored computed styles
+
+A stylesheet-only change produced an identical fingerprint. Fingerprints now carry
+`computedStyles`, the appearance-relevant computed properties of every element,
+which feed the hash and are reported by `compareFingerprints()` as `"computed"`
+changes.
+
+### Fixed — `VERSION` reported a version the package never had
+
+`VERSION` from the versioning plugin was hard-coded to `"1.0.0"`, so compatibility
+checks compared against a false framework version. It is now the published package
+version, stamped at build time.
+
+### Fixed — `rollback()` could reverse steps before finding an irreversible one
+
+A missing `down()` was discovered only when the rollback reached it, after newer
+steps had already been reversed. Every step is now checked for a `down()` before
+any is run, so an irreversible migration fails the rollback without changing
+anything. Combined with the per-step checkpoints, storage always describes what is
+actually applied.
+
+### Fixed — route loader data leaked between routes and SSR requests
+
+Loader data lived in one application-global context: every `executeLoader()`
+replaced it, nothing restored it, and disposal left it discoverable, so a route's
+component could read another route's data and concurrent SSR requests saw each
+other's. There is no ambient loader any more: `loaderData()` resolves only inside
+the new `renderWithLoader(resource, render)`, which scopes the data for exactly
+the duration of a route component's construction (scopes nest, and the previous
+one is restored even if rendering throws). `withLoader(loader, context, render)`
+executes and renders in one step, disposing the resource if rendering throws. A
+disposed resource cannot be read or scoped. Scopes are per SSR request.
+
+**Breaking:** calling `loaderData()` after `executeLoader()` without
+`renderWithLoader()` / `withLoader()` now throws.
+
+### Fixed — `createListbox()` activated and selected disabled options
+
+Options marked `aria-disabled="true"` (or `disabled`) were reachable by arrow keys,
+Home and End, and selectable by Enter or click. Navigation now skips them (with
+wraparound), selection and clicks refuse them, `aria-disabled` is read live so a
+change takes effect immediately, and an all-disabled listbox has no active option.
+
+### Fixed — concurrent `clipboard().copy()` calls published in completion order
+
+Writes can settle out of order, and every write that resolved updated `text()` and
+replaced the `copied` reset timer, so an older copy finishing late overwrote the
+newer value. Only the most recent `copy()` now publishes state or owns the timer;
+a superseded write still resolves (or rejects) for its own caller, and `dispose()`
+invalidates every pending write.
+
+### Fixed — `socket().close()` after a remote close reported `"closing"` forever
+
+The native close handler never released the closed socket, and closing a `CLOSED`
+socket fires no further event, so `status()` stuck at `"closing"`. The handler now
+releases its instance, `close()` inspects `readyState` (a closed socket stays
+`"closed"`, a closing one is left alone), and every handler ignores events from a
+socket that has since been replaced by a reconnect.
+
+### Fixed — single-file `fileUpload()` reported files it did not keep
+
+In single mode only the last valid file is retained, but `onFiles` received every
+valid file, so consumers processed files the widget had discarded. `onFiles` now
+receives exactly the committed selection.
+
+### Fixed — empty `accept` tokens admitted files of unknown type
+
+A trailing or doubled comma (`"image/png,"`) produced an empty pattern that equalled
+a file's empty MIME type, letting any file of unknown type through. Empty and
+whitespace-only tokens are now dropped; an `accept` string with no valid tokens
+applies no restriction, like the HTML attribute.
+
+### Fixed — `formatCurrency()` options could override currency and style
+
+Options were spread after `style: "currency"` and `currency`, so
+`{ currency: "EUR" }` or `{ style: "percent" }` defeated the positional currency.
+The fixed fields are now applied last, and options are typed as the new
+`CurrencyFormatOptions` (`Intl.NumberFormatOptions` without `style` / `currency`).
+
+### Fixed — resource hints were deduplicated by URL alone
+
+`prefetch()` and `preloadResource()` shared one URL-keyed cache, so a prefetch
+suppressed a later preload of the same URL, and one `as` value suppressed another.
+Hints are now deduplicated by `rel`, `as`, `crossorigin` and URL together; exact
+duplicates are still created once.
+
+### Fixed — Tabs and Accordion generated duplicate document ids
+
+Element ids were derived from the caller's item id alone, so two widgets with the
+same item ids both created `sibu-tab-details` / `sibu-tabpanel-details` (and the
+accordion equivalents): `aria-controls` and `aria-labelledby` resolved to another
+widget's elements, and item ids containing whitespace produced multi-token ARIA
+references. Each `bind()` now allocates a unique prefix with `createId()` and
+appends an encoded, collision-free form of the item id; ids the author already set
+on the elements are kept and referenced as-is, and teardown removes only generated
+ids.
+
+### Fixed — datePicker teardown left cell accessibility state behind
+
+`bind()` wrote `role`, `aria-selected`, `aria-disabled` and `tabindex` to every
+cell, but teardown restored only the grid, so reused cells kept `role="gridcell"`,
+stale ARIA state and a roving tabindex. Each cell's original attributes are now
+captured on first touch; cells that leave the displayed month are restored
+immediately, and teardown restores the rest.
+
+### Fixed — `draggable()` permanently changed relinquished elements
+
+Retargeting and disposal removed only the listeners: the previous element stayed
+`draggable`, and `isDragging()` could stay `true`. The element's original
+`draggable` attribute is now restored on retarget and disposal, `isDragging` is
+cleared when the active target is detached, and `dispose()` is idempotent.
+
+### Fixed — `dropZone()` flickered while moving between child elements
+
+Every bubbling `dragleave` cleared `isOver`, including the one fired when moving
+from one child to another inside the zone. Enter/leave events are now balanced
+with a depth counter, and the state resets on drop, retarget and disposal. A leave
+to a known node outside the zone (including another document) ends the hover
+outright. A leave with no destination — which Safari reports for every drag leave,
+including moves between children — ends it only if no `dragenter`/`dragover` on
+the zone follows within 600 ms, so the hover neither sticks after leaving the
+window nor flickers off inside the zone.
+
+### Fixed — `pointerLock().request()` discarded the browser's result
+
+Modern `requestPointerLock()` returns a promise that rejects on refusal, but the
+wrapper ignored it, so permission and user-activation failures became unhandled
+rejections. `request()` now returns `Promise<void>`, resolving when the lock is
+granted and rejecting with the browser's original error; synchronous throws and
+legacy `void` implementations are normalized. An element without Pointer Lock
+support (e.g. iOS Safari) resolves without doing anything, so fire-and-forget
+callers never get an unhandled rejection.
+
+### Fixed — `throttle()` emitted twice in quick succession after a trailing update
+
+A trailing emission ended the cooldown, so a change 1 ms later emitted
+immediately — two updates back-to-back despite "at most once per interval". Every
+emission, leading or trailing, now opens a full cooldown window.
+
+### Fixed — `withDefaults()` made every prop optional
+
+It returned `Component<Partial<P>>`, so a required prop without a default could be
+omitted and arrive as `undefined`. The returned component now takes
+`WithDefaultsProps<P, D>` (exported): keys with a default become optional, all other
+keys keep their original required/optional status, and defaults for keys the
+component does not accept — or of the wrong type — are compile errors.
+
+### Fixed — `interval().pause()` did not preserve the remaining delay
+
+`pause()` cleared the interval and `resume()` started a fresh full period,
+contradicting the documented contract and drifting on every pause. `resume()` now
+finishes the interrupted period first, then continues on the regular cadence; time
+spent paused does not count. `pause()` and `resume()` are idempotent, and `stop()`
+leaves nothing scheduled.
+
+### Fixed — `swipe()` combined different touches and ignored cancelled gestures
+
+The end of a gesture was read from `changedTouches[0]`, so an unrelated finger
+could complete it, and `touchcancel` was ignored. A gesture is now tracked by the
+initiating touch's `identifier`: its end is matched by identifier, `touchcancel`
+ends it, and a gesture that becomes multi-touch is abandoned. `dispose()` also
+removes the new cancel listener.
+
+### Fixed — disposing one `speech()` controller cancelled every controller's speech
+
+Controllers called the global `speechSynthesis` `cancel()` / `pause()` / `resume()`
+directly, so unmounting one component cancelled or paused speech from every other
+controller and from application code. Utterances from all controllers now go
+through a shared owner-aware queue and are handed to the native queue one at a time.
+`cancel()`, `pause()`, `resume()` and `dispose()` affect only that controller's
+utterances, and native methods are called only while its utterance is the one
+speaking. `speaking()` now means "this controller has an utterance playing or
+waiting", and the 200 ms state polling is gone.
+
+### Fixed — a failed `scrollLock().lock()` corrupted the shared lock count
+
+Ownership and the shared count were committed before the body styles were applied,
+so a lock that threw (no `document.body` yet, a failing style write) left the count
+at 1 with no handle able to release it, and every later lock skipped the body. The
+DOM work now runs first, all-or-nothing, and ownership is committed only after it
+succeeds.
+
+### Fixed — `Head({ title: "" })` could not clear the title
+
+The static title path tested truthiness, so an empty title was ignored while a
+reactive getter returning `""` worked. Both now apply any defined title, and the SSR
+document shell renders an empty `<title>` the same way.
+
+### Fixed — `setStructuredData()` deleted valid JSON-LD before serializing
+
+The existing script was removed before `JSON.stringify` ran, so a payload that fails
+to serialize — a cycle, a `BigInt`, a throwing getter or `toJSON` — destroyed the
+previously published metadata. The replacement is now built first and swapped in
+place with `replaceWith()` only after serialization succeeds.
+
+### Fixed — `createId()` was not request-scoped during SSR
+
+The suspense counter was request-scoped but `createId()` incremented one
+process-global counter, so a server render's ids depended on earlier and
+concurrent requests and could differ from a fresh client's — breaking `for`,
+`aria-labelledby`, `aria-describedby` and hydration. Inside `runInSSRContext` the
+counter now lives on the request store (shared by duplicate module copies through
+the same request), so every request's ids start from 1 and match a fresh client
+sequence. Outside a request the shared client counter is used as before.
+
+### Fixed — module factories bypassed circular-dependency detection
+
+A module left the resolution stack before its factory ran, and a factory calling
+`resolve()` started a fresh stack, so a factory cycle recursed until the call stack
+overflowed. Modules now move through `unloaded` → `resolving` → `loaded`, detected
+across every `resolve()` call including those made from factories, so direct and
+indirect factory cycles throw the documented circular-dependency error. A module
+whose initialization throws returns to `unloaded` and can be retried; a successful
+factory still runs once.
+
+### Fixed — a failing custom-element rerender destroyed the working component
+
+`defineElement()` tore the current subtree down before calling the component
+factory, so a throwing rerender — typically an invalid attribute — left the element
+blank with its live state disposed. Rendering is now a transaction: the replacement
+is built first and committed only on success, disposing the old subtree exactly
+once. On failure the working subtree stays, disposers the failed attempt registered
+are rolled back, and the error is reported with the element as its node
+(`phase: "render"`), so an enclosing `ErrorBoundary` can claim it.
+
+### Fixed — router parsing dropped `?` and `#` after the first one
+
+Route parsing destructured `split("#")` and `split("?")`, keeping only the first two
+pieces: `/callback?redirect=/login?next=home#section#details` lost `?next=home` and
+`#details`. URLs are now split at the first `#`, then the first `?` before it, and
+everything after a delimiter belongs to that part — for `navigate()` and for
+`RouterLink` active-state matching alike.
+
+### Fixed — testing utilities detached components without disposing them
+
+The Jest and universal adapters cleared containers with `innerHTML = ""`,
+`testComponent().destroy()` removed its container directly, and
+`snapshotComponent()` never disposed its temporary render, so effects, listeners and
+subscriptions leaked across tests. All of them now run framework disposal first;
+`snapshotComponent()` does so even when serialization throws. The Cypress adapter's
+`mount()` now returns an idempotent, disposal-aware `unmount()`.
+
+### Fixed — the fake timer turned zero-delay intervals into one-shot timers
+
+`createTimerMock()` decided a timer was an interval by the truthiness of its period,
+so `setInterval(fn, 0)` ran once — and `advance()` could spin forever on a zero
+period. Interval kind is now checked explicitly, zero, negative and non-finite
+periods are normalized to a 1 ms minimum so they stay recurring, and `flush()`
+reports hitting its iteration limit instead of stopping silently.
+
+### Fixed — `getSlot()` returned inherited members as slots
+
+`getSlot({}, "toString")` returned `Object.prototype.toString`, so reserved-looking
+slot names bypassed fallback rendering. Only an own, function-valued entry is now
+returned.
+
+### Fixed — `timeline()` accepted capacities that corrupted its state
+
+`timeline(0, 0)` evicted the current value on the first `set()`, leaving an empty
+history, an index of `-1` and an `undefined` value. `maxHistory` must now be a
+positive safe integer; anything else throws a `RangeError`.
+
+### Fixed — ISR `isStale()` did not react to time passing
+
+`isStale()` compared a timestamp signal with `Date.now()`, so nothing reactive
+changed when the deadline passed and subscribed UI stayed stale-unaware. Staleness
+is now a signal flipped by a deadline timer: it becomes `true` when
+`revalidateAfter` elapses (starting revalidation), stays `true` while revalidation
+is pending or after it fails, and returns to `false` on success, which re-arms the
+deadline. Disposal cancels the deadline, and a non-positive or non-finite
+`revalidateAfter` throws a `RangeError`.
+
+### Fixed — dynamically added listbox options had incomplete ARIA state
+
+`createListbox()` stamped option ids and `aria-selected` only once, so options
+inserted later had no id — keyboard navigation set an empty
+`aria-activedescendant` — and no selection state. Options are now reconciled on DOM
+mutation and before every interaction: new options get an id and `aria-selected`
+reflecting the current selection, and removing the active option clears the active
+descendant. The handle gains `refresh()` for synchronous reconciliation, and
+`dispose()` stops observing.
+
+### Fixed — `normalize()` permitted prototype pollution
+
+The entity registry and tables were ordinary objects keyed by schema names and
+ids, so a schema named `__proto__` wrote the normalized entity onto
+`Object.prototype`, and ids such as `constructor` or `toString` collided with
+inherited members that `denormalize()` then returned. `normalize()`,
+`denormalize()` and `normalizedStore()` now keep their tables as null-prototype
+objects, read only own properties, and define every write as an own property, so
+every schema name, relation field and id is literal data.
+
+### Fixed — normalized stores lost entities with missing ids and allowed re-keying
+
+Ids came from `String(entity[idKey])`, so an entity without an id was stored
+under `"undefined"` and each later one silently overwrote it. Ids are now
+validated: only strings and finite numbers are accepted, and anything else throws
+a `TypeError` naming the entity type and `idKey` — in `normalize()`, `add()` and
+`addMany()`, where one invalid entity rejects the whole batch. An `update()` that
+would change the entity's id field throws and leaves the store unchanged (remove
+and re-add instead); repeating the same id is allowed.
+
+### Fixed — `store()` could not hold an own `__proto__` state key
+
+The signal registry and snapshots were filled by assignment, so a `__proto__` key
+(valid in JSON) replaced the registry's prototype and disappeared from reads,
+updates, resets, snapshots and `subscribeKey()`. The registry is now a
+null-prototype object and entries and snapshot keys are defined as own properties.
+
+### Fixed — `deepEqual()` treated distinct opaque objects as equal
+
+After the handled built-ins it compared enumerable keys, so objects whose state is
+not in enumerable keys — `new Number(1)` vs `new Number(2)`, two different `URL`s,
+`Error`s with different messages — compared equal and `deepSignal` suppressed the
+update. Boxed primitives now compare by value, `URL`s by `href`, and `Error`s by
+name, message, cause and own enumerable fields. Only plain (or null-prototype)
+records fall back to key comparison; any other distinct instance — a `Promise`, a
+`WeakMap`, a class instance — is unequal.
+
+### Fixed — reactive `splice(start)` ignored the missing `deleteCount`
+
+`array()` and `reactiveArray()` defaulted an omitted `deleteCount` to `0`, so
+`splice(2)` removed nothing, while native `splice(start)` deletes through the
+end. Both now forward exactly the arguments given, matching
+`Array.prototype.splice` for omitted and explicit `undefined` counts and for
+negative or out-of-range starts. `array()` also no longer notifies for a
+`splice()` that neither removes nor inserts anything.
+
+### Fixed — prop defaults overwrote an explicit `null`
+
+`validateProps()` (and so `defineStrictComponent()`) applied a default whenever
+the value was `== null`, replacing an explicit `null` even when the prop's
+validator accepts it. Defaults now apply only to absent or `undefined` props, in
+both development and production. `false`, `0` and `""` were already kept.
+
+### Fixed — `urlState()` erased `history.state` and instances drifted apart
+
+- `setParams()` and `setHash()` passed `null` as the history state, silently
+  erasing router metadata, scroll-restoration data and application state on the
+  entry. The current `history.state` is now kept — on a replaced entry and carried
+  onto a pushed one, falsy values included. The new `state` option in
+  `UrlStateOptions` sets state deliberately.
+- Setters updated only their own instance, and History API writes fire no
+  `popstate`, so separately mounted `urlState()` instances disagreed about the
+  URL. Every framework URL write now resynchronizes all live instances (shared
+  across duplicate module copies); a disposed instance stops receiving updates,
+  and `dispose()` is idempotent.
+
+### Fixed — migration runner races, rollback checkpoints and loose SemVer parsing
+
+- **Serialized operations.** `migrate()` computed its pending list before awaiting
+  any migration, so concurrent calls ran the same `up()` twice. `migrate()` and
+  `rollback()` now run one at a time across every runner in the realm sharing the
+  same storage and storage key (runners on other keys stay independent), each
+  re-reading the stored version when it starts; a failed operation releases the
+  queue. The runner accepts a `storage` option (default `localStorage`).
+- **Rollback checkpoints.** The applied version was written only after every
+  `down()` succeeded, so a part-way failure left storage claiming reversed
+  migrations were still applied and a retry ran their `down()` again. The version
+  is now checkpointed after every successful `down()` (the key is removed when
+  nothing remains applied).
+- **Storage failures are distinct.** A failed storage write now surfaces as the new
+  `MigrationStorageError` (with the migration's `version`) instead of being
+  reported as a failed `up()` — `migrate()` lists it in `errors`, `rollback()`
+  throws it.
+- **Strict `parseSemVer()`.** It used `parseInt`, accepting `1.2.3garbage`,
+  `1.2.3.4` and an empty prerelease. It now uses an anchored SemVer 2.0.0 grammar
+  that rejects trailing characters, extra components, empty or illegal
+  identifiers and numeric leading zeros, and parses build metadata into the new
+  `SemVer.build` field. The `v` prefix and abbreviated `1` / `1.2` forms still
+  work.
+
+### Fixed — `eventBus()` and `createSharedScope()` did not isolate subscribers
+
+Both iterated the live listener set and called user callbacks without
+containment: one throwing listener stopped delivery to every later listener and
+escaped to the caller, listeners added during delivery ran in the same dispatch,
+and a listener that kept adding listeners never let it finish. Delivery now walks
+a snapshot, isolates each callback and reports failures through the runtime error
+pipeline (`phase: "event"`). Listeners added during a dispatch start with the next
+one; listeners removed or cleared during it are skipped; a dispatch started from a
+listener completes before the outer one continues.
+
+### Fixed — startup caches exceeded their size bounds
+
+`createSSRCache()` and `prerenderRoutes()` evicted before checking whether the key
+already existed, so overwriting a key at capacity discarded an unrelated entry;
+`maxSize: 0` still stored one item; an oldest key of `""` was never evicted; and
+valid entries were evicted while expired ones remained. Overwrites no longer
+evict, expired entries are removed before valid ones, `0` disables caching, and a
+negative or non-integer limit throws a `RangeError`.
+
+### Fixed — `deferNonCritical()` could starve forever
+
+It scheduled `requestIdleCallback` without a timeout and, given a deadline with
+under 1 ms left — which is always the case for a timed-out callback — rescheduled
+without running anything. It now passes a finite timeout and runs at least one task
+per callback, chunking the rest to the remaining idle budget. A failing task is
+reported through the runtime error pipeline instead of `console.error`.
+
+### Fixed — a synchronous `ssrSuspense()` content throw bypassed the fallback
+
+`content()` was called as an argument to `Promise.race()`, so a synchronous throw
+escaped `ssrSuspense()` and crashed the request, while an async rejection became
+fallback output. Every failure to produce content HTML — a synchronous throw, a
+rejection, a hostile thenable, the timeout, or rendering the resolved element
+throwing — now resolves the boundary with the fallback HTML. A timer handle of
+`0` is now cleared.
+
+### Fixed — testing queries broke on attribute values with special characters
+
+`queryByTestId`, `queryByRole` and `queryByLabel` interpolated values into CSS
+selectors, so a quote, backslash, bracket or newline produced an invalid selector
+or a wrong match, and a `findBy*()` whose query then threw on a later poll never
+settled. Queries now match attribute values exactly via the new
+`queryByAttribute()` / `queryAllByAttribute()` helpers — also used by `render()`,
+the Jest/Cypress/Playwright adapters, the e2e helpers and the label check in the
+a11y audit — and a throwing poll rejects the `findBy*()` promise.
+
+### Fixed — `broadcast().post()` threw after `dispose()`
+
+Disposal closed the native channel but `post()` kept calling it, throwing
+`InvalidStateError`. After `dispose()`, `post()` is now a no-op and `last()` no
+longer changes; `dispose()` is idempotent. Errors from `post()` before disposal,
+such as a `DataCloneError`, still propagate.
+
+### Fixed — failed plugin installation left a partially active plugin
+
+`install()` wrote hooks and providers straight into the live registry, and the
+plugin was marked installed only after `install()` returned. A throwing install
+left its hooks and providers active while `installedPlugins` said it was not
+installed; retrying registered every surviving hook again; and a plugin that
+installed itself — directly or through a dependency — recursed until the stack
+overflowed.
+
+Installation is now a transaction. Hooks and providers are staged and committed
+only when `install()` returns, so a failed install leaves the registry unchanged
+and can be retried. The plugin is marked installed before its init hooks run.
+Installing a plugin whose `install()` is already running throws a
+recursive-installation error. Each `plugin()` call is its own transaction: a
+dependency installed successfully by a nested `plugin()` call stays installed
+even if the outer installation fails.
+
+### Fixed — `lazyModule().get()` did not deduplicate concurrent loads
+
+The cache was filled only after the loader resolved, so every `get()` made before
+then started another load, with duplicated side effects and a cached value decided
+by settlement order. Concurrent calls now share one in-flight load. A rejected
+load clears the shared slot (only if it still owns it) so the next `get()`
+retries.
+
+`lazyModule()` now returns the new `LazyModule<T>` type, whose `loaded` is
+`readonly` — assigning it compiled but threw at runtime, since it is a getter.
+
+### Fixed — `packageInfo` described a package layout that does not exist
+
+It reported `name: "sibu"`, `version: "1.0.0"`, `.mjs` import targets, source
+paths that do not exist and subpaths the package does not export. It now reports
+`sibujs` with the version stamped at build time, lists the real module entry
+points, and `generateExportsMap()` produces exactly the `exports` map in
+package.json — including the CDN subpaths, which map to `{ default }`. Its return
+type is now `Record<string, PackageExportTarget>`. Tests fail if the entry list,
+the build script and package.json drift apart, and check every target exists in
+a built `dist`.
+
+### Fixed — `contentEditable.setContent(string)` kept raw HTML
+
+The string form is documented as `{ html, sanitize: true }` but stored the string
+unchanged, so `content()` rendered as HTML carried live markup. It is now
+sanitized exactly like `{ html }`. Any `<` that would open a tag after stripping
+is re-escaped, so HTML-encoded payloads (`&lt;img onerror=…&gt;`) cannot decode
+into markup, while intentionally encoded text is kept rather than deleted.
+`{ html, sanitize: false }` remains the only raw-HTML path.
+
+### Fixed — scoped `contentEditable` formatting unwrapped DOM outside the editor
+
+The selection was checked to be inside the editor, but the search for an existing
+wrapper kept climbing past it, so `bold()` / `italic()` / `underline()` could
+unwrap an element that contained the editor and rewrite unrelated siblings. The
+search now stops at the bound editor and at the nearest editing host
+(`contenteditable` other than `"false"`); neither the boundary nor anything above
+it is ever unwrapped.
+
+### Fixed — `formAction().onSubmit` was typed for every action
+
+`onSubmit` passes exactly one `FormData`, but it was on every handle, so a numeric
+or multi-argument action compiled as a submit handler and received a `FormData`
+at runtime. `FormActionHandle` now includes `onSubmit` only when a single-FormData
+call is valid for the action; the shared members are `FormActionState`, and
+`onSubmit` is `FormActionSubmit`. This is a type-level change for code that read
+`onSubmit` on a non-FormData action.
+
+### Fixed — `accordion()` and `tabs()` accepted invalid initial state
+
+- `accordion()` now drops unknown `defaultExpanded` ids and, in single mode, keeps
+  only the first valid one.
+- `tabs()` uses `defaultTab` only when it names an enabled tab; otherwise the first
+  enabled tab is active, and when every tab is disabled no tab is active (`""`).
+
+### Fixed — widget `bind()` teardown did not restore mutated DOM
+
+Tabs and Accordion toggled each panel's `hidden` without restoring it and deleted
+author-written `aria-selected`, `tabindex` and `aria-expanded`, and FileUpload
+overwrote the input's `accept` and `multiple`, the error region's text and the drop
+zone's `data-drag-over`. Teardown now restores every attribute a binding touches to
+its value before `bind()` — removing attributes that did not exist — and the
+teardown functions are idempotent. Tabs also reconciles `aria-disabled` with each
+tab definition in both directions while bound.
+
+### Fixed — a middleware calling `next()` twice ran the action twice
+
+Every `globalStore` middleware shared one `next` closure over a single chain
+index. A middleware that called `next()` twice applied the action twice — one
+`dispatch()` incremented a counter by two and notified listeners twice — and
+with several middlewares the second call jumped straight to the action,
+bypassing the middlewares after it.
+
+Each middleware now receives its own `next`, which advances the chain at most
+once per dispatch. Extra calls are ignored, with a development warning naming the
+middleware and action.
+
+### Fixed — a throwing `globalStore` listener broke `dispatch()` and `reset()`
+
+Both committed the new state and then iterated the live listener `Set` without
+isolation. One throwing listener made `dispatch()` / `reset()` throw even though
+the mutation had landed, and every later listener missed the update. Iterating
+the live `Set` also delivered the current update to listeners subscribed during
+notification, so a listener that subscribed on every call kept iteration from
+terminating.
+
+Both paths now share one notifier that delivers to a snapshot of the listeners,
+isolates each call, and reports failures through the runtime error pipeline
+(`phase: "event"`). Listeners subscribed during notification start with the next
+update; listeners unsubscribed by an earlier listener in the same round are
+skipped.
+
+### Fixed — `machine.send()` lost reentrant events
+
+Exit hooks and transition actions ran before the outer transition committed its
+state. A `send()` from an action, an exit or entry hook, or a subscriber woken by
+the context update saw the old state: its transition was overwritten when the
+outer one finished, and exit hooks could run twice for one logical state.
+Context and state were also published separately, exposing the new context
+paired with the old state.
+
+`send()` is now run-to-completion. Each machine has an internal FIFO event
+queue; an event sent while a transition is in progress (exit → action → publish
+→ entry) is processed, in order, after that transition completes — including
+events sent from the initial state's entry hook. Context and state are published
+in one batch. If a transition throws, the error still reaches the caller, the
+processing guard is reset, and the events queued by that failed transition are
+discarded. `send()` also no longer subscribes a calling effect to the machine.
+
+### Fixed — `matchesPattern()` was nondeterministic with `g` / `y` expressions
+
+The validator called `regex.test(value)` directly. A global or sticky expression
+advances `lastIndex` on each match, so the same valid value alternated between
+valid and invalid, and one validator shared by two fields marked the second
+identical — and valid — field invalid, blocking submission.
+
+Every validation now starts from `lastIndex = 0`, and the caller's `lastIndex` is
+restored afterwards, so results no longer depend on call history and the
+expression the caller passed in is left as it was.
+
+### Fixed — `imageLoader()` exposed stale dimensions
+
+Starting a new load reset `status` and `image` but not `width` / `height`, so
+while a new reactive `src` was pending — and permanently if it failed — the
+loader reported the previous image's dimensions, contradicting "0 until loaded"
+and producing wrong aspect ratios. `dispose()`, documented to reset state, left
+every signal unchanged.
+
+- Starting a load now resets `status`, `image`, `width` and `height` together in
+  one batch, and a successful load publishes them together too, so observers
+  never see a mix of old and new values.
+- `dispose()` resets every signal to its initial value, and is idempotent.
+- An abandoned request that is still in flight — on a `src` change or on
+  `dispose()` — is best-effort cancelled by clearing its `src`. An image that
+  already loaded is left untouched, since a caller may still be displaying it.
+
+### Fixed — `flushScheduler()` stranded remaining work when a task threw
+
+`flushScheduler()` cancelled the pending frame / idle / timeout wake-up and then
+invoked tasks without containment. The first throwing task escaped the flush,
+and every task behind it stayed queued with nothing scheduled to run it, leaving
+the application partially updated.
+
+All scheduler drains — `flushScheduler()`, the frame/idle/timeout queue drain and
+`Priority.IMMEDIATE` tasks — now invoke tasks through one shared safe path. A
+failure is reported through the runtime error pipeline with
+`phase: "scheduler"` (previously the async drain wrote straight to
+`console.error`) and draining continues. Scheduler state is restored in a
+`finally`.
+
+### Fixed — `lazyChunk()` mounted components into disposed containers
+
+`lazyChunk()` had no lifetime state and registered no disposer, so both
+settlement paths always mutated the container. A container disposed before its
+chunk loaded still called the component factory and appended the result — or
+the failure message — after the disposal traversal had completed, leaving any
+bindings and listeners the component created attached to an unreachable
+subtree.
+
+The container now registers terminal ownership before the load starts, as core
+`lazy()` does. A container disposed before settlement never has the component
+built or the failure message inserted, and a component whose own construction
+disposes the container is disposed and discarded instead of appended.
+
+### Fixed — overlapping `transition().start()` calls corrupted `pending()`
+
+Every `start()` set `pending` to `true`, but each body reset it to `false` when
+that one operation finished. With two transitions in flight, the first to
+settle cleared `pending()` while the second was still running; a synchronous
+first body cleared it before the second body had even started.
+
+The transition now counts outstanding starts. Each one is released exactly once
+— on synchronous completion, a throw, resolution or rejection — and `pending()`
+becomes `false` only when none remain.
+
+### Fixed — `intersection()` and `lazyLoad()` accepted callbacks from disconnected observers
+
+`disconnect()` removes an observer's targets but does not clear entries it has
+already queued, so the browser can still deliver a notification afterwards.
+
+- **`intersection()`** — after `observe()` moved to another element, or after
+  `unobserve()`, a notification queued for the previous observation overwrote
+  the reactive `isIntersecting` / `intersectionRatio` state. Each observation now
+  has a generation, and callbacks from a superseded one are ignored.
+- **`lazyLoad()`** — a queued intersecting notification could call `loader()`
+  after the returned cleanup ran, or call it a second time. It now has a
+  terminal state: the loader runs at most once and never after cleanup.
+
+Both also call `takeRecords()` before `disconnect()` to drop entries not yet
+delivered.
+
+### Fixed — `dispose()` was hidden from TypeScript on reactive helpers
+
+`debounce()`, `throttle()`, `previous()` and `persisted()` retain effects, timers
+and (for `persisted()`) a global `storage` listener, and their runtime values
+always carried `dispose()` — but the declared return types were a plain getter
+or tuple, so `value.dispose()` failed to compile without a cast.
+
+- **New `DisposableAccessor<T>`** type (`Accessor<T> & { dispose(): void }`).
+  `debounce`, `throttle` and `previous` now return it; it stays assignable
+  wherever a plain getter was expected.
+- **New `PersistedSetter<T>`** type. `persisted()` returns it as the setter, so
+  `setValue.dispose()` type-checks. Its documentation now also states that the
+  setter always carries `dispose()`, not only when cross-tab sync is on.
+
+### Fixed — `animationFrame()` kept running after a reactive `pause()` / `dispose()`
+
+Each frame published `delta` and `elapsed` — whose subscribers run synchronously
+— and then unconditionally requested the next frame. An effect that called
+`pause()` or `dispose()` in response flipped `running()` to `false`, but the
+loop kept scheduling frames and publishing values indefinitely, breaking the
+permanent-disposal contract with a full-speed browser loop.
+
+The loop now tracks its state internally, independent of the `running` signal,
+and re-checks it after every publication. A frame stops publishing and schedules
+nothing once a subscriber pauses or disposes it, and never double-schedules when
+a subscriber pauses and resumes it. `resume()` and `pause()` update internal
+state before publishing `running`, so a subscriber reacting to it sees settled
+state too.
+
+### Fixed — `when()` and `match()` rendered after disposal
+
+Both directives queue their first render in a microtask that checked only
+`initialized` and `anchor.parentNode`. `dispose(anchor)` does not detach the
+anchor, so a directive disposed before that microtask ran still invoked its
+branch or case factory and inserted DOM after teardown — outside the disposal
+traversal that had already completed, so the new branch's bindings and
+listeners were never released.
+
+Both now carry a terminal disposed flag, set by their registered disposer and
+checked by the queued render and by `update()`. A directive disposed before its
+first render never calls a factory and inserts nothing, matching `each()`.
+
+### Fixed — `FocusTrap` threw from a microtask after disposal
+
+`FocusTrap()` attaches its removal observer and performs autofocus in queued
+microtasks. `dispose(trap)` does not detach the element, so a trap appended and
+disposed before those microtasks ran was still connected, but its observer had
+already been cleared: the queued `observe()` call threw an uncaught `TypeError`,
+and autofocus moved focus into the torn-down trap.
+
+The trap now has a terminal disposed state. Both microtasks return early once it
+is disposed or no longer connected, so a disposed trap attaches no observer and
+leaves focus where it was. Cleanup is idempotent — when the removal observer and
+`dispose()` both reach it, focus is restored once — and the observer path also
+releases the node's disposer registration.
+
+### Fixed — manual helper disposal left dead cleanup registrations
+
+`hover()`, `focus().bind()` and `createListbox()` register their cleanup with the
+element and also return it for manual disposal, but the manual path never
+removed the node-level registration. Every attach/dispose cycle on a long-lived
+element left one dead closure behind: it kept its captured state alive,
+`checkLeaks()` kept counting it, and the final `dispose(node)` re-ran every
+historical cleanup.
+
+Manual disposal now calls `unregisterDisposer()` — the pattern `enhance()`
+already used — so repeated cycles return the active binding count to its
+original value and `dispose(node)` runs only the cleanups still live. Each
+disposer is idempotent, and calling it after `dispose(node)` is a no-op.
+
+### Fixed — multi-select `createListbox()` lost values stored as CSV
+
+Multiple selection lived in one comma-joined string that was re-split on every
+toggle. Selecting an option whose `data-value` was `"a,b"` was indistinguishable
+from selecting `"a"` and `"b"`, it could not be deselected, and later toggles
+marked options the user never chose as `aria-selected="true"`. The empty-string
+value was dropped by the split and could not be toggled at all.
+
+### Added — `ListboxHandle.selectedValues()`
+
+The listbox now stores its selection as a collection. `selectedValues()` returns
+the selected values in selection order (at most one in single-select mode), and
+toggling and `aria-selected` reconciliation work from it, so every `data-value`
+string — including commas and `""` — is selectable and deselectable on its own.
+An option without a `data-value` is never marked selected.
+
+`selectedValue()` is kept as a compatibility view (the value in single-select
+mode, the CSV in multiple mode) and is deprecated for multiple mode.
+
+### Fixed — `dialog()` stack corruption under reentrancy and after `dispose()`
+
+`open()` published `isOpen = true` before adding the dialog to the global stack.
+Subscribers run synchronously, so an effect that closed the dialog as it opened
+ran before the push, and `open()` then pushed an already-closed "ghost" entry:
+the global Escape listener stayed attached, and after the real top dialog closed
+the next Escape targeted the ghost. The mirror case — an effect reopening the
+dialog as it closed — left it open but off the stack. `dispose()` had no
+terminal state, so a stale `open()` or `toggle()` re-attached the controller.
+
+`open()` and `close()` now commit the open state and stack membership before
+publishing `isOpen`, so a reentrant call always sees settled state. `dispose()`
+is terminal: it marks the dialog disposed before changing anything observable,
+and `open()` / `toggle()` are no-ops afterwards. `isOpen()`, stack membership
+and the global Escape listener stay in sync in every case. `open()`, `close()`
+and `toggle()` also no longer subscribe a calling effect to `isOpen`.
+
+### Fixed — a throwing transition callback hung `enter()` / `leave()`
+
+`transition()` called `onEnterDone` / `onLeaveDone` and only then resolved the
+promise, so a throwing callback skipped the resolve. With a timed transition,
+`await enter()` or `await leave()` hung forever and the exception escaped from
+`setTimeout`, bypassing `ErrorBoundary` and `setRuntimeErrorHandler`. With
+`duration: 0` the promise rejected instead, so behaviour depended on duration.
+
+The promise now always resolves. The callback's error is reported once with
+`phase: "async"` and the element as its node, so the nearest `ErrorBoundary`
+claims it, or the runtime handler when none does. Transition classes and timer
+state are cleaned up as before, and the controller stays usable.
+
+### Fixed — `resource()` ran `onSettled` after `dispose()`
+
+`dispose()` blocked late `data`, `error`, `loading`, `onSuccess` and `onError`
+updates, but `onSettled` was gated only on the request version, which disposal
+does not change. When the aborted request rejected — or a fetcher that ignores
+the abort signal eventually resolved or rejected — `onSettled` still ran against
+a torn-down owner. No lifecycle callback runs after `dispose()` now; a request
+that settles before disposal still gets its `onSettled`.
+
+### Fixed — uncloneable payloads corrupted the worker controllers
+
+`postMessage()` throws synchronously (`DataCloneError`) when a payload cannot be
+structured-cloned — a function, DOM node, symbol or some proxies. None of the
+worker APIs handled that, and each was left in a broken state:
+
+- **`worker().post()`** set `loading` to `true` before posting, and nothing ever
+  cleared it. It now posts first: a failed post sets `error()` to the original
+  exception and leaves `loading` and `result` untouched, so a request already in
+  flight is unaffected. When that request's reply arrives it clears the error
+  together with setting `result` and `loading`, so the hook never shows a good
+  result alongside another call's failure.
+- **`workerFn().run()`** queued the request before posting. Replies are matched
+  to requests by queue position, so the failed request absorbed the next reply
+  and every later caller received its predecessor's result. The failed `run()`
+  now rejects without ever entering the queue, and `loading` reflects only the
+  requests actually sent.
+- **`createWorkerPool().execute()`** left the worker's slot marked in flight with
+  its listeners attached, so that worker's queue never advanced. The task now
+  rejects, the slot is released, and the next queued task is dispatched.
+
+The rejection or `error()` value is the original `DataCloneError`, so callers
+can check `err.name`. The worker is not terminated: a clone failure never
+reaches it, and it stays usable for later valid requests.
+
+### Added — `form().dispose()`
+
+A form creates one derived `error` per field plus five aggregates (`errors`,
+`isValid`, `isDirty`, `touched`, `values`), and none of them could be released. A
+validator that reads a caller-owned signal kept its subscription for as long as
+that signal lived, and DevTools retained every node of an abandoned form.
+
+`FormReturn` now carries `dispose()`:
+
+```ts
+const f = form({ age: { initial: 0, validators: [(v) => (v < minAge() ? "Too young" : null)] } });
+onCleanup(f.dispose, formElement);
+```
+
+It releases the aggregates first, then every field error, and is idempotent.
+Each derived emits its DevTools `computed:destroy` event. Afterwards the derived
+accessors are inert: they return their last settled values and never recompute
+or resubscribe. Field `value()` and `set()` keep working as plain signals.
+
+### Fixed — `hotkey()` dropped unknown combo modifiers
+
+The combo parser silently ignored any modifier it did not recognize, so
+`hotkey("mod+s", save)` registered a shortcut with no modifier at all: it fired
+on every plain "s" (including inside text inputs) and never on Ctrl+S or Cmd+S.
+
+- **`mod` modifier** — resolves to Cmd on Apple platforms and Ctrl everywhere
+  else, so `hotkey("mod+s", save)` works cross-platform with one registration.
+- **`option`** is accepted as an alias for `alt`.
+- **Unknown modifiers throw** — `hotkey("hyper+s", fn)` now throws
+  `hotkey("hyper+s"): unknown modifier "hyper"` instead of matching the bare key.
+- **The `+` key** is written as a trailing plus: `hotkey("+", fn)`,
+  `hotkey("ctrl++", fn)`. A combo with no key (`"ctrl+"`) throws.
+
+### Fixed — widget DOM updates bypassed `ErrorBoundary`
+
+`VirtualList` and several widget `bind()` methods drove their DOM updates with a
+plain `effect()`, which carries no owner node. When an update threw on a later
+scheduled run — a `renderItem`, `option` or `cell` callback, or a DOM write — the
+error was reported with `node: undefined`, so the enclosing `ErrorBoundary` could
+never claim it and it fell through to the global handler.
+
+These updates are now owned DOM bindings, so a later failure carries
+`phase: "binding"` and the owner node, and the nearest boundary renders its
+fallback:
+
+| API | Owner node |
+|---|---|
+| `VirtualList` | the list container |
+| `combobox().bind()` | `els.input` |
+| `select().bind()` | `els.listbox` |
+| `datePicker().bind()` | `els.grid` |
+| `tabs().bind()` | `els.tablist` |
+| `accordion().bind()` | `els.root`, or the first trigger |
+| `fileUpload().bind()` | `els.input` |
+| `popover().bind()` | `els.trigger` |
+| `tooltip().bind()` | `els.trigger` |
+| `bindField()` on a `<select multiple>` | the select element |
+
+Behaviour is otherwise unchanged: the updates stay inert during SSR and are
+released by the same teardown / `dispose()` paths as before.
+
 ## [4.5.0] — 2026-09-13
 
 ### Added — `derived().dispose()`

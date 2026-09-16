@@ -109,14 +109,15 @@ describe("tabs coverage", () => {
     const { tablist, tabEls, panelEls } = setup(t);
     expect(tablist.getAttribute("role")).toBe("tablist");
     expect(tabEls.one.getAttribute("role")).toBe("tab");
-    expect(tabEls.one.id).toBe("sibu-tab-one");
-    expect(tabEls.one.getAttribute("aria-controls")).toBe("sibu-tabpanel-one");
+    // Ids are unique per binding; what matters is that the references resolve.
+    expect(tabEls.one.id).toMatch(/^sibu-tabs-\d+-tab-one$/);
+    expect(tabEls.one.getAttribute("aria-controls")).toBe(panelEls.one.id);
     expect(tabEls.one.getAttribute("aria-selected")).toBe("true");
     expect(tabEls.one.tabIndex).toBe(0);
     expect(tabEls.two.tabIndex).toBe(-1);
     expect(panelEls.one.getAttribute("role")).toBe("tabpanel");
-    expect(panelEls.one.id).toBe("sibu-tabpanel-one");
-    expect(panelEls.one.getAttribute("aria-labelledby")).toBe("sibu-tab-one");
+    expect(panelEls.one.id).toMatch(/^sibu-tabs-\d+-panel-one$/);
+    expect(panelEls.one.getAttribute("aria-labelledby")).toBe(tabEls.one.id);
     expect(panelEls.one.hidden).toBe(false);
     expect(panelEls.two.hidden).toBe(true);
   });

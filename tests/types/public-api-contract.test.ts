@@ -13,21 +13,29 @@
 // Negative cases use `@ts-expect-error`, which fails the build if the error
 // STOPS occurring — so a constraint that is later relaxed cannot silently drift.
 import { describe, expect, it } from "vitest";
+import { formatCurrency } from "../../src/browser/format";
 import { action, copyOnClick } from "../../src/core/rendering/action";
 import { input } from "../../src/core/rendering/html";
+import { signal } from "../../src/core/signals/signal";
+import { debounce } from "../../src/data/debounce";
 import { mutation } from "../../src/data/mutation";
+import { previous } from "../../src/data/previous";
 import { query } from "../../src/data/query";
+import { throttle } from "../../src/data/throttle";
 import type { defineComponent } from "../../src/patterns/componentProps";
 import type { validateProps } from "../../src/patterns/contracts";
-import type { withDefaults } from "../../src/patterns/hoc";
+import { withDefaults } from "../../src/patterns/hoc";
 import type { machine } from "../../src/patterns/machine";
+import { persisted } from "../../src/patterns/persist";
 import { normalize, normalizedStore } from "../../src/performance/normalize";
 import type { createSharedScope } from "../../src/platform/microfrontend";
 import type { wasm } from "../../src/platform/wasm";
+import { lazyModule } from "../../src/plugins/modular";
 import type { AsyncComponent, Component, LazyComponent, RouteDef } from "../../src/plugins/router";
 import { createMemoryRouter, createRouter } from "../../src/plugins/router";
 import { eventBus } from "../../src/ui/eventBus";
 import { bindField, form } from "../../src/ui/form";
+import { formAction } from "../../src/ui/formAction";
 
 /** Compile-time assertion helper — no runtime cost, no new dependency. */
 const expectType = <T>(_value: T): void => undefined;
@@ -256,5 +264,109 @@ describe("public API type contracts", () => {
     // the tag-factory prop types is a wider change. See final-pre-rc-findings.
     const multi = form({ tags: { initial: ["a"] as string[] } });
     expectType<() => string[]>(bindField(multi.fields.tags).value);
+  });
+
+  // debounce / throttle / previous / persisted retain effects, timers and a
+  // global `storage` listener. Their runtime values always carried `dispose()`,
+  // but the declared return types hid it, so valid cleanup failed to compile.
+  // Every call below is deliberately cast-free.
+  it("reactive helpers expose dispose() without casts", () => {
+    const [source, setSource] = signal(1);
+
+    const debounced = debounce(source, 100);
+    expectType<number>(debounced());
+    debounced.dispose();
+
+    const throttled = throttle(source, 100);
+    expectType<number>(throttled());
+    throttled.dispose();
+
+    const prev = previous(source);
+    expectType<number | undefined>(prev());
+    prev.dispose();
+
+    const [theme, setTheme] = persisted("contract-theme", "light");
+    expectType<string>(theme());
+    setTheme("dark");
+    setTheme((current) => `${current}!`);
+    setTheme.dispose();
+
+    // Still assignable wherever a plain getter was expected.
+    const plain: () => number = debounced;
+    expectType<number>(plain());
+    setSource(2);
+    expect(typeof debounced.dispose).toBe("function");
+  });
+
+  // `loaded` is backed by a getter with no setter: assigning it throws in
+  // strict mode at runtime, so the type must not allow it.
+  it("lazyModule().loaded is read-only", () => {
+    const mod = lazyModule(async () => 42);
+    expectType<boolean>(mod.loaded);
+    expect(() => {
+      // @ts-expect-error loaded is read-only
+      mod.loaded = true;
+    }).toThrow(TypeError);
+    expect(mod.loaded).toBe(false);
+  });
+
+  // `onSubmit` forwards exactly one FormData. It must only exist on handles
+  // whose action accepts that call.
+  it("formAction exposes onSubmit only for FormData actions", () => {
+    const save = formAction(async (data: FormData) => data.get("title"));
+    expectType<(e: Event) => void>(save.onSubmit);
+
+    const optional = formAction(async (data?: FormData) => data);
+    expectType<(e: Event) => void>(optional.onSubmit);
+
+    const numeric = formAction(async (count: number) => count * 2);
+    // @ts-expect-error a numeric action cannot be a submit handler
+    void numeric.onSubmit;
+
+    const none = formAction(async () => "ok");
+    // @ts-expect-error a zero-argument action cannot be a submit handler
+    void none.onSubmit;
+
+    const multi = formAction(async (data: FormData, extra: string) => `${data}${extra}`);
+    // @ts-expect-error onSubmit passes one argument; this action requires two
+    void multi.onSubmit;
+
+    // Everything else is available on every handle.
+    expectType<() => boolean>(numeric.pending);
+    expect(typeof numeric.run).toBe("function");
+  });
+
+  // withDefaults() used to return Component<Partial<P>>, so a required prop
+  // without a default could be omitted and arrive as `undefined`.
+  it("withDefaults keeps non-defaulted required props required", () => {
+    const Raw = (props: { label: string; size: number; tone?: string }) => {
+      const el = document.createElement("button");
+      el.textContent = `${props.label}:${props.size}:${props.tone ?? ""}`;
+      return el;
+    };
+    const Button = withDefaults(Raw, { size: 10 });
+
+    // Defaulted required key becomes optional; originally optional stays optional.
+    expect(Button({ label: "ok" }).textContent).toBe("ok:10:");
+    Button({ label: "ok", size: 2, tone: "dark" });
+
+    // @ts-expect-error `label` has no default and is still required
+    Button({});
+    // @ts-expect-error excess props are rejected
+    Button({ label: "ok", bogus: true });
+    // @ts-expect-error a default for a key the component does not accept
+    withDefaults(Raw, { nope: 1 });
+    // @ts-expect-error a default of the wrong type
+    withDefaults(Raw, { size: "big" });
+  });
+
+  // formatCurrency's positional currency and currency style cannot be overridden.
+  it("formatCurrency options exclude style and currency", () => {
+    expectType<string>(formatCurrency(1, "USD", { locale: "en-US", maximumFractionDigits: 0 }));
+    // @ts-expect-error currency is the positional argument
+    formatCurrency(1, "USD", { currency: "EUR" });
+    // @ts-expect-error style is always "currency"
+    formatCurrency(1, "USD", { style: "percent" });
+    expect(true).toBe(true);
   });
 });

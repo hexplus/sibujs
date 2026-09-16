@@ -1,4 +1,10 @@
 import { type RuntimeErrorPhase, reportError } from "../core/errors";
+import {
+  beginDisposerCapture,
+  currentDisposerCapture,
+  type DisposerCapture,
+  endDisposerCapture,
+} from "../core/rendering/dispose";
 import type { ReactiveSignal } from "./signal";
 
 // ---------------------------------------------------------------------------
@@ -264,6 +270,11 @@ type SubWithList = Subscriber & {
   // would retain unrelated subtrees.
   _errorPhase?: RuntimeErrorPhase;
   _errorNode?: unknown;
+  // The render transaction this subscriber was created in, if any (see
+  // withDisposerRollback). Its re-runs register disposers into that transaction
+  // and are rolled back with it; re-runs of subscribers created outside one
+  // never are, whichever transaction happens to be open at drain time.
+  _cap?: DisposerCapture | null;
   // True when at least one dependency recorded during the most recent run was
   // a COMPUTED. Rebuilt from scratch by every `retrack`.
   //
@@ -466,6 +477,9 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   }
   currentSubscriber = subscriber;
   const sub = subscriber as SubWithList;
+  // Stamped on the first tracking run, which happens where the subscriber is
+  // created.
+  if (sub._cap === undefined) sub._cap = currentDisposerCapture();
   const epoch = ++subscriberEpochCounter;
   sub._epoch = epoch;
   sub._structDirty = false;
@@ -897,7 +911,14 @@ function drainQueue(): void {
       continue;
     }
 
-    safeInvoke(sub);
+    // Each re-run registers into the transaction that created this subscriber
+    // — nothing, for one created outside any (see withDisposerRollback).
+    const pushed = beginDisposerCapture((sub as SubWithList)._cap ?? null);
+    try {
+      safeInvoke(sub);
+    } finally {
+      if (pushed) endDisposerCapture();
+    }
   }
 }
 

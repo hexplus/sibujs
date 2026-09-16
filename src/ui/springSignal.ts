@@ -57,6 +57,11 @@ export function springSignal(
   let target = initial;
   let rafId: number | null = null;
   let lastTime = 0;
+  // Terminal: once disposed, nothing schedules a frame or writes the value.
+  let disposed = false;
+  // Without requestAnimationFrame (SSR, bare Node) the value snaps to its
+  // target, exactly like reduced motion — the setter used to throw.
+  const canAnimate = () => typeof requestAnimationFrame === "function";
   // Reference timestep (60 Hz) — coefficients are tuned at this rate so
   // the same `stiffness`/`damping` produce the same feel regardless of
   // monitor refresh rate. Clamped per-frame to avoid blow-ups after a
@@ -65,6 +70,8 @@ export function springSignal(
   const MAX_STEP_RATIO = 4; // never integrate more than 4 reference steps
 
   function tick(now: number): void {
+    rafId = null;
+    if (disposed) return;
     if (lastTime === 0) lastTime = now;
     const rawDt = now - lastTime;
     lastTime = now;
@@ -80,27 +87,34 @@ export function springSignal(
     if (Math.abs(current - target) < precision && Math.abs(velocity) < precision) {
       current = target;
       velocity = 0;
-      rafId = null;
       lastTime = 0;
       setValue(current);
       return;
     }
 
     setValue(current);
+    // A subscriber may have disposed the spring — or restarted it through
+    // set() — during setValue(); only schedule when neither happened.
+    if (disposed || rafId !== null) return;
     rafId = requestAnimationFrame(tick);
   }
 
+  function cancelFrame(): void {
+    if (rafId !== null) {
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(rafId);
+      rafId = null;
+    }
+  }
+
   function set(newTarget: number): void {
+    if (disposed) return;
     target = newTarget;
 
-    // Snap immediately when reduced motion is preferred
-    if (prefersReducedMotion()) {
+    // Snap immediately when reduced motion is preferred or frames are unavailable
+    if (!canAnimate() || prefersReducedMotion()) {
       current = newTarget;
       velocity = 0;
-      if (rafId !== null) {
-        cancelAnimationFrame(rafId);
-        rafId = null;
-      }
+      cancelFrame();
       lastTime = 0;
       setValue(current);
       return;
@@ -114,10 +128,8 @@ export function springSignal(
   }
 
   function dispose(): void {
-    if (rafId !== null) {
-      cancelAnimationFrame(rafId);
-      rafId = null;
-    }
+    disposed = true;
+    cancelFrame();
     lastTime = 0;
   }
 

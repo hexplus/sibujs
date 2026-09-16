@@ -364,6 +364,86 @@ describe("resource", () => {
       expect(r.data()).toBe(undefined);
     });
 
+    it("no lifecycle callback runs after dispose() when the fetcher honors the abort", async () => {
+      const onSuccess = vi.fn();
+      const onError = vi.fn();
+      const onSettled = vi.fn();
+      const r = resource(
+        ({ signal }) =>
+          new Promise<string>((_, reject) => {
+            signal.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+          }),
+        { onSuccess, onError, onSettled, retry: { maxRetries: 0 } },
+      );
+
+      await tick();
+      r.dispose();
+      await tick();
+
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(onSettled).not.toHaveBeenCalled();
+    });
+
+    it("no lifecycle callback runs after dispose() when the fetcher ignores the abort", async () => {
+      const onSuccess = vi.fn();
+      const onError = vi.fn();
+      const onSettled = vi.fn();
+      const settle: { resolve?: (v: string) => void; reject?: (e: Error) => void } = {};
+      const r = resource(
+        () =>
+          new Promise<string>((resolve, reject) => {
+            settle.resolve = resolve;
+            settle.reject = reject;
+          }),
+        { onSuccess, onError, onSettled, retry: { maxRetries: 0 } },
+      );
+
+      await tick();
+      r.dispose();
+      settle.resolve?.("late");
+      await tick();
+
+      expect(onSuccess).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+      expect(onSettled).not.toHaveBeenCalled();
+      expect(r.data()).toBe(undefined);
+    });
+
+    it("no lifecycle callback runs after dispose() when an abort-ignoring fetcher later rejects", async () => {
+      const onError = vi.fn();
+      const onSettled = vi.fn();
+      let rejectLate: ((e: Error) => void) | undefined;
+      const r = resource(
+        () =>
+          new Promise<string>((_, reject) => {
+            rejectLate = reject;
+          }),
+        { onError, onSettled, retry: { maxRetries: 0 } },
+      );
+
+      await tick();
+      r.dispose();
+      rejectLate?.(new Error("late failure"));
+      await tick();
+
+      expect(onError).not.toHaveBeenCalled();
+      expect(onSettled).not.toHaveBeenCalled();
+      expect(r.error()).toBe(undefined);
+    });
+
+    it("onSettled still runs for a request that settles before dispose()", async () => {
+      const onSettled = vi.fn();
+      const r = resource(async () => "done", { onSettled });
+
+      await tick();
+      expect(onSettled).toHaveBeenCalledTimes(1);
+
+      r.dispose();
+      await tick();
+      expect(onSettled).toHaveBeenCalledTimes(1);
+    });
+
     it("dispose() stops source-driven refetches", async () => {
       const [id, setId] = signal(1);
       const fetcher = vi.fn(async (currentId: number) => `v${currentId}`);

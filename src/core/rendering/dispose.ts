@@ -44,6 +44,65 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 let activeBindingCount = 0;
 
 /**
+ * One open render transaction's registration record. Frames are identities, not
+ * just arrays: a subscriber created inside a transaction keeps a reference to
+ * its frame, so its later re-runs register into that transaction (and are rolled
+ * back with it) while everything else stays out. A closed frame accepts nothing.
+ *
+ * @internal
+ */
+export interface DisposerCapture {
+  entries: [Node, () => void][];
+  closed: boolean;
+  /**
+   * Set when a transaction SUCCEEDS inside another: its registrations were
+   * handed to the enclosing one, so a subscriber it created keeps registering
+   * there. Absent after a rollback (that transaction owns nothing any more) and
+   * at the outermost level (later re-runs are captured by nobody).
+   */
+  forwardTo?: DisposerCapture;
+}
+
+/** The frame a capture stands for now: itself, or whoever inherited it. */
+function resolveCapture(capture: DisposerCapture | null | undefined): DisposerCapture | null {
+  let frame = capture;
+  while (frame?.closed) frame = frame.forwardTo;
+  return frame ?? null;
+}
+
+// Open captures, innermost last. A `null` frame suppresses capturing entirely.
+const registrationCaptures: (DisposerCapture | null)[] = [];
+
+/** The capture a subscriber created right now belongs to. @internal */
+export function currentDisposerCapture(): DisposerCapture | null {
+  return resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+}
+
+/**
+ * Make `capture` (or no capture at all) the active one for the code that
+ * follows, and report whether a frame was pushed. The reactive runtime brackets
+ * every subscriber re-run with this: a re-run registers into the transaction
+ * that created the subscriber, and an unrelated subscriber's registrations do
+ * not leak into whatever transaction happens to be open.
+ *
+ * @internal
+ */
+export function beginDisposerCapture(capture: DisposerCapture | null): boolean {
+  // Nothing to isolate: no transaction is open and the subscriber owns none.
+  if (capture === null && registrationCaptures.length === 0) return false;
+  // A closed frame resolves to whoever inherited its work (see forwardTo), so a
+  // subscriber created by a successful nested transaction keeps registering into
+  // the enclosing one until that finishes too.
+  registrationCaptures.push(resolveCapture(capture));
+  return true;
+}
+
+/** Undo a {@link beginDisposerCapture} that returned `true`. @internal */
+export function endDisposerCapture(): void {
+  registrationCaptures.pop();
+}
+
+/**
  * Register a teardown function for a DOM node.
  * When dispose(node) is called, all registered teardowns run.
  */
@@ -55,6 +114,84 @@ export function registerDisposer(node: Node, teardown: () => void): void {
   }
   disposers.push(teardown);
   if (DEV) activeBindingCount++;
+  const capture = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+  if (capture) capture.entries.push([node, teardown]);
+}
+
+/**
+ * Run `build` as a render transaction.
+ *
+ * Every disposer registered while it runs is recorded. If `build` throws, those
+ * registrations — and only those — are run and unregistered in reverse order,
+ * then the error is rethrown; ownership that existed before the attempt (a host
+ * element's own disposers, say) is untouched. This is what lets a failed
+ * rebuild release the bindings and listeners it created before throwing, even
+ * though the half-built nodes were never returned to the caller.
+ *
+ * On success the registrations stay, and an enclosing transaction inherits
+ * them, so an outer failure rolls back nested successful work too.
+ *
+ * @internal
+ */
+export function withDisposerRollback<T>(build: () => T): T {
+  const frame: DisposerCapture = { entries: [], closed: false };
+  const captured = frame.entries;
+  registrationCaptures.push(frame);
+  let result: T;
+  try {
+    result = build();
+  } catch (err) {
+    // The capture stays open while rolling back: a teardown that registers more
+    // cleanup lands in `captured` and is drained too (newest first), bounded by
+    // the same ceiling as dispose(). Popping it first left those registrations
+    // attached to nodes the failed render never returned.
+    let executed = 0;
+    try {
+      while (captured.length > 0) {
+        if (executed >= MAX_DRAIN_TEARDOWNS) {
+          // Leave the remainder registered (reachable via dispose/checkLeaks).
+          reportDrainRunaway("rollback", executed, captured.length);
+          break;
+        }
+        const [node, teardown] = captured.pop()!;
+        // Only teardowns still registered are owed a run: one already executed
+        // (or removed) by a dispose() during the build must not run twice.
+        if (!unregisterDisposer(node, teardown)) continue;
+        executed++;
+        try {
+          teardown();
+        } catch (cleanupErr) {
+          reportError(cleanupErr, { phase: "cleanup", name: "disposer" });
+        }
+      }
+    } finally {
+      frame.closed = true;
+      // Whatever the ceiling left behind stays REGISTERED (reachable through
+      // dispose()), but this frame stops referencing it.
+      captured.length = 0;
+      registrationCaptures.pop();
+    }
+    throw err;
+  }
+  frame.closed = true;
+  registrationCaptures.pop();
+  const parent = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+  if (parent) {
+    // Hand up only registrations that are still live; ones a dispose() already
+    // ran are not the enclosing transaction's to roll back.
+    for (const entry of captured) {
+      if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.entries.push(entry);
+    }
+    // Subscribers created by this transaction now belong to the enclosing one.
+    frame.forwardTo = parent;
+  }
+  // A subscriber created here keeps a reference to this frame for its whole
+  // life, so the frame must not keep the transaction's nodes and teardowns
+  // alive: the live ones now belong to the parent (or to nobody), and the
+  // disposed ones are gone. Registrations made later resolve through
+  // `forwardTo`, never into this array.
+  captured.length = 0;
+  return result;
 }
 
 /**
@@ -67,14 +204,15 @@ export function registerDisposer(node: Node, teardown: () => void): void {
  * The teardown is assumed to have already run (or to be deliberately abandoned);
  * this only releases the reference.
  */
-export function unregisterDisposer(node: Node, teardown: () => void): void {
+export function unregisterDisposer(node: Node, teardown: () => void): boolean {
   const disposers = elementDisposers.get(node);
-  if (!disposers) return;
+  if (!disposers) return false;
   const index = disposers.indexOf(teardown);
-  if (index === -1) return;
+  if (index === -1) return false;
   disposers.splice(index, 1);
   if (DEV) activeBindingCount--;
   if (disposers.length === 0) elementDisposers.delete(node);
+  return true;
 }
 
 /**
@@ -104,55 +242,64 @@ export function dispose(node: Node): void {
   }
 
   for (let i = order.length - 1; i >= 0; i--) {
-    const current = order[i];
-    if (elementDisposers.has(current)) {
-      // Drain to stability. A disposer may register another on the same node
-      // (a parent teardown releasing a child, a lifecycle hook re-arming), and
-      // that follow-up work is owed the same guarantee as the first batch — so
-      // the loop runs until the queue is empty, bounded only by the safety
-      // ceiling on total teardown executions (MAX_DRAIN_TEARDOWNS). That ceiling
-      // is an absolute work bound: it primarily catches cleanup production that
-      // does not terminate, but an exceptionally large finite chain reaches it
-      // too, and either case is reported rather than silently dropped.
-      let executed = 0;
-      let runaway = false;
+    disposeNodeOwn(order[i]);
+  }
+}
 
-      while (!runaway) {
-        const pending = elementDisposers.get(current);
-        if (!pending || pending.length === 0) break;
+/**
+ * Run the teardowns registered for `node` ITSELF, leaving its descendants
+ * alone.
+ *
+ * For an owner that holds cleanup on a node whose children belong to someone
+ * else — a custom element disconnecting, where the light-DOM children are the
+ * consumer's and the rendered content was already disposed through its own root
+ * — a recursive `dispose()` would destroy that unrelated content.
+ *
+ * Drains to stability, like `dispose()`: a teardown may register another on the
+ * same node, and that follow-up is owed the same guarantee, bounded by
+ * {@link MAX_DRAIN_TEARDOWNS} and reported when the ceiling is reached.
+ *
+ * @internal
+ */
+export function disposeNodeOwn(node: Node): void {
+  if (!elementDisposers.has(node)) return;
+  let executed = 0;
+  let runaway = false;
 
-        // Snapshot + delete BEFORE running so re-entrant dispose() on the
-        // same node (e.g. parent disposer triggering child cleanup) doesn't
-        // re-run these or land in an infinite cycle.
-        const snapshot = pending.slice();
-        elementDisposers.delete(current);
-        if (DEV) activeBindingCount -= snapshot.length;
+  while (!runaway) {
+    const pending = elementDisposers.get(node);
+    if (!pending || pending.length === 0) break;
 
-        for (let i = 0; i < snapshot.length; i++) {
-          if (executed >= MAX_DRAIN_TEARDOWNS) {
-            // Put the untouched remainder back rather than dropping it: unlike
-            // an enhancement's local queue, this one is node-keyed, so restored
-            // entries stay reachable through a later dispose(node) and stay
-            // visible to checkLeaks(). The runaway is still reported — bounded
-            // protection must never look like completed cleanup.
-            const rest = snapshot.slice(i);
-            const added = elementDisposers.get(current);
-            elementDisposers.set(current, added ? rest.concat(added) : rest);
-            if (DEV) activeBindingCount += rest.length;
-            reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
-            runaway = true;
-            break;
-          }
-          executed++;
-          try {
-            snapshot[i]();
-          } catch (err) {
-            // A disposer is user teardown. Containment is deliberate — the
-            // remaining disposers must still run — but gating the report on dev
-            // mode meant a leaking teardown was invisible in production.
-            reportError(err, { phase: "cleanup", name: "disposer" });
-          }
-        }
+    // Snapshot + delete BEFORE running so re-entrant dispose() on the
+    // same node (e.g. parent disposer triggering child cleanup) doesn't
+    // re-run these or land in an infinite cycle.
+    const snapshot = pending.slice();
+    elementDisposers.delete(node);
+    if (DEV) activeBindingCount -= snapshot.length;
+
+    for (let i = 0; i < snapshot.length; i++) {
+      if (executed >= MAX_DRAIN_TEARDOWNS) {
+        // Put the untouched remainder back rather than dropping it: unlike
+        // an enhancement's local queue, this one is node-keyed, so restored
+        // entries stay reachable through a later dispose(node) and stay
+        // visible to checkLeaks(). The runaway is still reported — bounded
+        // protection must never look like completed cleanup.
+        const rest = snapshot.slice(i);
+        const added = elementDisposers.get(node);
+        elementDisposers.set(node, added ? rest.concat(added) : rest);
+        if (DEV) activeBindingCount += rest.length;
+        reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
+        runaway = true;
+        break;
+      }
+      executed++;
+      try {
+        snapshot[i]();
+      } catch (err) {
+        // A disposer is user teardown. Containment is deliberate — the
+        // remaining disposers must still run — but gating the report on dev
+        // mode meant a leaking teardown was invisible in production.
+        reportError(err, { phase: "cleanup", name: "disposer" });
       }
     }
   }

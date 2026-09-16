@@ -12,10 +12,10 @@ describe("contentEditable", () => {
     expect(editor.isFocused()).toBe(false);
   });
 
-  it("sets and reads content", () => {
+  it("sets and reads content (the string form is sanitized to text)", () => {
     const editor = contentEditable();
     editor.setContent("<b>Hello</b>");
-    expect(editor.content()).toBe("<b>Hello</b>");
+    expect(editor.content()).toBe("Hello");
   });
 
   it("tracks focus state", () => {

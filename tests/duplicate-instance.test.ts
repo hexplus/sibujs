@@ -30,6 +30,7 @@ interface Instance {
   enableSSR: () => void;
   disableSSR: () => void;
   isSSR: () => boolean;
+  runInSSRContext: <T>(fn: () => T) => T;
   setRuntimeErrorHandler: (handler: ErrorHandler | null) => ErrorHandler | null;
   getRuntimeErrorHandler: () => ErrorHandler | null;
   reportError: (error: unknown, context: { phase: string; name?: string }) => void;
@@ -56,7 +57,7 @@ beforeAll(async () => {
         export { reactiveBinding } from "./src/reactivity/track";
         export { batch } from "./src/reactivity/batch";
         export { createId } from "./src/core/rendering/createId";
-        export { enableSSR, disableSSR, isSSR } from "./src/core/ssr-context";
+        export { enableSSR, disableSSR, isSSR, runInSSRContext } from "./src/core/ssr-context";
         export { setRuntimeErrorHandler, getRuntimeErrorHandler, reportError } from "./src/core/errors";
       `,
       resolveDir: process.cwd(),
@@ -259,6 +260,16 @@ describe("duplicate instance — other coordination singletons", () => {
     // Independent module-local counters would both start at 1 and collide.
     const ids = [a.createId("x"), b.createId("x"), a.createId("x"), b.createId("x")];
     expect(new Set(ids).size).toBe(ids.length); // all unique
+  });
+
+  test("inside an SSR request, both copies share the request's id sequence", () => {
+    const a = loadInstance();
+    const b = loadInstance();
+
+    // The request store is found through the shared AsyncLocalStorage, so a
+    // request's ids stay one deterministic sequence whichever copy generates them.
+    const ids = a.runInSSRContext(() => [a.createId("x"), b.createId("x"), a.createId("x")]);
+    expect(ids).toEqual(["x-1", "x-2", "x-3"]);
   });
 
   test("enableSSR() in instance A is observed by isSSR() in instance B", () => {

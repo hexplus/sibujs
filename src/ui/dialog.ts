@@ -76,6 +76,16 @@ export function dialog(): {
 } {
   const [isOpen, setIsOpen] = signal(false);
   const entry: DialogEntry = { close: () => close() };
+  // Plain-variable source of truth; the signal only publishes it. Subscribers
+  // run synchronously inside `setIsOpen`, so they may re-enter open()/close()
+  // before the outer call returns. Every call therefore commits `opened` and
+  // the stack FIRST and publishes last — a reentrant call then sees settled
+  // state, and the outer call has nothing left to do that could undo it.
+  // (Reading a local instead of `isOpen()` also keeps open()/close()/toggle()
+  // from subscribing a calling effect to this dialog.)
+  let opened = false;
+  // Terminal: once disposed, no stale open()/toggle() may re-attach the entry.
+  let disposed = false;
 
   function pushOnStack(): void {
     // Avoid duplicate pushes if open() is called twice.
@@ -91,27 +101,32 @@ export function dialog(): {
   }
 
   function open(): void {
-    if (isOpen()) return;
-    setIsOpen(true);
+    if (disposed || opened) return;
+    opened = true;
     pushOnStack();
+    setIsOpen(true);
   }
 
   function close(): void {
-    if (!isOpen()) {
+    if (!opened) {
       // Still make sure we're off the stack.
       removeFromStack();
       return;
     }
-    setIsOpen(false);
+    opened = false;
     removeFromStack();
+    setIsOpen(false);
   }
 
   function toggle(): void {
-    if (isOpen()) close();
+    if (opened) close();
     else open();
   }
 
   function dispose(): void {
+    // Flag first, so a subscriber reacting to the close below cannot reopen.
+    disposed = true;
+    opened = false;
     removeFromStack();
     setIsOpen(false);
   }

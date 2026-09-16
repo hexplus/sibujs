@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { effect } from "../src/core/signals/effect";
 import { createWorkerPool, worker, workerFn } from "../src/platform/worker";
 
 // ---------------------------------------------------------------------------
@@ -18,6 +19,14 @@ interface FakeWorkerInstance {
 }
 
 const instances: FakeWorkerInstance[] = [];
+
+function containsFunction(value: unknown): boolean {
+  if (typeof value === "function") return true;
+  if (value && typeof value === "object") return Object.values(value).some(containsFunction);
+  return false;
+}
+
+const uncloneable = { callback: () => {} };
 
 class FakeWorker {
   private listeners: Record<string, ((e: unknown) => void)[]> = {};
@@ -40,6 +49,11 @@ class FakeWorker {
   }
 
   postMessage(data: unknown): void {
+    // Mirror the structured-clone algorithm's synchronous failure for the
+    // uncloneable value used by the tests.
+    if (containsFunction(data)) {
+      throw new DOMException("could not be cloned", "DataCloneError");
+    }
     this.posted.push(data);
   }
 
@@ -162,6 +176,52 @@ describe("worker", () => {
     w.terminate();
   });
 
+  it("reports a synchronous DataCloneError without leaving loading stuck", () => {
+    const w = worker<unknown, number>(() => {});
+    expect(() => w.post(uncloneable)).not.toThrow();
+    expect(w.error()?.name).toBe("DataCloneError");
+    expect(w.loading()).toBe(false);
+    // The worker itself is still usable.
+    expect(instances[0].terminated).toBe(false);
+
+    w.post(1);
+    expect(w.error()).toBeNull();
+    expect(w.loading()).toBe(true);
+    instances[0].emitMessage(42);
+    expect(w.result()).toBe(42);
+    expect(w.loading()).toBe(false);
+  });
+
+  it("a failed post does not clear loading for a request already in flight", () => {
+    const w = worker<unknown, number>(() => {});
+    w.post(1);
+    w.post(uncloneable);
+    expect(w.error()?.name).toBe("DataCloneError");
+    expect(w.loading()).toBe(true);
+    instances[0].emitMessage(7);
+    expect(w.result()).toBe(7);
+    expect(w.loading()).toBe(false);
+    // The clone error belonged to a different call; a successful reply must not
+    // be shown alongside it.
+    expect(w.error()).toBeNull();
+  });
+
+  it("an observer never sees a successful result paired with a stale error", () => {
+    const w = worker<unknown, number>(() => {});
+    w.post(1);
+    w.post(uncloneable);
+    const seen: string[] = [];
+    const stop = effect(() => {
+      seen.push(`${w.result()}|${w.error()?.name ?? "none"}|${w.loading()}`);
+    });
+    seen.length = 0;
+
+    instances[0].emitMessage(7);
+
+    expect(seen).toEqual(["7|none|false"]);
+    stop();
+  });
+
   it("captures an error when Worker is unsupported", () => {
     delete (globalThis as Record<string, unknown>).Worker;
     const w = worker(() => {});
@@ -205,6 +265,36 @@ describe("workerFn", () => {
     await expect(p2).rejects.toThrow("dead");
     expect(instances[0].terminated).toBe(true);
     expect(wf.loading()).toBe(false);
+  });
+
+  it("rejects a run() whose arguments cannot be cloned and keeps FIFO routing intact", async () => {
+    const wf = workerFn((x: unknown) => x);
+    const valid1 = wf.run(1);
+    const invalid = wf.run(uncloneable);
+    const valid2 = wf.run(2);
+
+    await expect(invalid).rejects.toMatchObject({ name: "DataCloneError" });
+    expect(instances[0].posted).toEqual([[1], [2]]);
+    expect(instances[0].terminated).toBe(false);
+    expect(wf.loading()).toBe(true);
+
+    // Replies go to the valid callers in order, not to the failed request.
+    instances[0].emitMessage("one");
+    expect(wf.loading()).toBe(true);
+    instances[0].emitMessage("two");
+    await expect(valid1).resolves.toBe("one");
+    await expect(valid2).resolves.toBe("two");
+    expect(wf.loading()).toBe(false);
+  });
+
+  it("a run() that fails to post alone leaves loading false", async () => {
+    const wf = workerFn((x: unknown) => x);
+    await expect(wf.run(uncloneable)).rejects.toMatchObject({ name: "DataCloneError" });
+    expect(wf.loading()).toBe(false);
+
+    const next = wf.run(3);
+    instances[0].emitMessage(3);
+    await expect(next).resolves.toBe(3);
   });
 
   it("rejects run() when the worker is unavailable", async () => {
@@ -272,6 +362,35 @@ describe("createWorkerPool", () => {
     const p = pool.execute(1);
     instances[0].emitError("pool-error");
     await expect(p).rejects.toThrow("pool-error");
+  });
+
+  it("rejects a task that cannot be cloned and advances the slot's queue", async () => {
+    const pool = createWorkerPool<unknown, string>(() => {}, 1);
+    const invalid = pool.execute(uncloneable);
+    const valid = pool.execute(2);
+
+    await expect(invalid).rejects.toMatchObject({ name: "DataCloneError" });
+    // The failed task released the slot, so the queued task was dispatched.
+    expect(instances[0].posted).toEqual([2]);
+    expect(instances[0].terminated).toBe(false);
+
+    instances[0].emitMessage("b");
+    await expect(valid).resolves.toBe("b");
+  });
+
+  it("a failed task detaches its listeners so later replies reach the right caller", async () => {
+    const pool = createWorkerPool<unknown, string>(() => {}, 1);
+    const first = pool.execute(1);
+    const invalid = pool.execute(uncloneable);
+    const last = pool.execute(3);
+
+    instances[0].emitMessage("first");
+    await expect(first).resolves.toBe("first");
+    await expect(invalid).rejects.toMatchObject({ name: "DataCloneError" });
+    expect(instances[0].posted).toEqual([1, 3]);
+
+    instances[0].emitMessage("last");
+    await expect(last).resolves.toBe("last");
   });
 
   it("revokes the shared blob URL only once across workers", async () => {
