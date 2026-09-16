@@ -26,6 +26,13 @@ export interface CustomElementOptions {
 const MAX_RENDER_PASSES = 10;
 
 /**
+ * Thrown inside a render transaction whose element was disconnected while the
+ * component ran, so the transaction rolls back instead of committing. Private:
+ * never reported, never observable outside this module.
+ */
+const ABANDONED_RENDER = Symbol("sibujs.defineElement.abandonedRender");
+
+/**
  * defineElement creates a Web Component wrapping a SibuJS component function.
  */
 export function defineElement(
@@ -98,6 +105,10 @@ export function defineElement(
       // disposal-aware replacement primitive so the ordering guarantee lives in
       // one place rather than being re-derived per call site.
       replaceChildrenSafely(this._root);
+      // Children first, then the host itself: a component may register cleanup
+      // directly against its host (`registerDisposer(host, …)`), which is not
+      // part of the rendered subtree and would otherwise outlive the element.
+      dispose(this);
     }
 
     /**
@@ -140,17 +151,20 @@ export function defineElement(
 
       let el: HTMLElement;
       try {
-        el = withDisposerRollback(() => component(props, this));
+        el = withDisposerRollback(() => {
+          const built = component(props, this);
+          // Disconnected while the component ran (it removed its own host): the
+          // disconnect teardown has already run, so this render must not
+          // commit. Aborting from INSIDE the transaction rolls back everything
+          // it registered — on the returned tree, on intermediate nodes, and on
+          // the host — instead of only disposing the returned element.
+          if (!this._connected) throw ABANDONED_RENDER;
+          return built;
+        });
       } catch (err) {
-        reportError(err, { phase: "render", name: `defineElement(${name})`, node: this });
-        return;
-      }
-
-      // Disconnected while the component ran (it removed its own host): the
-      // disconnect teardown has already run, so committing would leave a live
-      // subtree nothing ever disposes. Release the fresh build instead.
-      if (!this._connected) {
-        dispose(el);
+        if (err !== ABANDONED_RENDER) {
+          reportError(err, { phase: "render", name: `defineElement(${name})`, node: this });
+        }
         return;
       }
 

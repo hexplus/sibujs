@@ -135,6 +135,90 @@ describe("defineElement render reentrancy", () => {
     expect(bindings).toBe(before);
   });
 
+  for (const shadow of [false, true]) {
+    it(`host-owned work from a render abandoned by disconnection is rolled back (shadow: ${shadow})`, () => {
+      const tag = uniqueTag();
+      const [value, setValue] = signal(0);
+      let runs = 0;
+      const cleanup = vi.fn();
+      const intermediateCleanup = vi.fn();
+      const returnedCleanup = vi.fn();
+
+      defineElement(
+        tag,
+        (_props, host) => {
+          host.remove();
+          const stop = effect(() => {
+            value();
+            runs++;
+          });
+          registerDisposer(host, stop);
+          registerDisposer(host, cleanup);
+
+          const intermediate = document.createElement("div");
+          registerDisposer(intermediate, intermediateCleanup);
+          const returned = document.createElement("span");
+          returned.appendChild(intermediate);
+          registerDisposer(returned, returnedCleanup);
+          return returned;
+        },
+        { shadow },
+      );
+
+      const host = document.createElement(tag);
+      document.body.appendChild(host);
+      const before = runs;
+
+      expect(host.isConnected).toBe(false);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(intermediateCleanup).toHaveBeenCalledTimes(1);
+      expect(returnedCleanup).toHaveBeenCalledTimes(1);
+
+      // The effect the abandoned render created is stopped.
+      setValue(1);
+      expect(runs).toBe(before);
+
+      // Nothing runs a second time when the host is disposed again.
+      dispose(host);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("disconnecting normally releases disposers registered against the host", () => {
+    const tag = uniqueTag();
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+    let runs = 0;
+    defineElement(
+      tag,
+      (_props, host) => {
+        const stop = effect(() => {
+          value();
+          runs++;
+        });
+        registerDisposer(host, stop);
+        registerDisposer(host, cleanup);
+        return div("body") as HTMLElement;
+      },
+      { shadow: false },
+    );
+
+    const host = document.createElement(tag);
+    document.body.appendChild(host);
+    const before = runs;
+    host.remove();
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    setValue(1);
+    expect(runs).toBe(before);
+
+    // Reconnecting renders again, and the new registration is released once.
+    document.body.appendChild(host);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    host.remove();
+    expect(cleanup).toHaveBeenCalledTimes(2);
+  });
+
   it("a component that moves its own host while rendering renders again without nesting", () => {
     const tag = uniqueTag();
     const renders = vi.fn();

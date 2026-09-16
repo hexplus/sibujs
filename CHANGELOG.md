@@ -9,6 +9,18 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed — internal render-transaction helpers are no longer exported from `sibujs`
+
+The root barrel re-exported every symbol of the disposal and id modules, so
+helpers added for the framework's own render transactions became public API:
+`withDisposerRollback`, `currentDisposerCapture`, `beginDisposerCapture`,
+`endDisposerCapture`, the `DisposerCapture` type and `idSegment`. An unpaired
+`endDisposerCapture()` can corrupt an open transaction, so these are now exported
+explicitly from their source modules for internal use only. The public disposal
+and id surface — `dispose`, `registerDisposer`, `unregisterDisposer`,
+`replaceChildrenSafely`, `checkLeaks`, `MAX_DRAIN_TEARDOWNS`,
+`reportDrainRunaway`, `createId`, `__resetIdCounter` — is unchanged.
+
 ### Fixed — `defineElement()` re-rendered recursively when a component wrote its host's attributes
 
 A component that set one of its own observed attributes while rendering started a
@@ -19,8 +31,11 @@ attributes on every render is stopped after 10 passes and reported. A first rend
 that throws is also retried on the next attribute change instead of leaving the
 element blank until it is reconnected. A component that moves its host while
 rendering gets one follow-up render instead of a nested one, and one that removes
-its host has the fresh build disposed rather than committed into a disconnected
-element nothing would tear down.
+its host has that render rolled back as a failed transaction — releasing what it
+registered on the returned tree, on intermediate nodes and on the host itself —
+rather than committed into a disconnected element nothing would tear down.
+Disconnecting normally now also releases disposers registered directly against
+the host, not only those inside the rendered subtree.
 
 ### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
 
@@ -220,7 +235,9 @@ The baseline was raised from 26,450 B to 26,500 B for the `copyOnClick` and
 component-registry fixes (+64 B after trimming), to 26,600 B for safe thenable
 adoption in `transition()` and the `imageLoader` reentrancy guard (+106 B), and
 to 26,800 B for per-subscriber render-transaction ownership in the disposal and
-reactive core (+111 B); the raw budget is unchanged.
+reactive core (+111 B), and back to 26,600 B once the internal transaction
+helpers stopped being re-exported from the root barrel (−250 B); the raw budget
+is unchanged.
 
 ### Fixed — `springSignal()` restarted after disposal and crashed during SSR
 

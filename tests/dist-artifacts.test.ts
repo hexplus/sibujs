@@ -203,8 +203,9 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // guards in `imageLoader` (+106 B), and to 26,800 B for per-subscriber
     // render-transaction ownership in the disposal/reactive core, including the
     // forwarding of a successful nested transaction to its parent (+111 B).
-    // The headroom is deliberate: at under 10 B, every core comment or rename
-    // moved the gate.
+    // Keeping the transaction helpers out of the root barrel then gave ~250 B
+    // back, so the baseline is 26,600 B again. The headroom is deliberate: at
+    // under 10 B, every core comment or rename moved the gate.
     //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
@@ -214,7 +215,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_800 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_600 * 1.02));
   });
 });
 
