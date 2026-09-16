@@ -34,6 +34,9 @@ interface PluginHooks {
   error: Array<(error: Error) => void>;
 }
 
+/** Shared across duplicate copies of this module: see the class below. */
+const CANCELLED_BRAND = Symbol.for("sibujs.plugins.installCancelled.v1");
+
 /**
  * An installation that never took effect because `reset()` (or a newer install
  * of the same name) invalidated it. Thrown by a synchronous install that reset
@@ -44,12 +47,30 @@ interface PluginHooks {
 export class PluginInstallCancelledError extends Error {
   /** The plugin whose installation was cancelled. */
   readonly pluginName: string;
+  /**
+   * Brand, not identity: the default registry is shared across duplicate copies
+   * of this module, so the error a caller receives may come from another copy's
+   * constructor. `instanceof` is taught to recognise the brand instead.
+   */
+  readonly [CANCELLED_BRAND] = true;
 
   constructor(pluginName: string) {
     super(`[Plugin] Installation of "${pluginName}" was cancelled before it was committed (registry reset).`);
     this.name = "PluginInstallCancelledError";
     this.pluginName = pluginName;
   }
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return isPluginInstallCancelledError(value);
+  }
+}
+
+/**
+ * Whether `value` is a cancelled-installation error, from this copy of the
+ * module or any duplicate of it.
+ */
+export function isPluginInstallCancelledError(value: unknown): value is PluginInstallCancelledError {
+  return typeof value === "object" && value !== null && (value as Record<symbol, unknown>)[CANCELLED_BRAND] === true;
 }
 
 export interface PluginRegistry {
@@ -194,10 +215,18 @@ export function createPluginRegistry(): PluginRegistry {
 
       // Async install: the name is reserved until the promise settles, so a
       // concurrent attempt is refused. Only fulfilment commits.
-      pendingInstalls.set(p.name, myGeneration);
+      //
+      // Unless this installation is ALREADY stale — `install()` may have reset
+      // the registry itself, and reset() cleared a reservation that did not
+      // exist yet. Reserving now would lock the name until another reset, or
+      // forever if the promise never settles.
+      if (myGeneration === generation) pendingInstalls.set(p.name, myGeneration);
       const settled = pending.then(
         () => {
-          if (!commit()) throw new PluginInstallCancelledError(p.name);
+          if (commit()) return;
+          // Defensive: a stale settlement releases only its own reservation.
+          if (pendingInstalls.get(p.name) === myGeneration) pendingInstalls.delete(p.name);
+          throw new PluginInstallCancelledError(p.name);
         },
         (err) => {
           // Only release the reservation when it is still this installation's:

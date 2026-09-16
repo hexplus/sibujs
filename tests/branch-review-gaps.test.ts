@@ -662,6 +662,67 @@ describe("plugin context after commit", () => {
     await expect(ignored).rejects.toBeInstanceOf(PluginInstallCancelledError);
   });
 
+  it("an async install that resets synchronously never reserves its name", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const cancelled = registry.plugin({
+      name: "same",
+      install() {
+        registry.reset();
+        return gate;
+      },
+    });
+
+    // The name is free immediately: nothing stale reserved it.
+    expect(() => registry.plugin({ name: "same", install: (ctx) => ctx.provide("fresh", 1) })).not.toThrow();
+    expect(registry.inject("fresh")).toBe(1);
+
+    release();
+    await expect(cancelled).rejects.toBeInstanceOf(PluginInstallCancelledError);
+
+    // The newer installation is untouched, and the name stays reusable.
+    expect(registry.installedPlugins.has("same")).toBe(true);
+    registry.reset();
+    expect(() => registry.plugin({ name: "same", install: (ctx) => ctx.provide("again", 1) })).not.toThrow();
+    expect(registry.inject("again")).toBe(1);
+  });
+
+  it("a stale install that never settles does not lock its name", () => {
+    const registry = createPluginRegistry();
+    registry.plugin({
+      name: "forever",
+      install() {
+        registry.reset();
+        return new Promise<void>(() => {}); // never settles
+      },
+    });
+    expect(() => registry.plugin({ name: "forever", install: () => {} })).not.toThrow();
+    expect(registry.installedPlugins.has("forever")).toBe(true);
+  });
+
+  it("a stale install that rejects after reset leaves the name reusable", async () => {
+    const registry = createPluginRegistry();
+    let fail!: (e: unknown) => void;
+    const gate = new Promise<void>((_r, reject) => {
+      fail = reject;
+    });
+    registry.plugin({
+      name: "rejects",
+      install() {
+        registry.reset();
+        return gate;
+      },
+    });
+    fail(new Error("stale failure"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(() => registry.plugin({ name: "rejects", install: (ctx) => ctx.provide("after", 1) })).not.toThrow();
+    expect(registry.inject("after")).toBe(1);
+  });
+
   it("a second async install of the same name while one is in flight is refused", async () => {
     const registry = createPluginRegistry();
     let release!: () => void;

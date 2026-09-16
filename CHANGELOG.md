@@ -60,8 +60,13 @@ immediately — an older installation settling afterwards cannot disturb it. A
 cancelled installation rejects with the new `PluginInstallCancelledError` rather
 than reporting success it never achieved (a synchronous install that resets its
 own registry throws it); the cancellation is deliberate, so it is not reported as
-a runtime error. Recursion protection is independent of `reset()`: a plugin that
-resets the registry from inside its own `install()` still cannot install itself.
+a runtime error. That error is branded with a global symbol and exported
+alongside `isPluginInstallCancelledError()`, so a cancellation raised by one copy
+of the module is recognised by another's `instanceof` — the default registry is
+shared across duplicate copies. An install that resets the registry itself never
+reserves its name, so the name stays installable even if that installation never
+settles. Recursion protection is independent of `reset()`: a plugin that resets
+the registry from inside its own `install()` still cannot install itself.
 
 ### Fixed — ISR stopped revalidating after one failed fetch
 
