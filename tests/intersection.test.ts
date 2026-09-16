@@ -22,6 +22,10 @@ class MockIntersectionObserver {
     this.elements = [];
   }
 
+  takeRecords(): IntersectionObserverEntry[] {
+    return [];
+  }
+
   trigger(entries: Partial<IntersectionObserverEntry>[]) {
     this.callback(entries as IntersectionObserverEntry[], this as unknown as IntersectionObserver);
   }

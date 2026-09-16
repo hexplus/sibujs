@@ -29,23 +29,34 @@ export function queryByText(container: HTMLElement, text: string): HTMLElement |
   return walk(container);
 }
 
+/**
+ * First descendant of `container` whose `attribute` is exactly `value`.
+ *
+ * Deliberately not `querySelector(`[attr="${value}"]`)`: interpolating an
+ * arbitrary attribute value into a selector breaks on quotes, backslashes and
+ * brackets (an invalid-selector DOMException) or matches something else. Only
+ * the attribute NAME, which is always a fixed literal here, reaches the selector.
+ */
+export function queryByAttribute(container: ParentNode, attribute: string, value: string): HTMLElement | null {
+  for (const el of Array.from(container.querySelectorAll<HTMLElement>(`[${attribute}]`))) {
+    if (el.getAttribute(attribute) === value) return el;
+  }
+  return null;
+}
+
+/** Every descendant of `container` whose `attribute` is exactly `value`. See {@link queryByAttribute}. */
+export function queryAllByAttribute(container: ParentNode, attribute: string, value: string): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(`[${attribute}]`)).filter(
+    (el) => el.getAttribute(attribute) === value,
+  );
+}
+
 export function queryByTestId(container: HTMLElement, testId: string): HTMLElement | null {
-  return container.querySelector(`[data-testid="${testId}"]`);
+  return queryByAttribute(container, "data-testid", testId);
 }
 
 export function queryByRole(container: HTMLElement, role: string): HTMLElement | null {
-  return container.querySelector(`[role="${role}"]`);
-}
-
-/**
- * Escape characters that are special inside a CSS identifier selector.
- * Used as a fallback when `globalThis.CSS.escape` is not available
- * (headless runtimes like jsdom only partially implement the CSS API).
- */
-function cssEscape(value: string): string {
-  const g = globalThis as unknown as { CSS?: { escape?: (v: string) => string } };
-  if (g.CSS && typeof g.CSS.escape === "function") return g.CSS.escape(value);
-  return value.replace(/[^\w-]/g, (m) => `\\${m.charCodeAt(0).toString(16)} `);
+  return queryByAttribute(container, "role", role);
 }
 
 export function queryByLabel(container: HTMLElement, labelText: string): HTMLElement | null {
@@ -56,9 +67,9 @@ export function queryByLabel(container: HTMLElement, labelText: string): HTMLEle
     if (label.textContent?.trim() === labelText) {
       const forId = label.getAttribute("for");
       if (forId) {
-        // Use the scoped selector first so we respect the `container` bound.
-        const target = container.querySelector(`#${cssEscape(forId)}`);
-        if (target) return target as HTMLElement;
+        // Scoped to `container`, and matched exactly rather than via `#id`.
+        const target = queryByAttribute(container, "id", forId);
+        if (target) return target;
       }
       // Implicit association: first labellable descendant
       const child = label.querySelector("input, select, textarea, button");
@@ -66,7 +77,7 @@ export function queryByLabel(container: HTMLElement, labelText: string): HTMLEle
     }
   }
   // Fallback: aria-label
-  return container.querySelector(`[aria-label="${labelText}"]`);
+  return queryByAttribute(container, "aria-label", labelText);
 }
 
 // ─── async finders ────────────────────────────────────────────────────────
@@ -74,8 +85,18 @@ export function queryByLabel(container: HTMLElement, labelText: string): HTMLEle
 async function pollUntil<T>(fn: () => T | null, timeout: number, interval: number, errorIfTimeout: string): Promise<T> {
   const start = Date.now();
   return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const check = () => {
-      const result = fn();
+      timer = undefined;
+      let result: T | null;
+      // A query that throws on a timer poll used to escape from the timer while
+      // the returned promise never settled. It now rejects the promise.
+      try {
+        result = fn();
+      } catch (err) {
+        reject(err);
+        return;
+      }
       if (result !== null) {
         resolve(result);
         return;
@@ -84,9 +105,12 @@ async function pollUntil<T>(fn: () => T | null, timeout: number, interval: numbe
         reject(new Error(errorIfTimeout));
         return;
       }
-      setTimeout(check, interval);
+      timer = setTimeout(check, interval);
     };
     check();
+    // Every settle path above returns before scheduling, so no timer is left
+    // pending once the promise settles.
+    void timer;
   });
 }
 

@@ -4,17 +4,7 @@
 
 import { replaceChildrenSafely } from "../core/rendering/dispose";
 import { globalSingleton } from "../utils/globalSingleton";
-
-/**
- * Escape a value for safe embedding in a CSS attribute selector.
- * Uses the native `CSS.escape` when available (jsdom/browsers) and
- * falls back to a conservative hex-escape otherwise.
- */
-function escapeSelector(value: string): string {
-  const g = globalThis as unknown as { CSS?: { escape?: (v: string) => string } };
-  if (g.CSS && typeof g.CSS.escape === "function") return g.CSS.escape(value);
-  return value.replace(/[^\w-]/g, (m) => `\\${m.charCodeAt(0).toString(16)} `);
-}
+import { queryByAttribute } from "./queries";
 
 // Tracks containers produced by `render()` so tests can bulk-clean via
 // `unmountAll()` when individual `unmount()` calls were missed. Shared via
@@ -74,11 +64,11 @@ export function render(component: () => HTMLElement): {
   }
 
   function getByTestId(testId: string): HTMLElement | null {
-    return container.querySelector(`[data-testid="${escapeSelector(testId)}"]`);
+    return queryByAttribute(container, "data-testid", testId);
   }
 
   function getByRole(role: string): HTMLElement | null {
-    return container.querySelector(`[role="${role}"]`);
+    return queryByAttribute(container, "role", role);
   }
 
   function queryAll(selector: string): HTMLElement[] {

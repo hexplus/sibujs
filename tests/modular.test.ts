@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBundle, createModuleRegistry, lazyModule, packageInfo } from "../src/plugins/modular";
 
@@ -230,55 +232,46 @@ describe("lazyModule", () => {
 // =============================================================================
 
 describe("packageInfo", () => {
-  it("should have the correct name and version", () => {
-    expect(packageInfo.name).toBe("sibu");
-    expect(packageInfo.version).toBe("1.0.0");
+  // packageInfo used to hard-code a different package ("sibu" 1.0.0) with
+  // `.mjs` outputs, nonexistent source paths and subpaths the real package does
+  // not export. It is now checked against the package's own manifest, build
+  // script and (when built) dist output, so it cannot drift again silently.
+  const ROOT = resolve(__dirname, "..");
+  const pkg = JSON.parse(readFileSync(resolve(ROOT, "package.json"), "utf8")) as {
+    name: string;
+    version: string;
+    scripts: Record<string, string>;
+    exports: Record<string, Record<string, string>>;
+  };
+
+  it("name and version match package.json", () => {
+    expect(packageInfo.name).toBe(pkg.name);
+    expect(packageInfo.version).toBe(pkg.version);
   });
 
-  it("should have all expected entry points", () => {
-    const keys = Object.keys(packageInfo.entryPoints);
-    expect(keys).toContain("main");
-    expect(keys).toContain("core");
-    expect(keys).toContain("hooks");
-    expect(keys).toContain("router");
-    expect(keys).toContain("i18n");
-    expect(keys).toContain("testing");
-    expect(keys).toContain("ssr");
+  it("generates exactly the exports map declared in package.json", () => {
+    expect(packageInfo.generateExportsMap()).toEqual(pkg.exports);
   });
 
-  it("should have entry point values that end with .ts", () => {
-    for (const value of Object.values(packageInfo.entryPoints)) {
-      expect(value).toMatch(/\.ts$/);
+  it("every module entry point is a source file the build script compiles", () => {
+    const buildEntries = pkg.scripts.build
+      .split("&&")[0]
+      .split(/\s+/)
+      .filter((part) => part.endsWith(".ts"));
+    const entrySources = Object.values(packageInfo.entryPoints).map((p) => p.replace(/^\.\//, ""));
+
+    expect([...entrySources].sort()).toEqual([...buildEntries].sort());
+    for (const source of entrySources) {
+      expect(existsSync(resolve(ROOT, source)), `${source} exists`).toBe(true);
     }
   });
 
-  it("generateExportsMap should return a proper map", () => {
-    const exportsMap = packageInfo.generateExportsMap();
-
-    // 'main' entry maps to '.'
-    expect(exportsMap["."]).toBeDefined();
-    expect(exportsMap["."].import).toMatch(/\.mjs$/);
-    expect(exportsMap["."].require).toMatch(/\.cjs$/);
-    expect(exportsMap["."].types).toMatch(/\.d\.ts$/);
-  });
-
-  it("generateExportsMap maps non-main entries to subpaths", () => {
-    const exportsMap = packageInfo.generateExportsMap();
-
-    expect(exportsMap["./core"]).toBeDefined();
-    expect(exportsMap["./hooks"]).toBeDefined();
-    expect(exportsMap["./router"]).toBeDefined();
-
-    // The dist path should contain 'dist/'
-    expect(exportsMap["./core"].import).toContain("dist/");
-  });
-
-  it("generateExportsMap converts source .ts paths to dist paths", () => {
-    const exportsMap = packageInfo.generateExportsMap();
-
-    // 'main' entry: ./index.ts -> ./dist/index.mjs
-    expect(exportsMap["."].import).toBe("./dist/index.mjs");
-    expect(exportsMap["."].require).toBe("./dist/index.cjs");
-    expect(exportsMap["."].types).toBe("./dist/index.d.ts");
+  const distBuilt = existsSync(resolve(ROOT, "dist/index.js"));
+  it.skipIf(!distBuilt)("every generated target exists in the built dist", () => {
+    for (const [subpath, targets] of Object.entries(packageInfo.generateExportsMap())) {
+      for (const target of Object.values(targets)) {
+        expect(existsSync(resolve(ROOT, target)), `${subpath} → ${target}`).toBe(true);
+      }
+    }
   });
 });

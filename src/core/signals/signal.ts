@@ -20,6 +20,16 @@ declare const __accessor: unique symbol;
  */
 export type Accessor<T> = (() => T) & { readonly [__accessor]?: never };
 
+/**
+ * An {@link Accessor} that owns a subscription, timer or listener and must be
+ * released when its consumer goes away. Returned by helpers such as `debounce`,
+ * `throttle` and `previous`.
+ */
+export type DisposableAccessor<T> = Accessor<T> & {
+  /** Stop the underlying subscription and cancel pending work. The accessor keeps its last value. */
+  dispose(): void;
+};
+
 type SetState<T> = (next: T | ((prev: T) => T)) => void;
 type StateTuple<T> = [Accessor<T>, SetState<T>];
 

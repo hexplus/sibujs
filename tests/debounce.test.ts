@@ -97,7 +97,7 @@ describe("debounce", () => {
   it("dispose() stops the subscription and cancels the pending timer", async () => {
     vi.useFakeTimers();
     const [count, setCount] = signal(0);
-    const debounced = debounce(count, 100) as (() => number) & { dispose: () => void };
+    const debounced = debounce(count, 100);
     expect(typeof debounced.dispose).toBe("function");
 
     setCount(1);

@@ -32,9 +32,9 @@ describe("contentEditable coverage", () => {
     expect(ed.isFocused()).toBe(false);
   });
 
-  it("setContent with a plain string assigns it directly (legacy form)", () => {
+  it("setContent with a plain string assigns its text (legacy form)", () => {
     const ed = contentEditable();
-    // Legacy string form is treated as raw value assignment.
+    // Legacy string form is sanitized like { html }; plain text is unchanged.
     ed.setContent("hello world");
     expect(ed.content()).toBe("hello world");
   });

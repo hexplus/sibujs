@@ -22,7 +22,8 @@ import { signal } from "../core/signals/signal";
 // This matches `asyncDerived()`'s behavior and prevents form-flicker
 // when users double-click submit.
 
-export interface FormActionHandle<TArgs extends unknown[], TResult> {
+/** The parts of a form-action handle available for every action signature. */
+export interface FormActionState<TArgs extends unknown[], TResult> {
   /** Invoke the action. Rejections become `error()`, resolutions `result()`. */
   run: (...args: TArgs) => Promise<void>;
   /** True while the underlying promise is unresolved. */
@@ -33,13 +34,29 @@ export interface FormActionHandle<TArgs extends unknown[], TResult> {
   result: () => TResult | null;
   /** Clear result and error without affecting an in-flight call. */
   reset: () => void;
+}
+
+/** The submit-handler part of a form-action handle. */
+export interface FormActionSubmit {
   /**
    * A ready-to-attach submit handler for `<form>` elements. Calls
    * `e.preventDefault()`, builds a `FormData`, and passes it to the
-   * underlying action. Only available when `TArgs = [FormData]`.
+   * underlying action as its only argument.
    */
   onSubmit: (e: Event) => void;
 }
+
+/**
+ * Handle returned by {@link formAction}.
+ *
+ * `onSubmit` calls the action with exactly one `FormData`, so it is part of the
+ * type only when that call is valid for the action — `(data: FormData) => …`
+ * or `(data?: FormData) => …`. For any other signature (numeric, zero- or
+ * multi-argument) it is omitted rather than silently handing the action a
+ * `FormData` it does not expect.
+ */
+export type FormActionHandle<TArgs extends unknown[], TResult> = FormActionState<TArgs, TResult> &
+  ([FormData] extends TArgs ? FormActionSubmit : Record<never, never>);
 
 /**
  * Wrap an async function into a reactive form-action handle.
@@ -94,12 +111,13 @@ export function formAction<TArgs extends unknown[], TResult>(
     const formEl = e.currentTarget as HTMLFormElement | null;
     if (!formEl || typeof FormData === "undefined") return;
     const data = new FormData(formEl);
-    // The caller is responsible for declaring their action as
-    // `(data: FormData) => …`. We can't statically enforce it from this
-    // helper signature, so the single-arg forwarding goes through
-    // `unknown` and is dispatched as a FormData call.
+    // `FormActionHandle` only exposes `onSubmit` when a single-FormData call is
+    // valid for the action, so the forwarding cast is sound for every caller
+    // that can reach this handler through the public type.
     (run as unknown as (d: FormData) => Promise<void>)(data);
   }
 
-  return { run, pending, error, result, reset, onSubmit };
+  // The runtime object always carries `onSubmit`; the conditional return type
+  // is what removes it from signatures it would not suit.
+  return { run, pending, error, result, reset, onSubmit } as FormActionHandle<TArgs, TResult>;
 }

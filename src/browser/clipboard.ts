@@ -22,6 +22,11 @@ export function clipboard(): {
   const [copied, setCopied] = signal(false);
   let copiedTimer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  // Invocation counter. Writes can settle out of order (a permission prompt on
+  // one, not the other), and only the most recent copy() may publish state or
+  // own the `copied` timer — otherwise an older write resolving late overwrote
+  // the newer value and replaced its reset timer. dispose() bumps it too.
+  let generation = 0;
 
   async function copy(value: string): Promise<void> {
     if (disposed) return;
@@ -29,11 +34,13 @@ export function clipboard(): {
       return;
     }
 
+    const mine = ++generation;
     await navigator.clipboard.writeText(value);
 
-    // Re-check AFTER the await, not just before it. This is the whole point:
-    // the controller may have been disposed while the write was pending.
-    if (disposed) return;
+    // Re-check AFTER the await, not just before it: the controller may have
+    // been disposed, or a newer copy() started, while this write was pending.
+    // A superseded write resolves normally for its caller but publishes nothing.
+    if (disposed || mine !== generation) return;
 
     setText(value);
     setCopied(true);
@@ -48,6 +55,7 @@ export function clipboard(): {
 
   function dispose() {
     disposed = true;
+    generation++;
     if (copiedTimer !== null) {
       clearTimeout(copiedTimer);
       copiedTimer = null;

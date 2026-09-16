@@ -2,6 +2,9 @@
 // PLUGIN ARCHITECTURE
 // ============================================================================
 
+import { DEV, devWarn } from "../core/dev";
+import { reportError } from "../core/errors";
+import { adoptThenable } from "../utils/adoptThenable";
 import { globalSingleton } from "../utils/globalSingleton";
 
 export interface PluginContext {
@@ -16,7 +19,12 @@ export interface PluginContext {
 
 export interface SibuPlugin {
   name: string;
-  install: (ctx: PluginContext, options?: unknown) => void;
+  /**
+   * Register hooks and providers. May be async: the plugin is committed only
+   * when the returned promise fulfils, and a rejection commits nothing and
+   * leaves the plugin installable again.
+   */
+  install: (ctx: PluginContext, options?: unknown) => void | PromiseLike<void>;
 }
 
 interface PluginHooks {
@@ -26,11 +34,56 @@ interface PluginHooks {
   error: Array<(error: Error) => void>;
 }
 
+/** Shared across duplicate copies of this module: see the class below. */
+const CANCELLED_BRAND = Symbol.for("sibujs.plugins.installCancelled.v1");
+
+/**
+ * An installation that never took effect because `reset()` (or a newer install
+ * of the same name) invalidated it. Thrown by a synchronous install that reset
+ * its own registry, and the rejection of a cancelled async install — a
+ * deliberate cancellation, not a failure, so it is not reported as a runtime
+ * error.
+ */
+export class PluginInstallCancelledError extends Error {
+  /** The plugin whose installation was cancelled. */
+  readonly pluginName: string;
+  /**
+   * Brand, not identity: the default registry is shared across duplicate copies
+   * of this module, so the error a caller receives may come from another copy's
+   * constructor. `instanceof` is taught to recognise the brand instead.
+   */
+  readonly [CANCELLED_BRAND] = true;
+
+  constructor(pluginName: string) {
+    super(`[Plugin] Installation of "${pluginName}" was cancelled before it was committed (registry reset).`);
+    this.name = "PluginInstallCancelledError";
+    this.pluginName = pluginName;
+  }
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    return isPluginInstallCancelledError(value);
+  }
+}
+
+/**
+ * Whether `value` is a cancelled-installation error, from this copy of the
+ * module or any duplicate of it.
+ */
+export function isPluginInstallCancelledError(value: unknown): value is PluginInstallCancelledError {
+  return typeof value === "object" && value !== null && (value as Record<symbol, unknown>)[CANCELLED_BRAND] === true;
+}
+
 export interface PluginRegistry {
   readonly installedPlugins: Set<string>;
   readonly hooks: PluginHooks;
   readonly provided: Map<string, unknown>;
-  plugin: (p: SibuPlugin, options?: unknown) => void;
+  /**
+   * Install a plugin. Returns a promise for an async `install()` — awaited, it
+   * fulfils when the plugin is committed, rejects with the install failure, or
+   * rejects with {@link PluginInstallCancelledError} when `reset()` invalidated
+   * it; a synchronous install returns `undefined` and throws on failure.
+   */
+  plugin: (p: SibuPlugin, options?: unknown) => void | Promise<void>;
   inject: <T = unknown>(key: string, defaultValue?: T) => T;
   triggerMount: (element: HTMLElement) => void;
   triggerUnmount: (element: HTMLElement) => void;
@@ -46,36 +99,150 @@ export function createPluginRegistry(): PluginRegistry {
   const installedPlugins = new Set<string>();
   const hooks: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
   const provided = new Map<string, unknown>();
+  // Names whose `install()` is currently ON THE CALL STACK. A plugin that
+  // installs itself — directly, or through a dependency that installs it back —
+  // is rejected instead of recursing until the stack overflows. Deliberately
+  // NOT cleared by reset(): the call is still on the stack, so a plugin that
+  // resets the registry from inside its own install() cannot recurse.
+  const installStack = new Set<string>();
+  // Async installs that have not settled, with the generation each belongs to.
+  // reset() drops them (their generation is gone), so the same name is free
+  // again immediately.
+  const pendingInstalls = new Map<string, number>();
+  // Bumped by reset(): every context and every in-flight installation captures
+  // the generation it belongs to, so a stale context cannot repopulate the
+  // registry and a pending install cannot commit into a registry that has been
+  // reset (or into a newer installation of the same name).
+  let generation = 0;
 
   const registry: PluginRegistry = {
     installedPlugins,
     hooks,
     provided,
+    /**
+     * Install a plugin as a transaction.
+     *
+     * Hooks and providers registered through `ctx` are staged and committed
+     * only if `install()` returns; a throwing install leaves the registry
+     * exactly as it found it (and can simply be retried). The plugin is marked
+     * installed at commit, before its init hooks run.
+     *
+     * Each `plugin()` call is its own transaction: a dependency installed by a
+     * nested `plugin()` call commits on its own and stays installed even if the
+     * outer installation later fails.
+     */
     plugin(p, options) {
       if (installedPlugins.has(p.name)) {
         console.warn(`[Plugin] "${p.name}" is already installed.`);
         return;
       }
-      const ctx: PluginContext = {
-        onInit: (cb) => hooks.init.push(cb),
-        onMount: (cb) => hooks.mount.push(cb),
-        onUnmount: (cb) => hooks.unmount.push(cb),
-        onError: (cb) => hooks.error.push(cb),
-        provide: (key, value) => provided.set(key, value),
-      };
-      const initHooksBefore = hooks.init.length;
-      p.install(ctx, options);
-      installedPlugins.add(p.name);
-      // Snapshot only the init hooks added by this plugin, then iterate the copy
-      const justAdded = hooks.init.slice(initHooksBefore);
-      for (const cb of justAdded) {
-        try {
-          cb();
-        } catch (e) {
-          console.error(`[Plugin] "${p.name}" init error:`, e);
-        }
+      if (installStack.has(p.name)) {
+        throw new Error(`[Plugin] "${p.name}" is already being installed (recursive installation).`);
       }
+      if (pendingInstalls.has(p.name)) {
+        throw new Error(`[Plugin] "${p.name}" is already being installed (asynchronous installation in flight).`);
+      }
+
+      const staged: PluginHooks = { init: [], mount: [], unmount: [], error: [] };
+      const stagedProvided = new Map<string, unknown>();
+      // Staging covers the whole installation — including the part after an
+      // `await`. Once committed, `ctx` writes to the live registry again, so
+      // hooks and providers registered later (from an init hook, a timer) are
+      // not lost.
+      let committed = false;
+      const myGeneration = generation;
+      const stale = (): boolean => {
+        if (myGeneration === generation) return false;
+        if (DEV) devWarn(`plugin: "${p.name}" registered after the registry was reset; the registration was ignored.`);
+        return true;
+      };
+      const target = (): PluginHooks | null => (stale() ? null : committed ? hooks : staged);
+      const ctx: PluginContext = {
+        onInit: (cb) => void target()?.init.push(cb),
+        onMount: (cb) => void target()?.mount.push(cb),
+        onUnmount: (cb) => void target()?.unmount.push(cb),
+        onError: (cb) => void target()?.error.push(cb),
+        provide: (key, value) => {
+          if (stale()) return;
+          (committed ? provided : stagedProvided).set(key, value);
+        },
+      };
+
+      /** Commits the staged registrations; false when this install was cancelled. */
+      const commit = (): boolean => {
+        // The registry was reset (or re-used for this name) while the install
+        // was in flight: this installation no longer owns anything here.
+        if (myGeneration !== generation) return false;
+        hooks.init.push(...staged.init);
+        hooks.mount.push(...staged.mount);
+        hooks.unmount.push(...staged.unmount);
+        hooks.error.push(...staged.error);
+        for (const [key, value] of stagedProvided) provided.set(key, value);
+        installedPlugins.add(p.name);
+        committed = true;
+        if (pendingInstalls.get(p.name) === myGeneration) pendingInstalls.delete(p.name);
+
+        // Run only this plugin's init hooks registered during install(), from a
+        // snapshot (an init hook registering another does not run it now).
+        for (const cb of staged.init.slice()) {
+          try {
+            cb();
+          } catch (e) {
+            console.error(`[Plugin] "${p.name}" init error:`, e);
+          }
+        }
+        return true;
+      };
+
+      installStack.add(p.name);
+      let pending: Promise<unknown> | null;
+      try {
+        // adoptThenable reads `then` once and turns a throwing getter or
+        // invocation into a rejection.
+        pending = adoptThenable(p.install(ctx, options));
+      } finally {
+        // The call has left the stack, whatever it did (including resetting the
+        // registry); a later install of this name is a new transaction.
+        installStack.delete(p.name);
+      }
+
+      if (!pending) {
+        // A synchronous install that reset the registry committed nothing, and
+        // must not look like it succeeded.
+        if (!commit()) throw new PluginInstallCancelledError(p.name);
+        return;
+      }
+
+      // Async install: the name is reserved until the promise settles, so a
+      // concurrent attempt is refused. Only fulfilment commits.
+      //
+      // Unless this installation is ALREADY stale — `install()` may have reset
+      // the registry itself, and reset() cleared a reservation that did not
+      // exist yet. Reserving now would lock the name until another reset, or
+      // forever if the promise never settles.
+      if (myGeneration === generation) pendingInstalls.set(p.name, myGeneration);
+      const settled = pending.then(
+        () => {
+          if (commit()) return;
+          // Defensive: a stale settlement releases only its own reservation.
+          if (pendingInstalls.get(p.name) === myGeneration) pendingInstalls.delete(p.name);
+          throw new PluginInstallCancelledError(p.name);
+        },
+        (err) => {
+          // Only release the reservation when it is still this installation's:
+          // a reset (or a newer install of the same name) owns it now.
+          if (pendingInstalls.get(p.name) === myGeneration) pendingInstalls.delete(p.name);
+          reportError(err, { phase: "async", name: `plugin(${p.name})` });
+          throw err;
+        },
+      );
+      // Handled here so a caller that ignores the returned promise gets a
+      // reported error (or a silent cancellation) rather than an unhandled
+      // rejection; the promise this returns still rejects for an awaiting caller.
+      settled.catch(() => {});
+      return settled;
     },
+
     inject<T = unknown>(key: string, defaultValue?: T): T {
       if (provided.has(key)) return provided.get(key) as T;
       if (defaultValue !== undefined) return defaultValue;
@@ -113,6 +280,13 @@ export function createPluginRegistry(): PluginRegistry {
       }
     },
     reset() {
+      // Terminal for everything issued before it: in-flight installs cannot
+      // commit, and contexts handed to already-installed plugins stop writing.
+      generation++;
+      // In-flight async installs belong to the old generation: they can neither
+      // commit nor keep their name reserved. `installStack` is NOT cleared —
+      // those calls are still running, and the recursion guard must hold.
+      pendingInstalls.clear();
       installedPlugins.clear();
       hooks.init.length = 0;
       hooks.mount.length = 0;
@@ -135,16 +309,25 @@ const _defaults = globalSingleton(Symbol.for("sibujs.plugins.defaultRegistry.v1"
 /**
  * Creates a plugin definition.
  */
-export function createPlugin(name: string, install: (ctx: PluginContext, options?: unknown) => void): SibuPlugin {
+export function createPlugin(
+  name: string,
+  install: (ctx: PluginContext, options?: unknown) => void | PromiseLike<void>,
+): SibuPlugin {
   return { name, install };
 }
 
 /**
  * Installs a plugin into the default (singleton) registry.
+ *
+ * Returns the installation's completion promise when `install()` is async —
+ * await it to know the plugin is ready, or to catch a failed installation — and
+ * `undefined` for a synchronous install (which throws on failure).
  */
-export function plugin(plugin: SibuPlugin, options?: unknown): void {
+export function plugin(plugin: SibuPlugin, options?: unknown): void | Promise<void> {
   _defaults.touched = true;
-  _defaults.registry.plugin(plugin, options);
+  // Returned, not discarded: an async install's completion (and failure) has to
+  // reach the caller through the singleton API too.
+  return _defaults.registry.plugin(plugin, options);
 }
 
 /**

@@ -148,7 +148,9 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
     for (const [key, def] of Object.entries(schema)) {
       const propDef: PropDef = typeof def === "function" ? { type: def as Validator } : (def as PropDef);
 
-      if (result[key] == null && propDef.default !== undefined) {
+      // Defaults fill only absent / undefined props. An explicit `null` is a
+      // real value (often a meaningful "none") and is kept, not replaced.
+      if (result[key] === undefined && propDef.default !== undefined) {
         result[key] = typeof propDef.default === "function" ? (propDef.default as () => unknown)() : propDef.default;
       }
 
@@ -188,7 +190,8 @@ export function validateProps<Props extends object>(props: Partial<Props>, schem
     if (typeof def === "function") continue;
 
     const fallback = (def as PropDef).default;
-    if (result[key] == null && fallback !== undefined) {
+    // Same rule as development: only absent / undefined props take the default.
+    if (result[key] === undefined && fallback !== undefined) {
       result[key] = typeof fallback === "function" ? (fallback as () => unknown)() : fallback;
     }
   }

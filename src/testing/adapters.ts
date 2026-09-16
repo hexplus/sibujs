@@ -3,14 +3,16 @@
  * Provides integration with Jest, Cypress, and Playwright.
  */
 
+import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
+import { queryAllByAttribute, queryByAttribute } from "./queries";
+
 /**
- * Escape a value for safe interpolation inside an `[attr="..."]` selector. Only
- * `"` and `\` are significant there, so a value containing quotes/brackets can
- * no longer break the selector or throw a SyntaxError (CSS-selector injection).
- * For id selectors, query via `[id="..."]` with this escaping rather than `#`.
+ * Escape a value for a double-quoted CSS attribute selector (`[attr="..."]`).
+ * Interpolating raw values produced invalid selectors for quotes, backslashes
+ * and newlines, and let a crafted value widen the match.
  */
-function escSel(value: string): string {
-  return value.replace(/["\\]/g, "\\$&");
+function escapeAttrValue(value: string): string {
+  return value.replace(/[\\"]/g, "\\$&").replace(/\n/g, "\\a ").replace(/\r/g, "\\d ").replace(/\0/g, "\\fffd ");
 }
 
 // ─── Jest Adapter ───────────────────────────────────────────────────────────
@@ -34,7 +36,9 @@ export function createJestAdapter() {
     /** Call in afterEach to clean up */
     teardown(): void {
       if (container) {
-        container.innerHTML = "";
+        // Dispose, don't just detach: `innerHTML = ""` skipped framework
+        // teardown, so effects and listeners leaked into later tests.
+        replaceChildrenSafely(container);
         if (container.parentNode) {
           container.parentNode.removeChild(container);
         }
@@ -190,25 +194,36 @@ export function createCypressAdapter() {
     ): {
       element: HTMLElement;
       container: HTMLElement;
+      /** Dispose the mounted component and remove the container this call created. Idempotent. */
+      unmount: () => void;
     } {
+      const ownsContainer = !options?.container;
       const container = options?.container || document.createElement("div");
-      if (!options?.container) {
+      if (ownsContainer) {
         container.setAttribute("data-testenv", "cypress");
         document.body.appendChild(container);
       }
       const element = typeof component === "function" ? component() : component;
       container.appendChild(element);
-      return { element, container };
+      let unmounted = false;
+      const unmount = () => {
+        if (unmounted) return;
+        unmounted = true;
+        dispose(element);
+        element.parentNode?.removeChild(element);
+        if (ownsContainer) container.parentNode?.removeChild(container);
+      };
+      return { element, container, unmount };
     },
 
     /** Generate Cypress custom commands for SibuJS */
     commands: {
       /** Find by data-testid */
-      getByTestId: (id: string): string => `[data-testid="${id}"]`,
+      getByTestId: (id: string): string => `[data-testid="${escapeAttrValue(id)}"]`,
       /** Find by text */
-      getByText: (text: string): string => `:contains("${text}")`,
+      getByText: (text: string): string => `:contains("${escapeAttrValue(text)}")`,
       /** Find by role */
-      getByRole: (role: string): string => `[role="${role}"]`,
+      getByRole: (role: string): string => `[role="${escapeAttrValue(role)}"]`,
     },
   };
 }
@@ -223,10 +238,11 @@ export function createPlaywrightAdapter() {
   return {
     /** Selectors for common SibuJS patterns */
     selectors: {
-      byTestId: (id: string): string => `[data-testid="${id}"]`,
-      byRole: (role: string): string => `[role="${role}"]`,
-      byAriaLabel: (label: string): string => `[aria-label="${label}"]`,
-      byDataAttr: (attr: string, value?: string): string => (value ? `[data-${attr}="${value}"]` : `[data-${attr}]`),
+      byTestId: (id: string): string => `[data-testid="${escapeAttrValue(id)}"]`,
+      byRole: (role: string): string => `[role="${escapeAttrValue(role)}"]`,
+      byAriaLabel: (label: string): string => `[aria-label="${escapeAttrValue(label)}"]`,
+      byDataAttr: (attr: string, value?: string): string =>
+        value ? `[data-${attr}="${escapeAttrValue(value)}"]` : `[data-${attr}]`,
     },
 
     /** Generate a page object for a SibuJS component */
@@ -278,7 +294,9 @@ export function createUniversalAdapter() {
     /** Teardown test environment */
     teardown(): void {
       if (container) {
-        container.innerHTML = "";
+        // Dispose, don't just detach: `innerHTML = ""` skipped framework
+        // teardown, so effects and listeners leaked into later tests.
+        replaceChildrenSafely(container);
         if (container.parentNode) {
           container.parentNode.removeChild(container);
         }
@@ -301,11 +319,11 @@ export function createUniversalAdapter() {
     /** Query helpers */
     queries: {
       byTestId(container: Element, id: string): Element | null {
-        return container.querySelector(`[data-testid="${escSel(id)}"]`);
+        return queryByAttribute(container, "data-testid", id);
       },
 
       byRole(container: Element, role: string): Element | null {
-        return container.querySelector(`[role="${escSel(role)}"]`);
+        return queryByAttribute(container, "role", role);
       },
 
       byText(container: Element, text: string): Element | null {
@@ -325,8 +343,8 @@ export function createUniversalAdapter() {
           if (labelEl.textContent?.includes(label)) {
             const forAttr = labelEl.getAttribute("for");
             if (forAttr) {
-              // Use [id="..."] (not `#`) so ids with special characters match.
-              return container.querySelector(`[id="${escSel(forAttr)}"]`);
+              // Exact attribute match, so ids with any characters resolve.
+              return queryByAttribute(container, "id", forAttr);
             }
             // If no "for" attribute, look for a nested input
             const nested = labelEl.querySelector("input, select, textarea");
@@ -334,11 +352,11 @@ export function createUniversalAdapter() {
           }
         }
         // Fallback: look for aria-label
-        return container.querySelector(`[aria-label="${escSel(label)}"]`);
+        return queryByAttribute(container, "aria-label", label);
       },
 
       allByRole(container: Element, role: string): Element[] {
-        return Array.from(container.querySelectorAll(`[role="${escSel(role)}"]`));
+        return queryAllByAttribute(container, "role", role);
       },
     },
 

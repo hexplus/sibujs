@@ -15,15 +15,16 @@ export function formatNumber(value: number, options?: Intl.NumberFormatOptions &
   return new Intl.NumberFormat(locale, formatOptions).format(value);
 }
 
-export function formatCurrency(
-  value: number,
-  currency: string,
-  options?: Intl.NumberFormatOptions & { locale?: string },
-): string {
+/** Options for {@link formatCurrency}: any `Intl.NumberFormat` option except the ones it fixes. */
+export type CurrencyFormatOptions = Omit<Intl.NumberFormatOptions, "style" | "currency"> & { locale?: string };
+
+export function formatCurrency(value: number, currency: string, options?: CurrencyFormatOptions): string {
   const { locale, ...formatOptions } = options ?? {};
+  // `style` and `currency` are applied LAST: spread after them, options could
+  // switch the currency away from the positional argument or format a percent.
   return new Intl.NumberFormat(locale, {
+    ...formatOptions,
     style: "currency",
     currency,
-    ...formatOptions,
   }).format(value);
 }

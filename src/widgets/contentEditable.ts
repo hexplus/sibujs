@@ -2,6 +2,21 @@ import { signal } from "../core/signals/signal";
 import { stripHtml } from "../utils/sanitize";
 
 /**
+ * Reduce an HTML string to text that stays inert if it is rendered as HTML
+ * again.
+ *
+ * One `stripHtml` pass removes the markup and decodes entities, so an encoded
+ * payload (`&lt;img onerror=…&gt;`) comes out shaped like a tag. Stripping
+ * again until stable made it inert, but also deleted text that was encoded on
+ * purpose (`&amp;lt;b&amp;gt;` — "the <b> tag" — vanished). Instead, every `<`
+ * that would open a tag is re-escaped: nothing is lost, and rendering the
+ * result as HTML still creates no element.
+ */
+function toInertText(html: string): string {
+  return stripHtml(String(html)).replace(/<(?=[a-z!/?])/gi, "&lt;");
+}
+
+/**
  * Options for `setContent`.
  *
  * WARNING: passing `sanitize: false` bypasses the built-in protection and
@@ -59,8 +74,11 @@ export function contentEditable(element?: HTMLElement): {
   const [isFocused, setFocused] = signal<boolean>(false);
 
   function setContent(input: string | SetContentOptions): void {
+    // The legacy string form is documented as `{ html, sanitize: true }` and is
+    // handled exactly that way; raw HTML is reachable only through
+    // `{ html, sanitize: false }`.
     if (typeof input === "string") {
-      setContentInternal(input);
+      setContentInternal(toInertText(input));
       return;
     }
     if (typeof input.text === "string") {
@@ -69,7 +87,7 @@ export function contentEditable(element?: HTMLElement): {
     }
     if (typeof input.html === "string") {
       const shouldSanitize = input.sanitize !== false;
-      setContentInternal(shouldSanitize ? stripHtml(input.html) : input.html);
+      setContentInternal(shouldSanitize ? toInertText(input.html) : input.html);
       return;
     }
     setContentInternal("");
@@ -94,7 +112,7 @@ export function contentEditable(element?: HTMLElement): {
 
     // Check if we're already inside the same tag — if so, unwrap
     const ancestor = range.commonAncestorContainer;
-    const existingWrap = findAncestorByTag(
+    const existingWrap = findWrapperWithinEditor(
       ancestor instanceof HTMLElement ? ancestor : ancestor.parentElement,
       tagName,
     );
@@ -146,13 +164,27 @@ export function contentEditable(element?: HTMLElement): {
     }
   }
 
-  function findAncestorByTag(el: Element | null, tagName: string): HTMLElement | null {
+  /**
+   * Find an existing `tagName` wrapper around the selection that belongs to the
+   * editor. The walk stops at the bound editor element and at the nearest
+   * editing host (an element with `contenteditable` other than "false"),
+   * whichever comes first — neither the boundary itself nor anything above it
+   * is ever returned. An unbounded walk used to find a `<strong>` that
+   * CONTAINED the editor and unwrap it, rewriting unrelated sibling DOM.
+   */
+  function findWrapperWithinEditor(el: Element | null, tagName: string): HTMLElement | null {
     const upper = tagName.toUpperCase();
     while (el) {
+      if (el === element || isEditingHost(el)) return null;
       if (el.tagName === upper) return el as HTMLElement;
       el = el.parentElement;
     }
     return null;
+  }
+
+  function isEditingHost(el: Element): boolean {
+    const attr = el.getAttribute("contenteditable");
+    return attr !== null && attr.toLowerCase() !== "false";
   }
 
   function bold(): void {

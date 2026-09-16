@@ -1,6 +1,6 @@
 import { createId } from "../core/rendering/createId";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 const boundPopovers = new WeakMap<HTMLElement, () => void>();
 
@@ -57,11 +57,11 @@ export function popover(): {
       els.popover.setAttribute("aria-labelledby", els.labelledBy.id);
     }
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const open = isOpen();
       els.trigger.setAttribute("aria-expanded", open ? "true" : "false");
       els.popover.hidden = !open;
-    });
+    }, els.trigger);
 
     const onTriggerClick = (e: Event) => {
       e.preventDefault();
@@ -87,8 +87,14 @@ export function popover(): {
     els.trigger.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onDocPointer);
 
+    // Idempotent, like Accordion/Tabs: a second call — possibly after the
+    // element was bound again — must neither restore attributes over the new
+    // binding nor drop its registration.
+    let tornDown = false;
     const teardown = () => {
-      boundPopovers.delete(els.trigger);
+      if (tornDown) return;
+      tornDown = true;
+      if (boundPopovers.get(els.trigger) === teardown) boundPopovers.delete(els.trigger);
       fxTeardown();
       els.trigger.removeEventListener("click", onTriggerClick);
       els.popover.removeEventListener("keydown", onKey);

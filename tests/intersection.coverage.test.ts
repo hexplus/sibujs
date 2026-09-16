@@ -25,6 +25,11 @@ class MockIntersectionObserver {
     this.disconnected = true;
     this.observed = [];
   }
+  takeRecords(): IntersectionObserverEntry[] {
+    this.tookRecords = true;
+    return [];
+  }
+  tookRecords = false;
   trigger(entries: Entry[]) {
     this.callback(entries as IntersectionObserverEntry[], this as unknown as IntersectionObserver);
   }
@@ -75,6 +80,53 @@ describe("intersection callback updates signals", () => {
     expect(MockIntersectionObserver.instances[1].disconnected).toBe(false);
   });
 
+  // disconnect() does not clear an observer's already-queued entries, so a
+  // notification task can still invoke a disconnected observer's callback.
+  it("ignores a queued notification from the observer it retargeted away from", () => {
+    const result = intersection();
+    const a = document.createElement("div");
+    const b = document.createElement("div");
+    result.observe(a);
+    const stale = MockIntersectionObserver.instances[0];
+    result.observe(b);
+    const live = MockIntersectionObserver.instances[1];
+
+    live.trigger([{ isIntersecting: true, intersectionRatio: 0.5 }]);
+    stale.trigger([{ isIntersecting: false, intersectionRatio: 0 }]);
+
+    expect(result.isIntersecting()).toBe(true);
+    expect(result.intersectionRatio()).toBe(0.5);
+    expect(stale.tookRecords).toBe(true);
+  });
+
+  it("ignores a queued notification after unobserve()", () => {
+    const result = intersection();
+    const el = document.createElement("div");
+    result.observe(el);
+    const stale = MockIntersectionObserver.instances[0];
+    result.unobserve();
+
+    stale.trigger([{ isIntersecting: true, intersectionRatio: 1 }]);
+
+    expect(result.isIntersecting()).toBe(false);
+    expect(result.intersectionRatio()).toBe(0);
+  });
+
+  it("a stale notification cannot override state after retargeting back to the same element", () => {
+    const result = intersection();
+    const el = document.createElement("div");
+    result.observe(el);
+    const first = MockIntersectionObserver.instances[0];
+    result.observe(el);
+    const second = MockIntersectionObserver.instances[1];
+
+    second.trigger([{ isIntersecting: true, intersectionRatio: 0.9 }]);
+    first.trigger([{ isIntersecting: false, intersectionRatio: 0 }]);
+
+    expect(result.isIntersecting()).toBe(true);
+    expect(result.intersectionRatio()).toBe(0.9);
+  });
+
   it("unobserve disconnects and clears the element", () => {
     const result = intersection();
     const el = document.createElement("div");
@@ -111,6 +163,44 @@ describe("lazyLoad", () => {
     expect(obs.disconnected).toBe(true);
 
     cleanup();
+  });
+
+  it("a notification queued before cleanup never calls the loader", () => {
+    const loader = vi.fn();
+    const el = document.createElement("div");
+    const cleanup = lazyLoad(el, loader);
+    const obs = MockIntersectionObserver.instances[0];
+
+    cleanup();
+    obs.trigger([{ isIntersecting: true }]);
+
+    expect(loader).not.toHaveBeenCalled();
+    expect(obs.tookRecords).toBe(true);
+  });
+
+  it("the loader runs at most once, even if a second intersecting notification arrives", () => {
+    const loader = vi.fn();
+    const el = document.createElement("div");
+    lazyLoad(el, loader);
+    const obs = MockIntersectionObserver.instances[0];
+
+    obs.trigger([{ isIntersecting: true }]);
+    obs.trigger([{ isIntersecting: true }]);
+
+    expect(loader).toHaveBeenCalledOnce();
+  });
+
+  it("cleanup after the loader ran is harmless", () => {
+    const loader = vi.fn();
+    const el = document.createElement("div");
+    const cleanup = lazyLoad(el, loader);
+    MockIntersectionObserver.instances[0].trigger([{ isIntersecting: true }]);
+
+    expect(() => {
+      cleanup();
+      cleanup();
+    }).not.toThrow();
+    expect(loader).toHaveBeenCalledOnce();
   });
 
   it("cleanup disconnects the observer", () => {

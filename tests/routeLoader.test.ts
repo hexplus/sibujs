@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { executeLoader, loaderData, preloadRoute } from "../src/data/routeLoader";
+import { executeLoader, loaderData, preloadRoute, renderWithLoader } from "../src/data/routeLoader";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -35,19 +35,20 @@ describe("routeLoader", () => {
 
   it("loaderData accesses the current loader resource", async () => {
     const loader = vi.fn().mockResolvedValue("loaded-data");
-    executeLoader(loader, { params: {}, path: "/" });
+    const res = executeLoader(loader, { params: {}, path: "/" });
     await tick();
 
-    const { data, loading, error } = loaderData<string>();
+    const { data, loading, error } = renderWithLoader(res, () => loaderData<string>());
     expect(data()).toBe("loaded-data");
     expect(loading()).toBe(false);
     expect(error()).toBe(undefined);
+    res.dispose();
   });
 
   it("loaderData throws when no loader context exists", () => {
-    // Reset context by providing null
-    // This test relies on the context being cleared or never set
-    // In practice, loaderData should only be called within a route component
+    const res = executeLoader(vi.fn().mockResolvedValue("x"), { params: {}, path: "/" });
+    expect(() => loaderData()).toThrow(/loaderData must be used inside a route with a loader/);
+    res.dispose();
   });
 
   it("preloadRoute calls the loader and returns data", async () => {

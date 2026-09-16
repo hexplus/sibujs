@@ -89,7 +89,8 @@ describe("registerDisposer / dispose", () => {
 
     expect(() => dispose(root)).not.toThrow();
     for (const td of teardowns) expect(td).toHaveBeenCalledTimes(1);
-  });
+    // Scale test: under a parallel full-suite run jsdom can exceed the 15s default.
+  }, 60_000);
 
   it("disposes multiple sibling children", () => {
     const parent = document.createElement("ul");

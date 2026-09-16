@@ -1,12 +1,13 @@
 import { effect } from "../core/signals/effect";
-import { signal } from "../core/signals/signal";
+import { type DisposableAccessor, signal } from "../core/signals/signal";
 
 /**
  * Tracks the previous value of a reactive signal.
  * Returns `undefined` on first read (there is no previous value yet).
  *
  * @param getter A reactive getter to track
- * @returns A reactive getter for the previous value
+ * @returns A reactive getter for the previous value, with `dispose()` to stop
+ *   tracking the source
  *
  * @example
  * ```ts
@@ -19,7 +20,7 @@ import { signal } from "../core/signals/signal";
  * prev(); // 5
  * ```
  */
-export function previous<T>(getter: () => T): () => T | undefined {
+export function previous<T>(getter: () => T): DisposableAccessor<T | undefined> {
   const [previous, setPrevious] = signal<T | undefined>(undefined);
   let current = getter();
 
@@ -38,5 +39,5 @@ export function previous<T>(getter: () => T): () => T | undefined {
     enumerable: false,
   });
 
-  return previous;
+  return previous as DisposableAccessor<T | undefined>;
 }

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { speech } from "../src/browser/speech";
+import { __resetSpeechCoordinator, speech } from "../src/browser/speech";
 
 describe("speech", () => {
   let synth: {
@@ -20,6 +20,7 @@ describe("speech", () => {
   }>;
 
   beforeEach(() => {
+    __resetSpeechCoordinator();
     synth = {
       speaking: false,
       paused: false,
@@ -60,14 +61,26 @@ describe("speech", () => {
     tts.dispose();
   });
 
-  it("pause/resume/cancel forward to the synth", () => {
+  it("pause/resume/cancel reach the synth while this controller's utterance is speaking", () => {
     const tts = speech();
+    tts.speak("hi");
     tts.pause();
     tts.resume();
     tts.cancel();
     expect(synth.pause).toHaveBeenCalled();
     expect(synth.resume).toHaveBeenCalled();
     expect(synth.cancel).toHaveBeenCalled();
+    tts.dispose();
+  });
+
+  it("pause/resume/cancel leave the synth alone when this controller has nothing speaking", () => {
+    const tts = speech();
+    tts.pause();
+    tts.resume();
+    tts.cancel();
+    expect(synth.pause).not.toHaveBeenCalled();
+    expect(synth.resume).not.toHaveBeenCalled();
+    expect(synth.cancel).not.toHaveBeenCalled();
     tts.dispose();
   });
 

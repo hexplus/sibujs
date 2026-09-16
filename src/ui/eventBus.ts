@@ -1,6 +1,13 @@
+import { reportError } from "../core/errors";
+
 /**
  * eventBus creates a typed publish/subscribe event system.
  * No reactive state needed -- pure event dispatching.
+ *
+ * `emit()` delivers to the handlers registered when it starts. A throwing
+ * handler is reported through the runtime error pipeline and the remaining
+ * handlers still run. Handlers added during delivery receive the next event;
+ * handlers removed (or cleared) during delivery are skipped for the rest of it.
  */
 // `T extends object`, deliberately NOT `Record<string, unknown>`.
 //
@@ -31,9 +38,17 @@ export function eventBus<T extends object>(): {
 
   function emit<K extends keyof T>(event: K, data: T[K]): void {
     const set = listeners.get(event);
-    if (set) {
-      for (const handler of set) {
+    if (!set || set.size === 0) return;
+    // Snapshot: iterating the live Set ran handlers added mid-delivery in the
+    // same emit, and a handler that kept adding handlers never let it finish.
+    for (const handler of Array.from(set)) {
+      // Re-check against the CURRENT set: off() may have emptied and dropped
+      // this event's set, and clear() drops them all.
+      if (!listeners.get(event)?.has(handler)) continue;
+      try {
         handler(data);
+      } catch (err) {
+        reportError(err, { phase: "event", name: `eventBus(${String(event)})` });
       }
     }
   }

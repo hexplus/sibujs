@@ -1,5 +1,6 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { batch } from "../reactivity/batch";
 
 export interface ImageLoaderState {
   /** Reactive loading state: "pending" | "loaded" | "error". */
@@ -10,7 +11,10 @@ export interface ImageLoaderState {
   width: () => number;
   /** Intrinsic height, 0 until loaded. */
   height: () => number;
-  /** Abort in-flight load and reset state. */
+  /**
+   * Stop tracking `src`, best-effort cancel an in-flight load (its result is
+   * ignored either way), and reset every signal to its initial value.
+   */
   dispose: () => void;
 }
 
@@ -50,26 +54,60 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
   }
 
   let current: HTMLImageElement | null = null;
+  // Whether `current` has fired load/error. Only an unsettled request is
+  // cancelled: a loaded element may already be held and displayed by a caller.
+  let currentSettled = false;
   let disposed = false;
+  // Identifies the latest start(); a start interrupted by a reentrant dispose or
+  // source change (through the "pending" publication) must not continue.
+  let startToken = 0;
+
+  // Every field describes the CURRENT source, so they are reset together — a
+  // pending or failed load must never report the previous image's dimensions.
+  function resetState() {
+    batch(() => {
+      setStatus("pending");
+      setImage(null);
+      setWidth(0);
+      setHeight(0);
+    });
+  }
+
+  // Detach the previous request and, if it is still in flight, ask the browser
+  // to drop it: assigning an empty src aborts the pending fetch. Its handlers
+  // are removed first, so the error that assignment may raise is never seen.
+  function abandonCurrent() {
+    if (!current) return;
+    const prev = current;
+    current = null;
+    prev.onload = null;
+    prev.onerror = null;
+    if (!currentSettled) prev.src = "";
+  }
 
   function start(url: string) {
-    if (current) {
-      current.onload = null;
-      current.onerror = null;
-    }
-    setStatus("pending");
-    setImage(null);
+    const token = ++startToken;
+    abandonCurrent();
+    resetState();
+    // resetState() notifies subscribers synchronously; one may have disposed the
+    // loader or started a newer load. Neither may be followed by a request here.
+    if (disposed || token !== startToken) return;
     const img = new Image();
     current = img;
+    currentSettled = false;
     img.onload = () => {
       if (disposed || current !== img) return;
-      setImage(img);
-      setWidth(img.naturalWidth);
-      setHeight(img.naturalHeight);
-      setStatus("loaded");
+      currentSettled = true;
+      batch(() => {
+        setImage(img);
+        setWidth(img.naturalWidth);
+        setHeight(img.naturalHeight);
+        setStatus("loaded");
+      });
     };
     img.onerror = () => {
       if (disposed || current !== img) return;
+      currentSettled = true;
       setStatus("error");
     };
     img.src = url;
@@ -88,16 +126,15 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
   }
 
   function dispose() {
+    if (disposed) return;
     disposed = true;
+    startToken++;
     if (srcEffectTeardown) {
       srcEffectTeardown();
       srcEffectTeardown = null;
     }
-    if (current) {
-      current.onload = null;
-      current.onerror = null;
-      current = null;
-    }
+    abandonCurrent();
+    resetState();
   }
 
   return { status, image, width, height, dispose };

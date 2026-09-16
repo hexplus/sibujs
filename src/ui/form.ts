@@ -1,7 +1,9 @@
+import { reportError } from "../core/errors";
 import { registerDisposer } from "../core/rendering/dispose";
-import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
+import { type DerivedAccessor, derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
+import { adoptThenable } from "../utils/adoptThenable";
 
 // ============================================================================
 // TYPES
@@ -39,6 +41,16 @@ export interface FormReturn<T extends object> {
   handleSubmit: (onSubmit: (values: T) => void | Promise<void>) => (e?: Event) => void;
   reset: () => void;
   setError: (field: keyof T, message: string) => void;
+  /**
+   * Release the form's derived graph: every field `error` and the `errors`,
+   * `isValid`, `isDirty`, `touched` and `values` aggregates. Call it when the
+   * form's owner goes away, e.g. `onCleanup(f.dispose, formElement)`.
+   *
+   * Afterwards the derived accessors are inert — they return their last
+   * settled values and never recompute — while field `value()`/`set()` keep
+   * working as plain signals. Idempotent.
+   */
+  dispose: () => void;
 }
 
 // ============================================================================
@@ -102,10 +114,18 @@ export function maxLength(max: number, message?: string): ValidatorFn<string> {
  */
 export function matchesPattern(regex: RegExp, message = "Invalid format"): ValidatorFn<string> {
   return (value: string) => {
-    if (value && !regex.test(value)) {
-      return message;
+    if (!value) return null;
+    // `test()` on a global (`g`) or sticky (`y`) expression starts at, and then
+    // advances, `lastIndex` — so the same valid value alternated between valid
+    // and invalid, and a validator shared by two fields rejected the second.
+    // Every validation starts from 0, and the caller's `lastIndex` is restored.
+    const savedLastIndex = regex.lastIndex;
+    regex.lastIndex = 0;
+    try {
+      return regex.test(value) ? null : message;
+    } finally {
+      regex.lastIndex = savedLastIndex;
     }
-    return null;
   };
 }
 
@@ -247,17 +267,17 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
   // Write-back: a `<select multiple>` can't be driven by the plain `value` prop
   // (assigning an array to `el.value` clears the selection), so reflect the
   // field's array value onto each option's `selected` flag via a reactive
-  // effect bound to the element. Every other control type is handled correctly
+  // binding owned by the element. Every other control type is handled correctly
   // by the `value` prop alone, so this only engages for multi-selects.
   const onElement = (el: HTMLElement): void => {
     if (el instanceof HTMLSelectElement && el.multiple) {
-      const stop = effect(() => {
+      const stop = domBinding(() => {
         const v = field.value() as unknown;
         const selected = Array.isArray(v) ? v.map(String) : [];
         for (const opt of Array.from(el.options)) {
           opt.selected = selected.includes(opt.value);
         }
-      });
+      }, el);
       registerDisposer(el, stop);
     }
     if (typeof extraOnElement === "function") {
@@ -283,6 +303,9 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
   const fieldEntries = Object.entries(config) as [keyof T, FieldConfig][];
   const fieldMap = {} as { [K in keyof T]: FormField<T[K]> };
   const [manualErrors, setManualErrors] = signal<Record<string, string | null>>({});
+  // Field error deriveds, kept so dispose() can release them. Validators may
+  // read caller-owned signals, which would otherwise hold these forever.
+  const fieldErrors: DerivedAccessor<string | null>[] = [];
 
   for (const [name, cfg] of fieldEntries) {
     const [value, setValue] = signal<T[keyof T]>(cfg.initial as T[keyof T]);
@@ -299,6 +322,7 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
       }
       return null;
     });
+    fieldErrors.push(error);
 
     // Wrap the setter so editing the field clears any prior manual error
     // (e.g. server-side "email already taken" must not stick after edit).
@@ -392,12 +416,27 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
         field.touch();
       }
       if (isValid()) {
-        const result = onSubmit(values());
-        if (result && typeof (result as Promise<void>).then === "function") {
+        // Failures — a synchronous throw, a rejection, or a thenable whose
+        // `then` itself throws — are reported (they used to be swallowed, so a
+        // failed save looked successful) and always release `submitting`.
+        const report = (error: unknown) => reportError(error, { phase: "async", name: "form.handleSubmit" });
+        let pending: Promise<unknown> | null;
+        try {
+          // adoptThenable reads `then` once; a throwing accessor or invocation
+          // becomes a rejection instead of escaping with submitting stuck.
+          pending = adoptThenable(onSubmit(values()));
+        } catch (error) {
+          report(error);
+          return;
+        }
+        if (pending) {
           setSubmitting(true);
-          (result as Promise<void>).then(
+          pending.then(
             () => setSubmitting(false),
-            () => setSubmitting(false),
+            (error) => {
+              setSubmitting(false);
+              report(error);
+            },
           );
         }
       }
@@ -414,6 +453,20 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
     setManualErrors((prev) => ({ ...prev, [field as string]: message }));
   }
 
+  let disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    // Aggregates first: they read the field errors, so releasing them before
+    // their sources never leaves an aggregate linked to a disposed derived.
+    errors.dispose();
+    isValid.dispose();
+    isDirty.dispose();
+    touchedState.dispose();
+    values.dispose();
+    for (const error of fieldErrors) error.dispose();
+  }
+
   return {
     fields: fieldMap,
     errors,
@@ -425,5 +478,6 @@ export function form<T extends object>(config: FormConfig<T>): FormReturn<T> {
     handleSubmit,
     reset,
     setError,
+    dispose,
   };
 }

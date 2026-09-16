@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dispose, registerDisposer } from "../src/core/rendering/dispose";
 import { createChunkRegistry, lazyChunk, preloadModule, preloadModules } from "../src/performance/chunkLoader";
 
 // ─── createChunkRegistry ────────────────────────────────────────────────────
@@ -267,6 +268,100 @@ describe("lazyChunk", () => {
 
     expect(container.textContent).toContain("Failed to load chunk");
     expect(container.textContent).toContain("network error");
+  });
+});
+
+// ─── lazyChunk disposed before settlement ───────────────────────────────────
+//
+// THE DEFECT: lazyChunk() had no lifetime state and no registered disposer, so
+// both settlement paths always mutated the container. A container disposed
+// before its chunk loaded still ran `component()` and appended the result (or
+// the failure message) after the disposal traversal had completed — any
+// bindings or listeners the component created were never released.
+
+function deferredLoader() {
+  let resolve!: (mod: { default: () => HTMLElement }) => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<{ default: () => HTMLElement }>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { load: () => promise, resolve, reject };
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
+describe("lazyChunk disposed before settlement", () => {
+  it("never constructs or inserts the component when disposed before the load resolves", async () => {
+    const registry = createChunkRegistry();
+    const loader = deferredLoader();
+    const component = vi.fn(() => {
+      const el = document.createElement("span");
+      el.textContent = "late";
+      return el;
+    });
+    const fallback = document.createElement("em");
+    fallback.textContent = "Loading...";
+
+    const container = lazyChunk("disposed-ok", loader.load, registry, () => fallback)();
+    dispose(container);
+    loader.resolve({ default: component });
+    await settle();
+
+    expect(component).not.toHaveBeenCalled();
+    expect(container.querySelector("span")).toBeNull();
+    expect(container.textContent).toBe("Loading...");
+  });
+
+  it("never inserts the failure message when disposed before the load rejects", async () => {
+    const registry = createChunkRegistry({ retries: 0 });
+    const loader = deferredLoader();
+
+    const container = lazyChunk("disposed-fail", loader.load, registry)();
+    dispose(container);
+    loader.reject(new Error("network error"));
+    await settle();
+
+    expect(container.childNodes).toHaveLength(0);
+    expect(container.textContent).not.toContain("Failed to load chunk");
+  });
+
+  it("disposes and discards a component whose construction disposed the container", async () => {
+    const registry = createChunkRegistry();
+    const loader = deferredLoader();
+    let container!: HTMLElement;
+    const componentTeardown = vi.fn();
+    const component = () => {
+      const el = document.createElement("span");
+      el.textContent = "self-destructing";
+      registerDisposer(el, componentTeardown);
+      dispose(container);
+      return el;
+    };
+
+    container = lazyChunk("disposed-during-build", loader.load, registry)();
+    loader.resolve({ default: component });
+    await settle();
+
+    expect(container.querySelector("span")).toBeNull();
+    expect(componentTeardown).toHaveBeenCalledTimes(1);
+  });
+
+  it("still loads into a container that stays alive", async () => {
+    const registry = createChunkRegistry();
+    const loader = deferredLoader();
+    const container = lazyChunk("alive", loader.load, registry)();
+
+    loader.resolve({
+      default: () => {
+        const el = document.createElement("span");
+        el.textContent = "Loaded!";
+        return el;
+      },
+    });
+    await settle();
+
+    expect(container.textContent).toBe("Loaded!");
   });
 });
 

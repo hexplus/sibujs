@@ -26,20 +26,35 @@ export function draggable(element: ElementTarget, data?: unknown): { isDragging:
   let currentEl: HTMLElement | null = null;
   let onDragStart: ((e: DragEvent) => void) | null = null;
   let onDragEnd: (() => void) | null = null;
+  // The element's `draggable` attribute before this helper set it.
+  let prevDraggableAttr: string | null = null;
+
+  // Give the current element back exactly as it was: listeners removed, the
+  // original `draggable` attribute restored, and any in-progress drag state
+  // cleared. Retargeting and disposal used to remove only the listeners, so a
+  // relinquished element stayed natively draggable and `isDragging` could stay
+  // true forever.
+  function detach(): void {
+    if (!currentEl) return;
+    if (onDragStart) currentEl.removeEventListener("dragstart", onDragStart);
+    if (onDragEnd) currentEl.removeEventListener("dragend", onDragEnd);
+    if (prevDraggableAttr === null) currentEl.removeAttribute("draggable");
+    else currentEl.setAttribute("draggable", prevDraggableAttr);
+    currentEl = null;
+    onDragStart = null;
+    onDragEnd = null;
+    setIsDragging(false);
+  }
 
   const getter = resolveTarget(element);
   const cleanup = effect(() => {
-    // Remove previous listeners
-    if (currentEl && onDragStart && onDragEnd) {
-      currentEl.removeEventListener("dragstart", onDragStart);
-      currentEl.removeEventListener("dragend", onDragEnd);
-    }
-
     const el = getter();
-    currentEl = el;
-
+    if (el === currentEl) return;
+    detach();
     if (!el) return;
 
+    currentEl = el;
+    prevDraggableAttr = el.getAttribute("draggable");
     el.draggable = true;
 
     onDragStart = (e: DragEvent) => {
@@ -57,13 +72,12 @@ export function draggable(element: ElementTarget, data?: unknown): { isDragging:
     el.addEventListener("dragend", onDragEnd);
   });
 
+  let disposed = false;
   function dispose() {
+    if (disposed) return;
+    disposed = true;
     cleanup();
-    if (currentEl && onDragStart && onDragEnd) {
-      currentEl.removeEventListener("dragstart", onDragStart);
-      currentEl.removeEventListener("dragend", onDragEnd);
-      currentEl = null;
-    }
+    detach();
   }
 
   return { isDragging, dispose };
@@ -78,6 +92,9 @@ export function draggable(element: ElementTarget, data?: unknown): { isDragging:
  * @param options Object with onDrop callback receiving the transferred data and event
  * @returns Object with reactive isOver getter and dispose function
  */
+/** How long an ambiguous drag leave (null `relatedTarget`) waits for the drag to reappear. */
+const DROP_ZONE_EXIT_GRACE_MS = 600;
+
 export function dropZone(
   element: ElementTarget,
   options: { onDrop: (data: unknown, event: DragEvent) => void },
@@ -91,40 +108,90 @@ export function dropZone(
   let currentEl: HTMLElement | null = null;
   let onDragOver: ((e: DragEvent) => void) | null = null;
   let onDragEnter: ((e: DragEvent) => void) | null = null;
-  let onDragLeave: (() => void) | null = null;
+  let onDragLeave: ((e: DragEvent) => void) | null = null;
   let onDrop: ((e: DragEvent) => void) | null = null;
+  // Balanced enter/leave depth. `dragenter` / `dragleave` bubble from every
+  // descendant, and moving between children fires the new child's enter before
+  // the old child's leave — so clearing on every leave made `isOver` flicker
+  // false while the pointer was still inside the zone.
+  let depth = 0;
+  // A leave with no usable destination is ambiguous: browsers report a null
+  // `relatedTarget` when the drag leaves the window, and Safari reports null on
+  // EVERY drag leave — including moves between two children inside the zone.
+  // Such a leave only ends the hover if no dragenter/dragover on the zone follows
+  // within the grace period; dragover keeps firing (every ~350 ms at most) while
+  // the pointer is still inside.
+  let exitTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const getter = resolveTarget(element);
-  const cleanup = effect(() => {
-    // Remove previous listeners
+  function cancelPendingExit(): void {
+    if (exitTimer !== null) {
+      clearTimeout(exitTimer);
+      exitTimer = null;
+    }
+  }
+
+  function resetOver(): void {
+    cancelPendingExit();
+    depth = 0;
+    setIsOver(false);
+  }
+
+  function detach(): void {
     if (currentEl && onDragOver && onDragEnter && onDragLeave && onDrop) {
       currentEl.removeEventListener("dragover", onDragOver);
       currentEl.removeEventListener("dragenter", onDragEnter);
       currentEl.removeEventListener("dragleave", onDragLeave);
       currentEl.removeEventListener("drop", onDrop);
     }
+    currentEl = null;
+    resetOver();
+  }
 
+  const getter = resolveTarget(element);
+  const cleanup = effect(() => {
     const el = getter();
-    currentEl = el;
+    if (el === currentEl) return;
+    detach();
 
     if (!el) return;
+    currentEl = el;
 
     onDragOver = (e: DragEvent) => {
       e.preventDefault();
+      cancelPendingExit();
     };
 
     onDragEnter = (e: DragEvent) => {
       e.preventDefault();
+      cancelPendingExit();
+      depth++;
       setIsOver(true);
     };
 
-    onDragLeave = () => {
-      setIsOver(false);
+    onDragLeave = (e: DragEvent) => {
+      depth = Math.max(0, depth - 1);
+      if (depth === 0) {
+        resetOver();
+        return;
+      }
+      const to = e.relatedTarget as Node | null;
+      if (to != null && typeof (to as Node).nodeType === "number") {
+        // A known destination outside the zone (including another document's
+        // node) ends the hover outright, even if an enter was missed.
+        if (!el.contains(to)) resetOver();
+        return;
+      }
+      // No usable destination: end the hover unless the drag shows up again.
+      cancelPendingExit();
+      exitTimer = setTimeout(() => {
+        exitTimer = null;
+        resetOver();
+      }, DROP_ZONE_EXIT_GRACE_MS);
     };
 
     onDrop = (e: DragEvent) => {
       e.preventDefault();
-      setIsOver(false);
+      resetOver();
 
       let transferData: unknown = null;
       if (e.dataTransfer) {
@@ -150,13 +217,7 @@ export function dropZone(
 
   function dispose() {
     cleanup();
-    if (currentEl && onDragOver && onDragEnter && onDragLeave && onDrop) {
-      currentEl.removeEventListener("dragover", onDragOver);
-      currentEl.removeEventListener("dragenter", onDragEnter);
-      currentEl.removeEventListener("dragleave", onDragLeave);
-      currentEl.removeEventListener("drop", onDrop);
-      currentEl = null;
-    }
+    detach();
   }
 
   return { isOver, dispose };

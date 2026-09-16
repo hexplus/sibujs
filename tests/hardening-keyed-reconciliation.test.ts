@@ -206,7 +206,8 @@ describe("hardening: keyed reconciliation", () => {
       setItems([]);
       await tick();
       expect(domIds()).toEqual([]);
-    });
+      // Scale test: under a parallel full-suite run jsdom can exceed the 15s default.
+    }, 60_000);
   });
 
   describe("randomized differential testing", () => {

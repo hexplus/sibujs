@@ -3,6 +3,11 @@
  * Provides DOM fakes, HTTP mocks, and testing helpers for CI/CD integration.
  */
 
+import { reportError } from "../core/errors";
+import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { queryAllByAttribute, queryByAttribute } from "./queries";
+import { serializeDom } from "./serializeDom";
+
 // ─── HTTP Mock ──────────────────────────────────────────────────────────────
 
 export interface MockResponse {
@@ -32,29 +37,200 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
   const requestLog: Array<{ url: string; method: string; body: unknown; timestamp: number }> = [];
   const mockRoutes = [...routes];
 
+  // String routes match exactly — `url.endsWith(route)` let "/api/users" match
+  // "https://x/evil/api/users". An absolute route is compared to the full URL
+  // (without its fragment); a path route to the request's pathname, plus its
+  // query when the route itself contains one. RegExp routes see the full URL.
+  function matchesStringRoute(route: string, url: string): boolean {
+    if (url === route) return true;
+    let target: URL;
+    try {
+      target = new URL(url, "http://localhost");
+    } catch {
+      return false;
+    }
+    if (/^[a-z][a-z\d+.-]*:/i.test(route)) {
+      return `${target.origin}${target.pathname}${target.search}` === route || target.href === route;
+    }
+    const hashIndex = route.indexOf("#");
+    const bare = hashIndex === -1 ? route : route.slice(0, hashIndex);
+    return bare.includes("?") ? `${target.pathname}${target.search}` === bare : target.pathname === bare;
+  }
+
   function matchRoute(url: string, method: string): MockRoute | undefined {
     return mockRoutes.find((route) => {
       const methodMatch = !route.method || route.method.toUpperCase() === method.toUpperCase();
       if (!methodMatch) return false;
-      if (typeof route.url === "string") return url === route.url || url.endsWith(route.url);
+      if (typeof route.url === "string") return matchesStringRoute(route.url, url);
+      route.url.lastIndex = 0;
       return route.url.test(url);
     });
   }
 
-  const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const method = init?.method || "GET";
-    let body: unknown;
-    if (init?.body != null) {
-      const raw = String(init.body);
+  // Like fetch(), reject with the signal's reason — a TimeoutError from
+  // AbortSignal.timeout() or a custom reason passed to abort() — and fall back
+  // to an AbortError only when no reason is available.
+  const abortError = (signal: AbortSignal): unknown =>
+    signal.reason !== undefined ? signal.reason : new DOMException("The operation was aborted.", "AbortError");
+
+  // ── Request normalization ──
+  // Every call is turned into ONE effective Request, exactly as fetch() would
+  // build it: a Request input is cloned (so the caller's stays unconsumed) and
+  // `init` overrides its method, headers and body. Method, headers and body are
+  // then all read from that request, so the handler's `headers` — including the
+  // Content-Type fetch generates for FormData, URLSearchParams and typed Blobs —
+  // always describe the body it receives. The body is decoded by that type:
+  //   multipart/form-data               → FormData
+  //   application/x-www-form-urlencoded → URLSearchParams
+  //   text-like (text/*, JSON, XML)     → parsed JSON, else the string
+  //   anything else (binary, untyped)   → Blob
+  const isFormEncoded = (type: string) => /^application\/x-www-form-urlencoded\b/i.test(type);
+  const isTextLike = (type: string) => /^text\/|[/+](?:json|xml|javascript)\b/i.test(type);
+
+  const decodeText = (text: string, type: string): unknown => {
+    if (isFormEncoded(type)) return new URLSearchParams(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  };
+
+  // The page URL when it is a usable base; otherwise (no location, or an opaque
+  // one such as jsdom's default `about:blank`) http://localhost, so relative
+  // URLs never make the mock reject with "Invalid URL".
+  const httpBase = (): string => {
+    const href = (globalThis as { location?: { href?: string } }).location?.href;
+    if (href) {
       try {
-        body = JSON.parse(raw);
+        if (/^https?:$/.test(new URL(href).protocol)) return href;
       } catch {
-        // Non-JSON body (plain text, form-encoded, stringified FormData) — keep
-        // the raw value instead of throwing and breaking the mock.
-        body = raw;
+        // Unparseable location — fall through.
       }
     }
+    return "http://localhost";
+  };
+
+  // Structured bodies the runtime's own Request cannot serialize — jsdom's
+  // FormData / URLSearchParams / Blob in a jsdom test environment — are handed
+  // to the handler unchanged. Runtimes differ in HOW they reject them: some
+  // stringify ("[object FormData]", labelled text/plain), newer ones throw from
+  // the constructor. Both are detected here, and a body the runtime DOES
+  // understand keeps taking the normal path, so decoding stays identical to a
+  // Request input carrying the same bytes.
+  const STRUCTURED_CONTENT_TYPE: Record<string, (raw: unknown) => string | null> = {
+    FormData: () => "multipart/form-data",
+    URLSearchParams: () => "application/x-www-form-urlencoded;charset=UTF-8",
+    Blob: (raw) => (raw as Blob).type || null,
+    File: (raw) => (raw as Blob).type || null,
+  };
+  const AUTO_TEXT_TYPE = /^text\/plain;charset=utf-8$/i;
+
+  /** The structured tag of `raw`, or null when it is not one of the above. */
+  const structuredTag = (raw: unknown): string | null => {
+    if (raw === null || typeof raw !== "object") return null;
+    const tag = Object.prototype.toString.call(raw).slice(8, -1);
+    return Object.hasOwn(STRUCTURED_CONTENT_TYPE, tag) ? tag : null;
+  };
+
+  /** Whether this runtime refuses (or mangles) `raw` as a Request body. */
+  const unusableBody = async (raw: unknown, tag: string): Promise<boolean> => {
+    let probe: Request;
+    try {
+      // Probed without the caller's headers, so an explicit Content-Type cannot
+      // hide the runtime's verdict.
+      probe = new Request("http://localhost/", { method: "POST", body: raw as BodyInit });
+    } catch {
+      return true; // rejected outright
+    }
+    if (!AUTO_TEXT_TYPE.test(probe.headers.get("content-type") ?? "")) return false;
+    // Labelled text/plain: a recognised URLSearchParams never is, and the others
+    // were stringified when the body equals their "[object …]" tag.
+    return tag === "URLSearchParams" || (await probe.text()) === String(raw);
+  };
+
+  const toEffectiveRequest = (
+    input: RequestInfo | URL,
+    request: Request | undefined,
+    init: RequestInit | undefined,
+    method: string | undefined,
+    rawBody: BodyInit | null | undefined,
+    omitBody: boolean,
+  ): Request => {
+    const overrides: RequestInit & { duplex?: "half" } = {};
+    // Each member is read once (accessors must not answer twice differently).
+    const headers = init?.headers;
+    if (method !== undefined) overrides.method = method;
+    if (headers !== undefined) overrides.headers = headers;
+    if (rawBody != null && !omitBody) {
+      overrides.body = rawBody;
+      // Streaming bodies must declare half-duplex.
+      if (typeof ReadableStream !== "undefined" && rawBody instanceof ReadableStream) overrides.duplex = "half";
+    }
+    if (request) return new Request(request.clone(), overrides);
+    // Relative URLs resolve like a page's fetch() would; the original string is
+    // still what routes match and the log records.
+    const raw = input instanceof URL ? input.href : (input as string);
+    const href = new URL(raw, httpBase()).href;
+    return new Request(href, overrides);
+  };
+
+  const decodeBody = async (effective: Request): Promise<unknown> => {
+    if (effective.body === null) return undefined;
+    const type = effective.headers.get("content-type") ?? "";
+    if (/^multipart\/form-data\b/i.test(type)) return effective.formData();
+    if (isTextLike(type) || isFormEncoded(type)) return decodeText(await effective.text(), type);
+    return effective.blob();
+  };
+
+  const mockFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const request = typeof Request !== "undefined" && input instanceof Request ? input : undefined;
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    // The signal is kept separately: it is honoured below, and is not copied into
+    // the effective request (a foreign-realm signal would be rejected there).
+    // An explicit `signal: null` detaches from the input Request's signal, as in
+    // fetch(); only an omitted or undefined signal inherits it.
+    // `init.signal` is read once, like fetch() reads the dictionary member: an
+    // accessor must not be able to answer differently on a second read.
+    const initSignal = init?.signal;
+    const signal = initSignal === null ? undefined : (initSignal ?? request?.signal);
+
+    if (signal?.aborted) throw abortError(signal);
+
+    const rawBody = init?.body;
+    const initMethod = init?.method;
+    const tag = structuredTag(rawBody);
+    const passThrough = tag !== null && (await unusableBody(rawBody, tag));
+    if (passThrough) {
+      // The Request below is built without the body, so its own validation
+      // cannot see it: refuse a body on GET/HEAD here, as fetch() does.
+      const intended = (initMethod ?? request?.method ?? "GET").toUpperCase();
+      if (intended === "GET" || intended === "HEAD") {
+        throw new TypeError(`Request with ${intended} method cannot have body.`);
+      }
+    }
+
+    // Construction errors (a GET with a body, an invalid URL) reject exactly as
+    // fetch() does.
+    const effective = toEffectiveRequest(input, request, init, initMethod, rawBody, passThrough);
+    const method = effective.method.toUpperCase();
+    let headers = effective.headers;
+    let body: unknown;
+    if (passThrough && tag) {
+      body = rawBody;
+      // The request carries no body, so supply the type this body implies —
+      // unless the caller set one explicitly.
+      if (!headers.has("content-type")) {
+        const type = STRUCTURED_CONTENT_TYPE[tag](rawBody);
+        if (type) {
+          headers = new Headers(headers);
+          headers.set("content-type", type);
+        }
+      }
+    } else {
+      body = await decodeBody(effective);
+    }
+    if (signal?.aborted) throw abortError(signal);
 
     requestLog.push({ url, method, body, timestamp: Date.now() });
 
@@ -63,33 +239,60 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
       return new Response(JSON.stringify({ error: "Not mocked" }), { status: 404 });
     }
 
-    // Wrap response resolution in try/finally so a user-supplied response
-    // callback throwing does not leave the mock in a partially-applied state.
+    // Races `work` against the signal, so an abort rejects immediately with an
+    // AbortError; the listener is removed once either side settles.
+    const abortable = <T>(work: Promise<T>): Promise<T> => {
+      if (!signal) return work;
+      if (signal.aborted) return Promise.reject(abortError(signal));
+      return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(abortError(signal));
+        signal.addEventListener("abort", onAbort, { once: true });
+        work.then(
+          (value) => {
+            signal.removeEventListener("abort", onAbort);
+            resolve(value);
+          },
+          (err) => {
+            signal.removeEventListener("abort", onAbort);
+            reject(err);
+          },
+        );
+      });
+    };
+
     let mockResponse: MockResponse;
     try {
       if (typeof route.response === "function") {
-        mockResponse = await route.response({ url, method, body, headers: new Headers(init?.headers) });
+        const handler = route.response;
+        mockResponse = await abortable(Promise.resolve().then(() => handler({ url, method, body, headers })));
       } else {
         mockResponse = route.response;
       }
-
-      if (mockResponse.delay) {
-        await new Promise((r) => setTimeout(r, mockResponse.delay));
-      }
-
-      return new Response(
-        typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body),
-        {
-          status: mockResponse.status || 200,
-          statusText: mockResponse.statusText || "OK",
-          headers: mockResponse.headers,
-        },
-      );
     } catch (err) {
+      if (signal?.aborted) throw abortError(signal);
       // Surface response-handler errors as a synthetic 500 so tests see them
       // instead of an unhandled rejection leaking past the mock boundary.
       return new Response(JSON.stringify({ error: String(err) }), { status: 500 });
     }
+
+    if (mockResponse.delay) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await abortable(
+          new Promise<void>((r) => {
+            timer = setTimeout(r, mockResponse.delay);
+          }),
+        );
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    return new Response(typeof mockResponse.body === "string" ? mockResponse.body : JSON.stringify(mockResponse.body), {
+      status: mockResponse.status || 200,
+      statusText: mockResponse.statusText || "OK",
+      headers: mockResponse.headers,
+    });
   };
 
   const restore = (): void => {
@@ -149,6 +352,18 @@ export function createHttpMock(routes: MockRoute[] = [], options: { afterEach?: 
 
 // ─── Timer Mock ─────────────────────────────────────────────────────────────
 
+/** Smallest interval period the fake timer uses, in fake milliseconds. */
+const MIN_INTERVAL_MS = 1;
+
+/**
+ * Normalize an interval period. Zero, negative and non-finite delays become
+ * `MIN_INTERVAL_MS`: they stay recurring (real runtimes clamp rather than
+ * turning them into one-shot timers) without an infinite same-timestamp loop.
+ */
+function normalizeIntervalDelay(delay: number): number {
+  return Number.isFinite(delay) && delay >= MIN_INTERVAL_MS ? delay : MIN_INTERVAL_MS;
+}
+
 /**
  * Create a fake timer system for testing time-dependent code.
  * Mocks setTimeout, setInterval, requestAnimationFrame.
@@ -186,7 +401,8 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
       };
       (globalThis as unknown as Record<string, unknown>).setInterval = (cb: () => void, interval: number) => {
         const id = nextId++;
-        timers.push({ id, callback: cb, time: currentTime + interval, interval });
+        const period = normalizeIntervalDelay(interval);
+        timers.push({ id, callback: cb, time: currentTime + period, interval: period });
         return id;
       };
       (globalThis as unknown as Record<string, unknown>).clearTimeout = (id: number) => {
@@ -230,7 +446,9 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
         if (!next) break;
         currentTime = next.time;
         const idx = timers.indexOf(next);
-        if (next.interval) {
+        // `!== undefined`: an interval's period can never be 0 here (see
+        // normalizeIntervalDelay), but kind must not hinge on truthiness.
+        if (next.interval !== undefined) {
           next.time += next.interval;
         } else {
           timers.splice(idx, 1);
@@ -247,12 +465,22 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
         timers.sort((a, b) => a.time - b.time);
         const next = timers[0];
         currentTime = next.time;
-        if (next.interval) {
+        if (next.interval !== undefined) {
           next.time += next.interval;
         } else {
           timers.shift();
         }
         next.callback();
+      }
+      // A recurring interval never drains. Stopping at the cap is correct, but
+      // it must not look like a completed flush.
+      if (timers.length > 0 && i > maxIterations) {
+        reportError(
+          new Error(
+            `[createTimerMock] flush() stopped after ${maxIterations} timer runs with ${timers.length} still pending — likely a recurring interval.`,
+          ),
+          { phase: "scheduler", name: "createTimerMock.flush" },
+        );
       }
     },
     /** Get current fake time */
@@ -278,51 +506,11 @@ export function createTimerMock(options: { afterEach?: (cleanup: () => void) => 
  * Create a serializable snapshot of a DOM element for comparison testing.
  */
 export function createDOMSnapshot(element: Element): string {
-  return serializeElement(element, 0);
-}
-
-function serializeElement(el: Element, indent: number): string {
-  const pad = "  ".repeat(indent);
-  const tag = el.tagName.toLowerCase();
-
-  // Attributes
-  const attrs = Array.from(el.attributes)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((a) => `${a.name}="${a.value}"`)
-    .join(" ");
-
-  const open = attrs ? `${pad}<${tag} ${attrs}>` : `${pad}<${tag}>`;
-
-  // Children
-  const children = Array.from(el.childNodes);
-  if (children.length === 0) {
-    return `${open}</${tag}>`;
-  }
-
-  if (children.length === 1 && children[0].nodeType === 3) {
-    const text = children[0].textContent?.trim() || "";
-    return `${open}${text}</${tag}>`;
-  }
-
-  const childStr = children
-    .map((child) => {
-      if (child.nodeType === 3) {
-        const text = child.textContent?.trim();
-        return text ? `${"  ".repeat(indent + 1)}${text}` : "";
-      }
-      if (child.nodeType === 1) {
-        return serializeElement(child as Element, indent + 1);
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-
-  return `${open}\n${childStr}\n${pad}</${tag}>`;
+  return serializeDom(element);
 }
 
 /**
- * Assert that two DOM trees are structurally equivalent.
+ * Assert two DOM elements have the same structure.
  */
 export function assertDOMEquals(actual: Element, expected: Element): void {
   const actualSnapshot = createDOMSnapshot(actual);
@@ -367,10 +555,10 @@ export function testComponent(
     element,
     container,
     getByTestId(id: string) {
-      return container.querySelector(`[data-testid="${id}"]`);
+      return queryByAttribute(container, "data-testid", id);
     },
     getAllByTestId(id: string) {
-      return Array.from(container.querySelectorAll(`[data-testid="${id}"]`));
+      return queryAllByAttribute(container, "data-testid", id);
     },
     getByText(text: string) {
       const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
@@ -393,6 +581,9 @@ export function testComponent(
       await new Promise((r) => setTimeout(r, 0));
     },
     destroy() {
+      // Run framework disposal before detaching, so the component's effects and
+      // listeners do not outlive the test.
+      replaceChildrenSafely(container);
       if (container.parentNode) container.parentNode.removeChild(container);
     },
   };

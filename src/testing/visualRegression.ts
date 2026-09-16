@@ -4,6 +4,8 @@
  * In environments without a real browser, uses DOM structure and computed styles.
  */
 
+import { serializeDom } from "./serializeDom";
+
 // ─── Hashing ────────────────────────────────────────────────────────────────
 
 /**
@@ -34,48 +36,76 @@ function walkElements(root: Element): Element[] {
 // ─── Structure Serialization ────────────────────────────────────────────────
 
 /**
- * Serialize an element tree to a deterministic string capturing tag names,
- * sorted attributes, and nesting depth.  Similar to createDOMSnapshot in e2e.ts
- * but intentionally self-contained so the visual-regression module has no
- * cross-dependency on the e2e module.
+ * Serialize an element tree to a deterministic, escaped string capturing tag
+ * names, sorted attributes, text and nesting depth.
  */
 function serializeStructure(el: Element, indent: number): string {
-  const pad = "  ".repeat(indent);
-  const tag = el.tagName.toLowerCase();
+  return serializeDom(el, indent);
+}
 
-  const attrs = Array.from(el.attributes)
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .map((a) => `${a.name}="${a.value}"`)
-    .join(" ");
+// ─── Computed Styles ────────────────────────────────────────────────────────
 
-  const open = attrs ? `${pad}<${tag} ${attrs}>` : `${pad}<${tag}>`;
+/**
+ * Computed properties that determine appearance. Styles coming from
+ * stylesheets, inherited values and custom properties never show up in the
+ * markup, so without these a stylesheet-only regression went undetected.
+ */
+const APPEARANCE_PROPERTIES = [
+  "display",
+  "visibility",
+  "opacity",
+  "position",
+  "color",
+  "background-color",
+  "background-image",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "line-height",
+  "text-align",
+  "text-decoration",
+  "text-transform",
+  "width",
+  "height",
+  "margin",
+  "padding",
+  "border",
+  "border-radius",
+  "box-shadow",
+  "transform",
+  "z-index",
+  "overflow",
+  "flex-direction",
+  "justify-content",
+  "align-items",
+  "gap",
+] as const;
 
-  const children = Array.from(el.childNodes);
-
-  if (children.length === 0) {
-    return `${open}</${tag}>`;
-  }
-
-  if (children.length === 1 && children[0].nodeType === 3) {
-    const text = children[0].textContent?.trim() || "";
-    return `${open}${text}</${tag}>`;
-  }
-
-  const childStr = children
-    .map((child) => {
-      if (child.nodeType === 3) {
-        const text = child.textContent?.trim();
-        return text ? `${"  ".repeat(indent + 1)}${text}` : "";
+/**
+ * Capture the appearance-relevant computed style of every element, in tree
+ * order (`tag[n]: prop:value; ...`). Empty values are omitted. Environments
+ * without `getComputedStyle` produce an empty list.
+ */
+function captureComputedStyles(elements: Element[]): string[] {
+  const view = elements[0]?.ownerDocument?.defaultView;
+  if (!view || typeof view.getComputedStyle !== "function") return [];
+  const counters: Record<string, number> = {};
+  return elements.map((el) => {
+    const tag = el.tagName.toLowerCase();
+    counters[tag] = (counters[tag] || 0) + 1;
+    let declarations = "";
+    try {
+      const style = view.getComputedStyle(el);
+      for (const property of APPEARANCE_PROPERTIES) {
+        const value = style.getPropertyValue(property);
+        if (value) declarations += `${property}:${value};`;
       }
-      if (child.nodeType === 1) {
-        return serializeStructure(child as Element, indent + 1);
-      }
-      return "";
-    })
-    .filter(Boolean)
-    .join("\n");
-
-  return `${open}\n${childStr}\n${pad}</${tag}>`;
+    } catch {
+      // Unsupported element or environment — record the element without styles.
+    }
+    return `${tag}[${counters[tag]}]: ${declarations}`;
+  });
 }
 
 // ─── Fingerprint Type ───────────────────────────────────────────────────────
@@ -93,6 +123,12 @@ export interface VisualFingerprint {
   inlineStyles: string[];
   /** Data attributes */
   dataAttributes: Record<string, string>;
+  /**
+   * Appearance-relevant computed styles per element, in tree order. Captures
+   * stylesheet, inherited and custom-property driven changes that leave the
+   * markup untouched.
+   */
+  computedStyles: string[];
   /** Computed hash of the fingerprint */
   hash: string;
 }
@@ -101,7 +137,8 @@ export interface VisualFingerprint {
 
 /**
  * Capture a visual fingerprint of a component.
- * Includes DOM structure, attributes, text content, and inline styles.
+ * Includes DOM structure, attributes, text content, inline styles and the
+ * appearance-relevant computed styles of every element.
  */
 export function captureFingerprint(element: Element): VisualFingerprint {
   const allElements = walkElements(element);
@@ -154,15 +191,20 @@ export function captureFingerprint(element: Element): VisualFingerprint {
     }
   }
 
-  // 7. Compute a composite hash from all the above
-  const composite = [
+  // 7. Computed appearance (stylesheets, inheritance, custom properties)
+  const computedStyles = captureComputedStyles(allElements);
+
+  // 8. Compute a composite hash from all the above. JSON keeps the parts
+  //    unambiguous: no separator inside one part can shift content into another.
+  const composite = JSON.stringify([
     structure,
     textContent,
-    JSON.stringify(elementCounts),
-    classNames.join(","),
-    inlineStyles.join(";"),
-    JSON.stringify(dataAttributes),
-  ].join("|");
+    elementCounts,
+    classNames,
+    inlineStyles,
+    dataAttributes,
+    computedStyles,
+  ]);
 
   const hash = djb2Hash(composite);
 
@@ -173,6 +215,7 @@ export function captureFingerprint(element: Element): VisualFingerprint {
     classNames,
     inlineStyles,
     dataAttributes,
+    computedStyles,
     hash,
   };
 }
@@ -180,7 +223,7 @@ export function captureFingerprint(element: Element): VisualFingerprint {
 // ─── Compare Fingerprints ───────────────────────────────────────────────────
 
 export interface FingerprintChange {
-  type: "structure" | "text" | "class" | "style" | "data" | "elements";
+  type: "structure" | "text" | "class" | "style" | "data" | "elements" | "computed";
   description: string;
 }
 
@@ -274,6 +317,22 @@ export function compareFingerprints(
     changes.push({
       type: "data",
       description: `Data attributes changed: ${dataChanges.join("; ")}`,
+    });
+  }
+
+  // 7. Computed styles (fingerprints captured before this field existed have none)
+  const baselineComputed = baseline.computedStyles ?? [];
+  const currentComputed = current.computedStyles ?? [];
+  const computedChanges: string[] = [];
+  for (let i = 0; i < Math.max(baselineComputed.length, currentComputed.length); i++) {
+    if (baselineComputed[i] !== currentComputed[i]) {
+      computedChanges.push(currentComputed[i] ?? baselineComputed[i]);
+    }
+  }
+  if (computedChanges.length > 0) {
+    changes.push({
+      type: "computed",
+      description: `Computed styles changed on ${computedChanges.length} element(s): ${truncate(computedChanges.join(" | "), 200)}`,
     });
   }
 

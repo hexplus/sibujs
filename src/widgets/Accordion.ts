@@ -1,6 +1,8 @@
+import { createId, idSegment } from "../core/rendering/createId";
 import { derived } from "../core/signals/derived";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
+import { snapshotAttributes } from "./attributeSnapshot";
 
 // First trigger of an accordion identifies the binding instance for
 // idempotency — calling bind() twice on the same set returns the prior
@@ -36,10 +38,16 @@ export function accordion(options: AccordionOptions): {
   isExpanded: (id: string) => boolean;
   bind: AccordionAriaBinding["bind"];
 } {
-  // (no-op — kept structure)
   const { items: itemDefs, multiple = false, defaultExpanded = [] } = options;
 
-  const [expandedIds, setExpandedIds] = signal<Set<string>>(new Set(defaultExpanded));
+  // Seed state through the same invariants expand() enforces: unknown ids are
+  // dropped, and single mode keeps only the first valid default. Seeding from
+  // `defaultExpanded` verbatim let single mode start with several panels open.
+  const knownIds = new Set(itemDefs.map((item) => item.id));
+  const validDefaults = defaultExpanded.filter((id) => knownIds.has(id));
+  const initialExpanded = multiple ? validDefaults : validDefaults.slice(0, 1);
+
+  const [expandedIds, setExpandedIds] = signal<Set<string>>(new Set(initialExpanded));
 
   const items = derived(() =>
     itemDefs.map((item) => ({
@@ -107,44 +115,29 @@ export function accordion(options: AccordionOptions): {
       const existing = boundAccordions.get(idempotencyKey);
       if (existing) return existing;
     }
+    // Snapshot every attribute the binding may touch — including aria-expanded
+    // and hidden, which the reactive binding owns — so teardown restores author
+    // markup exactly instead of deleting pre-existing ARIA state.
     const restore: Array<() => void> = [];
+    // One unique prefix per binding (see Tabs): ids from the item id alone
+    // collided across accordions and broke on whitespace. Author ids are kept.
+    const idPrefix = createId("sibu-accordion");
     for (const item of itemDefs) {
       const trig = els.triggers[item.id];
       const panel = els.panels[item.id];
       if (!trig) continue;
-      const prevTrigId = trig.id;
-      const prevTrigControls = trig.getAttribute("aria-controls");
-      trig.id = `sibu-accordion-trigger-${item.id}`;
-      let prevPanelRole: string | null = null;
-      let prevPanelId = "";
-      let prevPanelLabelledBy: string | null = null;
+      restore.push(snapshotAttributes(trig, ["id", "aria-controls", "aria-expanded"]));
+      if (!trig.id) trig.id = `${idPrefix}-trigger-${idSegment(item.id)}`;
       if (panel) {
-        prevPanelRole = panel.getAttribute("role");
-        prevPanelId = panel.id;
-        prevPanelLabelledBy = panel.getAttribute("aria-labelledby");
+        restore.push(snapshotAttributes(panel, ["role", "id", "aria-labelledby", "hidden"]));
         panel.setAttribute("role", "region");
-        panel.id = `sibu-accordion-panel-${item.id}`;
+        if (!panel.id) panel.id = `${idPrefix}-panel-${idSegment(item.id)}`;
         panel.setAttribute("aria-labelledby", trig.id);
         trig.setAttribute("aria-controls", panel.id);
       }
-      restore.push(() => {
-        if (prevTrigId === "") trig.removeAttribute("id");
-        else trig.id = prevTrigId;
-        if (prevTrigControls === null) trig.removeAttribute("aria-controls");
-        else trig.setAttribute("aria-controls", prevTrigControls);
-        trig.removeAttribute("aria-expanded");
-        if (panel) {
-          if (prevPanelRole === null) panel.removeAttribute("role");
-          else panel.setAttribute("role", prevPanelRole);
-          if (prevPanelId === "") panel.removeAttribute("id");
-          else panel.id = prevPanelId;
-          if (prevPanelLabelledBy === null) panel.removeAttribute("aria-labelledby");
-          else panel.setAttribute("aria-labelledby", prevPanelLabelledBy);
-        }
-      });
     }
 
-    const fxTeardown = effect(() => {
+    const fxTeardown = domBinding(() => {
       const ids = expandedIds();
       for (const item of itemDefs) {
         const trig = els.triggers[item.id];
@@ -154,7 +147,7 @@ export function accordion(options: AccordionOptions): {
         trig.setAttribute("aria-expanded", expanded ? "true" : "false");
         if (panel) panel.hidden = !expanded;
       }
-    });
+    }, idempotencyKey);
 
     const handlers: Array<{ el: HTMLElement; click: (e: Event) => void; key: (e: KeyboardEvent) => void }> = [];
     for (const item of itemDefs) {
@@ -172,7 +165,10 @@ export function accordion(options: AccordionOptions): {
       handlers.push({ el: trig, click, key });
     }
 
+    let tornDown = false;
     const teardown = () => {
+      if (tornDown) return;
+      tornDown = true;
       if (idempotencyKey) boundAccordions.delete(idempotencyKey);
       fxTeardown();
       for (const { el, click, key } of handlers) {

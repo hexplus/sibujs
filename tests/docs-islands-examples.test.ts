@@ -258,7 +258,9 @@ describe("the islands docs name only things that exist", () => {
     }
 
     expect(missing).toEqual([]);
-  });
+    // Cold-importing three full barrels takes ~3s alone and passed 15s under
+    // full-suite load.
+  }, 60_000);
 
   it("the guides link only to files that exist", () => {
     const root = resolve(__dirname, "..");

@@ -150,7 +150,10 @@ export function resource<T, S = void>(
       });
       runCallback("resource onError", () => options.onError?.(errorObj));
     } finally {
-      if (version === fetchVersion) {
+      // `dispose()` aborts but does not bump `fetchVersion`, so the version check
+      // alone would still run onSettled when the aborted (or abort-ignoring)
+      // request settles — application code against a torn-down owner.
+      if (!disposed && version === fetchVersion) {
         runCallback("resource onSettled", () => options.onSettled?.());
       }
     }
