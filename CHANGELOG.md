@@ -38,8 +38,10 @@ Disconnecting normally now also releases disposers registered directly against
 the host, not only those inside the rendered subtree — the host's own teardowns
 only, so a shadow element's light-DOM (slotted, consumer-owned) children keep
 their reactive lifecycle. A teardown that reconnects the element renders the next
-generation after the old one has finished draining, so the new generation's
-host-owned work is not torn down by the old one.
+generation after every teardown has finished draining — counted, so a nested
+disconnect inside a teardown cannot release the outer one early — so the new
+generation's host-owned work is not torn down by the old one. An observed
+attribute written by a disposer defers its render the same way.
 
 ### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
 

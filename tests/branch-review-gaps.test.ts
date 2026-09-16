@@ -263,6 +263,93 @@ describe("defineElement render reentrancy", () => {
     expect(cleanups).toEqual([1, 2, 3]);
   });
 
+  it("an observed attribute written during teardown does not render into the drain", () => {
+    const tag = uniqueTag();
+    const [value, setValue] = signal(0);
+    let generation = 0;
+    const runs: number[] = [];
+    const cleanups: number[] = [];
+
+    defineElement(
+      tag,
+      (_props, host) => {
+        const mine = ++generation;
+        const stop = effect(() => {
+          value();
+          runs.push(mine);
+        });
+        registerDisposer(host, stop);
+        registerDisposer(host, () => cleanups.push(mine));
+        if (mine === 1) {
+          registerDisposer(host, () => document.body.append(host));
+          registerDisposer(host, () => host.setAttribute("state", "ready"));
+        }
+        return div(`gen ${mine}`) as HTMLElement;
+      },
+      { shadow: false, observedAttributes: ["state"] },
+    );
+
+    const host = document.createElement(tag);
+    document.body.append(host);
+    host.remove();
+
+    expect(host.isConnected).toBe(true);
+    expect(cleanups).toEqual([1]);
+    const before = runs.filter((g) => g === generation).length;
+    setValue(1);
+    expect(runs.filter((g) => g === generation)).toHaveLength(before + 1);
+
+    host.remove();
+    expect(cleanups.filter((g) => g === 1)).toHaveLength(1);
+    expect(cleanups[cleanups.length - 1]).toBe(generation);
+  });
+
+  it("a nested disconnect inside a teardown does not release the outer drain early", () => {
+    const tag = uniqueTag();
+    const [value, setValue] = signal(0);
+    let generation = 0;
+    const runs: number[] = [];
+    const cleanups: number[] = [];
+
+    defineElement(
+      tag,
+      (_props, host) => {
+        const mine = ++generation;
+        const stop = effect(() => {
+          value();
+          runs.push(mine);
+        });
+        registerDisposer(host, stop);
+        registerDisposer(host, () => cleanups.push(mine));
+        if (mine === 1) {
+          registerDisposer(host, () => document.body.append(host));
+          registerDisposer(host, () => host.remove()); // nested teardown
+          registerDisposer(host, () => document.body.append(host));
+        }
+        return div(`gen ${mine}`) as HTMLElement;
+      },
+      { shadow: false },
+    );
+
+    const host = document.createElement(tag);
+    document.body.append(host);
+    host.remove();
+
+    expect(host.isConnected).toBe(true);
+    // Generation 1 was torn down exactly once, however many nested disconnects
+    // ran inside its drain.
+    expect(cleanups.filter((g) => g === 1)).toHaveLength(1);
+
+    const latest = generation;
+    const before = runs.filter((g) => g === latest).length;
+    setValue(1);
+    expect(runs.filter((g) => g === latest)).toHaveLength(before + 1);
+    // The newest generation's cleanup waits for its own disconnection.
+    expect(cleanups).not.toContain(latest);
+    host.remove();
+    expect(cleanups[cleanups.length - 1]).toBe(latest);
+  });
+
   it("a shadow host's light-DOM children are not disposed with the element", () => {
     const tag = uniqueTag();
     const shadowCleanup = vi.fn();

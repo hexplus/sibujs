@@ -70,17 +70,24 @@ export function defineElement(
     // callback recursed until the stack overflowed.
     private _rendering = false;
     private _dirty = false;
-    // A teardown is draining. A host teardown may reconnect the element, and
-    // rendering the next generation from inside that drain would let the drain
-    // tear down what the new render registers.
-    private _tearingDown = false;
+    // How many teardowns are draining. A host teardown may reconnect the element
+    // (and a nested disconnect may run inside it), and rendering the next
+    // generation from inside that drain would let the drain tear down what the
+    // new render registers. A counter, not a flag: a nested teardown returning
+    // must not declare the outer one finished.
+    private _teardownDepth = 0;
+
+    /** Whether rendering must wait for work already in progress. */
+    private get _busy(): boolean {
+      return this._rendering || this._teardownDepth > 0;
+    }
 
     connectedCallback(): void {
       this._connected = true;
       // Moved in the DOM by its own component while rendering, or reconnected
       // by its own teardown: finish that work first, then render, instead of
       // nesting inside it.
-      if (this._rendering || this._tearingDown) {
+      if (this._busy) {
         this._dirty = true;
         return;
       }
@@ -89,15 +96,15 @@ export function defineElement(
 
     disconnectedCallback(): void {
       this._connected = false;
-      this._tearingDown = true;
+      this._teardownDepth++;
       try {
         this._teardown();
       } finally {
-        this._tearingDown = false;
+        this._teardownDepth--;
         // A teardown reconnected the element: render the next generation now
-        // that the old one has finished draining (or let the running render
+        // that every teardown has finished draining (or let the running render
         // pick it up).
-        if (this._connected && this._dirty) {
+        if (this._teardownDepth === 0 && this._connected && this._dirty) {
           this._dirty = false;
           if (!this._rendering) this._render();
         }
@@ -108,7 +115,9 @@ export function defineElement(
       // Browsers call this even when the value is unchanged; a component that
       // mirrors state onto its host would otherwise re-render on every write.
       if (oldValue === newValue || !this._connected) return;
-      if (this._rendering) {
+      // Also while a teardown drains: an attribute written by a disposer must
+      // not render the next generation into that drain.
+      if (this._busy) {
         this._dirty = true;
         return;
       }
