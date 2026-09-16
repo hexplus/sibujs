@@ -166,6 +166,9 @@ export function withDisposerRollback<T>(build: () => T): T {
       }
     } finally {
       frame.closed = true;
+      // Whatever the ceiling left behind stays REGISTERED (reachable through
+      // dispose()), but this frame stops referencing it.
+      captured.length = 0;
       registrationCaptures.pop();
     }
     throw err;
@@ -182,6 +185,12 @@ export function withDisposerRollback<T>(build: () => T): T {
     // Subscribers created by this transaction now belong to the enclosing one.
     frame.forwardTo = parent;
   }
+  // A subscriber created here keeps a reference to this frame for its whole
+  // life, so the frame must not keep the transaction's nodes and teardowns
+  // alive: the live ones now belong to the parent (or to nobody), and the
+  // disposed ones are gone. Registrations made later resolve through
+  // `forwardTo`, never into this array.
+  captured.length = 0;
   return result;
 }
 

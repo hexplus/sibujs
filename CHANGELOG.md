@@ -32,7 +32,9 @@ register into that transaction (and roll back with it), and a subscriber created
 outside one never registers into whatever transaction happens to be open. A
 nested transaction that succeeds hands its subscribers to the enclosing one, so
 an ancestor's failure still rolls back cleanup they register afterwards; once the
-outermost one finishes, later re-runs are captured by nobody.
+outermost one finishes, later re-runs are captured by nobody. A finished frame
+also drops its own list, so a long-lived effect cannot retain the nodes and
+teardowns of the render it was created in.
 
 ### Fixed — plugin hooks and providers registered after `install()` were lost
 
@@ -54,7 +56,12 @@ default registry can await readiness or catch a failed install.
 `registry.reset()` is now terminal for everything issued before it: an install
 still in flight cannot commit, a context retained by an already-installed plugin
 stops writing to the registry, and the same plugin name can be installed again
-immediately — an older installation settling afterwards cannot disturb it.
+immediately — an older installation settling afterwards cannot disturb it. A
+cancelled installation rejects with the new `PluginInstallCancelledError` rather
+than reporting success it never achieved (a synchronous install that resets its
+own registry throws it); the cancellation is deliberate, so it is not reported as
+a runtime error. Recursion protection is independent of `reset()`: a plugin that
+resets the registry from inside its own `install()` still cannot install itself.
 
 ### Fixed — ISR stopped revalidating after one failed fetch
 

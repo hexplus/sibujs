@@ -6,11 +6,17 @@ import { dispose, registerDisposer, withDisposerRollback } from "../src/core/ren
 import { div } from "../src/core/rendering/html";
 import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
+import type { ReactiveSignal } from "../src/reactivity/signal";
+import { forEachSubscriber } from "../src/reactivity/track-core";
+
+// A signal accessor carries its node on `__signal` (see core/signals/signal.ts).
+const signalNode = (accessor: unknown): ReactiveSignal => (accessor as { __signal: ReactiveSignal }).__signal;
+
 import { defineElement } from "../src/platform/customElement";
 import { Head } from "../src/platform/head";
 import { createISR } from "../src/platform/incrementalRegeneration";
 import { renderToDocument } from "../src/platform/ssr";
-import { createPluginRegistry } from "../src/plugins/plugin";
+import { createPluginRegistry, PluginInstallCancelledError } from "../src/plugins/plugin";
 import { createMigrationRunner } from "../src/plugins/versioning";
 import { checkFormLabels, checkKeyboardAccess } from "../src/testing/a11y";
 import { createHttpMock } from "../src/testing/e2e";
@@ -309,6 +315,61 @@ describe("withDisposerRollback scope", () => {
     stop();
   });
 
+  it("a successful transaction's frame stops referencing its nodes and teardowns", () => {
+    const sibling = document.createElement("div");
+    const cleanup = vi.fn();
+    const [source] = signal(0);
+    let subscriber: { _cap?: { entries: unknown[] } } | undefined;
+
+    const keeper = document.createElement("div");
+    withDisposerRollback(() => {
+      const stop = effect(() => {
+        source();
+      });
+      // The effect outlives the sibling: its teardown belongs to another node.
+      registerDisposer(keeper, stop);
+      registerDisposer(sibling, cleanup);
+    });
+    dispose(sibling);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+
+    // The surviving effect's capture must not retain the disposed sibling.
+    forEachSubscriber(signalNode(source), (sub) => {
+      subscriber = sub as { _cap?: { entries: unknown[] } };
+    });
+    expect(subscriber, "the effect must still be subscribed").toBeDefined();
+    expect(subscriber?._cap, "it must still remember its transaction").toBeDefined();
+    expect(subscriber?._cap?.entries).toEqual([]);
+    dispose(keeper);
+  });
+
+  it("a nested successful transaction releases its own entries but still forwards", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+    let innerCapture: { entries: unknown[] } | undefined;
+
+    expect(() =>
+      withDisposerRollback(() => {
+        withDisposerRollback(() => {
+          const stop = effect(() => {
+            if (value() === 1) registerDisposer(node, cleanup);
+          });
+          registerDisposer(node, stop);
+          forEachSubscriber(signalNode(value), (sub) => {
+            innerCapture = (sub as { _cap?: { entries: unknown[] } })._cap;
+          });
+        });
+        // The inner frame kept nothing, yet its effect still registers upward.
+        expect(innerCapture?.entries).toEqual([]);
+        setValue(1);
+        throw new Error("outer failed");
+      }),
+    ).toThrow("outer failed");
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("a node disposed during the build is not torn down twice by an effect re-run", () => {
     const node = document.createElement("div");
     const cleanup = vi.fn();
@@ -477,7 +538,7 @@ describe("plugin context after commit", () => {
 
     registry.reset();
     release();
-    await pending;
+    await expect(pending).rejects.toThrow(/cancelled/);
 
     expect(registry.installedPlugins.has("slow")).toBe(false);
     expect(registry.provided.has("stale")).toBe(false);
@@ -540,6 +601,78 @@ describe("plugin context after commit", () => {
       }),
     ).rejects.toThrow("singleton install failed");
     expect(handler).toHaveBeenCalled();
+  });
+
+  it("a plugin that resets the registry inside install() still cannot install itself", () => {
+    const registry = createPluginRegistry();
+    let attempts = 0;
+    const recursive: Parameters<typeof registry.plugin>[0] = {
+      name: "recursive",
+      install() {
+        attempts++;
+        registry.reset();
+        registry.plugin(recursive);
+      },
+    };
+    expect(() => registry.plugin(recursive)).toThrow(/recursive installation/);
+    expect(attempts).toBe(1);
+
+    // A different name after the reset is fine, and the same name installs
+    // normally once the original call has unwound.
+    registry.plugin({ name: "other", install: (ctx) => ctx.provide("other", 1) });
+    expect(registry.inject("other")).toBe(1);
+    registry.plugin({ name: "recursive", install: (ctx) => ctx.provide("done", 1) });
+    expect(registry.inject("done")).toBe(1);
+  });
+
+  it("a synchronous install that resets its own registry reports cancellation", () => {
+    const registry = createPluginRegistry();
+    expect(() =>
+      registry.plugin({
+        name: "self-reset",
+        install(ctx) {
+          ctx.provide("never", 1);
+          registry.reset();
+        },
+      }),
+    ).toThrow(PluginInstallCancelledError);
+    expect(registry.installedPlugins.has("self-reset")).toBe(false);
+    expect(registry.provided.has("never")).toBe(false);
+  });
+
+  it("an async install cancelled by reset() rejects, silently for a caller that ignores it", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    // Ignored on purpose: a cancellation must not surface as an unhandled rejection.
+    const ignored = registry.plugin({ name: "cancelled", install: async () => gate });
+    registry.reset();
+    // A newer installation of the same name is unaffected by the cancellation.
+    registry.plugin({ name: "cancelled", install: (ctx) => ctx.provide("fresh", 1) });
+    release();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(registry.inject("fresh")).toBe(1);
+    expect(registry.installedPlugins.has("cancelled")).toBe(true);
+    // Cancellation is deliberate, so it is not reported as a runtime error.
+    expect(handler).not.toHaveBeenCalled();
+    // An awaiting caller still learns the installation never happened.
+    await expect(ignored).rejects.toBeInstanceOf(PluginInstallCancelledError);
+  });
+
+  it("a second async install of the same name while one is in flight is refused", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const first = registry.plugin({ name: "inflight", install: async () => gate });
+    expect(() => registry.plugin({ name: "inflight", install: () => {} })).toThrow(/already being installed/);
+    release();
+    await first;
+    expect(registry.installedPlugins.has("inflight")).toBe(true);
   });
 
   it("a throwing install still commits nothing", () => {
