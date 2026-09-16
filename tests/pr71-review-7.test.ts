@@ -185,9 +185,8 @@ describe("globalStore operation queue draining", () => {
       queued = true;
       for (let i = 0; i < size; i++) store.dispatch("inc");
     });
-    const started = performance.now();
     store.dispatch("inc");
-    return { elapsed: performance.now() - started, rounds, store };
+    return { rounds, store };
   };
 
   it("a large reentrant burst preserves order and processes everything queued during draining", () => {
@@ -199,16 +198,39 @@ describe("globalStore operation queue draining", () => {
     }
   });
 
-  it("drain work scales roughly linearly when the burst doubles", () => {
-    burst(20_000); // warm up
-    const best = (size: number) => Math.min(burst(size).elapsed, burst(size).elapsed, burst(size).elapsed);
-    const measure = () => best(80_000) / Math.max(best(40_000), 0.5);
-    let ratio = measure();
-    // Noise only inflates the ratio; re-measure once before failing. Linear is
-    // ~2x, quadratic ~4x.
-    if (ratio >= 3.2) ratio = measure();
-    expect(ratio).toBeLessThan(3.2);
-  }, 60_000);
+  // The regression this guards is `operations.shift()`, which re-indexes the
+  // whole queue on every step. Asserted structurally rather than by wall clock:
+  // a timing ratio measured while the rest of the suite runs in parallel fails
+  // intermittently on a busy machine, and proves nothing extra.
+  it("draining never removes from the front of the queue (no re-indexing)", () => {
+    // A plain wrapper, not vi.spyOn: the spy machinery itself uses array
+    // operations, which recurses when the prototype method is instrumented.
+    const original = Array.prototype.shift;
+    let shifts = 0;
+    Array.prototype.shift = function patchedShift<T>(this: T[]): T | undefined {
+      shifts++;
+      return original.call(this) as T | undefined;
+    };
+    let count = 0;
+    try {
+      count = burst(20_000).store.getState().count;
+    } finally {
+      Array.prototype.shift = original;
+    }
+    expect(count).toBe(20_001);
+    expect(shifts).toBe(0);
+  });
+
+  it("a doubled burst costs proportionally more work, counted deterministically", () => {
+    // Work is counted, not timed: each delivered round is one queue step, so a
+    // linear drain doubles with the input. A quadratic one cannot be observed
+    // through delivered rounds, which is why the shift() guard above exists.
+    const small = burst(20_000).rounds.length;
+    const large = burst(40_000).rounds.length;
+    expect(small).toBe(20_001);
+    expect(large).toBe(40_001);
+    expect(large / small).toBeCloseTo(2, 2);
+  });
 
   it("the queue keeps working after an operation fails mid-drain", () => {
     const store = globalStore({
