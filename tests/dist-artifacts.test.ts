@@ -200,8 +200,11 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // trimming), which otherwise left under 5 B of headroom. It was raised to
     // 26,600 B for `transition()` adopting hostile thenables safely (single
     // `then` read, deferred invocation, reported failures) and the reentrancy
-    // guards in `imageLoader` (+106 B), and to 26,700 B for per-subscriber
-    // render-transaction ownership in the disposal/reactive core (+85 B).
+    // guards in `imageLoader` (+106 B), and to 26,800 B for per-subscriber
+    // render-transaction ownership in the disposal/reactive core, including the
+    // forwarding of a successful nested transaction to its parent (+111 B).
+    // The headroom is deliberate: at under 10 B, every core comment or rename
+    // moved the gate.
     //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
@@ -211,7 +214,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_700 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_800 * 1.02));
   });
 });
 

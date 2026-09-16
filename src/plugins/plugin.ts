@@ -2,6 +2,7 @@
 // PLUGIN ARCHITECTURE
 // ============================================================================
 
+import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
 import { adoptThenable } from "../utils/adoptThenable";
 import { globalSingleton } from "../utils/globalSingleton";
@@ -62,6 +63,11 @@ export function createPluginRegistry(): PluginRegistry {
   // itself — directly, or through a dependency that installs it back — is
   // rejected instead of recursing until the stack overflows.
   const installing = new Set<string>();
+  // Bumped by reset(): every context and every in-flight installation captures
+  // the generation it belongs to, so a stale context cannot repopulate the
+  // registry and a pending install cannot commit into a registry that has been
+  // reset (or into a newer installation of the same name).
+  let generation = 0;
 
   const registry: PluginRegistry = {
     installedPlugins,
@@ -95,16 +101,28 @@ export function createPluginRegistry(): PluginRegistry {
       // hooks and providers registered later (from an init hook, a timer) are
       // not lost.
       let committed = false;
-      const target = () => (committed ? hooks : staged);
+      const myGeneration = generation;
+      const stale = (): boolean => {
+        if (myGeneration === generation) return false;
+        if (DEV) devWarn(`plugin: "${p.name}" registered after the registry was reset; the registration was ignored.`);
+        return true;
+      };
+      const target = (): PluginHooks | null => (stale() ? null : committed ? hooks : staged);
       const ctx: PluginContext = {
-        onInit: (cb) => target().init.push(cb),
-        onMount: (cb) => target().mount.push(cb),
-        onUnmount: (cb) => target().unmount.push(cb),
-        onError: (cb) => target().error.push(cb),
-        provide: (key, value) => (committed ? provided : stagedProvided).set(key, value),
+        onInit: (cb) => void target()?.init.push(cb),
+        onMount: (cb) => void target()?.mount.push(cb),
+        onUnmount: (cb) => void target()?.unmount.push(cb),
+        onError: (cb) => void target()?.error.push(cb),
+        provide: (key, value) => {
+          if (stale()) return;
+          (committed ? provided : stagedProvided).set(key, value);
+        },
       };
 
       const commit = (): void => {
+        // The registry was reset (or re-used for this name) while the install
+        // was in flight: this installation no longer owns anything here.
+        if (myGeneration !== generation) return;
         hooks.init.push(...staged.init);
         hooks.mount.push(...staged.mount);
         hooks.unmount.push(...staged.unmount);
@@ -147,7 +165,9 @@ export function createPluginRegistry(): PluginRegistry {
       const settled = pending.then(
         () => commit(),
         (err) => {
-          installing.delete(p.name);
+          // Only release the name when it is still this installation's to
+          // release: a reset (or a newer install of the same name) owns it now.
+          if (myGeneration === generation) installing.delete(p.name);
           reportError(err, { phase: "async", name: `plugin(${p.name})` });
           throw err;
         },
@@ -196,6 +216,10 @@ export function createPluginRegistry(): PluginRegistry {
       }
     },
     reset() {
+      // Terminal for everything issued before it: in-flight installs cannot
+      // commit, and contexts handed to already-installed plugins stop writing.
+      generation++;
+      installing.clear();
       installedPlugins.clear();
       hooks.init.length = 0;
       hooks.mount.length = 0;
@@ -227,10 +251,16 @@ export function createPlugin(
 
 /**
  * Installs a plugin into the default (singleton) registry.
+ *
+ * Returns the installation's completion promise when `install()` is async —
+ * await it to know the plugin is ready, or to catch a failed installation — and
+ * `undefined` for a synchronous install (which throws on failure).
  */
-export function plugin(plugin: SibuPlugin, options?: unknown): void {
+export function plugin(plugin: SibuPlugin, options?: unknown): void | Promise<void> {
   _defaults.touched = true;
-  _defaults.registry.plugin(plugin, options);
+  // Returned, not discarded: an async install's completion (and failure) has to
+  // reach the caller through the singleton API too.
+  return _defaults.registry.plugin(plugin, options);
 }
 
 /**

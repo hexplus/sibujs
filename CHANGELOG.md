@@ -29,7 +29,10 @@ including those registered by effects the build's signal writes re-ran elsewhere
 on the page, so a failed render tore down live bindings it did not own. Every
 subscriber now remembers the render transaction it was created in: its re-runs
 register into that transaction (and roll back with it), and a subscriber created
-outside one never registers into whatever transaction happens to be open.
+outside one never registers into whatever transaction happens to be open. A
+nested transaction that succeeds hands its subscribers to the enclosing one, so
+an ancestor's failure still rolls back cleanup they register afterwards; once the
+outermost one finishes, later re-runs are captured by nobody.
 
 ### Fixed — plugin hooks and providers registered after `install()` were lost
 
@@ -45,6 +48,13 @@ before and after an `await` commits together — while a rejection commits nothi
 is reported with `phase: "async"` and leaves the plugin installable again. The
 name stays reserved while the install is in flight, so a concurrent attempt is
 refused, and ignoring the returned promise never produces an unhandled rejection.
+The singleton `plugin()` returns that promise too, so applications using the
+default registry can await readiness or catch a failed install.
+
+`registry.reset()` is now terminal for everything issued before it: an install
+still in flight cannot commit, a context retained by an already-installed plugin
+stops writing to the registry, and the same plugin name can be installed again
+immediately — an older installation settling afterwards cannot disturb it.
 
 ### Fixed — ISR stopped revalidating after one failed fetch
 
@@ -197,8 +207,8 @@ reactive registries.
 The baseline was raised from 26,450 B to 26,500 B for the `copyOnClick` and
 component-registry fixes (+64 B after trimming), to 26,600 B for safe thenable
 adoption in `transition()` and the `imageLoader` reentrancy guard (+106 B), and
-to 26,700 B for per-subscriber render-transaction ownership in the disposal and
-reactive core (+85 B); the raw budget is unchanged.
+to 26,800 B for per-subscriber render-transaction ownership in the disposal and
+reactive core (+111 B); the raw budget is unchanged.
 
 ### Fixed — `springSignal()` restarted after disposal and crashed during SSR
 

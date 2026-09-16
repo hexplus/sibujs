@@ -233,6 +233,82 @@ describe("withDisposerRollback scope", () => {
     stopOuter();
   });
 
+  it("a successful inner transaction hands its effects to the outer one", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+
+    expect(() =>
+      withDisposerRollback(() => {
+        withDisposerRollback(() => {
+          const stop = effect(() => {
+            if (value() === 1) registerDisposer(node, cleanup);
+          });
+          registerDisposer(node, stop);
+        });
+        setValue(1); // the inner transaction's effect re-runs here
+        throw new Error("outer failed");
+      }),
+    ).toThrow("outer failed");
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    dispose(node);
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("three nested successful transactions hand ownership up to a failing ancestor", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+
+    expect(() =>
+      withDisposerRollback(() => {
+        withDisposerRollback(() => {
+          withDisposerRollback(() => {
+            const stop = effect(() => {
+              if (value() === 1) registerDisposer(node, cleanup);
+            });
+            registerDisposer(node, stop);
+          });
+        });
+        setValue(1);
+        throw new Error("ancestor failed");
+      }),
+    ).toThrow("ancestor failed");
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it("after the outermost transaction succeeds, later re-runs are captured by nobody", () => {
+    const node = document.createElement("div");
+    const cleanup = vi.fn();
+    const [value, setValue] = signal(0);
+    let stop = () => {};
+
+    withDisposerRollback(() => {
+      withDisposerRollback(() => {
+        stop = effect(() => {
+          if (value() > 0) registerDisposer(node, cleanup);
+        });
+      });
+    });
+
+    setValue(1);
+    expect(cleanup).not.toHaveBeenCalled();
+    // A later failing transaction does not own that registration either.
+    expect(() =>
+      withDisposerRollback(() => {
+        setValue(2);
+        throw new Error("unrelated failure");
+      }),
+    ).toThrow();
+    expect(cleanup).not.toHaveBeenCalled();
+
+    dispose(node);
+    expect(cleanup).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
   it("a node disposed during the build is not torn down twice by an effect re-run", () => {
     const node = document.createElement("div");
     const cleanup = vi.fn();
@@ -375,6 +451,95 @@ describe("plugin context after commit", () => {
     expect(registry.installedPlugins.has("hostile")).toBe(false);
     expect(registry.provided.has("nope")).toBe(false);
     expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("reset() is terminal for a pending install and for retained contexts", async () => {
+    const registry = createPluginRegistry();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const pending = registry.plugin({
+      name: "slow",
+      async install(ctx) {
+        ctx.provide("stale", true);
+        await gate;
+      },
+    });
+
+    let retained!: Parameters<Parameters<typeof registry.plugin>[0]["install"]>[0];
+    registry.plugin({
+      name: "old",
+      install(ctx) {
+        retained = ctx;
+      },
+    });
+
+    registry.reset();
+    release();
+    await pending;
+
+    expect(registry.installedPlugins.has("slow")).toBe(false);
+    expect(registry.provided.has("stale")).toBe(false);
+
+    retained.provide("resurrected", true);
+    retained.onMount(() => {});
+    expect(registry.provided.has("resurrected")).toBe(false);
+    expect(registry.hooks.mount).toHaveLength(0);
+  });
+
+  it("a rejected install settling after reset() leaves the new generation alone", async () => {
+    const registry = createPluginRegistry();
+    let fail!: (e: unknown) => void;
+    const gate = new Promise<void>((_r, reject) => {
+      fail = reject;
+    });
+    registry.plugin({ name: "shared", install: async () => gate });
+    registry.reset();
+
+    // The same name installs immediately after the reset.
+    registry.plugin({
+      name: "shared",
+      install(ctx) {
+        ctx.provide("fresh", 1);
+      },
+    });
+    expect(registry.inject("fresh")).toBe(1);
+
+    fail(new Error("old install failed"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The replacement survives the old installation's failure.
+    expect(registry.installedPlugins.has("shared")).toBe(true);
+    expect(registry.inject("fresh")).toBe(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("the singleton plugin() returns the installation's completion", async () => {
+    const { plugin, inject } = await import("../src/plugins/plugin");
+    const name = `singleton-${Math.random().toString(36).slice(2)}`;
+    const completion = plugin({
+      name,
+      async install(ctx) {
+        await Promise.resolve();
+        ctx.provide(`${name}-ready`, true);
+      },
+    });
+    expect(completion).toBeInstanceOf(Promise);
+    await completion;
+    expect(inject(`${name}-ready`)).toBe(true);
+
+    const failingName = `${name}-bad`;
+    await expect(
+      plugin({
+        name: failingName,
+        async install() {
+          await Promise.resolve();
+          throw new Error("singleton install failed");
+        },
+      }),
+    ).rejects.toThrow("singleton install failed");
+    expect(handler).toHaveBeenCalled();
   });
 
   it("a throwing install still commits nothing", () => {

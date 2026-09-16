@@ -54,6 +54,20 @@ let activeBindingCount = 0;
 export interface DisposerCapture {
   entries: [Node, () => void][];
   closed: boolean;
+  /**
+   * Set when a transaction SUCCEEDS inside another: its registrations were
+   * handed to the enclosing one, so a subscriber it created keeps registering
+   * there. Absent after a rollback (that transaction owns nothing any more) and
+   * at the outermost level (later re-runs are captured by nobody).
+   */
+  forwardTo?: DisposerCapture;
+}
+
+/** The frame a capture stands for now: itself, or whoever inherited it. */
+function resolveCapture(capture: DisposerCapture | null | undefined): DisposerCapture | null {
+  let frame = capture;
+  while (frame?.closed) frame = frame.forwardTo;
+  return frame ?? null;
 }
 
 // Open captures, innermost last. A `null` frame suppresses capturing entirely.
@@ -61,8 +75,7 @@ const registrationCaptures: (DisposerCapture | null)[] = [];
 
 /** The capture a subscriber created right now belongs to. @internal */
 export function currentDisposerCapture(): DisposerCapture | null {
-  const top = registrationCaptures[registrationCaptures.length - 1];
-  return top && !top.closed ? top : null;
+  return resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
 }
 
 /**
@@ -77,7 +90,10 @@ export function currentDisposerCapture(): DisposerCapture | null {
 export function beginDisposerCapture(capture: DisposerCapture | null): boolean {
   // Nothing to isolate: no transaction is open and the subscriber owns none.
   if (capture === null && registrationCaptures.length === 0) return false;
-  registrationCaptures.push(capture && !capture.closed ? capture : null);
+  // A closed frame resolves to whoever inherited its work (see forwardTo), so a
+  // subscriber created by a successful nested transaction keeps registering into
+  // the enclosing one until that finishes too.
+  registrationCaptures.push(resolveCapture(capture));
   return true;
 }
 
@@ -98,8 +114,8 @@ export function registerDisposer(node: Node, teardown: () => void): void {
   }
   disposers.push(teardown);
   if (DEV) activeBindingCount++;
-  const capture = registrationCaptures[registrationCaptures.length - 1];
-  if (capture && !capture.closed) capture.entries.push([node, teardown]);
+  const capture = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+  if (capture) capture.entries.push([node, teardown]);
 }
 
 /**
@@ -156,13 +172,15 @@ export function withDisposerRollback<T>(build: () => T): T {
   }
   frame.closed = true;
   registrationCaptures.pop();
-  const parent = registrationCaptures[registrationCaptures.length - 1];
-  if (parent && !parent.closed) {
+  const parent = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+  if (parent) {
     // Hand up only registrations that are still live; ones a dispose() already
     // ran are not the enclosing transaction's to roll back.
     for (const entry of captured) {
       if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.entries.push(entry);
     }
+    // Subscribers created by this transaction now belong to the enclosing one.
+    frame.forwardTo = parent;
   }
   return result;
 }
