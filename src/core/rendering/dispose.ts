@@ -242,55 +242,64 @@ export function dispose(node: Node): void {
   }
 
   for (let i = order.length - 1; i >= 0; i--) {
-    const current = order[i];
-    if (elementDisposers.has(current)) {
-      // Drain to stability. A disposer may register another on the same node
-      // (a parent teardown releasing a child, a lifecycle hook re-arming), and
-      // that follow-up work is owed the same guarantee as the first batch — so
-      // the loop runs until the queue is empty, bounded only by the safety
-      // ceiling on total teardown executions (MAX_DRAIN_TEARDOWNS). That ceiling
-      // is an absolute work bound: it primarily catches cleanup production that
-      // does not terminate, but an exceptionally large finite chain reaches it
-      // too, and either case is reported rather than silently dropped.
-      let executed = 0;
-      let runaway = false;
+    disposeNodeOwn(order[i]);
+  }
+}
 
-      while (!runaway) {
-        const pending = elementDisposers.get(current);
-        if (!pending || pending.length === 0) break;
+/**
+ * Run the teardowns registered for `node` ITSELF, leaving its descendants
+ * alone.
+ *
+ * For an owner that holds cleanup on a node whose children belong to someone
+ * else — a custom element disconnecting, where the light-DOM children are the
+ * consumer's and the rendered content was already disposed through its own root
+ * — a recursive `dispose()` would destroy that unrelated content.
+ *
+ * Drains to stability, like `dispose()`: a teardown may register another on the
+ * same node, and that follow-up is owed the same guarantee, bounded by
+ * {@link MAX_DRAIN_TEARDOWNS} and reported when the ceiling is reached.
+ *
+ * @internal
+ */
+export function disposeNodeOwn(node: Node): void {
+  if (!elementDisposers.has(node)) return;
+  let executed = 0;
+  let runaway = false;
 
-        // Snapshot + delete BEFORE running so re-entrant dispose() on the
-        // same node (e.g. parent disposer triggering child cleanup) doesn't
-        // re-run these or land in an infinite cycle.
-        const snapshot = pending.slice();
-        elementDisposers.delete(current);
-        if (DEV) activeBindingCount -= snapshot.length;
+  while (!runaway) {
+    const pending = elementDisposers.get(node);
+    if (!pending || pending.length === 0) break;
 
-        for (let i = 0; i < snapshot.length; i++) {
-          if (executed >= MAX_DRAIN_TEARDOWNS) {
-            // Put the untouched remainder back rather than dropping it: unlike
-            // an enhancement's local queue, this one is node-keyed, so restored
-            // entries stay reachable through a later dispose(node) and stay
-            // visible to checkLeaks(). The runaway is still reported — bounded
-            // protection must never look like completed cleanup.
-            const rest = snapshot.slice(i);
-            const added = elementDisposers.get(current);
-            elementDisposers.set(current, added ? rest.concat(added) : rest);
-            if (DEV) activeBindingCount += rest.length;
-            reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
-            runaway = true;
-            break;
-          }
-          executed++;
-          try {
-            snapshot[i]();
-          } catch (err) {
-            // A disposer is user teardown. Containment is deliberate — the
-            // remaining disposers must still run — but gating the report on dev
-            // mode meant a leaking teardown was invisible in production.
-            reportError(err, { phase: "cleanup", name: "disposer" });
-          }
-        }
+    // Snapshot + delete BEFORE running so re-entrant dispose() on the
+    // same node (e.g. parent disposer triggering child cleanup) doesn't
+    // re-run these or land in an infinite cycle.
+    const snapshot = pending.slice();
+    elementDisposers.delete(node);
+    if (DEV) activeBindingCount -= snapshot.length;
+
+    for (let i = 0; i < snapshot.length; i++) {
+      if (executed >= MAX_DRAIN_TEARDOWNS) {
+        // Put the untouched remainder back rather than dropping it: unlike
+        // an enhancement's local queue, this one is node-keyed, so restored
+        // entries stay reachable through a later dispose(node) and stay
+        // visible to checkLeaks(). The runaway is still reported — bounded
+        // protection must never look like completed cleanup.
+        const rest = snapshot.slice(i);
+        const added = elementDisposers.get(node);
+        elementDisposers.set(node, added ? rest.concat(added) : rest);
+        if (DEV) activeBindingCount += rest.length;
+        reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
+        runaway = true;
+        break;
+      }
+      executed++;
+      try {
+        snapshot[i]();
+      } catch (err) {
+        // A disposer is user teardown. Containment is deliberate — the
+        // remaining disposers must still run — but gating the report on dev
+        // mode meant a leaking teardown was invisible in production.
+        reportError(err, { phase: "cleanup", name: "disposer" });
       }
     }
   }

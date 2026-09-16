@@ -35,7 +35,11 @@ its host has that render rolled back as a failed transaction — releasing what 
 registered on the returned tree, on intermediate nodes and on the host itself —
 rather than committed into a disconnected element nothing would tear down.
 Disconnecting normally now also releases disposers registered directly against
-the host, not only those inside the rendered subtree.
+the host, not only those inside the rendered subtree — the host's own teardowns
+only, so a shadow element's light-DOM (slotted, consumer-owned) children keep
+their reactive lifecycle. A teardown that reconnects the element renders the next
+generation after the old one has finished draining, so the new generation's
+host-owned work is not torn down by the old one.
 
 ### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
 

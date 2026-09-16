@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { reportError } from "../core/errors";
-import { dispose, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
+import { disposeNodeOwn, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -70,12 +70,17 @@ export function defineElement(
     // callback recursed until the stack overflowed.
     private _rendering = false;
     private _dirty = false;
+    // A teardown is draining. A host teardown may reconnect the element, and
+    // rendering the next generation from inside that drain would let the drain
+    // tear down what the new render registers.
+    private _tearingDown = false;
 
     connectedCallback(): void {
       this._connected = true;
-      // Moved in the DOM by its own component while rendering: finish that
-      // render, then render again, instead of nesting.
-      if (this._rendering) {
+      // Moved in the DOM by its own component while rendering, or reconnected
+      // by its own teardown: finish that work first, then render, instead of
+      // nesting inside it.
+      if (this._rendering || this._tearingDown) {
         this._dirty = true;
         return;
       }
@@ -84,7 +89,19 @@ export function defineElement(
 
     disconnectedCallback(): void {
       this._connected = false;
-      this._teardown();
+      this._tearingDown = true;
+      try {
+        this._teardown();
+      } finally {
+        this._tearingDown = false;
+        // A teardown reconnected the element: render the next generation now
+        // that the old one has finished draining (or let the running render
+        // pick it up).
+        if (this._connected && this._dirty) {
+          this._dirty = false;
+          if (!this._rendering) this._render();
+        }
+      }
     }
 
     attributeChangedCallback(_name: string, oldValue: string | null, newValue: string | null): void {
@@ -105,10 +122,13 @@ export function defineElement(
       // disposal-aware replacement primitive so the ordering guarantee lives in
       // one place rather than being re-derived per call site.
       replaceChildrenSafely(this._root);
-      // Children first, then the host itself: a component may register cleanup
+      // Then the host's OWN teardowns: a component may register cleanup
       // directly against its host (`registerDisposer(host, …)`), which is not
       // part of the rendered subtree and would otherwise outlive the element.
-      dispose(this);
+      // Only the host's own queue — a recursive dispose() would also destroy
+      // light-DOM children, which belong to the consumer (slotted content for a
+      // shadow element), not to this render.
+      disposeNodeOwn(this);
     }
 
     /**

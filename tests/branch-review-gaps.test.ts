@@ -219,6 +219,81 @@ describe("defineElement render reentrancy", () => {
     expect(cleanup).toHaveBeenCalledTimes(2);
   });
 
+  it("a host teardown that reconnects the element keeps the new generation alive", () => {
+    const tag = uniqueTag();
+    const [value, setValue] = signal(0);
+    let generation = 0;
+    const runs: number[] = [];
+    const cleanups: number[] = [];
+
+    defineElement(
+      tag,
+      (_props, host) => {
+        const mine = ++generation;
+        const stop = effect(() => {
+          value();
+          runs.push(mine);
+        });
+        registerDisposer(host, stop);
+        registerDisposer(host, () => cleanups.push(mine));
+        if (mine === 1) registerDisposer(host, () => document.body.append(host));
+        return div(`gen ${mine}`) as HTMLElement;
+      },
+      { shadow: false },
+    );
+
+    const host = document.createElement(tag);
+    document.body.append(host);
+    host.remove();
+
+    expect(host.isConnected).toBe(true);
+    expect(generation).toBe(2);
+    expect(cleanups).toEqual([1]);
+
+    // The reconnected generation is still reactive.
+    const before = runs.filter((g) => g === 2).length;
+    setValue(1);
+    expect(runs.filter((g) => g === 2)).toHaveLength(before + 1);
+
+    // Repeated cycles neither accumulate nor double-run registrations.
+    host.remove();
+    expect(cleanups).toEqual([1, 2]);
+    document.body.append(host);
+    host.remove();
+    expect(cleanups).toEqual([1, 2, 3]);
+  });
+
+  it("a shadow host's light-DOM children are not disposed with the element", () => {
+    const tag = uniqueTag();
+    const shadowCleanup = vi.fn();
+    defineElement(
+      tag,
+      () => {
+        const rendered = div("shadow content") as HTMLElement;
+        registerDisposer(rendered, shadowCleanup);
+        return rendered;
+      },
+      { shadow: true },
+    );
+
+    const host = document.createElement(tag);
+    const slotted = document.createElement("button");
+    const slottedCleanup = vi.fn();
+    registerDisposer(slotted, slottedCleanup);
+    host.append(slotted);
+    document.body.append(host);
+
+    host.remove();
+
+    // Consumer-owned light DOM survives; the framework's shadow content does not.
+    expect(host.contains(slotted)).toBe(true);
+    expect(slottedCleanup).not.toHaveBeenCalled();
+    expect(shadowCleanup).toHaveBeenCalledTimes(1);
+
+    dispose(slotted);
+    expect(slottedCleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("a component that moves its own host while rendering renders again without nesting", () => {
     const tag = uniqueTag();
     const renders = vi.fn();
