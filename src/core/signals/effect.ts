@@ -1,5 +1,6 @@
 import { cleanup as coreCleanup, retrack, untracked } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { emitDevtools } from "../devtoolsHook";
 import { type RuntimeErrorPhase, reportError } from "../errors";
 import { isSSR } from "../ssr-context";
 
@@ -315,7 +316,7 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
   }
 
   const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-  if (hook) hook.emit("effect:create", { effectFn });
+  if (hook) emitDevtools(hook, "effect:create", { effectFn });
 
   return () => disposeEffect(ctx);
 }

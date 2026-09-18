@@ -22,6 +22,13 @@ This project follows [Semantic Versioning](https://semver.org/).
   component throws, or the append fails, every binding and listener it
   registered is released before the error reaches the caller. A pre-built node
   passed to `mount()` belongs to the caller and is never rolled back.
+- **DevTools hook failures are contained.** A throwing `effect:create`,
+  `computed:create` or `app:init` emit aborted construction after the effect,
+  computed or tree was already live, so the caller never received its disposer
+  or `unmount()`. A throwing `signal:update` or `computed:update` emit aborted a
+  write after the value changed but before subscribers were notified, and a
+  throwing `signal:create` made `signal()` throw. Every core emit now swallows
+  hook errors, as the destroy events already did.
 
 ### Fixed — `Fragment()` and `mount()` of a fragment
 
@@ -32,7 +39,13 @@ This project follows [Semantic Versioning](https://semver.org/).
 - `mount(Fragment([...]))` tracks the range the fragment filled, and
   `unmount()` disposes and removes everything in it, including nodes a reactive
   child rendered after mounting. It used to dispose the emptied fragment and
-  leave the mounted children live in the container.
+  leave the mounted children live in the container. The range is drained node by
+  node while its boundary markers are re-checked, so a node a teardown inserts
+  into it is removed too; the safety ceiling counts only nodes teardowns add, so
+  a fragment of any size unmounts completely, and if the ceiling is reached the
+  markers stay so the rest remains reachable. If outside code removed or reordered a marker, nothing
+  past that point is touched and the loss is reported (`phase: "cleanup"`,
+  `name: "mount"`), instead of removing whatever follows in the container.
 
 ### Fixed — `onMount()` cleanup skipped on native removal
 
@@ -48,11 +61,13 @@ A returned thenable is adopted with `then` read once instead of calling
 reported as a synchronous failure while the real rejection went unobserved. A
 throwing `then` accessor is reported as an async failure.
 
-### Changed — default CDN gzip budget baseline
+### Changed — default CDN budget baselines
 
-Raised from 26,600 B to 26,900 B: making `mount()` transactional brings
-`withDisposerRollback()` into the default bundle (+276 B). The raw budget is
-unchanged.
+The gzip baseline is raised from 26,600 B to 27,000 B: making `mount()` transactional brings
+`withDisposerRollback()` into the default bundle (+276 B), and the
+marker-checked fragment unmount and contained DevTools emits add the rest. The
+raw budget, unchanged until now, rises from 80,202 B to 80,400 B for the same
+work.
 
 ## [4.6.0] — 2026-09-18
 

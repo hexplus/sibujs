@@ -1,6 +1,7 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { emitDevtools } from "../devtoolsHook";
 import type { Accessor } from "./signal";
 
 /**
@@ -192,7 +193,7 @@ export function derived<T>(
     // `computed:destroy`; an update after it would describe a node DevTools no
     // longer tracks.
     if (hook && !disposed && !Object.is(oldValue, cs._v)) {
-      hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
+      emitDevtools(hook, "computed:update", { signal: cs, oldValue, newValue: cs._v });
     }
   };
   cs._validate = validate;
@@ -282,7 +283,7 @@ export function derived<T>(
     }
   };
 
-  if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });
+  if (hook) emitDevtools(hook, "computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
   return computedGetter as DerivedAccessor<T>;
 }

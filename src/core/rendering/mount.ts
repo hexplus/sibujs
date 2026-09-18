@@ -1,5 +1,7 @@
 import { devAssert } from "../dev";
-import { dispose, withDisposerRollback } from "./dispose";
+import { emitDevtools } from "../devtoolsHook";
+import { reportError } from "../errors";
+import { dispose, MAX_DRAIN_TEARDOWNS, reportDrainRunaway, withDisposerRollback } from "./dispose";
 
 /**
  * Mounts a root component into a DOM element.
@@ -35,7 +37,8 @@ export function mount(
     "mount: first argument must be a component function or a DOM Node.",
   );
 
-  const startTime = typeof performance !== "undefined" ? performance.now() : 0;
+  const now = (): number => (typeof performance !== "undefined" ? performance.now() : 0);
+  const startTime = now();
   let range: { start: Comment; end: Comment } | null = null;
   const attach = (built: Node): void => {
     if (built instanceof DocumentFragment) {
@@ -59,40 +62,84 @@ export function mount(
     node = component;
     attach(node);
   }
-  const duration = typeof performance !== "undefined" ? performance.now() - startTime : 0;
+  const duration = now() - startTime;
 
   // DevTools: emit app:init
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-  if (hook) {
-    hook.emit("app:init", { rootElement: node, container, duration });
-  }
+  if (hook) emitDevtools(hook, "app:init", { rootElement: node, container, duration });
 
   const mounted = range as { start: Comment; end: Comment } | null;
   return {
     node,
     unmount() {
-      if (hook) hook.emit("app:unmount", { rootElement: node });
+      if (hook) emitDevtools(hook, "app:unmount", { rootElement: node });
       if (mounted) {
         unmountRange(mounted.start, mounted.end);
         return;
       }
       dispose(node);
-      if (node.parentNode) {
-        node.parentNode.removeChild(node);
-      }
+      node.parentNode?.removeChild(node);
     },
   };
 }
 
-/** Dispose and remove `start`, `end` and every node between them. Idempotent. */
+/**
+ * Dispose and remove every node between `start` and `end`, then the markers.
+ * Idempotent.
+ *
+ * The range is only trusted while both markers share a parent with `end` after
+ * `start`. If outside code removed or moved a marker, "everything after
+ * `start`" would include nodes this mount never owned, so nothing between them
+ * is touched and the loss is reported.
+ *
+ * Nodes are drained one at a time rather than from a snapshot, re-checking the
+ * markers each step, so a node a teardown inserts into the range is removed too.
+ * The ceiling bounds only that growth: it is the range's size when unmounting
+ * starts plus the same allowance as `dispose()`, so a large fragment is never
+ * cut short. If it is reached anyway, the markers stay, keeping what is left
+ * reachable by a later `unmount()`.
+ */
 function unmountRange(start: Comment, end: Comment): void {
   const parent = start.parentNode;
-  if (!parent) return;
-  const nodes: Node[] = [];
-  for (let n: Node | null = start; n !== null; n = n.nextSibling) {
-    nodes.push(n);
-    if (n === end) break;
+  // Both markers gone: already unmounted. Only the start gone: a lost marker,
+  // reported below like any other; the `end` check makes this idempotent.
+  if (!parent && !end.parentNode) return;
+  let budget = MAX_DRAIN_TEARDOWNS;
+  for (let n = start.nextSibling; n && n !== end; n = n.nextSibling) budget++;
+  // `intact`: both markers still share the parent, with `end` after `start`.
+  // The order test (4 = Node.DOCUMENT_POSITION_FOLLOWING) can walk the siblings,
+  // so it runs once up front and again only when a marker's outer neighbour
+  // changed — a marker cannot move without changing one unless it returns to
+  // the same spot. Per-step it made unmounting quadratic in the range's size.
+  // `start` is never its own sibling, so the first pass always runs the check.
+  let before: Node | null = start;
+  let after: Node | null = null;
+  let intact = true;
+  for (;;) {
+    if (start.parentNode !== parent || end.parentNode !== parent) intact = false;
+    else if (start.previousSibling !== before || end.nextSibling !== after) {
+      before = start.previousSibling;
+      after = end.nextSibling;
+      intact = !!(start.compareDocumentPosition(end) & 4);
+    }
+    // While intact, `end` follows `start`, so `start.nextSibling` is never null.
+    const n = start.nextSibling as ChildNode;
+    if (!intact || n === end) break;
+    if (budget-- <= 0) {
+      reportDrainRunaway("mount", MAX_DRAIN_TEARDOWNS, 1);
+      return;
+    }
+    dispose(n);
+    // A teardown may have removed it already, or moved a marker — the next
+    // check catches the latter before anything else goes. (Intact implies a
+    // parent.)
+    if (n.parentNode === parent) (parent as ParentNode).removeChild(n);
   }
-  for (const n of nodes) dispose(n);
-  for (const n of nodes) n.parentNode?.removeChild(n);
+  if (!intact) {
+    // Outside code removed or reordered a marker; nodes past the point of
+    // loss are left alone because this mount cannot tell whether it owns them.
+    reportError(new Error("[SibuJS mount] fragment markers lost"), { phase: "cleanup", name: "mount" });
+  }
+  start.parentNode?.removeChild(start);
+  end.parentNode?.removeChild(end);
 }

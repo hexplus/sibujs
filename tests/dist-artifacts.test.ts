@@ -204,11 +204,19 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // render-transaction ownership in the disposal/reactive core, including the
     // forwarding of a successful nested transaction to its parent (+111 B).
     // Keeping the transaction helpers out of the root barrel then gave ~250 B
-    // back, so the baseline is 26,600 B again. It was raised to 26,900 B when
+    // back, so the baseline is 26,600 B again. It was raised to 27,000 B when
     // root `mount()` became a render transaction (a throwing component used to
-    // leave its bindings subscribed): that brings `withDisposerRollback()` into
-    // the default bundle (+276 B). The headroom is deliberate: at under 10 B,
-    // every core comment or rename moved the gate.
+    // leave its bindings subscribed), which brings `withDisposerRollback()` into
+    // the default bundle (+276 B), and for the marker-checked range teardown of
+    // a mounted fragment plus contained DevTools create/update emits (+179 B).
+    // The headroom is deliberate: at under 10 B, every core comment or rename
+    // moved the gate.
+    //
+    // The raw cap stayed at 80,202 B through all of that until the same
+    // `mount()` work: the transaction, the fragment range teardown (checked
+    // markers, a ceiling that counts only nodes teardowns add, and a linear
+    // order check) and the contained emits took raw to ~80,290 B, so it is now
+    // 80,400 B.
     //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
@@ -217,8 +225,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_900 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_400);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(27_000 * 1.02));
   });
 });
 
