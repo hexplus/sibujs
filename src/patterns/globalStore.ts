@@ -237,14 +237,51 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
             return;
           }
           called = true;
-          if (synchronous) runFrom(index + 1);
-          else perform(() => runFrom(index + 1), false);
+          if (synchronous) {
+            runFrom(index + 1);
+            return;
+          }
+          const proceed = () => perform(() => runFrom(index + 1), false);
+          // The rejection handler below observes the middleware's promise only
+          // after adoptThenable's extra microtask, so a next() the middleware
+          // queued before returning an ALREADY-rejected promise would run first
+          // and continue a failed chain. For a native promise, ask directly: a
+          // reaction on a settled promise is queued at once, ahead of the
+          // marker queued after it, so it decides whether the promise had
+          // already rejected when next() ran.
+          let decided = false;
+          try {
+            Reflect.apply(Promise.prototype.then, result, [
+              undefined,
+              () => {
+                if (decided) return;
+                decided = true;
+                failed = true;
+                if (DEV)
+                  devWarn(
+                    `globalStore: middleware ${index} next() called after it failed for "${String(action)}"; ignored.`,
+                  );
+              },
+            ]);
+          } catch {
+            // Not a native promise (no result, or a foreign thenable): its
+            // state cannot be read, so continue as before.
+            proceed();
+            return;
+          }
+          queueMicrotask(() => {
+            if (decided) return;
+            decided = true;
+            proceed();
+          });
         };
+        let result: unknown;
         let pending: Promise<unknown> | null;
         try {
+          result = middlewares[index](getState(), String(action), payload, next);
           // adoptThenable reads `then` once (a throwing getter becomes a
           // rejection) and invokes it in a later microtask.
-          pending = adoptThenable(middlewares[index](getState(), String(action), payload, next));
+          pending = adoptThenable(result);
         } catch (err) {
           failed = true;
           throw err;

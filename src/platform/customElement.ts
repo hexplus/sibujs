@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { reportError } from "../core/errors";
-import { disposeNodeOwn, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
+import { dispose, disposeNodeOwn, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -76,6 +76,9 @@ export function defineElement(
     // new render registers. A counter, not a flag: a nested teardown returning
     // must not declare the outer one finished.
     private _teardownDepth = 0;
+    // Disconnects so far. A render compares it across its old-subtree teardown
+    // to detect a disconnect that happened inside it.
+    private _disconnects = 0;
 
     /** Whether rendering must wait for work already in progress. */
     private get _busy(): boolean {
@@ -96,6 +99,7 @@ export function defineElement(
 
     disconnectedCallback(): void {
       this._connected = false;
+      this._disconnects++;
       this._teardownDepth++;
       try {
         this._teardown();
@@ -205,8 +209,22 @@ export function defineElement(
       }
       next.push(el);
 
-      // Disposes the previous subtree exactly once, then commits the new one.
-      replaceChildrenSafely(this._root, ...next);
+      // Dispose the previous subtree, then commit the new one — as two steps, so
+      // the commit can be abandoned. A disposer of the previous subtree may
+      // disconnect the host; that disconnect's teardown has already run the
+      // host-own disposers the new generation registered, so installing it would
+      // leave a generation half disposed and half live, with no later disconnect
+      // to clean it up. Any disconnect during the teardown abandons the commit;
+      // if the host was reconnected meanwhile, the render loop builds afresh.
+      const disconnects = this._disconnects;
+      for (const node of next) node.parentNode?.removeChild(node);
+      replaceChildrenSafely(this._root);
+      if (this._disconnects !== disconnects) {
+        for (const node of next) dispose(node);
+        if (this._connected) this._dirty = true;
+        return;
+      }
+      this._root.replaceChildren(...next);
     }
 
     private _getProps(): Record<string, unknown> {

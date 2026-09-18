@@ -41,7 +41,11 @@ their reactive lifecycle. A teardown that reconnects the element renders the nex
 generation after every teardown has finished draining — counted, so a nested
 disconnect inside a teardown cannot release the outer one early — so the new
 generation's host-owned work is not torn down by the old one. An observed
-attribute written by a disposer defers its render the same way.
+attribute written by a disposer defers its render the same way. A re-render whose
+teardown of the previous subtree disconnects the host (a disposer that removes
+it) no longer installs the new generation into the disconnected element, half
+released by that disconnect and half live; the commit is abandoned, and a
+reconnect renders a fresh generation.
 
 ### Fixed — a failed render rolled back cleanup that belonged to unrelated effects
 
@@ -894,7 +898,18 @@ bypassing the middlewares after it.
 
 Each middleware now receives its own `next`, which advances the chain at most
 once per dispatch. Extra calls are ignored, with a development warning naming the
-middleware and action.
+middleware and action. A middleware that fails (throws, or rejects) before calling
+`next()` never continues — including when it queued `next()` in a microtask and
+then returned an already-rejected promise, which previously ran the action
+before the rejection was observed.
+
+### Fixed — `componentAdapter()` and `createTheme()` resolved inherited keys as classes
+
+A `variant` or `size` named after an `Object.prototype` member (`toString`,
+`constructor`, …) resolved to that member instead of a mapped class, and the
+component threw while building its class. `resolveClass()` could likewise return
+an inherited member from `classOverrides`. Variant, size and override lookups now
+read own string entries only.
 
 ### Fixed — a throwing `globalStore` listener broke `dispatch()` and `reset()`
 

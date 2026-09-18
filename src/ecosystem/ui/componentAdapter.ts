@@ -93,6 +93,17 @@ export interface ThemeAPI {
 }
 
 /**
+ * The string stored under `key` as an OWN property of `map`, or `undefined`.
+ * Class maps are plain objects, so a bare `map[key]` resolves inherited names
+ * (`toString`, `constructor`) to Object.prototype members instead of classes.
+ */
+function ownString(map: Record<string, string> | undefined, key: string | undefined): string | undefined {
+  if (!map || key === undefined || !Object.hasOwn(map, key)) return undefined;
+  const value = map[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
  * Creates a reactive theme for a UI component library adapter.
  */
 export function createTheme(initial: ThemeConfig): ThemeAPI {
@@ -102,9 +113,8 @@ export function createTheme(initial: ThemeConfig): ThemeAPI {
     const config = getConfig();
     const overrideKey = variant ? `${component}-${variant}` : component;
 
-    if (config.classOverrides?.[overrideKey]) {
-      return config.classOverrides[overrideKey];
-    }
+    const override = ownString(config.classOverrides, overrideKey);
+    if (override) return override;
 
     const base = `${config.prefix}-${component}`;
     return variant ? `${base} ${config.prefix}-${component}--${variant}` : base;
@@ -235,12 +245,16 @@ export function componentAdapter(config: AdapterConfig): {
         const pick = (key: string, fallback: string): string =>
           Object.hasOwn(overrides, key) ? overrides[key] : reprefix(fallback, current.prefix);
 
+        // Own keys only: an inherited name (`variant: "toString"`) would
+        // otherwise resolve to an Object.prototype member, not a class.
         const classes: string[] = [pick(name, mapping.baseClass)];
-        if (variant && mapping.variants?.[variant]) {
-          classes.push(pick(`${name}-${variant}`, mapping.variants[variant]));
+        const variantClass = ownString(mapping.variants, variant);
+        if (variant && variantClass) {
+          classes.push(pick(`${name}-${variant}`, variantClass));
         }
-        if (size && mapping.sizes?.[size]) {
-          classes.push(pick(`${name}-${size}`, mapping.sizes[size]));
+        const sizeClass = ownString(mapping.sizes, size);
+        if (size && sizeClass) {
+          classes.push(pick(`${name}-${size}`, sizeClass));
         }
         return classes.filter(Boolean).join(" ");
       };
