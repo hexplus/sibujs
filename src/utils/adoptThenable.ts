@@ -20,10 +20,12 @@ export interface Adoption {
    * thenable resolving to a promise …), so the decision waits until the chain
    * reaches a stable point, however deep it is:
    * - a terminal value or rejection: open or rejected;
-   * - a foreign `then` that was invoked and reported nothing, even in the
-   *   reaction a promise-backed `then` queues for an already-settled state:
-   *   genuinely pending, so open. A `then` that holds back a known state for
-   *   several microtasks cannot be told apart from a pending one;
+   * - a foreign `then` that reported nothing synchronously when the adoption
+   *   invoked it: pending, so open. Whatever it reports afterwards is a later
+   *   settlement — including a promise-backed `then` (a wrapper, a subclass
+   *   overriding `then`, another realm's promise) that delivers an
+   *   already-settled state through a reaction, since nothing observable tells
+   *   that apart from a thenable settling later;
    * - a native promise: asked directly through its native `then`, whose reaction
    *   on a settled promise is queued at once — so a rejection that happened
    *   before this call is reported, one that happens after it is not.
@@ -160,17 +162,10 @@ export function adopt(value: unknown): Adoption | null {
       } catch (error) {
         onReject(error);
       }
-      if (!done && state === "invoking") {
-        // Reported nothing synchronously — but a promise-backed `then` (a
-        // wrapped or subclassed promise, a cross-realm one) delivers even an
-        // already-settled state through a reaction it just queued. Decide one
-        // microtask later, after that reaction, and only if the chain has not
-        // moved on meanwhile; a genuinely pending thenable is still pending.
-        state = "pending";
-        queueMicrotask(() => {
-          if (state === "pending") transition("pending");
-        });
-      }
+      // Reported nothing synchronously: pending. Not deferred to "give it time"
+      // — whatever it reports later (even a promise-backed `then` delivering a
+      // state it already held) is indistinguishable from a later settlement.
+      if (!done && state === "invoking") transition("pending");
     });
   };
 
@@ -182,12 +177,12 @@ export function adopt(value: unknown): Adoption | null {
       else (state === "rejected" ? onRejected : onOpen)();
     };
     // A native promise is asked NOW, so its answer reflects the moment of the
-    // call; an unresolved foreign step is waited for; anything else is known.
-    // A queued decide() runs after any reaction a promise-backed `then` already
-    // queued, so a `pending` state is re-read once those have had their turn.
+    // call; an unresolved foreign step is waited for (its synchronous report
+    // decides); anything else is read NOW and only delivered later, so a
+    // settlement after this call cannot change the answer.
     if (state === "native") probeNative(nativeTarget, onRejected, onOpen);
     else if (state === "invoking") waiters.push(decide);
-    else queueMicrotask(decide);
+    else queueMicrotask(state === "rejected" ? onRejected : onOpen);
   };
 
   return { promise, failedEarly: false, probe };

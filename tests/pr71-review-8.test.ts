@@ -291,6 +291,11 @@ describe("globalStore middleware rejected before a queued next()", () => {
       },
     });
 
+    /** A foreign thenable delegating to `promise`: its `then` is not the native one. */
+    const wrap = (promise: Promise<unknown>) =>
+      // biome-ignore lint/suspicious/noThenProperty: a promise wrapper is the subject under test
+      ({ then: promise.then.bind(promise) }) as unknown as PromiseLike<void>;
+
     async function expectBlocked(result: PromiseLike<void>, message: string) {
       const { store, action } = storeWith((_s, _a, _p, next) => {
         queueMicrotask(next);
@@ -339,16 +344,42 @@ describe("globalStore middleware rejected before a queued next()", () => {
       await expectBlocked(resolvingTo(hostile), "nested getter");
     });
 
-    /** A foreign thenable delegating to `promise`: its `then` is not the native one. */
-    const wrap = (promise: Promise<unknown>) =>
-      // biome-ignore lint/suspicious/noThenProperty: a promise wrapper is the subject under test
-      ({ then: promise.then.bind(promise) }) as unknown as PromiseLike<void>;
+    // CONTRACT: a non-native `then` counts as failed before next() only if it
+    // rejects or throws synchronously when the adoption invokes it. Anything it
+    // reports later is a later settlement — the action stays committed and the
+    // failure is reported. A promise-backed `then` that delivers an
+    // already-rejected state through a reaction is, observably, the same thing
+    // as a thenable rejecting one microtask later, so both land here.
+    async function expectLateFailure(result: PromiseLike<void>, message: string) {
+      const { store, action } = storeWith((_s, _a, _p, next) => {
+        queueMicrotask(next);
+        return result;
+      });
+      store.dispatch("inc");
+      await flush();
+      expect(action).toHaveBeenCalledTimes(1);
+      expect(store.getState().count).toBe(1);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler.mock.calls[0][0]).toMatchObject({ message });
+    }
 
-    it("an already-rejected wrapped promise beats queued next()", async () => {
-      await expectBlocked(wrap(Promise.reject(new Error("wrapped failure"))), "wrapped failure");
+    it("a foreign thenable rejecting one microtask after next() keeps the action", async () => {
+      await expectLateFailure(
+        {
+          // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+          then(_resolve: unknown, reject?: (err: unknown) => void) {
+            queueMicrotask(() => reject?.(new Error("late failure")));
+          },
+        } as unknown as PromiseLike<void>,
+        "late failure",
+      );
     });
 
-    it("an already-rejected promise subclass with its own then() beats queued next()", async () => {
+    it("an already-rejected wrapped promise reports asynchronously, so it is a late failure", async () => {
+      await expectLateFailure(wrap(Promise.reject(new Error("wrapped failure"))), "wrapped failure");
+    });
+
+    it("an already-rejected promise subclass overriding then() is a late failure", async () => {
       class WrappedPromise<T> extends Promise<T> {
         // biome-ignore lint/suspicious/noThenProperty: a promise subclass is the subject under test
         override then<A = T, B = never>(
@@ -359,13 +390,14 @@ describe("globalStore middleware rejected before a queued next()", () => {
         }
       }
       const failed = WrappedPromise.reject(new Error("subclass failure")) as PromiseLike<void>;
-      await expectBlocked(failed, "subclass failure");
+      await expectLateFailure(failed, "subclass failure");
     });
 
-    it("a wrapped promise nested in a foreign chain beats queued next()", async () => {
+    it("a promise subclass that inherits the native then() is probed natively and blocks", async () => {
+      class PlainSubclass<T> extends Promise<T> {}
       await expectBlocked(
-        resolvingTo(wrap(Promise.reject(new Error("nested wrapped failure")))),
-        "nested wrapped failure",
+        PlainSubclass.reject(new Error("plain subclass failure")) as PromiseLike<void>,
+        "plain subclass failure",
       );
     });
 
