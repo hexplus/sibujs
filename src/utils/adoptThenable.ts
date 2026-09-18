@@ -2,7 +2,7 @@ const nativeThen = Promise.prototype.then;
 
 /**
  * One adoption of a thenable: the promise it settles, plus what that same
- * adoption can tell synchronously about the thenable's state.
+ * adoption knows about the thenable's state.
  *
  * @internal
  */
@@ -12,14 +12,21 @@ export interface Adoption {
   /** The adoption already failed: reading `then` threw. */
   readonly failedEarly: boolean;
   /**
-   * Ask whether the thenable has ALREADY rejected, through the `then` this
-   * adoption captured — never a second read of the property. Possible only when
-   * that `then` is the native one, whose reaction on a settled promise is queued
-   * at once: exactly one callback then runs, one microtask later. Returns
-   * `false` (and calls neither) when the state cannot be read.
+   * Decide whether the thenable has rejected, using only the `then` this
+   * adoption captured — never a second read of the property. Exactly one
+   * callback runs, never synchronously.
+   *
+   * - Native `then`: asked directly. Its reaction on a settled promise is queued
+   *   at once, so this reports the promise's state at the time of the call.
+   * - Any other `then`: decided by the adoption's own invocation of it (waiting
+   *   for that invocation if it has not happened yet). A `then` that rejects
+   *   synchronously, or throws, counts as rejected; one that fulfils, or has not
+   *   settled yet, as open.
    */
-  probe(onRejected: () => void, onOpen: () => void): boolean;
+  probe(onRejected: () => void, onOpen: () => void): void;
 }
+
+type AdoptionState = "pending-invocation" | "pending" | "resolved" | "rejected";
 
 /**
  * Adopt `value` if it is a thenable, reading its `then` exactly once, and keep
@@ -35,11 +42,32 @@ export function adopt(value: unknown): Adoption | null {
   try {
     then = (value as { then?: unknown }).then;
   } catch (error) {
-    return { promise: Promise.reject(error), failedEarly: true, probe: () => false };
+    return {
+      promise: Promise.reject(error),
+      failedEarly: true,
+      probe: (onRejected) => queueMicrotask(onRejected),
+    };
   }
   if (typeof then !== "function") return null;
   const captured = then as (...args: unknown[]) => unknown;
+
+  // Tracked synchronously by the resolvers handed to the thenable, so the
+  // adoption knows what its `then` reported the moment it returns.
+  let state: AdoptionState = "pending-invocation";
+  const afterInvocation: Array<() => void> = [];
+
   const promise = new Promise((resolve, reject) => {
+    // Settle at most once, like the resolving functions they wrap.
+    const adoptedResolve = (result: unknown) => {
+      if (state === "resolved" || state === "rejected") return;
+      state = "resolved";
+      resolve(result);
+    };
+    const adoptedReject = (error: unknown) => {
+      if (state === "resolved" || state === "rejected") return;
+      state = "rejected";
+      reject(error);
+    };
     // Invoked in a later microtask, like native thenable assimilation, so the
     // caller finishes its synchronous setup (form.handleSubmit raises its
     // `submitting` lock) before any thenable code can re-enter it. Reflect.apply
@@ -47,31 +75,39 @@ export function adopt(value: unknown): Adoption | null {
     // of `then` is ignored.
     queueMicrotask(() => {
       try {
-        Reflect.apply(captured, value, [resolve, reject]);
+        Reflect.apply(captured, value, [adoptedResolve, adoptedReject]);
       } catch (error) {
-        reject(error);
+        adoptedReject(error);
       }
+      if (state === "pending-invocation") state = "pending";
+      for (const waiter of afterInvocation.splice(0)) waiter();
     });
   });
-  const probe = (onRejected: () => void, onOpen: () => void): boolean => {
-    if (captured !== nativeThen) return false;
-    let decided = false;
-    const decide = (rejected: boolean) => {
-      if (decided) return;
-      decided = true;
-      (rejected ? onRejected : onOpen)();
-    };
-    try {
-      Reflect.apply(captured, value, [undefined, () => decide(true)]);
-    } catch {
-      // The adoption's own invocation of this `then` throws the same way,
-      // which rejects it.
-      queueMicrotask(() => decide(true));
-      return true;
+
+  const probe = (onRejected: () => void, onOpen: () => void): void => {
+    if (captured === nativeThen) {
+      let decided = false;
+      const decide = (rejected: boolean) => {
+        if (decided) return;
+        decided = true;
+        (rejected ? onRejected : onOpen)();
+      };
+      try {
+        Reflect.apply(captured, value, [undefined, () => decide(true)]);
+      } catch {
+        // The adoption's own invocation of this `then` throws the same way,
+        // which rejects it.
+        queueMicrotask(() => decide(true));
+        return;
+      }
+      queueMicrotask(() => decide(false));
+      return;
     }
-    queueMicrotask(() => decide(false));
-    return true;
+    const decide = () => (state === "rejected" ? onRejected : onOpen)();
+    if (state === "pending-invocation") afterInvocation.push(decide);
+    else queueMicrotask(decide);
   };
+
   return { promise, failedEarly: false, probe };
 }
 

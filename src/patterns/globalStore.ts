@@ -242,21 +242,25 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
             return;
           }
           const proceed = () => perform(() => runFrom(index + 1), false);
-          // The rejection handler below observes the middleware's promise only
-          // after the adoption's extra microtask, so a next() the middleware
-          // queued before returning an ALREADY-rejected promise would run first
-          // and continue a failed chain. Ask the same adoption instead — it
-          // probes through the `then` it already captured, so it cannot disagree
-          // with the rejection handler about what the middleware returned.
-          const probing = adoption?.probe(() => {
+          // Not a thenable: nothing can fail after the middleware returned.
+          if (!adoption) {
+            proceed();
+            return;
+          }
+          // The rejection handler below observes the middleware's result only
+          // after the adoption settles, so a next() the middleware queued
+          // before returning an already-failing thenable (a rejected promise, a
+          // `then` that rejects synchronously or throws) would run first and
+          // continue a failed chain. Ask the same adoption instead — it decides
+          // through the `then` it already captured, so it cannot disagree with
+          // the rejection handler about what the middleware returned.
+          adoption.probe(() => {
             failed = true;
             if (DEV)
               devWarn(
                 `globalStore: middleware ${index} next() called after it failed for "${String(action)}"; ignored.`,
               );
           }, proceed);
-          // Not a thenable, or a foreign one whose state cannot be read.
-          if (!probing) proceed();
         };
         let adoption: Adoption | null = null;
         try {

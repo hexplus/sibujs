@@ -196,6 +196,85 @@ describe("globalStore middleware rejected before a queued next()", () => {
     expect(handler.mock.calls[0][0]).toMatchObject({ message: "hostile constructor" });
   });
 
+  it("a synchronously rejecting foreign thenable beats an already-queued next()", async () => {
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return {
+        // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+        then(_resolve: unknown, reject?: (err: unknown) => void) {
+          reject?.(new Error("foreign thenable failed"));
+        },
+      } as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+
+    expect(action).not.toHaveBeenCalled();
+    expect(store.getState().count).toBe(0);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toMatchObject({ message: "foreign thenable failed" });
+  });
+
+  it("a foreign thenable whose then() throws beats an already-queued next()", async () => {
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return {
+        // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+        then() {
+          throw new Error("then invocation failed");
+        },
+      } as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+
+    expect(action).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toMatchObject({ message: "then invocation failed" });
+  });
+
+  it("a synchronously fulfilling foreign thenable still continues a queued next()", async () => {
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return {
+        // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+        then(resolve?: (v: unknown) => void) {
+          resolve?.(undefined);
+        },
+      } as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("a foreign thenable that rejects only after next() keeps the committed action", async () => {
+    let rejectLater: (err: unknown) => void = () => {};
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return {
+        // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+        then(_resolve: unknown, reject: (err: unknown) => void) {
+          rejectLater = reject;
+        },
+      } as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+    expect(action).toHaveBeenCalledTimes(1);
+
+    rejectLater(new Error("late failure"));
+    await flush();
+    expect(store.getState().count).toBe(1);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("a queued next() still continues while the middleware's promise is pending", async () => {
     let finish: () => void = () => {};
     const { store, action } = storeWith((_s, _a, _p, next) => {
