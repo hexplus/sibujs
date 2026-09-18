@@ -12,21 +12,50 @@ export interface Adoption {
   /** The adoption already failed: reading `then` threw. */
   readonly failedEarly: boolean;
   /**
-   * Decide whether the thenable has rejected, using only the `then` this
-   * adoption captured — never a second read of the property. Exactly one
-   * callback runs, never synchronously.
+   * Decide whether the adoption has failed, using only the `then` functions it
+   * captured — never a second read of a property. Exactly one callback runs,
+   * never synchronously.
    *
-   * - Native `then`: asked directly. Its reaction on a settled promise is queued
-   *   at once, so this reports the promise's state at the time of the call.
-   * - Any other `then`: decided by the adoption's own invocation of it (waiting
-   *   for that invocation if it has not happened yet). A `then` that rejects
-   *   synchronously, or throws, counts as rejected; one that fulfils, or has not
-   *   settled yet, as open.
+   * The adoption follows the resolution chain itself (a thenable resolving to a
+   * thenable resolving to a promise …), so the decision waits until the chain
+   * reaches a stable point, however deep it is:
+   * - a terminal value or rejection: open or rejected;
+   * - a foreign `then` that was invoked and reported nothing: genuinely pending,
+   *   so open;
+   * - a native promise: asked directly through its native `then`, whose reaction
+   *   on a settled promise is queued at once — so a rejection that happened
+   *   before this call is reported, one that happens after it is not.
    */
   probe(onRejected: () => void, onOpen: () => void): void;
 }
 
-type AdoptionState = "pending-invocation" | "pending" | "resolved" | "rejected";
+/**
+ * Where the resolution chain stands.
+ * - `invoking`: a foreign `then` is queued for invocation; not known yet.
+ * - `pending`: that `then` was invoked and reported nothing.
+ * - `native`: the chain currently rests on a native promise.
+ * - `fulfilled` / `rejected`: terminal.
+ */
+type ChainState = "invoking" | "pending" | "native" | "fulfilled" | "rejected";
+
+/** Ask a native promise whether it has already rejected; see {@link Adoption.probe}. */
+function probeNative(target: unknown, onRejected: () => void, onOpen: () => void): void {
+  let decided = false;
+  const decide = (rejected: boolean) => {
+    if (decided) return;
+    decided = true;
+    (rejected ? onRejected : onOpen)();
+  };
+  try {
+    Reflect.apply(nativeThen, target, [undefined, () => decide(true)]);
+  } catch {
+    // The adoption's own invocation of this `then` throws the same way, which
+    // rejects it.
+    queueMicrotask(() => decide(true));
+    return;
+  }
+  queueMicrotask(() => decide(false));
+}
 
 /**
  * Adopt `value` if it is a thenable, reading its `then` exactly once, and keep
@@ -49,62 +78,101 @@ export function adopt(value: unknown): Adoption | null {
     };
   }
   if (typeof then !== "function") return null;
-  const captured = then as (...args: unknown[]) => unknown;
 
-  // Tracked synchronously by the resolvers handed to the thenable, so the
-  // adoption knows what its `then` reported the moment it returns.
-  let state: AdoptionState = "pending-invocation";
-  const afterInvocation: Array<() => void> = [];
-
+  let resolvePromise!: (result: unknown) => void;
+  let rejectPromise!: (error: unknown) => void;
   const promise = new Promise((resolve, reject) => {
-    // Settle at most once, like the resolving functions they wrap.
-    const adoptedResolve = (result: unknown) => {
-      if (state === "resolved" || state === "rejected") return;
-      state = "resolved";
-      resolve(result);
-    };
-    const adoptedReject = (error: unknown) => {
-      if (state === "resolved" || state === "rejected") return;
-      state = "rejected";
-      reject(error);
-    };
-    // Invoked in a later microtask, like native thenable assimilation, so the
-    // caller finishes its synchronous setup (form.handleSubmit raises its
-    // `submitting` lock) before any thenable code can re-enter it. Reflect.apply
-    // avoids the function's own, overridable `call` property; the return value
-    // of `then` is ignored.
-    queueMicrotask(() => {
-      try {
-        Reflect.apply(captured, value, [adoptedResolve, adoptedReject]);
-      } catch (error) {
-        adoptedReject(error);
-      }
-      if (state === "pending-invocation") state = "pending";
-      for (const waiter of afterInvocation.splice(0)) waiter();
-    });
+    resolvePromise = resolve;
+    rejectPromise = reject;
   });
 
-  const probe = (onRejected: () => void, onOpen: () => void): void => {
-    if (captured === nativeThen) {
-      let decided = false;
-      const decide = (rejected: boolean) => {
-        if (decided) return;
-        decided = true;
-        (rejected ? onRejected : onOpen)();
-      };
-      try {
-        Reflect.apply(captured, value, [undefined, () => decide(true)]);
-      } catch {
-        // The adoption's own invocation of this `then` throws the same way,
-        // which rejects it.
-        queueMicrotask(() => decide(true));
-        return;
-      }
-      queueMicrotask(() => decide(false));
+  let state: ChainState = "invoking";
+  let nativeTarget: unknown;
+  const waiters: Array<() => void> = [];
+  const transition = (next: ChainState) => {
+    state = next;
+    if (next === "invoking") return;
+    for (const waiter of waiters.splice(0)) waiter();
+  };
+  const fulfil = (result: unknown) => {
+    resolvePromise(result);
+    transition("fulfilled");
+  };
+  const fail = (error: unknown) => {
+    rejectPromise(error);
+    transition("rejected");
+  };
+
+  // The promise resolution procedure, run here rather than delegated to a
+  // native resolve(): delegating hid a nested thenable's assimilation, so the
+  // chain looked settled while it could still reject.
+  const follow = (result: unknown): void => {
+    if (result === promise) {
+      fail(new TypeError("adoptThenable: a thenable resolved to its own adoption"));
       return;
     }
-    const decide = () => (state === "rejected" ? onRejected : onOpen)();
-    if (state === "pending-invocation") afterInvocation.push(decide);
+    if (result === null || (typeof result !== "object" && typeof result !== "function")) {
+      fulfil(result);
+      return;
+    }
+    let nextThen: unknown;
+    try {
+      nextThen = (result as { then?: unknown }).then;
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    if (typeof nextThen !== "function") {
+      fulfil(result);
+      return;
+    }
+    invokeLater(result, nextThen as (...args: unknown[]) => unknown);
+  };
+
+  // Invoked in a later microtask, like native thenable assimilation, so the
+  // caller finishes its synchronous setup (form.handleSubmit raises its
+  // `submitting` lock) before any thenable code can re-enter it. Each invocation
+  // gets its own resolvers, usable once. Reflect.apply avoids the function's
+  // own, overridable `call` property; the return value of `then` is ignored.
+  const invokeLater = (target: unknown, targetThen: (...args: unknown[]) => unknown): void => {
+    if (targetThen === nativeThen) {
+      nativeTarget = target;
+      transition("native");
+    } else {
+      transition("invoking");
+    }
+    queueMicrotask(() => {
+      let done = false;
+      const onResolve = (result: unknown) => {
+        if (done) return;
+        done = true;
+        follow(result);
+      };
+      const onReject = (error: unknown) => {
+        if (done) return;
+        done = true;
+        fail(error);
+      };
+      try {
+        Reflect.apply(targetThen, target, [onResolve, onReject]);
+      } catch (error) {
+        onReject(error);
+      }
+      if (!done && state === "invoking") transition("pending");
+    });
+  };
+
+  invokeLater(value, then as (...args: unknown[]) => unknown);
+
+  const probe = (onRejected: () => void, onOpen: () => void): void => {
+    const decide = () => {
+      if (state === "native") probeNative(nativeTarget, onRejected, onOpen);
+      else (state === "rejected" ? onRejected : onOpen)();
+    };
+    // A native promise is asked NOW, so its answer reflects the moment of the
+    // call; an unresolved foreign step is waited for; anything else is known.
+    if (state === "native") probeNative(nativeTarget, onRejected, onOpen);
+    else if (state === "invoking") waiters.push(decide);
     else queueMicrotask(decide);
   };
 

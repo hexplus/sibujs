@@ -275,6 +275,85 @@ describe("globalStore middleware rejected before a queued next()", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  describe("nested resolution chains", () => {
+    /** A foreign thenable that resolves synchronously with `inner`. */
+    const resolvingTo = (inner: unknown) =>
+      ({
+        // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+        then(resolve?: (value: unknown) => void) {
+          resolve?.(inner);
+        },
+      }) as unknown as PromiseLike<void>;
+    const rejectingThenable = (message: string) => ({
+      // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+      then(_resolve: unknown, reject?: (err: unknown) => void) {
+        reject?.(new Error(message));
+      },
+    });
+
+    async function expectBlocked(result: PromiseLike<void>, message: string) {
+      const { store, action } = storeWith((_s, _a, _p, next) => {
+        queueMicrotask(next);
+        return result;
+      });
+      store.dispatch("inc");
+      await flush();
+      expect(action).not.toHaveBeenCalled();
+      expect(store.getState().count).toBe(0);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler.mock.calls[0][0]).toMatchObject({ message });
+    }
+
+    async function expectContinued(result: PromiseLike<void>) {
+      const { store, action } = storeWith((_s, _a, _p, next) => {
+        queueMicrotask(next);
+        return result;
+      });
+      store.dispatch("inc");
+      await flush();
+      expect(action).toHaveBeenCalledTimes(1);
+    }
+
+    it("a foreign thenable resolving to an immediately rejecting thenable beats queued next()", async () => {
+      await expectBlocked(resolvingTo(rejectingThenable("nested failure")), "nested failure");
+    });
+
+    it("a foreign thenable resolving to a rejected native promise beats queued next()", async () => {
+      await expectBlocked(resolvingTo(Promise.reject(new Error("nested failure"))), "nested failure");
+    });
+
+    it("a deep chain ending in a rejection beats queued next()", async () => {
+      await expectBlocked(
+        resolvingTo(resolvingTo(resolvingTo(resolvingTo(rejectingThenable("deep failure"))))),
+        "deep failure",
+      );
+    });
+
+    it("a nested then accessor that throws beats queued next()", async () => {
+      const hostile = {
+        // biome-ignore lint/suspicious/noThenProperty: a hostile thenable is the subject under test
+        get then() {
+          throw new Error("nested getter");
+        },
+      };
+      await expectBlocked(resolvingTo(hostile), "nested getter");
+    });
+
+    it("a chain ending in a plain value continues", async () => {
+      await expectContinued(resolvingTo(resolvingTo(Promise.resolve(42))));
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("a chain ending in a genuinely pending thenable continues", async () => {
+      // biome-ignore lint/suspicious/noThenProperty: a foreign thenable is the subject under test
+      await expectContinued(resolvingTo(resolvingTo({ then() {} })));
+    });
+
+    it("a chain ending in a pending native promise continues", async () => {
+      await expectContinued(resolvingTo(new Promise(() => {})));
+    });
+  });
+
   it("a queued next() still continues while the middleware's promise is pending", async () => {
     let finish: () => void = () => {};
     const { store, action } = storeWith((_s, _a, _p, next) => {
