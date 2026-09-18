@@ -339,6 +339,45 @@ describe("globalStore middleware rejected before a queued next()", () => {
       await expectBlocked(resolvingTo(hostile), "nested getter");
     });
 
+    /** A foreign thenable delegating to `promise`: its `then` is not the native one. */
+    const wrap = (promise: Promise<unknown>) =>
+      // biome-ignore lint/suspicious/noThenProperty: a promise wrapper is the subject under test
+      ({ then: promise.then.bind(promise) }) as unknown as PromiseLike<void>;
+
+    it("an already-rejected wrapped promise beats queued next()", async () => {
+      await expectBlocked(wrap(Promise.reject(new Error("wrapped failure"))), "wrapped failure");
+    });
+
+    it("an already-rejected promise subclass with its own then() beats queued next()", async () => {
+      class WrappedPromise<T> extends Promise<T> {
+        // biome-ignore lint/suspicious/noThenProperty: a promise subclass is the subject under test
+        override then<A = T, B = never>(
+          onFulfilled?: ((value: T) => A | PromiseLike<A>) | null,
+          onRejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+        ): Promise<A | B> {
+          return super.then(onFulfilled, onRejected);
+        }
+      }
+      const failed = WrappedPromise.reject(new Error("subclass failure")) as PromiseLike<void>;
+      await expectBlocked(failed, "subclass failure");
+    });
+
+    it("a wrapped promise nested in a foreign chain beats queued next()", async () => {
+      await expectBlocked(
+        resolvingTo(wrap(Promise.reject(new Error("nested wrapped failure")))),
+        "nested wrapped failure",
+      );
+    });
+
+    it("an already-fulfilled wrapped promise continues", async () => {
+      await expectContinued(wrap(Promise.resolve()));
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("a pending wrapped promise continues", async () => {
+      await expectContinued(wrap(new Promise(() => {})));
+    });
+
     it("a chain ending in a plain value continues", async () => {
       await expectContinued(resolvingTo(resolvingTo(Promise.resolve(42))));
       expect(handler).not.toHaveBeenCalled();

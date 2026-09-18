@@ -902,8 +902,9 @@ middleware and action. A middleware that fails (throws, or rejects) before calli
 `next()` never continues — including when it queued `next()` in a microtask and
 then returned an already-failing thenable — a rejected promise, a `then` accessor
 that throws, a custom `PromiseLike` whose `then` rejects synchronously or throws,
-or one that resolves to such a thenable at any depth — which previously ran the
-action before the failure was observed.
+an already-rejected promise behind a non-native `then` (a wrapper, a subclass
+overriding `then`, another realm's promise), or one that resolves to any of these
+at any depth — which previously ran the action before the failure was observed.
 
 ### Fixed — `componentAdapter()` and `createTheme()` resolved inherited keys as classes
 

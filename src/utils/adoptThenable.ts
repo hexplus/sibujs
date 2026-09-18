@@ -20,8 +20,10 @@ export interface Adoption {
    * thenable resolving to a promise …), so the decision waits until the chain
    * reaches a stable point, however deep it is:
    * - a terminal value or rejection: open or rejected;
-   * - a foreign `then` that was invoked and reported nothing: genuinely pending,
-   *   so open;
+   * - a foreign `then` that was invoked and reported nothing, even in the
+   *   reaction a promise-backed `then` queues for an already-settled state:
+   *   genuinely pending, so open. A `then` that holds back a known state for
+   *   several microtasks cannot be told apart from a pending one;
    * - a native promise: asked directly through its native `then`, whose reaction
    *   on a settled promise is queued at once — so a rejection that happened
    *   before this call is reported, one that happens after it is not.
@@ -158,7 +160,17 @@ export function adopt(value: unknown): Adoption | null {
       } catch (error) {
         onReject(error);
       }
-      if (!done && state === "invoking") transition("pending");
+      if (!done && state === "invoking") {
+        // Reported nothing synchronously — but a promise-backed `then` (a
+        // wrapped or subclassed promise, a cross-realm one) delivers even an
+        // already-settled state through a reaction it just queued. Decide one
+        // microtask later, after that reaction, and only if the chain has not
+        // moved on meanwhile; a genuinely pending thenable is still pending.
+        state = "pending";
+        queueMicrotask(() => {
+          if (state === "pending") transition("pending");
+        });
+      }
     });
   };
 
@@ -171,6 +183,8 @@ export function adopt(value: unknown): Adoption | null {
     };
     // A native promise is asked NOW, so its answer reflects the moment of the
     // call; an unresolved foreign step is waited for; anything else is known.
+    // A queued decide() runs after any reaction a promise-backed `then` already
+    // queued, so a `pending` state is re-read once those have had their turn.
     if (state === "native") probeNative(nativeTarget, onRejected, onOpen);
     else if (state === "invoking") waiters.push(decide);
     else queueMicrotask(decide);
