@@ -7,6 +7,7 @@
  * Provides critical path optimization, route prerendering, and SSR caching.
  */
 
+import { reportError } from "../core/errors";
 import { renderToString } from "../platform/ssr";
 
 // ─── Critical Resource Preloader ────────────────────────────────────────────
@@ -62,6 +63,55 @@ interface PrerenderCacheEntry {
 }
 
 /**
+ * Validate a cache size limit. `0` disables caching; negative, fractional and
+ * non-finite limits are rejected rather than silently behaving as some other
+ * bound.
+ */
+function assertCacheSize(name: string, value: number): void {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new RangeError(`[Startup] ${name} must be a non-negative integer, got ${value}`);
+  }
+}
+
+/**
+ * Make room to insert `key` into a timestamped cache without exceeding
+ * `maxSize`. Returns false when the cache cannot hold anything (`maxSize` 0).
+ *
+ * Overwriting an existing key needs no room, so nothing is evicted — evicting
+ * first used to discard an unrelated entry on every update at capacity. For a
+ * new key, expired entries go first, then the oldest valid ones (compared with
+ * `!== null`, so an oldest key of "" is evicted too).
+ */
+function makeRoomFor<E extends { timestamp: number }>(
+  cache: Map<string, E>,
+  key: string,
+  maxSize: number,
+  isValid: (entry: E) => boolean,
+): boolean {
+  if (maxSize === 0) return false;
+  if (cache.has(key)) return true;
+  if (cache.size < maxSize) return true;
+
+  for (const [k, entry] of cache) {
+    if (!isValid(entry)) cache.delete(k);
+  }
+
+  while (cache.size >= maxSize) {
+    let oldestKey: string | null = null;
+    let oldestTime = Infinity;
+    for (const [k, entry] of cache) {
+      if (entry.timestamp < oldestTime) {
+        oldestTime = entry.timestamp;
+        oldestKey = k;
+      }
+    }
+    if (oldestKey === null) break;
+    cache.delete(oldestKey);
+  }
+  return true;
+}
+
+/**
  * Prerender a set of routes for instant navigation.
  * Renders components to HTML using `renderToString` and caches them.
  * Supports TTL-based expiry and maximum cache size limits.
@@ -72,6 +122,7 @@ export function prerenderRoutes(
 ) {
   const maxCacheSize = options?.maxCacheSize ?? 50;
   const cacheTTL = options?.cacheTTL ?? 0; // 0 = no expiry
+  assertCacheSize("maxCacheSize", maxCacheSize);
 
   const cache = new Map<string, PrerenderCacheEntry>();
 
@@ -80,22 +131,10 @@ export function prerenderRoutes(
     return Date.now() - entry.timestamp < cacheTTL;
   }
 
-  function evictOldest(): void {
-    if (cache.size < maxCacheSize) return;
-    let oldestKey: string | null = null;
-    let oldestTime = Infinity;
-    for (const [key, entry] of cache) {
-      if (entry.timestamp < oldestTime) {
-        oldestTime = entry.timestamp;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey) cache.delete(oldestKey);
-  }
-
-  // Prerender all provided routes immediately
+  // Prerender all provided routes immediately. With caching disabled
+  // (`maxCacheSize: 0`) there is nowhere to keep the HTML, so nothing is rendered.
   for (const route of routes) {
-    evictOldest();
+    if (!makeRoomFor(cache, route.path, maxCacheSize, isValid)) break;
     const html = renderToString(route.component());
     cache.set(route.path, { html, timestamp: Date.now() });
   }
@@ -168,6 +207,7 @@ interface SSRCacheEntry {
 export function createSSRCache(config?: { maxSize?: number; defaultTTL?: number }) {
   const maxSize = config?.maxSize ?? 100;
   const defaultTTL = config?.defaultTTL ?? 60000; // 1 minute default
+  assertCacheSize("maxSize", maxSize);
 
   const cache = new Map<string, SSRCacheEntry>();
   let hits = 0;
@@ -176,19 +216,6 @@ export function createSSRCache(config?: { maxSize?: number; defaultTTL?: number 
   function isValid(entry: SSRCacheEntry): boolean {
     if (entry.ttl === 0) return true; // 0 = no expiry
     return Date.now() - entry.timestamp < entry.ttl;
-  }
-
-  function evictOldest(): void {
-    if (cache.size < maxSize) return;
-    let oldestKey: string | null = null;
-    let oldestTime = Infinity;
-    for (const [key, entry] of cache) {
-      if (entry.timestamp < oldestTime) {
-        oldestTime = entry.timestamp;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey) cache.delete(oldestKey);
   }
 
   return {
@@ -210,7 +237,7 @@ export function createSSRCache(config?: { maxSize?: number; defaultTTL?: number 
 
     /** Cache an HTML string with an optional TTL override */
     set(key: string, html: string, ttl?: number): void {
-      evictOldest();
+      if (!makeRoomFor(cache, key, maxSize, isValid)) return;
       cache.set(key, {
         html,
         timestamp: Date.now(),
@@ -250,6 +277,9 @@ export function createSSRCache(config?: { maxSize?: number; defaultTTL?: number 
 
 // ─── Defer Non-Critical Work ────────────────────────────────────────────────
 
+/** Upper bound on how long deferred work waits for an idle period. */
+const DEFER_IDLE_TIMEOUT_MS = 2000;
+
 /**
  * Measure and optimize Time to Interactive (TTI).
  * Defers non-critical work until after the main thread is idle.
@@ -258,18 +288,29 @@ export function createSSRCache(config?: { maxSize?: number; defaultTTL?: number 
 export function deferNonCritical(tasks: Array<() => void>): void {
   if (tasks.length === 0) return;
 
-  const schedule =
-    typeof requestIdleCallback !== "undefined" ? requestIdleCallback : (cb: () => void) => setTimeout(cb, 1);
+  // A finite timeout makes the browser invoke the callback even on a page that
+  // never goes idle; without one, deferred work could wait forever.
+  const schedule: (cb: (deadline?: IdleDeadline) => void) => void =
+    typeof requestIdleCallback !== "undefined"
+      ? (cb) => {
+          requestIdleCallback(cb, { timeout: DEFER_IDLE_TIMEOUT_MS });
+        }
+      : (cb) => {
+          setTimeout(cb, 1);
+        };
 
   // Copy tasks so the original array is not mutated
   const queue = [...tasks];
   let index = 0;
 
   function processNext(deadline?: IdleDeadline): void {
-    // Process as many tasks as we can within the idle period
+    // Every invocation runs at least one task. Rescheduling as soon as the
+    // budget was under 1ms — including a timed-out callback, whose budget is
+    // always 0 — could reschedule forever without doing any work. After that
+    // first task, work stays chunked to the remaining idle budget.
+    let ranOne = false;
     while (index < queue.length) {
-      // If we have a deadline and time is running out, reschedule
-      if (deadline && deadline.timeRemaining() < 1) {
+      if (ranOne && deadline && deadline.timeRemaining() < 1) {
         schedule(processNext);
         return;
       }
@@ -277,12 +318,12 @@ export function deferNonCritical(tasks: Array<() => void>): void {
       try {
         queue[index]();
       } catch (e) {
-        // Non-critical tasks should not crash the app
-        if (typeof console !== "undefined") {
-          console.error("[Startup] Deferred task failed:", e);
-        }
+        // Non-critical tasks must not stop the tasks after them; the failure is
+        // still reported.
+        reportError(e, { phase: "scheduler", name: "deferNonCritical" });
       }
       index++;
+      ranOne = true;
     }
   }
 

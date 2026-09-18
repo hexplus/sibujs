@@ -156,6 +156,11 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   let lastCondition: T | undefined;
 
   let initialized = false;
+  // Terminal. `dispose(anchor)` does not detach the anchor, so `parentNode`
+  // cannot tell a disposed directive from a live one — without this flag the
+  // queued initial render below would still run the branch factory and insert
+  // DOM after teardown, outside the disposal traversal that already completed.
+  let disposed = false;
   // Tracks whether a bare-element branch has already been attached once, so the
   // reuse warning fires on genuine reuse rather than on first render.
   const attachedOnce = new WeakSet<Node>();
@@ -165,6 +170,7 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   let currentNodeOwned = false;
 
   const update = () => {
+    if (disposed) return;
     // Always evaluate condition to register reactive dependencies
     const show = condition();
 
@@ -209,11 +215,15 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   // closures are released instead of leaking. Owner-stamped with the anchor, as
   // in `show`, so a condition or branch factory that throws on a scheduled run
   // reaches the enclosing ErrorBoundary.
-  registerDisposer(anchor, reactiveBinding(update, anchor));
+  const stopBinding = reactiveBinding(update, anchor);
+  registerDisposer(anchor, () => {
+    disposed = true;
+    stopBinding();
+  });
 
   if (!initialized) {
     queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) update();
+      if (!disposed && !initialized && anchor.parentNode) update();
     });
   }
 
@@ -273,11 +283,14 @@ export function match<T extends string | number>(
   let lastKey: string | undefined;
 
   let initialized = false;
+  // Terminal; see `when`.
+  let disposed = false;
   const attachedOnce = new WeakSet<Node>();
   // See `when`: only a node this directive produced may be disposed.
   let currentNodeOwned = false;
 
   const update = () => {
+    if (disposed) return;
     // Always evaluate value() to register reactive dependencies
     const key = String(value());
 
@@ -314,11 +327,15 @@ export function match<T extends string | number>(
   // anchor releases the value subscription and the matched branch. Owner-stamped
   // with the anchor, as in `when`, so a throwing selector or case factory on a
   // scheduled run reaches the enclosing ErrorBoundary.
-  registerDisposer(anchor, reactiveBinding(update, anchor));
+  const stopBinding = reactiveBinding(update, anchor);
+  registerDisposer(anchor, () => {
+    disposed = true;
+    stopBinding();
+  });
 
   if (!initialized) {
     queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) update();
+      if (!disposed && !initialized && anchor.parentNode) update();
     });
   }
 

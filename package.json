@@ -1,6 +1,6 @@
 {
   "name": "sibujs",
-  "version": "4.5.0",
+  "version": "4.6.0",
   "description": "A function-based frontend framework with fine-grained reactivity and no virtual DOM. Tag factories return live DOM nodes you can hold and mutate, signals update only what changed, and nothing needs a compiler — it runs from a script tag or a bundler.",
   "keywords": [
     "frontend",

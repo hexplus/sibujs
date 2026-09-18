@@ -208,7 +208,7 @@ describe("startup optimizations coverage", () => {
       }
     });
 
-    it("continues after a failing task and logs the error", async () => {
+    it("continues after a failing task and reports the error", async () => {
       const realRIC = (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback;
       (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback = undefined;
       const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -223,7 +223,8 @@ describe("startup optimizations coverage", () => {
         ]);
         vi.advanceTimersByTime(2);
         expect(good).toHaveBeenCalledTimes(1);
-        expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("Deferred task failed"), expect.any(Error));
+        // Reported through the runtime error pipeline, whose default sink is console.error.
+        expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("task boom"), expect.any(Error));
       } finally {
         (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback = realRIC;
       }
@@ -240,12 +241,13 @@ describe("startup optimizations coverage", () => {
         const a = vi.fn();
         const b = vi.fn();
         deferNonCritical([a, b]);
-        // First invocation: deadline has no time, so it should reschedule
-        // before running any task.
+        // First invocation: no idle time left. It still runs one task (so a busy
+        // page cannot starve deferred work), then reschedules the rest.
         calls[0]({ timeRemaining: () => 0 });
-        expect(a).not.toHaveBeenCalled();
+        expect(a).toHaveBeenCalledTimes(1);
+        expect(b).not.toHaveBeenCalled();
         expect(fakeRIC).toHaveBeenCalledTimes(2);
-        // Second invocation with plenty of time runs all tasks.
+        // Second invocation runs the remaining task.
         calls[1]({ timeRemaining: () => 50 });
         expect(a).toHaveBeenCalledTimes(1);
         expect(b).toHaveBeenCalledTimes(1);

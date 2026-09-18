@@ -189,9 +189,23 @@ describe(`optimisticList broad operations over ${N} rows`, () => {
     // Warm up so JIT compilation is not attributed to the smaller size.
     await run(2_000);
 
-    const small = Math.min(await run(5_000), await run(5_000));
-    const large = Math.min(await run(20_000), await run(20_000));
-    const ratio = large / Math.max(small, 0.05);
+    // Best of several runs per size: a single GC pause or scheduler hiccup on a
+    // shared CI host inflated one sample past the bound (10.4× on Node 22.3).
+    const best = async (rows: number, samples: number) => {
+      let min = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < samples; i++) min = Math.min(min, await run(rows));
+      return min;
+    };
+    const measure = async () => {
+      const small = await best(5_000, 5);
+      const large = await best(20_000, 5);
+      return { small, large, ratio: large / Math.max(small, 0.05) };
+    };
+
+    // Noise only ever inflates the ratio, so a second measurement is taken before
+    // failing; genuinely quadratic work stays near 16× on both.
+    let { small, large, ratio } = await measure();
+    if (ratio >= 10) ({ small, large, ratio } = await measure());
     console.log(`[optimisticList] 4× rows → ${ratio.toFixed(1)}× time (${small.toFixed(2)} → ${large.toFixed(2)} ms)`);
 
     // Linear is ~4×; quadratic is ~16×. Anything under 10 is decisively not the

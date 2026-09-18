@@ -87,7 +87,9 @@ describe("the root barrel publishes exactly the intended SSR surface", () => {
       }
     }
     expect(leaked, "an internal helper is reachable from a public entry point").toEqual([]);
-  });
+    // Cold-importing all 16 entry points transforms most of the source tree;
+    // under a parallel full-suite run that routinely exceeded the 15s default.
+  }, 60_000);
 
   it("keeps the helper available INTERNALLY, which is why it exists", () => {
     // Removing it from the barrel must not remove it from the module: i18n

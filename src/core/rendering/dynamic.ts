@@ -1,4 +1,5 @@
 import { track } from "../../reactivity/track";
+import { globalSingleton } from "../../utils/globalSingleton";
 import { registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div } from "./html";
 
@@ -7,8 +8,16 @@ type Component = () => HTMLElement;
 /**
  * Registry for dynamically loaded components.
  * Components can be registered at runtime and resolved by name.
+ *
+ * Shared across duplicate copies of this module through a globalThis registry
+ * (first copy wins, like the action and reactive registries): a module-local map
+ * made a component registered through one copy unresolvable through another. A
+ * future incompatible layout must use a new symbol version.
  */
-const componentRegistry = new Map<string, Component>();
+const componentRegistry = globalSingleton(
+  Symbol.for("sibujs.components.registry.v1"),
+  () => new Map<string, Component>(),
+);
 
 /**
  * Register a component by name for dynamic resolution.
@@ -51,7 +60,7 @@ export function resolveComponent(name: string): HTMLElement {
   if (component) {
     return component();
   }
-  return div({ nodes: `[Component "${name}" not found]` }) as HTMLElement;
+  return div(`[Component "${name}" not found]`) as HTMLElement;
 }
 
 /**

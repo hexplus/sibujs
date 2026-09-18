@@ -1,6 +1,6 @@
 import { dispose, registerDisposer } from "../core/rendering/dispose";
-import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { domBinding } from "../reactivity/domBinding";
 
 // ============================================================================
 // VIRTUAL SCROLLING
@@ -82,10 +82,11 @@ export function VirtualList<T>(props: VirtualListProps<T>): HTMLElement {
     }
   };
 
-  // Tie the render effect to the container's lifetime; disposing the container
+  // Tie the render binding to the container's lifetime; disposing the container
   // (e.g. when its parent unmounts) stops the items()/scrollTop() subscription
-  // instead of leaking the effect and the whole subtree.
-  registerDisposer(container, effect(update));
+  // instead of leaking the binding and the whole subtree. Owning it by the
+  // container lets an enclosing ErrorBoundary claim a later `renderItem` throw.
+  registerDisposer(container, domBinding(update, container));
 
   return container;
 }

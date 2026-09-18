@@ -19,6 +19,11 @@ export interface StoreActions<T> {
   getSnapshot: () => T;
 }
 
+/** Define `key` as an own enumerable data property, even when it is "__proto__". */
+function defineOwn(obj: object, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 /**
  * Creates a global store with reactive properties and subscription support.
  *
@@ -49,15 +54,17 @@ export function store<T extends object>(
     "store: argument must be a plain object. For arrays, use array() instead.",
   );
 
-  // Create individual signals for each key
-  const signals: {
+  // Create individual signals for each key. The registry has no prototype and
+  // every entry is DEFINED, so a state key such as "__proto__" (valid in JSON)
+  // becomes an own entry instead of replacing the registry's prototype.
+  const signals = Object.create(null) as {
     [K in keyof T]: [() => T[K], (value: T[K]) => void];
-  } = {} as { [K in keyof T]: [() => T[K], (value: T[K]) => void] };
+  };
 
   // Initialize signals
   (Object.keys(initialState) as Array<keyof T>).forEach((key) => {
     const [getter, setter] = signal(initialState[key]);
-    signals[key] = [getter, setter];
+    defineOwn(signals, key as string, [getter, setter]);
   });
 
   // Proxy to expose reactive getters
@@ -85,9 +92,11 @@ export function store<T extends object>(
 
   // Get non-reactive snapshot of current state
   const getSnapshot = (): T => {
+    // A plain object for callers, but filled by definition so an own
+    // "__proto__" key is kept rather than dropped.
     const snapshot: Partial<T> = {};
     (Object.keys(signals) as Array<keyof T>).forEach((key) => {
-      snapshot[key] = signals[key][0]();
+      defineOwn(snapshot, key as string, signals[key][0]());
     });
     return snapshot as T;
   };

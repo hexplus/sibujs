@@ -1,6 +1,13 @@
+import { reportError } from "../core/errors";
+
 /**
  * eventBus creates a typed publish/subscribe event system.
  * No reactive state needed -- pure event dispatching.
+ *
+ * `emit()` delivers to the handlers registered when it starts. A throwing
+ * handler is reported through the runtime error pipeline and the remaining
+ * handlers still run. Handlers added during delivery receive the next event;
+ * handlers removed (or cleared) during delivery are skipped for the rest of it.
  */
 // `T extends object`, deliberately NOT `Record<string, unknown>`.
 //
@@ -16,39 +23,68 @@ export function eventBus<T extends object>(): {
   off: <K extends keyof T>(event: K, handler: (data: T[K]) => void) => void;
   clear: () => void;
 } {
-  const listeners = new Map<keyof T, Set<(data: any) => void>>();
+  // One record per subscription. emit() snapshots RECORDS, not handlers, so a
+  // handler removed and re-added during delivery is a new record that starts
+  // with the next event instead of passing for the old subscription. Adding the
+  // same handler again while subscribed keeps the existing subscription.
+  interface Subscription {
+    handler: (data: any) => void;
+    active: boolean;
+  }
+  const listeners = new Map<keyof T, Map<(data: any) => void, Subscription>>();
 
   function on<K extends keyof T>(event: K, handler: (data: T[K]) => void): () => void {
-    let set = listeners.get(event);
-    if (!set) {
-      set = new Set();
-      listeners.set(event, set);
+    let subs = listeners.get(event);
+    if (!subs) {
+      subs = new Map();
+      listeners.set(event, subs);
     }
-    set.add(handler);
-    // Return unsubscribe function
-    return () => off(event, handler);
+    let subscription = subs.get(handler);
+    if (!subscription) {
+      subscription = { handler, active: true };
+      subs.set(handler, subscription);
+    }
+    const own = subscription;
+    // A stale handle (its subscription already removed) must not remove a
+    // later subscription of the same handler.
+    return () => {
+      if (listeners.get(event)?.get(handler) !== own) return;
+      off(event, handler);
+    };
   }
 
   function emit<K extends keyof T>(event: K, data: T[K]): void {
-    const set = listeners.get(event);
-    if (set) {
-      for (const handler of set) {
-        handler(data);
+    const subs = listeners.get(event);
+    if (!subs || subs.size === 0) return;
+    // Snapshot: iterating the live map ran handlers added mid-delivery in the
+    // same emit, and a handler that kept adding handlers never let it finish.
+    for (const subscription of Array.from(subs.values())) {
+      // off() and clear() deactivate the record, so removals mid-delivery skip.
+      if (!subscription.active) continue;
+      try {
+        subscription.handler(data);
+      } catch (err) {
+        reportError(err, { phase: "event", name: `eventBus(${String(event)})` });
       }
     }
   }
 
   function off<K extends keyof T>(event: K, handler: (data: T[K]) => void): void {
-    const set = listeners.get(event);
-    if (set) {
-      set.delete(handler);
-      if (set.size === 0) {
-        listeners.delete(event);
-      }
+    const subs = listeners.get(event);
+    if (!subs) return;
+    const subscription = subs.get(handler);
+    if (!subscription) return;
+    subscription.active = false;
+    subs.delete(handler);
+    if (subs.size === 0) {
+      listeners.delete(event);
     }
   }
 
   function clear(): void {
+    for (const subs of listeners.values()) {
+      for (const subscription of subs.values()) subscription.active = false;
+    }
     listeners.clear();
   }
 

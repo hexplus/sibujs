@@ -1,4 +1,6 @@
+import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
+import { adoptThenable } from "../utils/adoptThenable";
 import { track } from "./track";
 
 // ============================================================================
@@ -122,7 +124,8 @@ function scheduleIdle(fn: () => void): void {
  * and avoids the complexity of an interruptible reconciler.
  *
  * Async callbacks are supported: `pending()` stays `true` until the
- * returned promise resolves OR rejects.
+ * returned promise resolves OR rejects. With overlapping `start()` calls it
+ * stays `true` until every one of them has settled.
  *
  * @example
  * ```ts
@@ -135,24 +138,39 @@ function scheduleIdle(fn: () => void): void {
  */
 export function transition(): TransitionState {
   const [pending, setPending] = signal(false);
+  // Transitions started but not yet settled. `pending()` is derived from this
+  // rather than toggled per call: with overlapping starts, the first to settle
+  // used to publish `false` while later ones were still in flight.
+  let outstanding = 0;
 
   function start(fn: () => void | Promise<void>): void {
+    outstanding++;
     setPending(true);
+
+    // Each start settles exactly once, whichever way it ends.
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      outstanding--;
+      if (outstanding === 0) setPending(false);
+    };
+
+    // Failures are reported and still settle this start: a throwing body, a
+    // rejection, a throwing `then` getter (read outside any try before, which
+    // left pending() stuck) or a throwing `then` invocation.
+    const fail = (error: unknown) => {
+      finish();
+      reportError(error, { phase: "async", name: "transition" });
+    };
+
     scheduleIdle(() => {
-      let result: void | Promise<void>;
       try {
-        result = fn();
-      } catch {
-        setPending(false);
-        return;
-      }
-      if (result && typeof (result as Promise<void>).then === "function") {
-        (result as Promise<void>).then(
-          () => setPending(false),
-          () => setPending(false),
-        );
-      } else {
-        setPending(false);
+        // adoptThenable reads `then` exactly once and settles at most once.
+        const adopted = adoptThenable(fn());
+        adopted ? adopted.then(finish, fail) : finish();
+      } catch (error) {
+        fail(error);
       }
     });
   }

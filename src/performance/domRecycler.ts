@@ -106,7 +106,14 @@ export function getDOMPool(): DOMPool {
 // RESOURCE PRELOADING
 // ============================================================================
 
+// Keyed by hint kind AND URL (`rel`, `as`, `crossorigin`, href). Keying by URL
+// alone made a prefetch suppress a later, higher-priority preload of the same
+// URL — and one `as` value suppress another with different fetch semantics.
 const preloadedResources = new Set<string>();
+
+function hintKey(rel: string, as: string, crossorigin: string, href: string): string {
+  return `${rel}\u0000${as}\u0000${crossorigin}\u0000${href}`;
+}
 
 /**
  * Preloads a resource (script, style, or generic fetch).
@@ -116,8 +123,10 @@ export function preloadResource(url: string, type: "script" | "style" | "fetch" 
   // they reach a resource-hint href, consistent with platform/head.ts.
   const safe = sanitizeUrl(url);
   if (!safe) return;
-  if (preloadedResources.has(safe)) return;
-  preloadedResources.add(safe);
+  const as = type === "script" || type === "style" || type === "image" ? type : "fetch";
+  const key = hintKey("preload", as, as === "fetch" ? "anonymous" : "", safe);
+  if (preloadedResources.has(key)) return;
+  preloadedResources.add(key);
 
   const link = document.createElement("link");
   link.rel = "preload";
@@ -147,8 +156,9 @@ export function preloadResource(url: string, type: "script" | "style" | "fetch" 
 export function prefetch(url: string): void {
   const safe = sanitizeUrl(url);
   if (!safe) return;
-  if (preloadedResources.has(safe)) return;
-  preloadedResources.add(safe);
+  const key = hintKey("prefetch", "", "", safe);
+  if (preloadedResources.has(key)) return;
+  preloadedResources.add(key);
 
   const link = document.createElement("link");
   link.rel = "prefetch";

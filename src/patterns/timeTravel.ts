@@ -26,8 +26,16 @@ export interface TimeTravelReturn<T> {
 
 /**
  * timeline wraps a state value with undo/redo history.
+ *
+ * @param maxHistory How many entries (including the current one) to keep. Must
+ *   be a positive safe integer — `0`, negative, fractional, `NaN` or infinite
+ *   capacities throw a `RangeError`, since they would evict the current value
+ *   and break the index invariant.
  */
 export function timeline<T>(initial: T, maxHistory = 100): TimeTravelReturn<T> {
+  if (!Number.isSafeInteger(maxHistory) || maxHistory < 1) {
+    throw new RangeError(`[timeline] maxHistory must be a positive safe integer, got ${maxHistory}`);
+  }
   const [history, setHistory] = signal<T[]>([initial]);
   const [index, setIndex] = signal(0);
 

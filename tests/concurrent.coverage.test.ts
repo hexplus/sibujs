@@ -221,7 +221,9 @@ describe("transition", () => {
 
     resolveFn();
     await p;
-    await Promise.resolve();
+    // The result is adopted with `then` read once and invoked in a microtask,
+    // so settlement takes a few microtask hops.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
     expect(t.pending()).toBe(false);
   });
 

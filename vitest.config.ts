@@ -1,7 +1,17 @@
 /// <reference types="vitest" />
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vitest/config";
 
+// Stamp the package version exactly as tsup.config.ts does for the published
+// build, so source-level tests see the same `__SIBU_VERSION__` consumers get.
+const { version } = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")) as {
+  version: string;
+};
+
 export default defineConfig({
+  define: {
+    __SIBU_VERSION__: JSON.stringify(version),
+  },
   test: {
     globals: true,
     environment: "jsdom",

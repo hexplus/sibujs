@@ -207,7 +207,11 @@ export function infiniteQuery<TData, TPageParam = number>(
     }
   });
 
+  // Every public fetch is a no-op once disposed: refetch() used to clear the
+  // pages before fetchPage() noticed, leaving pages() empty while the disposed
+  // data() kept its last value.
   function fetchNextPage(): Promise<void> {
+    if (disposed) return Promise.resolve();
     // Already fetching (initial load or another page) — return that in-flight
     // promise instead of aborting it and dropping the page mid-flight.
     if (inFlight) return inFlight;
@@ -217,6 +221,7 @@ export function infiniteQuery<TData, TPageParam = number>(
   }
 
   function fetchPreviousPage(): Promise<void> {
+    if (disposed) return Promise.resolve();
     if (inFlight) return inFlight;
     const param = prevPageParam();
     if (param === undefined) return Promise.resolve();
@@ -224,6 +229,7 @@ export function infiniteQuery<TData, TPageParam = number>(
   }
 
   async function refetch(): Promise<void> {
+    if (disposed) return;
     batch(() => {
       setPages([]);
       setNextPageParam(initialPageParam);

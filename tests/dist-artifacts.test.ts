@@ -192,6 +192,21 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // and then split back out. The default bundle must not drift above that
     // without someone deciding to; a review caught exactly that drift once.
     //
+    // The gzip baseline was deliberately raised to 26,450 B for the audit
+    // correctness fixes in core (disposal rollback, error ownership, request-
+    // scoped ids), which added ~570 B gzip while raw stayed under 80,202 B.
+    // It was raised again to 26,500 B for reported `copyOnClick` clipboard
+    // failures and the duplicate-instance-safe component registry (+64 B after
+    // trimming), which otherwise left under 5 B of headroom. It was raised to
+    // 26,600 B for `transition()` adopting hostile thenables safely (single
+    // `then` read, deferred invocation, reported failures) and the reentrancy
+    // guards in `imageLoader` (+106 B), and to 26,800 B for per-subscriber
+    // render-transaction ownership in the disposal/reactive core, including the
+    // forwarding of a successful nested transaction to its parent (+111 B).
+    // Keeping the transaction helpers out of the root barrel then gave ~250 B
+    // back, so the baseline is 26,600 B again. The headroom is deliberate: at
+    // under 10 B, every core comment or rename moved the gate.
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -200,7 +215,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_202);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_330 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(26_600 * 1.02));
   });
 });
 

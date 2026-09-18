@@ -2,7 +2,8 @@
 // CUSTOM ELEMENTS (WEB COMPONENTS)
 // ============================================================================
 
-import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { reportError } from "../core/errors";
+import { dispose, disposeNodeOwn, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -21,6 +22,16 @@ export interface CustomElementOptions {
   // advertised support that did not exist. Removed rather than faked.
 }
 
+/** Consecutive renders allowed while a component keeps changing its own observed attributes. */
+const MAX_RENDER_PASSES = 10;
+
+/**
+ * Thrown inside a render transaction whose element was disconnected while the
+ * component ran, so the transaction rolls back instead of committing. Private:
+ * never reported, never observable outside this module.
+ */
+const ABANDONED_RENDER = Symbol("sibujs.defineElement.abandonedRender");
+
 /**
  * defineElement creates a Web Component wrapping a SibuJS component function.
  */
@@ -35,7 +46,6 @@ export function defineElement(
 
   class SibuElement extends HTMLElement {
     private _root: HTMLElement | ShadowRoot;
-    private _rendered: HTMLElement | null = null;
 
     static get observedAttributes(): string[] {
       return observed;
@@ -50,18 +60,72 @@ export function defineElement(
       }
     }
 
+    // Re-rendering is keyed on connection, not on a previous render: a first render
+    // that throws leaves nothing rendered, and the element must still re-render
+    // when a later attribute change fixes the input.
+    private _connected = false;
+    // A render in progress, and whether an attribute changed during it. The
+    // component may write its host's observed attributes while rendering; with
+    // the old subtree kept during the build, rendering again from inside the
+    // callback recursed until the stack overflowed.
+    private _rendering = false;
+    private _dirty = false;
+    // How many teardowns are draining. A host teardown may reconnect the element
+    // (and a nested disconnect may run inside it), and rendering the next
+    // generation from inside that drain would let the drain tear down what the
+    // new render registers. A counter, not a flag: a nested teardown returning
+    // must not declare the outer one finished.
+    private _teardownDepth = 0;
+    // Disconnects so far. A render compares it across its old-subtree teardown
+    // to detect a disconnect that happened inside it.
+    private _disconnects = 0;
+
+    /** Whether rendering must wait for work already in progress. */
+    private get _busy(): boolean {
+      return this._rendering || this._teardownDepth > 0;
+    }
+
     connectedCallback(): void {
+      this._connected = true;
+      // Moved in the DOM by its own component while rendering, or reconnected
+      // by its own teardown: finish that work first, then render, instead of
+      // nesting inside it.
+      if (this._busy) {
+        this._dirty = true;
+        return;
+      }
       this._render();
     }
 
     disconnectedCallback(): void {
-      this._teardown();
+      this._connected = false;
+      this._disconnects++;
+      this._teardownDepth++;
+      try {
+        this._teardown();
+      } finally {
+        this._teardownDepth--;
+        // A teardown reconnected the element: render the next generation now
+        // that every teardown has finished draining (or let the running render
+        // pick it up).
+        if (this._teardownDepth === 0 && this._connected && this._dirty) {
+          this._dirty = false;
+          if (!this._rendering) this._render();
+        }
+      }
     }
 
-    attributeChangedCallback(): void {
-      if (this._rendered) {
-        this._render();
+    attributeChangedCallback(_name: string, oldValue: string | null, newValue: string | null): void {
+      // Browsers call this even when the value is unchanged; a component that
+      // mirrors state onto its host would otherwise re-render on every write.
+      if (oldValue === newValue || !this._connected) return;
+      // Also while a teardown drains: an attribute written by a disposer must
+      // not render the next generation into that drain.
+      if (this._busy) {
+        this._dirty = true;
+        return;
       }
+      this._render();
     }
 
     private _teardown(): void {
@@ -70,23 +134,97 @@ export function defineElement(
       // inside the user component leak across reconnects. Routed through the
       // disposal-aware replacement primitive so the ordering guarantee lives in
       // one place rather than being re-derived per call site.
-      this._rendered = null;
       replaceChildrenSafely(this._root);
+      // Then the host's OWN teardowns: a component may register cleanup
+      // directly against its host (`registerDisposer(host, …)`), which is not
+      // part of the rendered subtree and would otherwise outlive the element.
+      // Only the host's own queue — a recursive dispose() would also destroy
+      // light-DOM children, which belong to the consumer (slotted content for a
+      // shadow element), not to this render.
+      disposeNodeOwn(this);
     }
 
+    /**
+     * Render as a transaction: build the replacement first, commit only if that
+     * succeeds. Tearing the current subtree down before calling the factory
+     * meant a throwing rerender (an invalid attribute, say) left the element
+     * blank with its live state already disposed. Now a failure keeps the
+     * working subtree, releases whatever the failed attempt registered, and is
+     * reported with this element as its node so an enclosing ErrorBoundary can
+     * claim it.
+     */
     private _render(): void {
-      this._teardown();
+      this._rendering = true;
+      try {
+        // Attribute changes made during a render are applied by one more pass
+        // after it commits. A component whose every render changes an observed
+        // attribute would never settle, so the passes are bounded and reported.
+        let passes = 0;
+        do {
+          this._dirty = false;
+          if (++passes > MAX_RENDER_PASSES) {
+            reportError(
+              new Error(
+                `[SibuJS] defineElement(${name}): the component changed its own observed attributes on ${MAX_RENDER_PASSES} consecutive renders; stopped re-rendering.`,
+              ),
+              { phase: "render", name: `defineElement(${name})`, node: this },
+            );
+            break;
+          }
+          this._renderOnce();
+        } while (this._dirty && this._connected);
+      } finally {
+        this._rendering = false;
+        this._dirty = false;
+      }
+    }
+
+    private _renderOnce(): void {
       const props = this._getProps();
 
+      let el: HTMLElement;
+      try {
+        el = withDisposerRollback(() => {
+          const built = component(props, this);
+          // Disconnected while the component ran (it removed its own host): the
+          // disconnect teardown has already run, so this render must not
+          // commit. Aborting from INSIDE the transaction rolls back everything
+          // it registered — on the returned tree, on intermediate nodes, and on
+          // the host — instead of only disposing the returned element.
+          if (!this._connected) throw ABANDONED_RENDER;
+          return built;
+        });
+      } catch (err) {
+        if (err !== ABANDONED_RENDER) {
+          reportError(err, { phase: "render", name: `defineElement(${name})`, node: this });
+        }
+        return;
+      }
+
+      const next: Node[] = [];
       if (options.styles && this._root instanceof ShadowRoot) {
         const styleEl = document.createElement("style");
         styleEl.textContent = options.styles;
-        this._root.appendChild(styleEl);
+        next.push(styleEl);
       }
+      next.push(el);
 
-      const el = component(props, this);
-      this._root.appendChild(el);
-      this._rendered = el;
+      // Dispose the previous subtree, then commit the new one — as two steps, so
+      // the commit can be abandoned. A disposer of the previous subtree may
+      // disconnect the host; that disconnect's teardown has already run the
+      // host-own disposers the new generation registered, so installing it would
+      // leave a generation half disposed and half live, with no later disconnect
+      // to clean it up. Any disconnect during the teardown abandons the commit;
+      // if the host was reconnected meanwhile, the render loop builds afresh.
+      const disconnects = this._disconnects;
+      for (const node of next) node.parentNode?.removeChild(node);
+      replaceChildrenSafely(this._root);
+      if (this._disconnects !== disconnects) {
+        for (const node of next) dispose(node);
+        if (this._connected) this._dirty = true;
+        return;
+      }
+      this._root.replaceChildren(...next);
     }
 
     private _getProps(): Record<string, unknown> {

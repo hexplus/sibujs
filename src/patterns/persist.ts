@@ -9,10 +9,10 @@ import { isUnsafeKey } from "../utils/guards";
  * @param key Storage key
  * @param initial Default value when no persisted value exists
  * @param options Storage options
- * @returns The same `[getter, setter]` tuple as `signal()`. For localStorage
- *   (cross-tab sync on), the setter additionally carries a non-enumerable
- *   `dispose()` method — call `setter.dispose()` on unmount to remove the
- *   `storage` event listener; otherwise it lives for the page's lifetime.
+ * @returns The same `[getter, setter]` tuple as `signal()`. The setter also
+ *   carries a non-enumerable `dispose()` method — call `setter.dispose()` on
+ *   unmount to stop persisting and remove the cross-tab `storage` listener;
+ *   otherwise both live for the page's lifetime.
  *
  * @example
  * ```ts
@@ -68,19 +68,22 @@ export interface PersistOptions<T = unknown> {
   decrypt?: (value: string) => string;
 }
 
+/** Setter returned by {@link persisted}: writes like a `signal()` setter, released with `dispose()`. */
+export type PersistedSetter<T> = ((next: T | ((prev: T) => T)) => void) & {
+  /** Stop persisting changes and remove the cross-tab `storage` listener. */
+  dispose(): void;
+};
+
 /**
  * A signal mirrored into persistent storage, rehydrated on creation.
  *
  * @param key Storage key.
  * @param initial Value used when storage holds nothing (or holds junk).
  * @param options Storage backend, serializer and version/migration settings.
- * @returns A `[accessor, setter]` pair with the same shape as `signal`.
+ * @returns A `[accessor, setter]` pair with the same shape as `signal`; the
+ *   setter carries `dispose()`.
  */
-export function persisted<T>(
-  key: string,
-  initial: T,
-  options: PersistOptions<T> = {},
-): [() => T, (next: T | ((prev: T) => T)) => void] {
+export function persisted<T>(key: string, initial: T, options: PersistOptions<T> = {}): [() => T, PersistedSetter<T>] {
   // Resolve storage defensively: under SSR the globals don't exist
   // (ReferenceError), and even in the browser access can throw in sandboxed /
   // privacy contexts. When unavailable, persisted() degrades to a plain signal.
@@ -189,5 +192,5 @@ export function persisted<T>(
     configurable: false,
   });
 
-  return [value, setValue];
+  return [value, setValue as PersistedSetter<T>];
 }

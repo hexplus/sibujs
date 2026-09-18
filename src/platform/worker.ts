@@ -1,4 +1,20 @@
 import { signal } from "../core/signals/signal";
+import { batch } from "../reactivity/batch";
+
+// `postMessage()` throws synchronously (a `DataCloneError` DOMException) when
+// the payload is not structured-cloneable: functions, DOM nodes, symbols, some
+// proxies. The message never reaches the worker, so no reply or error event
+// will ever follow — callers must unwind their own bookkeeping. The worker
+// itself is unaffected and stays usable.
+//
+// The original exception is kept whenever it is error-shaped, so callers can
+// still test `err.name === "DataCloneError"`. A DOMException is not always
+// `instanceof Error` (e.g. one created in another realm), hence the duck check.
+function toError(err: unknown): Error {
+  if (err instanceof Error) return err;
+  if (err !== null && typeof err === "object" && "name" in err && "message" in err) return err as Error;
+  return new Error(String(err));
+}
 
 // ============================================================================
 // WEB WORKER HOOKS
@@ -62,8 +78,15 @@ export function worker<TInput = unknown, TOutput = unknown>(
 
     worker.addEventListener("message", (e: MessageEvent<TOutput>) => {
       revokeBlobUrl();
-      setResult(e.data);
-      setLoading(false);
+      // A reply is the latest outcome, so it clears any error left by a post
+      // that failed to clone while this request was in flight — otherwise the
+      // hook would show a good result and an unrelated call's error together.
+      // Published as one batch so observers never see the mixed state.
+      batch(() => {
+        setResult(e.data);
+        setError(null);
+        setLoading(false);
+      });
     });
 
     worker.addEventListener("error", (e: ErrorEvent) => {
@@ -84,10 +107,20 @@ export function worker<TInput = unknown, TOutput = unknown>(
 
   function post(data: TInput): void {
     if (!worker) return;
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    worker.postMessage(data);
+    // Post before touching state: a payload that fails to clone was never sent,
+    // so it must not flip `loading` on (nothing would ever clear it) or wipe the
+    // state of a request that is still in flight.
+    try {
+      worker.postMessage(data);
+    } catch (err) {
+      setError(toError(err));
+      return;
+    }
+    batch(() => {
+      setLoading(true);
+      setError(null);
+      setResult(null);
+    });
   }
 
   function terminate(): void {
@@ -186,9 +219,18 @@ export function workerFn<TArgs extends unknown[], TResult>(
         reject(new Error("Worker is not available"));
         return;
       }
-      setLoading(true);
+      // Post before enqueueing: replies are matched to requests by queue
+      // position, so a request that failed to clone must never occupy a slot —
+      // the next reply would be handed to it and every later caller would
+      // receive its predecessor's result.
+      try {
+        worker.postMessage(args);
+      } catch (err) {
+        reject(toError(err));
+        return;
+      }
       queue.push({ resolve, reject });
-      worker.postMessage(args);
+      setLoading(true);
     });
   }
 
@@ -248,7 +290,14 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
   };
 
   function dispatchNext(idx: number) {
-    if (!alive || inflight[idx] || queues[idx].length === 0) return;
+    // Loop rather than recurse: each task that fails to clone releases the slot
+    // immediately, so a run of bad payloads must not grow the stack.
+    while (alive && !inflight[idx] && queues[idx].length > 0) {
+      dispatchOne(idx);
+    }
+  }
+
+  function dispatchOne(idx: number) {
     const w = workers[idx];
     const slot = queues[idx].shift() as Slot;
     const onMsg = (e: MessageEvent<TOutput>) => {
@@ -273,10 +322,18 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
       slot.reject(new Error(e.message || "Worker error"));
       dispatchNext(idx);
     };
+    // A task that fails to clone was never sent, so it must not hold the slot
+    // or listeners: the slot would stay in flight forever and its queue would
+    // never advance. The caller's `dispatchNext` loop moves on to the next task.
+    try {
+      w.postMessage(slot.data);
+    } catch (err) {
+      slot.reject(toError(err));
+      return;
+    }
     inflight[idx] = { ...slot, onMsg, onErr };
     w.addEventListener("message", onMsg);
     w.addEventListener("error", onErr);
-    w.postMessage(slot.data);
   }
 
   try {

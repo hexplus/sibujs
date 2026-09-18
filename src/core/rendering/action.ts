@@ -1,3 +1,4 @@
+import { reportError } from "../errors";
 import { registerDisposer } from "./dispose";
 
 /**
@@ -168,9 +169,18 @@ export const longPress: ActionFn<LongPressOptions> = (element, options) => {
  * ```
  */
 export const copyOnClick: ActionFn<(() => string) | undefined> = (element, getText) => {
+  // A failure — no Clipboard API (insecure context: the call below throws a
+  // TypeError), a throwing getter, or a rejected write (permission denied) — is
+  // reported with the element instead of escaping as an uncaught error or an
+  // unhandled rejection.
+  const report = (error: unknown) => reportError(error, { phase: "async", name: "copyOnClick", node: element });
   const handler = () => {
-    const text = typeof getText === "function" ? getText() : (element.textContent ?? "");
-    navigator.clipboard.writeText(text);
+    try {
+      const text = typeof getText === "function" ? getText() : (element.textContent ?? "");
+      Promise.resolve(navigator.clipboard.writeText(text)).catch(report);
+    } catch (error) {
+      report(error);
+    }
   };
   element.addEventListener("click", handler);
   return () => element.removeEventListener("click", handler);
