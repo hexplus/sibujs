@@ -753,7 +753,10 @@ and a listener that kept adding listeners never let it finish. Delivery now walk
 a snapshot, isolates each callback and reports failures through the runtime error
 pipeline (`phase: "event"`). Listeners added during a dispatch start with the next
 one; listeners removed or cleared during it are skipped; a dispatch started from a
-listener completes before the outer one continues.
+listener completes before the outer one continues. Delivery tracks subscriptions
+rather than callbacks, so the same function unsubscribed and re-subscribed during
+a dispatch also waits for the next one, and a stale unsubscribe handle no longer
+removes a later subscription of the same callback.
 
 ### Fixed — startup caches exceeded their size bounds
 

@@ -299,14 +299,21 @@ export function createSharedScope<T extends object>(initialState: T): SharedScop
   // Store a reactive signal per key
   const signals = new Map<keyof T, { get: () => T[keyof T]; set: (v: T[keyof T]) => void }>();
 
-  // Subscriber sets per key
-  const subscribers = new Map<keyof T, Set<(value: T[keyof T]) => void>>();
+  // One record per subscription, per key. set() snapshots RECORDS, not
+  // callbacks, so a callback unsubscribed and re-subscribed during delivery is a
+  // new record that starts with the next set(). Subscribing the same callback
+  // again while subscribed keeps the existing subscription.
+  interface Subscription {
+    callback: (value: T[keyof T]) => void;
+    active: boolean;
+  }
+  const subscribers = new Map<keyof T, Map<(value: T[keyof T]) => void, Subscription>>();
 
   // Initialise signals for every key in the initial state
   for (const key of Object.keys(initialState) as Array<keyof T>) {
     const [get, set] = signal<T[typeof key]>(initialState[key]);
     signals.set(key, { get, set });
-    subscribers.set(key, new Set());
+    subscribers.set(key, new Map());
   }
 
   /**
@@ -317,7 +324,7 @@ export function createSharedScope<T extends object>(initialState: T): SharedScop
     if (!signals.has(key)) {
       const [get, set] = signal<T[keyof T]>(undefined as T[keyof T]);
       signals.set(key, { get, set });
-      subscribers.set(key, new Set());
+      subscribers.set(key, new Map());
     }
   }
 
@@ -336,10 +343,10 @@ export function createSharedScope<T extends object>(initialState: T): SharedScop
     // next set(), and ones removed during it are skipped.
     const subs = subscribers.get(key);
     if (subs && subs.size > 0) {
-      for (const cb of Array.from(subs)) {
-        if (!subs.has(cb)) continue;
+      for (const subscription of Array.from(subs.values())) {
+        if (!subscription.active) continue;
         try {
-          cb(value);
+          subscription.callback(value);
         } catch (err) {
           reportError(err, { phase: "event", name: `sharedScope(${String(key)})` });
         }
@@ -353,9 +360,18 @@ export function createSharedScope<T extends object>(initialState: T): SharedScop
     if (!subs) {
       return () => {};
     }
-    subs.add(callback as (value: T[keyof T]) => void);
+    const cb = callback as (value: T[keyof T]) => void;
+    let subscription = subs.get(cb);
+    if (!subscription) {
+      subscription = { callback: cb, active: true };
+      subs.set(cb, subscription);
+    }
+    const own = subscription;
     return () => {
-      subs.delete(callback as (value: T[keyof T]) => void);
+      // A stale handle must not remove a later subscription of the same callback.
+      if (subs.get(cb) !== own) return;
+      own.active = false;
+      subs.delete(cb);
     };
   }
 

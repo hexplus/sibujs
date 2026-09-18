@@ -16,6 +16,9 @@ import { eventBus } from "../src/ui/eventBus";
 // starts. Listeners added during it wait for the next dispatch; listeners
 // removed (or cleared) during it are skipped for the rest of it. A dispatch
 // started from inside a listener completes before the outer one continues.
+// Delivery tracks SUBSCRIPTIONS, not callbacks: the same function unsubscribed
+// and re-subscribed mid-dispatch is a new subscription that waits for the next
+// dispatch, and a stale unsubscribe handle cannot remove the newer one.
 // ---------------------------------------------------------------------------
 
 type Report = { error: unknown; context: RuntimeErrorContext };
@@ -122,6 +125,52 @@ for (const { name, make } of CHANNELS) {
       channel.send(2);
 
       expect(removed).not.toHaveBeenCalled();
+    });
+
+    it("the same callback removed and re-added during delivery waits for the next event", () => {
+      const channel = make();
+      const target = vi.fn();
+      let unsubscribe: () => void = () => {};
+      let swapped = false;
+      channel.on(() => {
+        if (swapped) return;
+        swapped = true;
+        unsubscribe();
+        channel.on(target);
+      });
+      unsubscribe = channel.on(target);
+
+      channel.send(1);
+      expect(target).not.toHaveBeenCalled();
+
+      channel.send(2);
+      expect(target).toHaveBeenCalledTimes(1);
+      expect(target).toHaveBeenCalledWith(2);
+    });
+
+    it("a stale unsubscribe handle does not remove a later subscription of the same callback", () => {
+      const channel = make();
+      const target = vi.fn();
+      const oldUnsubscribe = channel.on(target);
+      oldUnsubscribe();
+      channel.on(target);
+
+      oldUnsubscribe();
+      channel.send(1);
+
+      expect(target).toHaveBeenCalledTimes(1);
+      expect(target).toHaveBeenCalledWith(1);
+    });
+
+    it("subscribing the same callback twice delivers once", () => {
+      const channel = make();
+      const target = vi.fn();
+      channel.on(target);
+      channel.on(target);
+
+      channel.send(1);
+
+      expect(target).toHaveBeenCalledTimes(1);
     });
 
     it("recursive dispatch completes before the outer dispatch continues", () => {
