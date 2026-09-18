@@ -31,7 +31,8 @@ describe("Fragment edge cases", () => {
       () => "txt", // function returning a string
       "plain", // plain string
     ]);
-    const kids = Array.from(frag.childNodes);
+    // Function children are reactive: each renders after its placeholder comment.
+    const kids = Array.from(frag.childNodes).filter((n) => n.nodeType !== Node.COMMENT_NODE);
     // i, real(b), txt-text, plain-text  → 4 nodes (nulls/booleans skipped)
     expect(kids.length).toBe(4);
     expect((kids[0] as Element).tagName).toBe("I");
@@ -40,10 +41,10 @@ describe("Fragment edge cases", () => {
     expect(kids[3].textContent).toBe("plain");
   });
 
-  it("resolves a null inside a nested array to nothing and bare null function to empty text", () => {
+  it("a function child returning null renders nothing but its placeholder", () => {
     const frag = Fragment([() => null]);
     expect(frag.childNodes.length).toBe(1);
-    expect(frag.childNodes[0].textContent).toBe("");
+    expect(frag.childNodes[0].nodeType).toBe(Node.COMMENT_NODE);
   });
 });
 

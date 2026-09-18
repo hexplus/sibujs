@@ -7,6 +7,53 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Fixed — failed construction left subscriptions nobody could release
+
+- **`effect()`** whose first run throws now releases the dependency edges that
+  run recorded and runs the cleanups it registered before rethrowing. It never
+  returned a disposer, so it stayed subscribed and re-ran on later writes.
+  Neither `effect:create` nor `effect:destroy` is emitted for it.
+- **`derived()`** whose initial getter throws now unsubscribes from the sources
+  it read before rethrowing. The accessor was never returned, so `dispose()` was
+  unreachable and every source kept the failed computed alive.
+- **`mount()`** of a component function is a render transaction: if the
+  component throws, or the append fails, every binding and listener it
+  registered is released before the error reaches the caller. A pre-built node
+  passed to `mount()` belongs to the caller and is never rolled back.
+
+### Fixed — `Fragment()` and `mount()` of a fragment
+
+- A function child of `Fragment()` is reactive, as it is in a tag factory. It
+  was evaluated once, so `Fragment([() => count()])` never updated. It renders
+  after a placeholder comment that owns the binding, so disposing the parent the
+  fragment was appended to stops it.
+- `mount(Fragment([...]))` tracks the range the fragment filled, and
+  `unmount()` disposes and removes everything in it, including nodes a reactive
+  child rendered after mounting. It used to dispose the emptied fragment and
+  leave the mounted children live in the container.
+
+### Fixed — `onMount()` cleanup skipped on native removal
+
+The cleanup returned from an `onMount()` callback now runs through the same
+once-only path as `onUnmount()`, so `element.remove()` runs it as well as
+`dispose()`. A callback that removes its own element has its cleanup run
+immediately.
+
+### Fixed — `catchError()` missed rejections from a `PromiseLike`
+
+A returned thenable is adopted with `then` read once instead of calling
+`.catch()`, which a `PromiseLike` need not have. The missing method used to be
+reported as a synchronous failure while the real rejection went unobserved. A
+throwing `then` accessor is reported as an async failure.
+
+### Changed — default CDN gzip budget baseline
+
+Raised from 26,600 B to 26,900 B: making `mount()` transactional brings
+`withDisposerRollback()` into the default bundle (+276 B). The raw budget is
+unchanged.
+
 ## [4.6.0] — 2026-09-18
 
 ### Changed — internal render-transaction helpers are no longer exported from `sibujs`

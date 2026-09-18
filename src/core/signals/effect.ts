@@ -295,10 +295,20 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
   ctx.subscriber = sub;
 
   // Initial run — take the happy path directly (no cleanup, no userCleanups).
+  // It is a transaction: a throwing first run never returns a disposer, so the
+  // edges it already recorded and the cleanups it already registered are
+  // released here, or the failed effect stays subscribed and re-runs as a
+  // zombie nobody can stop. `effect:create` has not been emitted, so no
+  // `effect:destroy` is either.
   ctx.running = true;
   try {
     retrack(ctx.bodyFn, ctx.subscriber);
     if (ctx.rerunPending) drainReruns(ctx);
+  } catch (err) {
+    ctx.disposed = true;
+    if (ctx.userCleanups.length > 0) flushUserCleanups(ctx);
+    coreCleanup(ctx.subscriber);
+    throw err;
   } finally {
     ctx.running = false;
     ctx.rerunPending = false;

@@ -115,18 +115,21 @@ export function derived<T>(
     cs._init = true;
   };
 
-  // Initial evaluation — sets up dependencies
-  track(() => {
-    let threw = true;
-    try {
+  // Initial evaluation — sets up dependencies. A throwing first run never
+  // returns the accessor, so nothing could ever call `dispose()`: release the
+  // edges it recorded before the throw, or its sources keep `markDirty` — and
+  // through it this whole computed — alive for as long as they live.
+  try {
+    track(() => {
       cs._v = getter();
       cs._d = false;
       cs._init = true;
-      threw = false;
-    } finally {
-      if (threw) cs._d = true;
-    }
-  }, markDirty);
+    }, markDirty);
+  } catch (err) {
+    disposed = true;
+    cleanup(markDirty);
+    throw err;
+  }
 
   // DevTools: emit computed:create
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;

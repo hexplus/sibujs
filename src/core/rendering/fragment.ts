@@ -1,15 +1,22 @@
-import type { NodeChildren } from "./types";
+import { bindChildNode } from "../../reactivity/bindChildNode";
+import { registerDisposer } from "./dispose";
+import type { NodeChild, NodeChildren } from "./types";
 
 /**
  * Fragment groups multiple nodes without adding a wrapper DOM element.
  * Returns a DocumentFragment that can be appended to any parent.
+ *
+ * A function child is reactive, exactly as it is inside a tag factory: it is
+ * rendered after a placeholder comment and re-rendered when the signals it reads
+ * change. The binding is owned by that placeholder, so disposing the parent the
+ * fragment was appended to (or unmounting a mounted fragment) stops it.
  *
  * @example
  * ```ts
  * div([
  *   Fragment([
  *     p("First"),
- *     p("Second"),
+ *     () => `Count: ${count()}`,
  *   ])
  * ]);
  * ```
@@ -26,31 +33,26 @@ export function Fragment(nodes: NodeChildren[]): DocumentFragment {
     if (Array.isArray(child)) {
       for (const nested of child) {
         if (nested == null || typeof nested === "boolean") continue;
-        frag.appendChild(resolveChild(nested));
+        appendChild(frag, nested);
       }
     } else {
-      frag.appendChild(resolveChild(child));
+      appendChild(frag, child);
     }
   }
 
   return frag;
 }
 
-function resolveChild(child: NodeChildren): Node {
-  // Defensive: Fragment() already filters null/boolean before calling
-  // resolveChild, so this branch is unreachable from the public API — kept
-  // only to make resolveChild safe if ever called directly.
-  /* v8 ignore next 3 */
-  if (child == null) {
-    return document.createTextNode("");
-  }
+function appendChild(frag: DocumentFragment, child: NodeChildren): void {
   if (child instanceof Node) {
-    return child;
+    frag.appendChild(child);
+    return;
   }
   if (typeof child === "function") {
-    const result = (child as () => unknown)();
-    if (result instanceof Node) return result;
-    return document.createTextNode(String(result ?? ""));
+    const placeholder = document.createComment("");
+    frag.appendChild(placeholder);
+    registerDisposer(placeholder, bindChildNode(placeholder, child as () => NodeChild));
+    return;
   }
-  return document.createTextNode(String(child));
+  frag.appendChild(document.createTextNode(String(child)));
 }

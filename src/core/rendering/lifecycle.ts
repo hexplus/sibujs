@@ -44,11 +44,19 @@ function safeCall(cb: () => unknown, hookName: string): unknown {
   }
 }
 
-/** Run onMount callback and register returned cleanup function (if any) on the element. */
+/** Run onMount callback and tie the cleanup it returns (if any) to the element's unmount. */
 function runMountCallback(callback: () => undefined | CleanupFn, hookName: string, element?: HTMLElement): void {
   const cleanup = safeCall(callback, hookName);
   if (typeof cleanup === "function" && element) {
-    registerDisposer(element, cleanup as CleanupFn);
+    if (element.isConnected) {
+      // Same once-only path as onUnmount(): dispose() AND a native .remove()
+      // both run it. Registering it only as a disposer skipped it whenever the
+      // element left the DOM without being disposed.
+      onUnmount(cleanup as CleanupFn, element);
+    } else {
+      // The callback removed its own element: the unmount already happened.
+      safeCall(cleanup as CleanupFn, "onUnmount");
+    }
   }
 }
 
