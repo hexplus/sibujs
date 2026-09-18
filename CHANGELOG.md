@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.6.0] — 2026-09-18
 
 ### Changed — internal render-transaction helpers are no longer exported from `sibujs`
 
