@@ -900,8 +900,8 @@ Each middleware now receives its own `next`, which advances the chain at most
 once per dispatch. Extra calls are ignored, with a development warning naming the
 middleware and action. A middleware that fails (throws, or rejects) before calling
 `next()` never continues — including when it queued `next()` in a microtask and
-then returned an already-rejected promise, which previously ran the action
-before the rejection was observed.
+then returned an already-rejected promise (or one whose `then` accessor throws),
+which previously ran the action before the rejection was observed.
 
 ### Fixed — `componentAdapter()` and `createTheme()` resolved inherited keys as classes
 

@@ -154,6 +154,48 @@ describe("globalStore middleware rejected before a queued next()", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it("a hostile then getter beats an already-queued next()", async () => {
+    const poisoned = Promise.resolve();
+    // biome-ignore lint/suspicious/noThenProperty: a hostile thenable is the subject under test
+    Object.defineProperty(poisoned, "then", {
+      get() {
+        throw new Error("hostile getter");
+      },
+    });
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return poisoned as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+
+    expect(action).not.toHaveBeenCalled();
+    expect(store.getState().count).toBe(0);
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toMatchObject({ message: "hostile getter" });
+  });
+
+  it("a native promise whose then invocation throws beats an already-queued next()", async () => {
+    const poisoned = Promise.resolve();
+    Object.defineProperty(poisoned, "constructor", {
+      get() {
+        throw new Error("hostile constructor");
+      },
+    });
+    const { store, action } = storeWith((_s, _a, _p, next) => {
+      queueMicrotask(next);
+      return poisoned as unknown as PromiseLike<void>;
+    });
+
+    store.dispatch("inc");
+    await flush();
+
+    expect(action).not.toHaveBeenCalled();
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(handler.mock.calls[0][0]).toMatchObject({ message: "hostile constructor" });
+  });
+
   it("a queued next() still continues while the middleware's promise is pending", async () => {
     let finish: () => void = () => {};
     const { store, action } = storeWith((_s, _a, _p, next) => {

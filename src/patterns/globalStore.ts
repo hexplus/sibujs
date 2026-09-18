@@ -1,7 +1,7 @@
 import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
-import { adoptThenable } from "../utils/adoptThenable";
+import { type Adoption, adopt } from "../utils/adoptThenable";
 import { stripUnsafeKeys } from "../utils/guards";
 
 /**
@@ -243,55 +243,38 @@ export function globalStore<S extends object, A extends StoreActionMap<S>>(confi
           }
           const proceed = () => perform(() => runFrom(index + 1), false);
           // The rejection handler below observes the middleware's promise only
-          // after adoptThenable's extra microtask, so a next() the middleware
+          // after the adoption's extra microtask, so a next() the middleware
           // queued before returning an ALREADY-rejected promise would run first
-          // and continue a failed chain. For a native promise, ask directly: a
-          // reaction on a settled promise is queued at once, ahead of the
-          // marker queued after it, so it decides whether the promise had
-          // already rejected when next() ran.
-          let decided = false;
-          try {
-            Reflect.apply(Promise.prototype.then, result, [
-              undefined,
-              () => {
-                if (decided) return;
-                decided = true;
-                failed = true;
-                if (DEV)
-                  devWarn(
-                    `globalStore: middleware ${index} next() called after it failed for "${String(action)}"; ignored.`,
-                  );
-              },
-            ]);
-          } catch {
-            // Not a native promise (no result, or a foreign thenable): its
-            // state cannot be read, so continue as before.
-            proceed();
-            return;
-          }
-          queueMicrotask(() => {
-            if (decided) return;
-            decided = true;
-            proceed();
-          });
+          // and continue a failed chain. Ask the same adoption instead — it
+          // probes through the `then` it already captured, so it cannot disagree
+          // with the rejection handler about what the middleware returned.
+          const probing = adoption?.probe(() => {
+            failed = true;
+            if (DEV)
+              devWarn(
+                `globalStore: middleware ${index} next() called after it failed for "${String(action)}"; ignored.`,
+              );
+          }, proceed);
+          // Not a thenable, or a foreign one whose state cannot be read.
+          if (!probing) proceed();
         };
-        let result: unknown;
-        let pending: Promise<unknown> | null;
+        let adoption: Adoption | null = null;
         try {
-          result = middlewares[index](getState(), String(action), payload, next);
-          // adoptThenable reads `then` once (a throwing getter becomes a
-          // rejection) and invokes it in a later microtask.
-          pending = adoptThenable(result);
+          // adopt() reads `then` once and invokes it in a later microtask.
+          adoption = adopt(middlewares[index](getState(), String(action), payload, next));
         } catch (err) {
           failed = true;
           throw err;
         } finally {
           synchronous = false;
         }
-        if (pending) {
+        if (adoption) {
+          // Reading `then` threw: the adoption has already failed, so a next()
+          // the middleware queued before returning must not continue.
+          if (adoption.failedEarly) failed = true;
           // Observed, so an async middleware failure reaches the runtime error
           // handler instead of becoming an unhandled rejection.
-          pending.then(undefined, (err) => {
+          adoption.promise.then(undefined, (err) => {
             failed = true;
             reportError(err, { phase: "async", name: "globalStore(middleware)" });
           });
