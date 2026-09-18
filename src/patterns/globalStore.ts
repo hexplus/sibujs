@@ -1,7 +1,7 @@
 import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
 import { signal } from "../core/signals/signal";
-import { type Adoption, adopt } from "../utils/adoptThenable";
+import { type Adoption, adopt } from "../utils/adoption";
 import { stripUnsafeKeys } from "../utils/guards";
 
 /**
