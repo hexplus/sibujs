@@ -1,6 +1,7 @@
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { emitDevtools } from "../devtoolsHook";
 import type { Accessor } from "./signal";
 
 /**
@@ -115,18 +116,21 @@ export function derived<T>(
     cs._init = true;
   };
 
-  // Initial evaluation — sets up dependencies
-  track(() => {
-    let threw = true;
-    try {
+  // Initial evaluation — sets up dependencies. A throwing first run never
+  // returns the accessor, so nothing could ever call `dispose()`: release the
+  // edges it recorded before the throw, or its sources keep `markDirty` — and
+  // through it this whole computed — alive for as long as they live.
+  try {
+    track(() => {
       cs._v = getter();
       cs._d = false;
       cs._init = true;
-      threw = false;
-    } finally {
-      if (threw) cs._d = true;
-    }
-  }, markDirty);
+    }, markDirty);
+  } catch (err) {
+    disposed = true;
+    cleanup(markDirty);
+    throw err;
+  }
 
   // DevTools: emit computed:create
   const hook = (globalThis as any).__SIBU_DEVTOOLS_GLOBAL_HOOK__;
@@ -189,7 +193,7 @@ export function derived<T>(
     // `computed:destroy`; an update after it would describe a node DevTools no
     // longer tracks.
     if (hook && !disposed && !Object.is(oldValue, cs._v)) {
-      hook.emit("computed:update", { signal: cs, oldValue, newValue: cs._v });
+      emitDevtools(hook, "computed:update", { signal: cs, oldValue, newValue: cs._v });
     }
   };
   cs._validate = validate;
@@ -279,7 +283,7 @@ export function derived<T>(
     }
   };
 
-  if (hook) hook.emit("computed:create", { signal: cs, name: debugName, getter: computedGetter });
+  if (hook) emitDevtools(hook, "computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
   return computedGetter as DerivedAccessor<T>;
 }

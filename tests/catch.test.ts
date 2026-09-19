@@ -67,6 +67,10 @@ describe("catchError (sync)", () => {
   });
 });
 
+// Rejections are observed through adoptThenable, which invokes `then` in a
+// later microtask; a macrotask boundary lets every hop settle.
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
 describe("catchError (async / thenable handling)", () => {
   afterEach(() => {
     setGlobalErrorHandler(null as unknown as (error: unknown, context?: string) => void);
@@ -78,9 +82,8 @@ describe("catchError (async / thenable handling)", () => {
     const err = new Error("async-fail");
     const result = catchError(() => Promise.reject(err), onError);
     expect(result).toBeInstanceOf(Promise);
-    // The internal .catch swallows the rejection, so awaiting is safe.
-    await Promise.resolve();
-    await Promise.resolve();
+    // The internal handler observes the rejection, so it is never unhandled.
+    await settle();
     expect(onError).toHaveBeenCalledWith(err, "async");
   });
 
@@ -96,33 +99,47 @@ describe("catchError (async / thenable handling)", () => {
     setGlobalErrorHandler(handler);
     const err = new Error("async-global");
     catchError(() => Promise.reject(err));
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(handler).toHaveBeenCalledWith(err, "async");
   });
 
   it("logs async rejections to console.error when no handler is present", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     catchError(() => Promise.reject(new Error("noh")));
-    await Promise.resolve();
-    await Promise.resolve();
+    await settle();
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0][0]).toContain("Unhandled async error in Sibu.catchError");
   });
 
-  it("treats any thenable (custom .then) as async", async () => {
+  it("observes a PromiseLike that implements only then()", async () => {
     const onError = vi.fn();
+    const err = new Error("thenable-fail");
     const thenable = {
       // biome-ignore lint/suspicious/noThenProperty: intentional thenable being tested
-      then(_res: unknown, _rej: unknown) {
-        return this;
-      },
-      catch(cb: (e: unknown) => void) {
-        cb(new Error("thenable-fail"));
-        return this;
+      then(_res: unknown, rej?: (e: unknown) => void) {
+        rej?.(err);
       },
     };
-    catchError(() => thenable, onError);
+    const result = catchError(() => thenable, onError);
+    expect(result).toBe(thenable);
+    await settle();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(err, "async");
+  });
+
+  it("reports a throwing then accessor as an async failure, reading it once", async () => {
+    const onError = vi.fn();
+    let reads = 0;
+    const hostile = {
+      // biome-ignore lint/suspicious/noThenProperty: intentional thenable being tested
+      get then() {
+        reads++;
+        throw new Error("getter");
+      },
+    };
+    catchError(() => hostile, onError);
+    await settle();
+    expect(reads).toBe(1);
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError.mock.calls[0][1]).toBe("async");
   });

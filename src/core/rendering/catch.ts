@@ -1,3 +1,5 @@
+import { adoptThenable } from "../../utils/adoptThenable";
+
 type ErrorHandler = (error: unknown, context?: string) => void;
 
 let globalErrorHandler: ErrorHandler | null = null;
@@ -14,9 +16,14 @@ export function catchError<T>(fn: () => T, onError?: ErrorHandler): T | null {
   try {
     const result = fn();
 
-    // Handle async — catch Promise rejections
-    if (result && typeof (result as unknown as Promise<unknown>).then === "function") {
-      (result as unknown as Promise<unknown>).catch((err: unknown) => {
+    // Handle async — observe the rejection of any thenable. PromiseLike only
+    // promises `then()`, so calling `.catch()` failed on a valid thenable (the
+    // TypeError was reported as a sync failure and the real rejection was never
+    // seen). adoptThenable reads `then` once and turns a throwing accessor into
+    // a rejection.
+    const adopted = adoptThenable(result);
+    if (adopted) {
+      adopted.then(undefined, (err: unknown) => {
         if (onError) {
           onError(err, "async");
         } else if (globalErrorHandler) {

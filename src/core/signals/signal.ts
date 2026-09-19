@@ -2,6 +2,7 @@ import { enqueueBatchedSignal } from "../../reactivity/batch";
 import type { ReactiveSignal } from "../../reactivity/signal";
 import { notifySubscribers, recordDependency } from "../../reactivity/track";
 import { DEV } from "../dev";
+import { emitDevtools } from "../devtoolsHook";
 
 // Phantom brand symbol — exists only in the type system, never at runtime.
 declare const __accessor: unique symbol;
@@ -130,7 +131,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
       state.__v++;
       if (DEV) {
         const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-        if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
+        if (hook) emitDevtools(hook, "signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
       }
       if (!enqueueBatchedSignal(state as ReactiveSignal)) {
         notifySubscribers(state as ReactiveSignal);
@@ -144,7 +145,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
       state.value = newValue;
       state.__v++;
       const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-      if (hook) hook.emit("signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
+      if (hook) emitDevtools(hook, "signal:update", { signal: state, name: debugName, oldValue: prev, newValue });
       if (!enqueueBatchedSignal(state as ReactiveSignal)) {
         notifySubscribers(state as ReactiveSignal);
       }
@@ -166,7 +167,7 @@ export function signal<T>(initial: T, options?: SignalOptions<T>): StateTuple<T>
 
   if (DEV) {
     const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
-    if (hook) hook.emit("signal:create", { signal: state, name: debugName, getter: get, initial });
+    if (hook) emitDevtools(hook, "signal:create", { signal: state, name: debugName, getter: get, initial });
   }
 
   return [get as Accessor<T>, set];
