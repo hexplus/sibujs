@@ -2,6 +2,7 @@ import { cleanup as coreCleanup, retrack, untracked } from "../../reactivity/tra
 import { devAssert } from "../dev";
 import { emitDevtools } from "../devtoolsHook";
 import { type RuntimeErrorPhase, reportError } from "../errors";
+import { registerRollbackCleanup } from "../rendering/dispose";
 import { isSSR } from "../ssr-context";
 
 /** Options for effect */
@@ -192,6 +193,11 @@ function disposeEffect(ctx: EffectCtx): void {
  * });
  * ```
  *
+ * An effect created while a component renders belongs to that render: if the
+ * render throws, the effect is disposed with it. Create an effect meant to
+ * outlive the render (shared, or started lazily on first use) inside
+ * `detached()`.
+ *
  * @returns A dispose function that stops the effect and releases its
  * dependencies. Idempotent.
  */
@@ -318,5 +324,9 @@ export function effect(effectFn: EffectBody | (() => void), options?: EffectOpti
   const hook = _g.__SIBU_DEVTOOLS_GLOBAL_HOOK__;
   if (hook) emitDevtools(hook, "effect:create", { effectFn });
 
-  return () => disposeEffect(ctx);
+  const dispose = () => disposeEffect(ctx);
+  // Created inside a render that later fails, nobody receives this disposer;
+  // the render transaction runs it on rollback instead.
+  registerRollbackCleanup(dispose);
+  return dispose;
 }

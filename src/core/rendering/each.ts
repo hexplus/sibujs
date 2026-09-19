@@ -3,7 +3,7 @@ import { resumeTracking, suspendTracking, track } from "../../reactivity/track";
 import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import type { NodeChild } from "./types";
 
 /**
@@ -263,7 +263,9 @@ export function each<T>(
           // bindings and effects it creates, which track in their own scopes.
           suspendTracking();
           try {
-            node = resolveNodeChild(render(itemGetter, indexGetter));
+            // A render transaction: a row that throws part-way leaves none of
+            // the bindings or effects it created subscribed.
+            node = withDisposerRollback(() => resolveNodeChild(render(itemGetter, indexGetter)));
           } finally {
             resumeTracking();
           }

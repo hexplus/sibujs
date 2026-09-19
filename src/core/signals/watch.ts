@@ -1,5 +1,6 @@
 import { resumeTracking, suspendTracking, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
+import { registerRollbackCleanup } from "../rendering/dispose";
 import { isSSR } from "../ssr-context";
 
 /**
@@ -51,5 +52,8 @@ export function watch<T>(getter: () => T, callback: (value: T, prev: T | undefin
 
   // Track dependencies and return teardown for unsubscription
   const teardown = track(subscriber);
+  // Created inside a render that later fails, nobody receives the teardown;
+  // the render transaction runs it on rollback instead.
+  registerRollbackCleanup(teardown);
   return teardown;
 }

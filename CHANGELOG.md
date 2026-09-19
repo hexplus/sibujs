@@ -62,13 +62,74 @@ A returned thenable is adopted with `then` read once instead of calling
 reported as a synchronous failure while the real rejection went unobserved. A
 throwing `then` accessor is reported as an async failure.
 
+### Added — `detached()`
+
+`detached(fn)` runs `fn` outside any render transaction and returns its result.
+Nothing created inside it belongs to the render that happens to be running, so
+that render failing leaves it alive. Use it for resources meant to outlive the
+render — a shared store, or a value cached on first use:
+
+```ts
+let cart: DerivedAccessor<number> | undefined;
+const cartCount = () => (cart ??= detached(() => derived(() => items().length)));
+```
+
+### Fixed — a failed render left resources it created subscribed
+
+A render that throws now releases everything it created, not only the bindings
+registered on its nodes:
+
+- **Standalone resources.** An `effect()`, `derived()`, `watch()` or
+  `asyncDerived()` created inside a render that later throws is disposed with
+  the rollback (an `asyncDerived()` also aborts its request). The render never
+  returned, so nobody held their disposers. A render that succeeds leaves them
+  manually owned, exactly as before; a nested render that succeeds hands them to
+  the enclosing one, whose failure still releases them. **Behavior change:** a
+  render owns what it creates even if it stored it somewhere longer-lived, so a
+  shared or lazily cached resource first created by a render that then throws
+  is disposed (a `derived()` freezes at its last value). Create such resources
+  inside `detached()`.
+- **Every render factory is a transaction.** `each()` rows, `when()` / `match()`
+  branches, `show()` thunks, `KeepAlive()` cases, `lazy()` components (already
+  loaded or not), `Suspense()` content and fallback, `Portal()` content,
+  `ErrorBoundary()` children and fallback, `resolveComponent()` and
+  `DynamicComponent()` all run the user factory as a render transaction, like
+  `mount()`. A factory that throws part-way — replaced by an error placeholder
+  or a boundary fallback — leaves none of its bindings behind.
+- **Deferred first renders are reported.** `when()`, `match()` and `KeepAlive()`
+  render for the first time in a microtask when their anchor had no parent yet.
+  A throw there escaped as an uncaught exception; it is now reported with the
+  anchor as its node, so the nearest `ErrorBoundary` can claim it.
+- `KeepAlive()` ignores inherited case keys: `"toString"` is not a case.
+
+### Fixed — `Fragment()` flattens every nesting level
+
+`Fragment([[[a, b]]])` stringified the inner array instead of appending `a` and
+`b`. Children are flattened at any depth, skipping `null`, `undefined` and
+booleans, matching what the `NodeChildren` type allows.
+
+### Fixed — tag factories read inherited props
+
+A props object created with `Object.create(defaults)`, or a class instance, had
+its inherited `class`, `on`, `style`, attributes and `onElement` applied as if
+the caller had passed them. Props, and the class, style and event maps, are now
+read by own keys only. The common plain object pays a single prototype check.
+
+### Fixed — lifecycle hooks registered before `<body>` existed
+
+The shared lifecycle observer watched `document.body`. A classic script in
+`<head>` registering `onMount()` / `onUnmount()` threw, and the observer was
+recorded as installed anyway, so every later hook watched nothing; a replaced
+`<body>` was never observed either. It now watches the document element, and is
+recorded only once observing succeeds.
+
 ### Changed — default CDN budget baselines
 
-The gzip baseline is raised from 26,600 B to 27,000 B: making `mount()` transactional brings
-`withDisposerRollback()` into the default bundle (+276 B), and the
-marker-checked fragment unmount and contained DevTools emits add the rest. The
-raw budget, unchanged until now, rises from 80,202 B to 80,400 B for the same
-work.
+The gzip baseline is raised from 26,600 B to 27,200 B: making `mount()`
+transactional brings `withDisposerRollback()` into the default bundle
+(+276 B), the marker-checked fragment unmount and contained DevTools emits add
+179 B, and the render-transaction and own-key work above adds 192 B. The raw
+budget, unchanged until now, rises from 80,202 B to 81,000 B for the same work.
 
 ## [4.6.0] — 2026-09-18
 

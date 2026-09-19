@@ -1,4 +1,5 @@
 import { batch } from "../../reactivity/batch";
+import { registerRollbackCleanup } from "../rendering/dispose";
 import { effect } from "./effect";
 import { signal } from "./signal";
 
@@ -170,6 +171,18 @@ export function asyncDerived<T>(
     );
   });
 
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    // Unsubscribe FIRST so a source that changes during teardown cannot
+    // schedule another run, then cancel whatever is still in flight.
+    stopEffect();
+    abortInFlight();
+  };
+  // The inner effect registers itself, but only this also aborts the request in
+  // flight: created inside a render that later fails, nobody receives it.
+  registerRollbackCleanup(dispose);
+
   return {
     value,
     loading,
@@ -178,13 +191,6 @@ export function asyncDerived<T>(
       if (disposed) return;
       setTick((n) => n + 1);
     },
-    dispose: () => {
-      if (disposed) return;
-      disposed = true;
-      // Unsubscribe FIRST so a source that changes during teardown cannot
-      // schedule another run, then cancel whatever is still in flight.
-      stopEffect();
-      abortInFlight();
-    },
+    dispose,
   };
 }

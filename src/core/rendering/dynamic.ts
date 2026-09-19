@@ -1,6 +1,6 @@
 import { track } from "../../reactivity/track";
 import { globalSingleton } from "../../utils/globalSingleton";
-import { registerDisposer, replaceChildrenSafely } from "./dispose";
+import { registerDisposer, replaceChildrenSafely, withDisposerRollback } from "./dispose";
 import { div } from "./html";
 
 type Component = () => HTMLElement;
@@ -57,9 +57,9 @@ export function unregisterComponent(name: string): void {
  */
 export function resolveComponent(name: string): HTMLElement {
   const component = componentRegistry.get(name);
-  if (component) {
-    return component();
-  }
+  // A render transaction: a component that throws part-way leaves none of the
+  // bindings or effects it created subscribed.
+  if (component) return withDisposerRollback(component);
   return div(`[Component "${name}" not found]`) as HTMLElement;
 }
 
@@ -86,7 +86,7 @@ export function DynamicComponent(is: () => string | Component): HTMLElement {
     let el: HTMLElement;
 
     if (typeof target === "function") {
-      el = target();
+      el = withDisposerRollback(target);
     } else {
       el = resolveComponent(target);
     }

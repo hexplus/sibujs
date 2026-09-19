@@ -190,7 +190,12 @@ function fullSweep(): void {
 
 function ensureObserver(): void {
   if (sharedObserver || typeof document === "undefined") return;
-  sharedObserver = new MutationObserver((mutations) => {
+  // The document element, not `document.body`: a classic script in <head> runs
+  // before <body> exists (observe(null) throws), and an observer rooted at one
+  // <body> never sees a replacement body. The root also sees the body arrive.
+  const root = document.documentElement;
+  if (!root) return;
+  const observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
       if (m.type !== "childList") continue;
       if (m.addedNodes.length > 0) {
@@ -212,7 +217,10 @@ function ensureObserver(): void {
     }
     maybeDisconnectObserver();
   });
-  sharedObserver.observe(document.body, { childList: true, subtree: true });
+  observer.observe(root, { childList: true, subtree: true });
+  // Recorded only once observing: had `observe()` thrown after the assignment,
+  // every later registration would believe an observer existed and watch nothing.
+  sharedObserver = observer;
 }
 
 function maybeDisconnectObserver(): void {

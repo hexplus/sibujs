@@ -1,5 +1,5 @@
 import { reportError } from "../errors";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 
 /**
  * Portal renders nodes into a DOM node outside the parent component hierarchy.
@@ -34,7 +34,9 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
     // entirely — otherwise portalContent leaks into the target DOM.
     if (disposed) return;
     try {
-      portalContent = nodes();
+      // A render transaction: content that throws part-way leaves none of the
+      // bindings or effects it created subscribed.
+      portalContent = withDisposerRollback(nodes);
       container.appendChild(portalContent);
     } catch (err) {
       // Single path: `reportError` offers the error to an enclosing boundary

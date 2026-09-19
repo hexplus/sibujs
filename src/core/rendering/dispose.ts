@@ -52,7 +52,12 @@ let activeBindingCount = 0;
  * @internal
  */
 export interface DisposerCapture {
-  entries: [Node, () => void][];
+  /**
+   * Registrations made while the transaction is open. A `null` node marks a
+   * rollback-only cleanup (see {@link registerRollbackCleanup}): run if the
+   * transaction fails, dropped when the outermost one commits.
+   */
+  entries: [Node | null, () => void][];
   closed: boolean;
   /**
    * Set when a transaction SUCCEEDS inside another: its registrations were
@@ -119,6 +124,56 @@ export function registerDisposer(node: Node, teardown: () => void): void {
 }
 
 /**
+ * Register cleanup for a resource that is not attached to any node — an
+ * `effect()`, a `derived()`, a `watch()` — created while a render transaction
+ * is open.
+ *
+ * A render owns what it creates. When the build that created the resource
+ * throws, the transaction runs `teardown` as part of its rollback — even if the
+ * build stored the resource somewhere longer-lived. Shared or lazily cached
+ * resources must therefore be created inside {@link detached}. When the build commits, the entry is
+ * handed to an enclosing transaction (whose failure still owes the rollback) or,
+ * at the outermost level, dropped without running: a successfully created
+ * resource stays manually owned, exactly as outside any transaction.
+ *
+ * `teardown` must be idempotent — the owner may already have disposed it.
+ *
+ * @internal
+ */
+export function registerRollbackCleanup(teardown: () => void): void {
+  const capture = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
+  if (capture) capture.entries.push([null, teardown]);
+}
+
+/**
+ * Run `fn` outside any render transaction, and return its result.
+ *
+ * A render owns everything it creates: if it throws, every `effect()`,
+ * `derived()`, `watch()`, `asyncDerived()` and node binding it created is
+ * released, even one it stored somewhere longer-lived. That is what keeps a
+ * failed render from leaving subscriptions behind, and it is exactly wrong for a
+ * resource meant to outlive the render — a shared store, or a value cached on
+ * first use. Create those inside `detached()`: nothing created there belongs to
+ * the render that happens to be running, so its failure leaves them alive, and
+ * they stay owned by whoever keeps their disposer.
+ *
+ * @example
+ * ```ts
+ * let cart: DerivedAccessor<number> | undefined;
+ * // May first run inside a component's render; must survive that render failing.
+ * const cartCount = () => (cart ??= detached(() => derived(() => items().length)));
+ * ```
+ */
+export function detached<T>(fn: () => T): T {
+  const pushed = beginDisposerCapture(null);
+  try {
+    return fn();
+  } finally {
+    if (pushed) endDisposerCapture();
+  }
+}
+
+/**
  * Run `build` as a render transaction.
  *
  * Every disposer registered while it runs is recorded. If `build` throws, those
@@ -156,7 +211,9 @@ export function withDisposerRollback<T>(build: () => T): T {
         const [node, teardown] = captured.pop()!;
         // Only teardowns still registered are owed a run: one already executed
         // (or removed) by a dispose() during the build must not run twice.
-        if (!unregisterDisposer(node, teardown)) continue;
+        // Rollback-only cleanups have no node and are always owed; they release
+        // resources the failed build created but never handed to anyone.
+        if (node !== null && !unregisterDisposer(node, teardown)) continue;
         executed++;
         try {
           teardown();
@@ -180,7 +237,7 @@ export function withDisposerRollback<T>(build: () => T): T {
     // Hand up only registrations that are still live; ones a dispose() already
     // ran are not the enclosing transaction's to roll back.
     for (const entry of captured) {
-      if (elementDisposers.get(entry[0])?.includes(entry[1])) parent.entries.push(entry);
+      if (entry[0] === null || elementDisposers.get(entry[0])?.includes(entry[1])) parent.entries.push(entry);
     }
     // Subscribers created by this transaction now belong to the enclosing one.
     frame.forwardTo = parent;

@@ -1,5 +1,5 @@
 import { reportError } from "../errors";
-import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
+import { dispose, registerDisposer, replaceChildrenSafely, withDisposerRollback } from "./dispose";
 import { div, span } from "./html";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
@@ -88,9 +88,11 @@ export function lazy(importFn: LazyImport): Component {
   let cached: Component | null = null;
 
   return function LazyComponent(): HTMLElement {
-    // If already loaded, render immediately
+    // If already loaded, render immediately. Every render of the loaded
+    // component is a transaction: one that throws part-way leaves none of the
+    // bindings or effects it created subscribed.
     if (cached) {
-      return cached();
+      return withDisposerRollback(cached);
     }
 
     const container = div({ class: "sibu-lazy" }) as HTMLElement;
@@ -100,7 +102,7 @@ export function lazy(importFn: LazyImport): Component {
       .then((mod) => {
         if (disposed) return;
         cached = mod.default;
-        const rendered = cached();
+        const rendered = withDisposerRollback(cached);
         replaceChildrenSafely(container, rendered);
       })
       .catch((err) => {
@@ -162,7 +164,8 @@ export interface SuspenseProps {
 export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
   const container = div({ class: "sibu-suspense" }) as HTMLElement;
 
-  const fallbackEl = fallback();
+  // Both factories are user construction, run as render transactions.
+  const fallbackEl = withDisposerRollback(fallback);
   container.appendChild(fallbackEl);
 
   let suspenseDisposed = false;
@@ -185,7 +188,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
   queueMicrotask(() => {
     if (suspenseDisposed) return;
     try {
-      const el = nodes();
+      const el = withDisposerRollback(nodes);
       childEl = el;
 
       // Committing swaps the fallback out for `el`. The fallback is

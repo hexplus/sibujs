@@ -34,6 +34,7 @@ export * from "./src/core/rendering/directives";
 // imported from the source module by the framework itself.
 export {
   checkLeaks,
+  detached,
   dispose,
   MAX_DRAIN_TEARDOWNS,
   registerDisposer,

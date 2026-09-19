@@ -1,6 +1,7 @@
 import { reactiveBinding } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
-import { dispose, registerDisposer } from "./dispose";
+import { deferredFirstRender } from "./deferredRender";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
 import type { NodeChild } from "./types";
 
@@ -36,7 +37,8 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
   // for `show` as a `TypeError` about `style` on `undefined` raised from inside
   // the directive rather than at the call site. Both shapes work in both places
   // now, which removes the mistake rather than reporting it.
-  const resolved: T = typeof element === "function" ? (element as () => T)() : element;
+  // A thunk is user construction: if it throws, what it created is rolled back.
+  const resolved: T = typeof element === "function" ? withDisposerRollback(element as () => T) : element;
   const update = () => {
     (resolved as unknown as HTMLElement).style.display = condition() ? "" : "none";
   };
@@ -119,7 +121,9 @@ function attachBranch(
   // A function branch is a FACTORY and is invoked; anything else is already
   // the content. `NodeChild` includes `() => NodeChild`, so this one check
   // covers thunks, accessors, elements, strings and numbers alike.
-  const result = typeof branch === "function" ? (branch as () => NodeChild)() : branch;
+  // The factory runs as a render transaction, so a branch that throws part-way
+  // leaves none of the bindings or effects it created subscribed.
+  const result = typeof branch === "function" ? withDisposerRollback(branch as () => NodeChild) : branch;
   if (result == null || typeof result === "boolean") return { node: null, owned: false };
 
   const node = result instanceof Node ? result : document.createTextNode(String(result));
@@ -222,9 +226,7 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   });
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!disposed && !initialized && anchor.parentNode) update();
-    });
+    queueMicrotask(() => deferredFirstRender(() => !disposed && !initialized, update, anchor, "when"));
   }
 
   return anchor;
@@ -334,9 +336,7 @@ export function match<T extends string | number>(
   });
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!disposed && !initialized && anchor.parentNode) update();
-    });
+    queueMicrotask(() => deferredFirstRender(() => !disposed && !initialized, update, anchor, "match"));
   }
 
   return anchor;

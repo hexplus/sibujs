@@ -1,5 +1,5 @@
 import { normalizeError, reportError } from "../core/errors";
-import { dispose, registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
+import { dispose, registerDisposer, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
 import { div, span, style } from "../core/rendering/html";
 import { takePendingError } from "../core/rendering/lazy";
 import { onMount } from "../core/rendering/lifecycle";
@@ -430,7 +430,9 @@ export function ErrorBoundary(
     const fn = fallback || defaultFallback;
     try {
       // `err` and `retry` both belong to THIS boundary instance.
-      return fn(err, retry);
+      // A render transaction, like the children below: a fallback that throws
+      // part-way leaves nothing it created subscribed.
+      return withDisposerRollback(() => fn(err, retry));
     } catch (fallbackError) {
       // The fallback renderer itself failed. This second error must not vanish:
       // route it through the central pipeline so an OUTER boundary can claim it
@@ -464,7 +466,9 @@ export function ErrorBoundary(
       }
 
       try {
-        const result = children();
+        // A render transaction: children that throw part-way leave none of the
+        // bindings or effects they created subscribed before the fallback shows.
+        const result = withDisposerRollback(children);
 
         // Handle async children (Promise-returning components)
         if (result && typeof (result as unknown as Promise<Element>).then === "function") {

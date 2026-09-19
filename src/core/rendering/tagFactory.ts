@@ -110,6 +110,8 @@ function applyStyle(el: Element, style: TagProps["style"]) {
 
   const htmlEl = el as HTMLElement;
   for (const prop in style as Record<string, string | number | (() => string | number)>) {
+    // Own keys only (as in every map below): an inherited entry is not the caller's.
+    if (!Object.hasOwn(style as object, prop)) continue;
     const val = (style as Record<string, string | number | (() => string | number)>)[prop];
     const name = toKebab(prop);
     if (typeof val === "function") {
@@ -144,6 +146,7 @@ export function resolveClassValue(cls: TagProps["class"]): string {
   if (!cls) return "";
   let out = "";
   for (const name in cls) {
+    if (!Object.hasOwn(cls, name)) continue;
     const val = (cls as Record<string, boolean | (() => boolean)>)[name];
     const active = typeof val === "function" ? val() : val;
     if (active) out = out ? `${out} ${name}` : name;
@@ -170,6 +173,7 @@ function applyClass(el: Element, cls: TagProps["class"]) {
   let hasReactive = false;
   let result = "";
   for (const name in obj) {
+    if (!Object.hasOwn(obj, name)) continue;
     const val = obj[name];
     if (typeof val === "function") {
       hasReactive = true;
@@ -182,6 +186,7 @@ function applyClass(el: Element, cls: TagProps["class"]) {
     const update = () => {
       let r = "";
       for (const name in obj) {
+        if (!Object.hasOwn(obj, name)) continue;
         const val = obj[name];
         const active = typeof val === "function" ? (val as () => boolean)() : val;
         if (active) r = r ? `${r} ${name}` : name;
@@ -392,7 +397,14 @@ export const tagFactory = (tag: string, ns?: string) => {
 
     // Full props object: tag({ class, on, style, ... }) OR
     //                    tag({ class, on, style, ... }, children)
-    const props = first as TagProps;
+    // Own properties only. A props object with a non-plain prototype
+    // (`Object.create(defaults)`, a class instance) is copied to its own
+    // enumerable keys once, so the direct reads below never pick up inherited
+    // values; the common plain object pays one prototype check. A spread, not
+    // Object.assign: assigning an own `__proto__` key would set the copy's
+    // prototype instead of copying it.
+    const proto = Object.getPrototypeOf(first);
+    const props = (proto === Object.prototype || proto === null ? first : { ...(first as object) }) as TagProps;
 
     // Known-keys fast path: process common props via direct access,
     // then check if there are any custom attributes to iterate.
@@ -423,6 +435,7 @@ export const tagFactory = (tag: string, ns?: string) => {
     const pOn = props.on;
     if (pOn) {
       for (const ev in pOn) {
+        if (!Object.hasOwn(pOn, ev)) continue;
         const handler = pOn[ev];
         if (typeof handler === "function") {
           el.addEventListener(ev, handler as EventListener);
@@ -442,6 +455,7 @@ export const tagFactory = (tag: string, ns?: string) => {
 
     // Custom attributes — only enter the loop if there are keys beyond the known set
     for (const key in props) {
+      if (!Object.hasOwn(props, key)) continue;
       switch (key) {
         case "class":
         case "id":

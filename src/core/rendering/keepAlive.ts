@@ -1,6 +1,7 @@
 import { track } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
-import { dispose, registerDisposer } from "./dispose";
+import { deferredFirstRender } from "./deferredRender";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 
 /**
  * Options for KeepAlive.
@@ -78,13 +79,16 @@ export function KeepAlive(
     // Retrieve from cache or create new
     let node = cache.get(key);
     if (!node) {
-      const factory = cases[key];
+      // Own keys only, as in `match()`: an inherited name (`toString`) is not a case.
+      const factory = Object.hasOwn(cases, key) ? cases[key] : undefined;
       if (!factory) {
         currentNode = null;
         initialized = true;
         return;
       }
-      node = factory();
+      // A render transaction: a case that throws part-way leaves none of the
+      // bindings or effects it created subscribed.
+      node = withDisposerRollback(factory);
       // A DocumentFragment is emptied by insertBefore (its children move out),
       // leaving an empty fragment with no parentNode — it could then never be
       // detached or re-attached, breaking caching. Wrap multi-root/fragment
@@ -126,9 +130,7 @@ export function KeepAlive(
   const untrack = track(update);
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) update();
-    });
+    queueMicrotask(() => deferredFirstRender(() => !initialized, update, anchor, "KeepAlive"));
   }
 
   // When the anchor is disposed (via when/match/each/dispose), tear down the

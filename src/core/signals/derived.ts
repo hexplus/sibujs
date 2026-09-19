@@ -2,6 +2,12 @@ import type { ReactiveSignal } from "../../reactivity/signal";
 import { cleanup, isTrackingSuspended, recordDependency, retrack, track } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import { emitDevtools } from "../devtoolsHook";
+import {
+  beginDisposerCapture,
+  currentDisposerCapture,
+  endDisposerCapture,
+  registerRollbackCleanup,
+} from "../rendering/dispose";
 import type { Accessor } from "./signal";
 
 /**
@@ -39,7 +45,9 @@ import type { Accessor } from "./signal";
  * `flag.dispose()`, or `onCleanup(flag.dispose, rowNode)` to tie it to a node.
  * A disposed accessor is inert: it keeps returning the last value it settled,
  * never recomputes, never re-subscribes, and never wakes downstream readers.
- * Disposal is idempotent.
+ * Disposal is idempotent. A derived created while a component renders belongs
+ * to that render and is disposed if the render throws; create a shared or
+ * lazily cached one inside `detached()`.
  *
  * ERRORS — a recomputation that throws is thrown to the next reader, in that
  * reader's context: a binding reports it with its node (so the nearest
@@ -94,6 +102,10 @@ export function derived<T>(
   };
   (markDirty as any)._c = 1;
   (markDirty as any)._sig = cs;
+  // The render transaction this computed was created in (null outside one).
+  // Stamped here, not on the first recompute: that runs wherever the first
+  // reader happens to be, and would hand ownership to the reader's render.
+  (markDirty as any)._cap = currentDisposerCapture();
 
   // Recompute body, allocated ONCE per derived (not per recompute). Hoisting it
   // out of the getter avoids a closure allocation on every propagation — the
@@ -150,6 +162,12 @@ export function derived<T>(
     if (!cs._d || disposed || pendingError !== undefined) return;
     const oldValue = cs._v;
     evaluating = true;
+    // A recompute runs in the READER's context, so anything the getter creates
+    // (a nested derived, an effect) would otherwise belong to the reader's
+    // render and be disposed if that render failed — while this computed keeps
+    // it in its cached value. Register into this computed's own transaction
+    // instead, exactly as the scheduler does for a subscriber's re-run.
+    const pushed = beginDisposerCapture((markDirty as any)._cap ?? null);
     try {
       retrack(recompute, markDirty);
       if (!Object.is(oldValue, cs._v)) cs.__v++;
@@ -181,6 +199,7 @@ export function derived<T>(
       if (disposed) cs._d = true;
       else cs._f = true;
     } finally {
+      if (pushed) endDisposerCapture();
       evaluating = false;
       // The getter may have disposed this computed mid-run. `dispose()` already
       // released the edges that existed at that moment, but any source read
@@ -285,6 +304,9 @@ export function derived<T>(
 
   if (hook) emitDevtools(hook, "computed:create", { signal: cs, name: debugName, getter: computedGetter });
 
+  // Created inside a render that later fails, the accessor never reaches its
+  // owner; the render transaction disposes it on rollback instead.
+  registerRollbackCleanup((computedGetter as DerivedAccessor<T>).dispose);
   return computedGetter as DerivedAccessor<T>;
 }
 

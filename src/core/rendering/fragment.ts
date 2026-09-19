@@ -26,24 +26,26 @@ import type { NodeChild, NodeChildren } from "./types";
  */
 export function Fragment(nodes: NodeChildren[]): DocumentFragment {
   const frag = document.createDocumentFragment();
-
-  for (const child of nodes) {
-    if (child == null || typeof child === "boolean") continue;
-
-    if (Array.isArray(child)) {
-      for (const nested of child) {
-        if (nested == null || typeof nested === "boolean") continue;
-        appendChild(frag, nested);
-      }
-    } else {
-      appendChild(frag, child);
-    }
-  }
-
+  appendChild(frag, nodes);
   return frag;
 }
 
-function appendChild(frag: DocumentFragment, child: NodeChildren): void {
+/**
+ * Append one child — flattening arrays at any depth, since `NodeChildren` nests
+ * (`NodeChild[][]`) and `Fragment()` takes an array of them. Skips `null`,
+ * `undefined` and booleans, as a tag factory does.
+ *
+ * Deliberately not shared with the tag factories' child loop: that one is an
+ * inlined hot path that registers bindings on its element, while a fragment
+ * has to hand each binding to its own placeholder (the fragment empties itself
+ * when appended).
+ */
+function appendChild(frag: DocumentFragment, child: unknown): void {
+  if (child == null || typeof child === "boolean") return;
+  if (Array.isArray(child)) {
+    for (const nested of child) appendChild(frag, nested);
+    return;
+  }
   if (child instanceof Node) {
     frag.appendChild(child);
     return;
