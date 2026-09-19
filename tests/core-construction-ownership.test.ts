@@ -440,6 +440,24 @@ describe("onMount() returned cleanup", () => {
     expect(cleanup).not.toHaveBeenCalled();
   });
 
+  it("runs immediately when the mount callback disposes its own element", async () => {
+    const cleanup = vi.fn();
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+
+    onMount(() => {
+      dispose(el);
+      return cleanup;
+    }, el);
+
+    await settle();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+
+    el.remove(); // a later native removal must not run it again
+    await settle();
+    expect(cleanup).toHaveBeenCalledTimes(1);
+  });
+
   it("runs immediately when the mount callback removed its own element", async () => {
     const cleanup = vi.fn();
     const el = document.createElement("div");

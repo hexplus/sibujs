@@ -51,8 +51,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 The cleanup returned from an `onMount()` callback now runs through the same
 once-only path as `onUnmount()`, so `element.remove()` runs it as well as
-`dispose()`. A callback that removes its own element has its cleanup run
-immediately.
+`dispose()`. A callback that removes or disposes its own element has its cleanup
+run immediately — `dispose()` leaves the element connected, so a cleanup
+attached after its disposer queue had drained would never have run.
 
 ### Fixed — `catchError()` missed rejections from a `PromiseLike`
 

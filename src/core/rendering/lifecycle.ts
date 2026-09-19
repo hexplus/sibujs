@@ -44,19 +44,30 @@ function safeCall(cb: () => unknown, hookName: string): unknown {
   }
 }
 
-/** Run onMount callback and tie the cleanup it returns (if any) to the element's unmount. */
-function runMountCallback(callback: () => undefined | CleanupFn, hookName: string, element?: HTMLElement): void {
+/**
+ * Run onMount callback and tie the cleanup it returns (if any) to the element's
+ * unmount. `isDisposed` reports whether the element was disposed — possibly by
+ * the callback itself.
+ */
+function runMountCallback(
+  callback: () => undefined | CleanupFn,
+  hookName: string,
+  element: HTMLElement,
+  isDisposed: () => boolean,
+): void {
   const cleanup = safeCall(callback, hookName);
-  if (typeof cleanup === "function" && element) {
-    if (element.isConnected) {
-      // Same once-only path as onUnmount(): dispose() AND a native .remove()
-      // both run it. Registering it only as a disposer skipped it whenever the
-      // element left the DOM without being disposed.
-      onUnmount(cleanup as CleanupFn, element);
-    } else {
-      // The callback removed its own element: the unmount already happened.
-      safeCall(cleanup as CleanupFn, "onUnmount");
-    }
+  if (typeof cleanup !== "function") return;
+  if (isDisposed() || !element.isConnected) {
+    // The callback removed or disposed its own element: the unmount already
+    // happened. `dispose()` leaves the element connected, so connectivity alone
+    // misses that case, and a cleanup registered after the disposer queue has
+    // drained would never run.
+    safeCall(cleanup as CleanupFn, "onUnmount");
+  } else {
+    // Same once-only path as onUnmount(): dispose() AND a native .remove()
+    // both run it. Registering it only as a disposer skipped it whenever the
+    // element left the DOM without being disposed.
+    onUnmount(cleanup as CleanupFn, element);
   }
 }
 
@@ -278,6 +289,7 @@ export function onMount(callback: () => undefined | CleanupFn, element?: HTMLEle
     // Disposed flag — if the element is disposed before it ever connects,
     // the microtask must not register an observer watcher.
     let disposed = false;
+    const isDisposed = () => disposed;
     registerDisposer(element, () => {
       disposed = true;
     });
@@ -285,7 +297,7 @@ export function onMount(callback: () => undefined | CleanupFn, element?: HTMLEle
     if (element.isConnected) {
       queueMicrotask(() => {
         if (disposed) return;
-        runMountCallback(callback, "onMount", element);
+        runMountCallback(callback, "onMount", element, isDisposed);
       });
       return;
     }
@@ -293,12 +305,12 @@ export function onMount(callback: () => undefined | CleanupFn, element?: HTMLEle
     queueMicrotask(() => {
       if (disposed) return;
       if (element.isConnected) {
-        runMountCallback(callback, "onMount", element);
+        runMountCallback(callback, "onMount", element, isDisposed);
         return;
       }
       const unregister = registerMountWatcher(element, () => {
         if (disposed) return;
-        runMountCallback(callback, "onMount", element);
+        runMountCallback(callback, "onMount", element, isDisposed);
       });
       // Ensure watcher is removed on dispose
       registerDisposer(element, unregister);
