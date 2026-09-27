@@ -85,7 +85,8 @@ This project follows [Semantic Versioning](https://semver.org/).
 On by default. Each fetched result is reconciled against the previous value of
 the same key: deeply equal data keeps its reference and notifies nobody, and
 partially changed data keeps every unchanged nested object and array. Only plain
-objects and arrays are compared; `Date`, `Map`, `Set` and class instances
+objects and arrays are compared (a hole in a sparse array stays distinct from an
+explicit `undefined`); `Date`, `Map`, `Set` and class instances
 compare by identity.
 
 - **Explicit writes always land.** `setQueryData()` and `resource.mutate()`

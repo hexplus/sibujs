@@ -106,10 +106,22 @@ function reconcile(prev: unknown, next: unknown, depth: number, walk: Walk, newR
   walk.cycleTo = Number.POSITIVE_INFINITY;
   walk.path.set(nextObject, depth);
   for (const key of nextKeys) {
+    // Array indices are iterated by length, so a hole is visited too. It must
+    // stay a hole: a hole and an explicit `undefined` are different arrays
+    // (`0 in a`, `Object.keys`, `map` and `forEach` all tell them apart), so
+    // comparing by value made `[ <empty> ]` → `[undefined]` look unchanged and
+    // the fetch notified nobody. The hole is not written into `copy`, which
+    // was created with holes; writing `undefined` would turn it into a real
+    // element.
+    if (arrays && !Object.hasOwn(nextRecord, key)) {
+      if (Object.hasOwn(prevRecord, key)) allFromPrev = false;
+      continue;
+    }
     const nextChild = nextRecord[key];
     // A key absent from `prev` has nothing to share with. `hasOwn` rather than
-    // a value check so `{ a: undefined }` → `{ b: undefined }` is a change.
-    const hasPrev = arrays ? (key as number) < (prev as unknown[]).length : Object.hasOwn(prevRecord, key);
+    // a value check so `{ a: undefined }` → `{ b: undefined }` is a change, and
+    // a hole in `prev` → a real element in `next` is one too.
+    const hasPrev = Object.hasOwn(prevRecord, key);
     const shared = hasPrev ? reconcile(prevRecord[key], nextChild, depth + 1, walk, false) : nextChild;
     copy[key] = shared;
     if (!hasPrev || !Object.is(shared, prevRecord[key])) allFromPrev = false;

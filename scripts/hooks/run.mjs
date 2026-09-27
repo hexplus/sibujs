@@ -5,7 +5,8 @@
 //
 // pre-commit is the quick gate, run on every commit:
 //   staged-file guards -> lint -> source typecheck -> test typecheck
-//   -> the unit tests related to the staged files
+//   -> the unit tests related to the staged files (file names are passed to
+//      Vitest as an argument vector, never through a shell)
 //
 // pre-push mirrors CI's `fast` job, so a push does not start a CI run that is
 // already known to fail:
@@ -21,6 +22,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 const hook = process.argv[2];
 
@@ -29,11 +31,37 @@ if (process.env.SIBU_SKIP_HOOKS === "1") {
   process.exit(0);
 }
 
-// `shell: true` so `npm` / `npx` resolve to their `.cmd` shims on Windows.
-function run(label, command) {
-  console.log(`\n[${hook}] ${label}\n> ${command}`);
+// Vitest's CLI entry, run with this same Node binary. Going through `npx`
+// needs a shell on Windows (to resolve the `.cmd` shim), and the staged file
+// names are passed to Vitest: through a shell, a name containing `"`, `$()` or
+// a backtick would break the quoting or run as shell syntax.
+const VITEST_CLI = fileURLToPath(new URL("../../node_modules/vitest/vitest.mjs", import.meta.url));
+
+/**
+ * Run one check and stop the hook if it fails. `args` go straight to the
+ * process as an argument vector, never through a shell.
+ */
+function run(label, file, args) {
+  console.log(`\n[${hook}] ${label}`);
   const started = Date.now();
-  const result = spawnSync(command, { stdio: "inherit", shell: true });
+  const result = spawnSync(file, args, { stdio: "inherit" });
+  if (result.error) console.error(result.error.message);
+  if (result.status !== 0) {
+    console.error(`\n[${hook}] FAILED: ${label}. Fix it, or bypass once with --no-verify.`);
+    process.exit(result.status ?? 1);
+  }
+  console.log(`[${hook}] ok: ${label} (${((Date.now() - started) / 1000).toFixed(1)} s)`);
+}
+
+/**
+ * Run a package.json script. This one does use a shell: `npm` is a `.cmd` shim
+ * on Windows, which cannot be spawned without one. The command line is built
+ * only from constant script names, never from file names or other input.
+ */
+function runScript(label, script) {
+  console.log(`\n[${hook}] ${label}\n> npm run ${script}`);
+  const started = Date.now();
+  const result = spawnSync(`npm run ${script}`, { stdio: "inherit", shell: true });
   if (result.status !== 0) {
     console.error(`\n[${hook}] FAILED: ${label}. Fix it, or bypass once with --no-verify.`);
     process.exit(result.status ?? 1);
@@ -92,21 +120,24 @@ if (hook === "pre-commit") {
   const files = stagedFiles();
   if (files.length === 0) process.exit(0);
   checkStaged(files);
-  run("lint", "npm run lint");
-  run("source typecheck", "npm run typecheck");
-  run("test typecheck", "npm run typecheck:tests");
+  runScript("lint", "lint");
+  runScript("source typecheck", "typecheck");
+  runScript("test typecheck", "typecheck:tests");
   // Only tests whose import graph reaches a staged source or test file. The full
-  // suite runs on pre-push; here it would make every commit take minutes.
-  const related = files.filter((f) => /^(src|tests)\/.*\.ts$/.test(f) || /^[^/]+\.ts$/.test(f));
+  // suite runs on pre-push; here it would make every commit take minutes. A
+  // name starting with `-` is left out so it cannot be read as a CLI flag.
+  const related = files.filter(
+    (f) => !f.startsWith("-") && (/^(src|tests)\/.*\.ts$/.test(f) || /^[^/]+\.ts$/.test(f)),
+  );
   if (related.length > 0) {
-    run("related unit tests", `npx vitest related --run --passWithNoTests ${related.map((f) => `"${f}"`).join(" ")}`);
+    run("related unit tests", process.execPath, [VITEST_CLI, "related", "--run", "--passWithNoTests", ...related]);
   }
 } else if (hook === "pre-push") {
-  run("build", "npm run build");
-  run("source typecheck", "npm run typecheck");
-  run("test typecheck", "npm run typecheck:tests");
-  run("lint", "npm run lint");
-  run("unit suite", "npx vitest run --reporter=dot");
+  runScript("build", "build");
+  runScript("source typecheck", "typecheck");
+  runScript("test typecheck", "typecheck:tests");
+  runScript("lint", "lint");
+  run("unit suite", process.execPath, [VITEST_CLI, "run", "--reporter=dot"]);
 } else {
   console.error(`unknown hook: ${hook}`);
   process.exit(1);

@@ -781,6 +781,53 @@ function tree(childName = "leaf"): TreeNode {
   return root;
 }
 
+describe("sparse arrays", () => {
+  it("regression: a hole replaced by an explicit undefined is a change", () => {
+    const prev = new Array(1);
+    const next = [undefined];
+
+    const result = replaceEqualDeep(prev, next);
+
+    expect(result).toBe(next);
+    expect(0 in result).toBe(true);
+  });
+
+  it("regression: an explicit undefined replaced by a hole is a change", () => {
+    const prev = [undefined];
+    const next = new Array(1);
+
+    const result = replaceEqualDeep(prev, next);
+
+    expect(result).toBe(next);
+    expect(0 in result).toBe(false);
+  });
+
+  it("regression: a rebuilt array keeps its holes as holes", () => {
+    const shared = { id: 1 };
+    const prev = [shared, { id: 2 }];
+    // Index 1 is a hole; index 0 is deeply equal to prev[0], so the result is a
+    // copy that reuses prev[0] and must not turn the hole into `undefined`.
+    const next: Array<{ id: number }> = new Array(2);
+    next[0] = { id: 1 };
+
+    const result = replaceEqualDeep(prev, next);
+
+    expect(result).not.toBe(prev);
+    expect(result[0]).toBe(shared);
+    expect(1 in result).toBe(false);
+    expect(result.length).toBe(2);
+  });
+
+  it("guard: identical sparse arrays are still shared", () => {
+    const prev = new Array(3);
+    prev[1] = { id: 1 };
+    const next = new Array(3);
+    next[1] = { id: 1 };
+
+    expect(replaceEqualDeep(prev, next)).toBe(prev);
+  });
+});
+
 describe("cyclic data", () => {
   it("regression: replaceEqualDeep does not overflow on back-references", () => {
     const prev = tree();
