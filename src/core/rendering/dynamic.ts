@@ -1,9 +1,9 @@
-import { track } from "../../reactivity/track";
+import { track, untracked } from "../../reactivity/track";
 import { globalSingleton } from "../../utils/globalSingleton";
+import { signal } from "../signals/signal";
 import { registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div } from "./html";
-
-type Component = () => HTMLElement;
+import type { Component } from "./types";
 
 /**
  * Registry for dynamically loaded components.
@@ -20,6 +20,19 @@ const componentRegistry = globalSingleton(
 );
 
 /**
+ * Bumped on every registry write so a `DynamicComponent` showing a name picks
+ * up a component registered (or replaced) after it rendered. A plain map could
+ * not tell it, so a name registered late stayed "not found" for good. Shared
+ * like the registry it versions.
+ */
+const registryVersion = globalSingleton(Symbol.for("sibujs.components.registryVersion.v1"), () => signal(0));
+
+function bumpRegistry(): void {
+  const [read, write] = registryVersion;
+  write(untracked(read) + 1);
+}
+
+/**
  * Register a component by name for dynamic resolution.
  *
  * @param name Unique component identifier
@@ -33,21 +46,26 @@ const componentRegistry = globalSingleton(
  */
 export function registerComponent(name: string, component: Component): void {
   componentRegistry.set(name, component);
+  bumpRegistry();
 }
 
 /**
  * Unregister a previously registered component.
  */
 export function unregisterComponent(name: string): void {
-  componentRegistry.delete(name);
+  if (componentRegistry.delete(name)) bumpRegistry();
 }
 
 /**
  * Resolve and render a dynamically registered component by name.
  * Returns a placeholder if the component is not found.
  *
+ * The registry is keyed by name, so it cannot know which root a component
+ * renders: `El` states it, like `querySelector<E>()`. It defaults to
+ * `HTMLElement`; pass `Element` (or `SVGSVGElement`, …) for an SVG component.
+ *
  * @param name Component name to resolve
- * @returns The rendered HTMLElement or a fallback
+ * @returns The rendered root element or a fallback
  *
  * @example
  * ```ts
@@ -55,12 +73,12 @@ export function unregisterComponent(name: string): void {
  * div([resolveComponent("Widget")]);
  * ```
  */
-export function resolveComponent(name: string): HTMLElement {
+export function resolveComponent<El extends Element = HTMLElement>(name: string): El {
   const component = componentRegistry.get(name);
   if (component) {
-    return component();
+    return component() as El;
   }
-  return div(`[Component "${name}" not found]`) as HTMLElement;
+  return div(`[Component "${name}" not found]`) as Element as El;
 }
 
 /**
@@ -78,18 +96,37 @@ export function resolveComponent(name: string): HTMLElement {
  * setView("grid"); // Swaps to registered "grid" component
  * ```
  */
-export function DynamicComponent(is: () => string | Component): HTMLElement {
-  const container = div({ class: "sibu-dynamic" }) as HTMLElement;
+export function DynamicComponent(is: () => string | Component): HTMLDivElement {
+  const container = div({ class: "sibu-dynamic" });
+  // Sentinel rather than `undefined` so the first run always renders, whatever
+  // `is()` returns.
+  const NONE = {};
+  // What is on screen: the component function, or the name that was missing.
+  let shown: unknown = NONE;
 
   function render() {
     const target = is();
-    let el: HTMLElement;
-
+    // A name resolves through the registry, and reading its version makes a
+    // later `registerComponent()` of a missing (or replaced) name re-run this.
+    let component: Component | undefined;
     if (typeof target === "function") {
-      el = target();
+      component = target;
     } else {
-      el = resolveComponent(target);
+      registryVersion[0]();
+      component = componentRegistry.get(target);
     }
+    // Only a change of what `is()` resolves to swaps the view. Without this
+    // guard any re-run of the effect rebuilt the component and discarded its
+    // DOM state.
+    const next = component ?? `missing:${target as string}`;
+    if (next === shown) return;
+    // The component body runs untracked: a signal it reads eagerly while
+    // building belongs to the component, not to this switch. Tracked, every
+    // write to such a signal re-ran the effect and remounted the component.
+    const el: Element = untracked(() => (component ? component() : div(`[Component "${target as string}" not found]`)));
+    // Recorded only once the build succeeded, so a component that threw is
+    // built again on the next run instead of being skipped as already shown.
+    shown = next;
 
     // Dispose old content before replacing to prevent reactive binding leaks.
     // Via the shared primitive rather than a hand-rolled dispose-then-replace:

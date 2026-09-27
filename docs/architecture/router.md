@@ -241,6 +241,38 @@ first, and the outlet resolves the component afterwards.
 On replacement the outgoing subtree is `dispose()`d before detaching, so route
 components are disposed exactly once per replacement.
 
+### Instance identity
+
+An outlet keeps its mounted instance only while **both** the matched record and
+that record's *instance key* are unchanged. Anything else is a replacement.
+
+| Outlet | Record it renders | Params in the default key |
+|---|---|---|
+| `Route()` | `matched[0]` (top level) | the params declared in `matched[0]`'s own path |
+| `Outlet()` | the deepest matched record | the params declared in every record below the top level |
+
+The matcher only exposes the merged params of the whole chain, so each record's
+share is recovered from its own path pattern (`:name` and `:name?`, aliases
+included). A `*` tail (`pathMatch`) is not part of the default key: a catch-all
+is a viewer over an open-ended path space, so it keeps its instance and reads
+`pathMatch` reactively. Consequences:
+
+```text
+routes: /records/:id   ·   /users { /:id/posts }   ·   /orgs/:org { /projects }   ·   /docs/*
+
+/records/1        → /records/2          Route() remounts the page
+/records/1?tab=a  → /records/1?tab=b    no remount (query is not a path param)
+/users/1/posts    → /users/2/posts      /users layout kept, Outlet() remounts the child
+/orgs/a/projects  → /orgs/b/projects    /orgs/:org layout remounts (its own param)
+/docs/intro       → /docs/api           no remount (add key: (r) => r.params.pathMatch to opt in)
+```
+
+A route's `key: (route) => string` replaces the default key for the level that
+renders that record. A constant keeps one instance across param changes; the
+instance must then read params reactively. The key is evaluated untracked.
+`KeepAliveRoute()` ignores `key`: it already keeps one instance per full
+location.
+
 ### Outlet ownership
 
 `Route()` and the nested `Outlet()` follow the same rule as every other async

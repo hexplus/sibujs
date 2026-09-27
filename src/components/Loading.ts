@@ -90,35 +90,33 @@ export function Loading(props: LoadingProps = {}): HTMLElement {
   const sizeClass = size !== "md" ? ` sibu-loading-${size}` : "";
 
   if (variant === "dots") {
-    return div({
+    return div(
+      {
+        class: `sibu-loading${sizeClass}`,
+        role: "status",
+        "aria-live": "polite",
+        // When there's no visible text, give the live region an accessible name
+        // so it isn't announced as an empty status.
+        "aria-label": text ? undefined : "Loading",
+      },
+      [
+        div({ class: "sibu-loading-dots" }, [
+          span({ class: "sibu-loading-dot" }),
+          span({ class: "sibu-loading-dot" }),
+          span({ class: "sibu-loading-dot" }),
+        ]),
+        text ? span({ class: "sibu-loading-text" }, text) : null,
+      ],
+    );
+  }
+
+  return div(
+    {
       class: `sibu-loading${sizeClass}`,
       role: "status",
       "aria-live": "polite",
-      // When there's no visible text, give the live region an accessible name
-      // so it isn't announced as an empty status.
       "aria-label": text ? undefined : "Loading",
-      nodes: [
-        div({
-          class: "sibu-loading-dots",
-          nodes: [
-            span({ class: "sibu-loading-dot" }) as HTMLElement,
-            span({ class: "sibu-loading-dot" }) as HTMLElement,
-            span({ class: "sibu-loading-dot" }) as HTMLElement,
-          ],
-        }) as HTMLElement,
-        text ? (span({ class: "sibu-loading-text", nodes: text }) as HTMLElement) : null,
-      ].filter(Boolean) as HTMLElement[],
-    }) as HTMLElement;
-  }
-
-  return div({
-    class: `sibu-loading${sizeClass}`,
-    role: "status",
-    "aria-live": "polite",
-    "aria-label": text ? undefined : "Loading",
-    nodes: [
-      div({ class: "sibu-loading-spinner" }) as HTMLElement,
-      text ? (span({ class: "sibu-loading-text", nodes: text }) as HTMLElement) : null,
-    ].filter(Boolean) as HTMLElement[],
-  }) as HTMLElement;
+    },
+    [div({ class: "sibu-loading-spinner" }), text ? span({ class: "sibu-loading-text" }, text) : null],
+  );
 }

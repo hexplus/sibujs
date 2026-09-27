@@ -101,7 +101,7 @@ focused.
 
 ```ts
 function UserCard(user: User): HTMLElement {
-  return div("user-card", [h2(user.name), p(user.email)]) as HTMLElement;
+  return div("user-card", [h2(user.name), p(user.email)]);
 }
 ```
 
@@ -111,7 +111,7 @@ Build complex UIs by composing smaller components.
 
 ```ts
 function Dashboard(): HTMLElement {
-  return div([Header(), Sidebar(), MainContent(), Footer()]) as HTMLElement;
+  return div([Header(), Sidebar(), MainContent(), Footer()]);
 }
 ```
 
@@ -124,7 +124,7 @@ interface AlertProps {
 }
 
 function Alert({ message, type = "info" }: AlertProps): HTMLElement {
-  return div({ class: `alert alert-${type}` }, message) as HTMLElement;
+  return div({ class: `alert alert-${type}` }, message);
 }
 ```
 
@@ -220,7 +220,7 @@ Create signals at the top level of a component or module.
 // Good
 function Counter(): HTMLElement {
   const [count] = signal(0);
-  return div(() => `${count()}`) as HTMLElement;
+  return div(() => `${count()}`);
 }
 
 // Anti-pattern: signal inside a conditional
@@ -397,7 +397,7 @@ import { div, signal, effect, onUnmount } from "sibujs";
 
 function Timer(): HTMLElement {
   const [seconds, setSeconds] = signal(0);
-  const el = div(() => `${seconds()}s`) as HTMLElement;
+  const el = div(() => `${seconds()}s`);
 
   const id = setInterval(() => setSeconds((s) => s + 1), 1000);
   onUnmount(() => clearInterval(id), el);
@@ -408,7 +408,7 @@ function Timer(): HTMLElement {
 
 ```ts
 function LiveFeed(): HTMLElement {
-  const el = div({ class: "feed" }) as HTMLElement;
+  const el = div({ class: "feed" });
   const ws = new WebSocket("wss://api.example.com/feed");
   ws.onmessage = (e) => {
     /* update UI */
@@ -446,7 +446,7 @@ import { media } from "sibujs/browser";
 
 function Sidebar(): HTMLElement {
   const { matches: small, dispose } = media("(max-width: 640px)");
-  const el = div({ class: () => (small() ? "sidebar compact" : "sidebar") }) as HTMLElement;
+  const el = div({ class: () => (small() ? "sidebar compact" : "sidebar") });
   onUnmount(dispose, el);
   return el;
 }
@@ -465,7 +465,7 @@ function App(): HTMLElement {
   return ErrorBoundary(
     {
       fallback: (err, retry) =>
-        div([p(`Error: ${err.message}`), button({ on: { click: retry } }, "Retry")]) as HTMLElement,
+        div([p(`Error: ${err.message}`), button({ on: { click: retry } }, "Retry")]),
     },
     () => MainContent(),
   );

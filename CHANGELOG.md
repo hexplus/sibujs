@@ -9,6 +9,179 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — production build optimizations produced broken bundles
+
+- **Injected imports targeted a package named `sibu`.** The Vite plugin's
+  compiled templates, `optimizeDeps` / `ssr.noExternal`, `createViteConfig`, the
+  route-splitting virtual module, webpack's vendor chunk, the CDN URL helpers,
+  `generateImportMap()` and `generateTsConfig()` all referenced `sibu`, which
+  does not resolve. They now use `sibujs`, and the import map lists the
+  package's real subpath entries instead of folders it never published.
+- **`html` template compilation renders exactly what the runtime renders.** The
+  compiler replays the runtime parser's own steps instead of calling tag
+  factories, so custom elements, `<var>`, SVG tags, comments, a bare `<`,
+  unquoted values such as `href=/about`, escape sequences (including line
+  continuations), reactive attributes and multi-root or text-only templates now
+  match. Only `html` imported from sibujs is compiled, and a template the
+  compiler cannot reproduce exactly is left to the runtime parser.
+- **Compiled output no longer collides with a module's own code.** Injected
+  imports are aliased, so a file that already imports `div`, or has a local
+  named `label`, no longer gets a duplicate import or calls a string.
+- **`staticOptimize` is conservative and now off by default.** It rewrote method
+  calls such as `db.select({...})` and the compiler's own output, dropped
+  shorthand, spread and `style` props, rendered `false` / `null` as text, and
+  never imported `staticTemplate`. It now rewrites only calls it can prove
+  static, imports `staticTemplate` from `sibujs/performance`, and is opt-in
+  because it is slower than the tag factory for single elements.
+- **Pure annotations mark only real sibujs factory calls.** They no longer land
+  on method calls, function declarations, text inside strings or comments, or
+  user functions that share a factory's name, any of which the minifier could
+  delete. A name the file declares anywhere — a nested `function context()`,
+  an object or class method, getter, setter or generator, a parameter or
+  variable, a second import — is left alone by every transform, so neither a
+  pure annotation nor `staticOptimize` touches a local that shadows the import.
+- **`vite build` is a production build without `NODE_ENV`.** Dev mode follows
+  Vite's command and mode, and the dev-mode prologue is plain JavaScript, so
+  `.js` files no longer fail to parse.
+- **Transformed modules keep their line numbers and return a source map.** The
+  dev-mode prologue shares the first line instead of adding two, compiled
+  templates and static rewrites keep the line breaks they replace, and
+  generated helpers are appended after the last line, so stack traces and
+  breakpoints point at the right line. The Vite plugin now returns a source
+  map for every module it changes (no more "Sourcemap is likely to be
+  incorrect" warning), exact to the column for unchanged code.
+- **Each module is scanned once.** The Vite plugin's steps share one scan of
+  the original source instead of re-lexing the module up to four times.
+- **The webpack plugin no longer breaks every build.** It pushed a loader rule
+  for a module that does not exist. Dev mode follows webpack's resolved
+  `mode` — read after webpack applies its defaults, so a config without
+  `mode` (production by default) no longer gets `__SIBU_DEV__ = true` from
+  `NODE_ENV` — and `__SIBU_DEV__` is applied through `DefinePlugin`.
+
+### Fixed — background refreshes re-rendered unchanged data
+
+- **`query()` background refreshes no longer notify when nothing changed.**
+  Refetches from `refetchInterval`, window focus, reconnect and
+  `invalidateQueries()` committed a fresh reference for identical payloads,
+  re-running every binding over `data` and rebuilding content such as
+  `when(() => q.data(), () => Form())`, which discarded typed input.
+- **`query()` with `select` notifies once per fetch.** The fetching observer and
+  observers sharing one in-flight request ran `select` twice and notified twice.
+- **A signal read inside `select` no longer triggers a refetch.** `select` runs
+  in its own reactive computation: a signal it reads re-runs the selection
+  only, never the key or the fetch.
+- **`resource()` refetches keep equal data referentially stable.**
+- **`DynamicComponent()` swaps only when `is()` changes.** The component body ran
+  inside the switch's tracked effect, so any signal it read while building
+  remounted the whole component. A name registered after the first render now
+  replaces the "not found" placeholder, and a component that threw is built
+  again on the next run instead of being skipped as already shown.
+- **`when()` and `match()` branch factories run untracked**, as `each()` rows
+  already did, so a signal read eagerly inside a branch no longer becomes a
+  dependency of the condition or selector.
+
+### Added — `structuralSharing` for `query()` and `resource()`
+
+On by default. Each fetched result is reconciled against the previous value of
+the same key: deeply equal data keeps its reference and notifies nobody, and
+partially changed data keeps every unchanged nested object and array. Only plain
+objects and arrays are compared; `Date`, `Map`, `Set` and class instances
+compare by identity.
+
+- **Explicit writes always land.** `setQueryData()` and `resource.mutate()`
+  handed a new top-level reference commit a new top-level reference and notify,
+  even when every child is unchanged — as after
+  `prev.items.push(x); return { ...prev }`. Unchanged nested subtrees are still
+  reused beneath it.
+- **Per observer.** The option governs only the observer that passes it. Every
+  default observer of a key holds the same reference (the one `getQueryData()`
+  returns); `false` commits every result as-is, so each fetch notifies; a
+  function `(prev, next) => T` receives that observer's own previous value for
+  the key and returns what to commit.
+- **`select` output is shared too**, against the observer's previous output for
+  the same key, so an identical refetch notifies nobody even when `select`
+  builds a new object.
+- **Cyclic data is safe.** Containers on a cycle are taken as-is instead of
+  being reconciled.
+
+### Changed — route components remount when their own path params change
+
+Navigating between two locations of the same route (`/records/1` →
+`/records/2`) disposes the old instance, running `onUnmount` / `onCleanup` and
+releasing its bindings, and mounts a fresh one, so reading `route().params` once
+at setup always gives the current values. It used to keep the first instance,
+which went on showing the old record. Query- and hash-only navigations keep the
+instance, and so do catch-all routes (`/docs/*`) when only the `*` tail changes;
+give one `key: (r) => r.params.pathMatch` to remount per path. Params are attributed per matched route: a child-only param change
+remounts the child inside `Outlet()` and leaves the parent layout mounted.
+`KeepAliveRoute()` is unchanged.
+
+### Added — `key` route option
+
+`key: (route) => string` sets the identity of a route's mounted instance; the
+component is remounted whenever the key changes. Return a constant to keep one
+long-lived instance across param changes (and read params reactively with
+`routerState().params()` or `() => route().params.id`), or include query values
+to also remount on a query change.
+
+### Fixed — `RouterLink` dropped reactive children
+
+`RouterLink(props, children)` accepts the same children as a tag factory. A
+getter child such as `() => \`Cart (${count()})\`` or `translated("nav.home")`
+rendered an empty link, and number children were dropped.
+
+### Added — live i18n for text and attributes
+
+- **`translated(key, params?)`** returns a getter usable as a text child or any
+  attribute (`input({ placeholder: translated("search.placeholder") })`).
+  Switching the locale updates each text node and attribute in place; nothing is
+  rebuilt, so focus and typed input survive.
+- **Getter interpolation parameters.** `t()`, `translated()` and `Trans()`
+  accept getters as parameter values (`{ name: userName }`), resolved at lookup
+  time so the interpolated value is live. New exported type `TranslationParams`.
+- **`getAvailableLocales()`** read inside a binding updates when a locale is
+  registered.
+
+### Fixed — i18n messages registered after `setLocale()`
+
+`registerTranslations()` notifies bindings, so `setLocale("es")` followed by
+lazily registering the `es` messages shows Spanish instead of raw keys.
+`hasTranslation()` is reactive for the same reason. Server renders are
+unaffected. A `{toString}`-style placeholder renders empty instead of reaching
+`Object.prototype`.
+
+### Changed — tag factories and component APIs are precisely typed
+
+- **Tag factories return their specific element type.** `div()` is an
+  `HTMLDivElement`, `input()` an `HTMLInputElement`, `svg()` an
+  `SVGSVGElement`; `tagFactory(tag)` maps known tag names through
+  `HTMLElementTagNameMap` / `SVGElementTagNameMap` and falls back to
+  `HTMLElement`. No cast is needed to reach element-specific members.
+- **New public `Component<P = void, R extends Node = Element>` type.** `mount`,
+  `lazy`, `Suspense`, `Portal`, `registerComponent`, `DynamicComponent`,
+  `defineComponent`, `defineSlottedComponent`, `withProps`, `withWrapper`,
+  `withDefaults` and `compose` all accept it.
+- **Component APIs accept any element root.** `onMount` / `onUnmount` / `Portal`
+  take `Element`, `Suspense` takes an `Element` content root and any `Node`
+  fallback, and `mount` takes any `Node`-returning component, so SVG roots work
+  without casts. `lazy()` keeps the loaded component's root type;
+  `defineComponent` and the HOC helpers are generic over the root type.
+- **Typed event handlers.** `on: { keydown: (e: KeyboardEvent) => … }`
+  type-checks; custom event names still accept any `Event` subtype.
+- **`onElement` receives the specific element**, and **`ref<T>()` fits the `ref`
+  prop** under `strict`.
+- **`input({ type })` and `a({ target })` accept getters.** New exported types
+  `TagFunction`, `StyleMap`, `StyleObject`, `TagEventHandlers`.
+
+### Fixed — props that could not take live values
+
+- **Reactive `id`.** `div({ id: () => x() })` binds and updates the id; the
+  getter's source text used to be written as the id.
+- **`class` getters returning `undefined` / `null` / `false`** remove the
+  attribute instead of rendering the literal text.
+- **`style` getters may return a style object.** Properties are set
+  individually and removed when a later run no longer lists them.
+
 ### Fixed — failed construction left subscriptions nobody could release
 
 - **`effect()`** whose first run throws now releases the dependency edges that
@@ -69,6 +242,11 @@ The gzip baseline is raised from 26,600 B to 27,000 B: making `mount()` transact
 marker-checked fragment unmount and contained DevTools emits add the rest. The
 raw budget, unchanged until now, rises from 80,202 B to 80,400 B for the same
 work.
+
+Both rise again, the gzip baseline to 27,600 B and the raw budget to 81,000 B,
+for the tag factory's reactive `id`, style-object and falsy `class` bindings,
+the rebuild guards in `when()` and `DynamicComponent()`, and the component
+registry version that lets a late `registerComponent()` render.
 
 ## [4.6.0] — 2026-09-18
 

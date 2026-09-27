@@ -43,17 +43,62 @@ export function setProp(el: Element, key: string, val: unknown): void {
   (el as unknown as Record<string, unknown>)[key] = val;
 }
 
-export interface TagProps {
-  id?: string;
-  class?: string | (() => string) | Record<string, boolean | (() => boolean)>;
-  style?: Record<string, string | number | (() => string | number)> | string | (() => string);
-  ref?: { current: Element | null };
+/**
+ * A style declaration map: camelCase or kebab-case property names to values.
+ * Each value may be a getter, which binds that one property reactively.
+ */
+export type StyleMap = Record<string, string | number | (() => string | number)>;
+
+/**
+ * A style map produced by a whole-`style` getter. The getter already runs
+ * reactively, so its values are plain; a `null` / `undefined` value leaves the
+ * property unset (and removes it if an earlier run set it).
+ */
+export type StyleObject = Record<string, string | number | null | undefined>;
+
+/**
+ * Listeners for the `on` prop. Known DOM event names get their specific event
+ * type from the DOM lib (`keydown` → `KeyboardEvent`, `click` → the lib's
+ * `MouseEvent` / `PointerEvent`), so a handler may declare it without a cast;
+ * any other name (custom events) receives an `Event`. That fallback is
+ * method-typed, so a handler declaring a narrower event
+ * (`(e: CustomEvent<Detail>) => …`) is still accepted for a custom name.
+ */
+export type TagEventHandlers = {
+  [K in keyof HTMLElementEventMap]?: (ev: HTMLElementEventMap[K]) => void;
+} & {
+  [event: string]: { handle(ev: Event): void }["handle"] | undefined;
+};
+
+/**
+ * Props accepted by a tag factory. `El` is the element the factory creates;
+ * it types `onElement`.
+ */
+export interface TagProps<El extends Element = HTMLElement> {
+  id?: string | (() => string);
+  class?: string | (() => string | null | undefined | false) | Record<string, boolean | (() => boolean)>;
+  style?: StyleMap | string | (() => string | StyleObject);
+  /**
+   * Receives the created element. Accepts what `ref()` returns under `strict`
+   * (`ref<HTMLInputElement>()` is a `Ref<HTMLInputElement | undefined>`) as
+   * well as a `{ current: Element | null }` box.
+   */
+  ref?: { current: Element | null | undefined };
   nodes?: NodeChildren;
-  on?: Record<string, (ev: Event) => void>;
+  on?: TagEventHandlers;
   /** Called with the element after creation — useful for imperative bindings */
-  onElement?: (el: HTMLElement) => void;
+  onElement?(el: El): void;
   [attr: string]: unknown;
 }
+
+/**
+ * A tag factory: builds one `El` per call. See {@link tagFactory} for the
+ * accepted calling conventions.
+ */
+export type TagFunction<El extends Element, Props extends TagProps<El> = TagProps<El>> = (
+  first?: Props | NodeChildren,
+  second?: NodeChildren,
+) => El;
 
 // Lone strings already warned about, so a list rendering the same mistaken
 // class string for every row reports it ONCE instead of once per element.
@@ -95,9 +140,41 @@ function applyStyle(el: Element, style: TagProps["style"]) {
   // policy the object form below already applies. Writing it raw made the
   // string form a security escape hatch from the object form — identical
   // authoring intent with two different policies.
+  //
+  // A getter may return either form. The object form writes per property, so
+  // it must remember what it wrote: a later run that no longer lists a
+  // property removes it instead of leaving the old value behind.
   if (typeof style === "function") {
+    const getter = style as () => string | StyleObject;
+    let written: string[] = [];
+    let wroteString = false;
     const teardown = reactiveBinding(() => {
-      el.setAttribute("style", sanitizeStyleAttribute(String((style as () => string)()), { element: el }));
+      const value = getter();
+      if (value === null || typeof value !== "object") {
+        written = [];
+        wroteString = true;
+        el.setAttribute("style", sanitizeStyleAttribute(String(value), { element: el }));
+        return;
+      }
+      const decl = (el as HTMLElement).style;
+      // Switching from the string form: its declarations are not tracked
+      // per property, so start from an empty list.
+      if (wroteString) {
+        el.removeAttribute("style");
+        wroteString = false;
+      }
+      const next: string[] = [];
+      for (const prop in value) {
+        const val = value[prop];
+        if (val == null) continue;
+        const name = toKebab(prop);
+        next.push(name);
+        decl.setProperty(name, sanitizeCSSValue(String(val), { property: name, element: el }));
+      }
+      for (let i = 0; i < written.length; i++) {
+        if (next.indexOf(written[i]) === -1) decl.removeProperty(written[i]);
+      }
+      written = next;
     }, el);
     registerDisposer(el, teardown);
     return;
@@ -109,8 +186,8 @@ function applyStyle(el: Element, style: TagProps["style"]) {
   }
 
   const htmlEl = el as HTMLElement;
-  for (const prop in style as Record<string, string | number | (() => string | number)>) {
-    const val = (style as Record<string, string | number | (() => string | number)>)[prop];
+  for (const prop in style as StyleMap) {
+    const val = (style as StyleMap)[prop];
     const name = toKebab(prop);
     if (typeof val === "function") {
       const getter = val as () => string | number;
@@ -140,7 +217,7 @@ function applyStyle(el: Element, style: TagProps["style"]) {
  */
 export function resolveClassValue(cls: TagProps["class"]): string {
   if (typeof cls === "string") return cls;
-  if (typeof cls === "function") return (cls as () => string)();
+  if (typeof cls === "function") return cls() || "";
   if (!cls) return "";
   let out = "";
   for (const name in cls) {
@@ -158,8 +235,13 @@ function applyClass(el: Element, cls: TagProps["class"]) {
   }
 
   if (typeof cls === "function") {
+    // `null` / `undefined` / `false` mean "no class": the attribute is removed
+    // rather than rendered as the literal text "undefined" / "false". That
+    // lets a getter be written as `() => active() && "on"`.
     const teardown = reactiveBinding(() => {
-      el.setAttribute("class", (cls as () => string)());
+      const value = cls();
+      if (value == null || value === false) el.removeAttribute("class");
+      else el.setAttribute("class", value);
     }, el);
     registerDisposer(el, teardown);
     return;
@@ -195,8 +277,10 @@ function applyClass(el: Element, cls: TagProps["class"]) {
   }
 }
 
-// Append children — optimized for common cases, inlined to avoid function call overhead
-function appendChildren(el: Element, nodes: NodeChildren) {
+// Append children — optimized for common cases, inlined to avoid function call overhead.
+// Exported so components that build their element by hand (`RouterLink`) accept
+// exactly the children a tag factory does, getters included.
+export function appendChildren(el: Element, nodes: NodeChildren) {
   // Fast path: single string → textContent (avoids createTextNode + appendChild)
   if (typeof nodes === "string") {
     el.textContent = nodes;
@@ -275,15 +359,31 @@ function appendChildren(el: Element, nodes: NodeChildren) {
  *   ])
  *
  * `children` overrides `props.nodes` when both are present.
+ *
+ * The returned factory is typed by the tag: `tagFactory("div")` builds
+ * `HTMLDivElement`s, `tagFactory("circle", SVG_NS)` builds `SVGCircleElement`s.
+ * A tag name TypeScript does not know builds `HTMLElement`s (which is what
+ * `document.createElement` returns for it), or `Element`s in another namespace.
  */
-export const tagFactory = (tag: string, ns?: string) => {
+export function tagFactory<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  ns?: undefined,
+): TagFunction<HTMLElementTagNameMap[K]>;
+export function tagFactory<K extends keyof SVGElementTagNameMap>(
+  tag: K,
+  ns: typeof SVG_NS,
+): TagFunction<SVGElementTagNameMap[K]>;
+export function tagFactory(tag: string, ns?: undefined): TagFunction<HTMLElement>;
+export function tagFactory(tag: string, ns: typeof SVG_NS): TagFunction<SVGElement>;
+export function tagFactory(tag: string, ns?: string): TagFunction<Element>;
+export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
   // Resolve the security blocklist ONCE per factory (the tag is constant) so
   // element creation pays only a boolean check instead of a `toLowerCase()` +
   // Set lookup per call. Creating a factory for a blocked tag (e.g. the
   // `script` export in html.ts) is still allowed; it throws only when called,
   // preserving the existing throw-on-use semantics.
   const blocked = isBlockedTag(tag);
-  return (first?: TagProps | NodeChildren, second?: NodeChildren): Element => {
+  return (first?: TagProps<Element> | NodeChildren, second?: NodeChildren): Element => {
     if (blocked) {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
     }
@@ -392,7 +492,7 @@ export const tagFactory = (tag: string, ns?: string) => {
 
     // Full props object: tag({ class, on, style, ... }) OR
     //                    tag({ class, on, style, ... }, children)
-    const props = first as TagProps;
+    const props = first as TagProps<Element>;
 
     // Known-keys fast path: process common props via direct access,
     // then check if there are any custom attributes to iterate.
@@ -400,7 +500,12 @@ export const tagFactory = (tag: string, ns?: string) => {
     if (pClass != null) applyClass(el, pClass);
 
     const pId = props.id;
-    if (pId != null) {
+    if (typeof pId === "function") {
+      // Reactive id — bound like any other reactive attribute (the same path
+      // the `html` template takes). Assigning the getter to `el.id` directly
+      // stringified it, rendering the function's own source as the id.
+      registerDisposer(el, bindAttribute(el as HTMLElement, "id", pId));
+    } else if (pId != null) {
       // DOM clobbering: an element with id="foo" becomes window.foo. If the
       // id value is user-controlled, it can shadow globals like `config`,
       // `location`, etc. Warn in dev so authors notice.
@@ -409,7 +514,7 @@ export const tagFactory = (tag: string, ns?: string) => {
           `tagFactory: element id="${pId}" matches a common global and may cause DOM clobbering. Avoid setting ids from untrusted input.`,
         );
       }
-      el.id = pId as string;
+      el.id = pId;
     }
 
     // Children resolution: `second` (positional) beats `props.nodes`.
@@ -423,7 +528,7 @@ export const tagFactory = (tag: string, ns?: string) => {
     const pOn = props.on;
     if (pOn) {
       for (const ev in pOn) {
-        const handler = pOn[ev];
+        const handler: unknown = pOn[ev];
         if (typeof handler === "function") {
           el.addEventListener(ev, handler as EventListener);
         } else if (DEV) {
@@ -438,7 +543,7 @@ export const tagFactory = (tag: string, ns?: string) => {
     if (pStyle != null) applyStyle(el, pStyle);
 
     const pRef = props.ref;
-    if (pRef) (pRef as { current: Element | null }).current = el;
+    if (pRef) pRef.current = el;
 
     // Custom attributes — only enter the loop if there are keys beyond the known set
     for (const key in props) {
@@ -476,10 +581,8 @@ export const tagFactory = (tag: string, ns?: string) => {
     }
 
     // onElement callback — for imperative bindings (inputMask.bind, etc.)
-    if (props.onElement && typeof props.onElement === "function") {
-      (props.onElement as (el: HTMLElement) => void)(el as HTMLElement);
-    }
+    if (typeof props.onElement === "function") props.onElement(el);
 
     return el;
   };
-};
+}

@@ -221,9 +221,9 @@ describe("SSR security: serialized state", () => {
   });
 
   it("escapes U+2028 and U+2029 line terminators", () => {
-    const html = serializeState({ a: "line break", b: "para break" });
-    expect(html).not.toContain(" ");
-    expect(html).not.toContain(" ");
+    const html = serializeState({ a: "line\u2028break", b: "para\u2029break" });
+    expect(html).not.toContain("\u2028");
+    expect(html).not.toContain("\u2029");
     expect(html).toContain("\\u2028");
     expect(html).toContain("\\u2029");
   });
@@ -231,7 +231,7 @@ describe("SSR security: serialized state", () => {
   it("round-trips hostile values back to their original form", () => {
     const state = {
       xss: "</script><script>alert(1)</script>",
-      unicode: "line break",
+      unicode: "line\u2028break",
       quotes: `"'\\`,
       amp: "a&b<c>d",
     };
@@ -244,8 +244,8 @@ describe("SSR security: serialized state", () => {
         .replace(/\\u003c/g, "<")
         .replace(/\\u003e/g, ">")
         .replace(/\\u0026/g, "&")
-        .replace(/\\u2028/g, " ")
-        .replace(/\\u2029/g, " "),
+        .replace(/\\u2028/g, "\u2028")
+        .replace(/\\u2029/g, "\u2029"),
     );
     expect(decoded).toEqual(state);
   });

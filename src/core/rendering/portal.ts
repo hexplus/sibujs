@@ -9,7 +9,8 @@ import { dispose, registerDisposer } from "./dispose";
  * are properly torn down when the anchor is disposed by `when()`, `match()`,
  * `each()`, or manual `dispose(anchor)`.
  *
- * @param nodes Function that returns the content to render
+ * @param nodes Function that returns the content to render — any element,
+ * HTML or SVG (a `Component` fits)
  * @param target Target DOM element (defaults to document.body)
  * @returns A Comment anchor node in the original position
  *
@@ -23,10 +24,10 @@ import { dispose, registerDisposer } from "./dispose";
  * Portal(() => div("Tooltip"), overlay);
  * ```
  */
-export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment {
+export function Portal(nodes: () => Element, target?: Element): Comment {
   const anchor = document.createComment("portal");
   const container = target || document.body;
-  let portalContent: HTMLElement | null = null;
+  let portalContent: Element | null = null;
   let disposed = false;
 
   queueMicrotask(() => {
@@ -56,7 +57,7 @@ export function Portal(nodes: () => HTMLElement, target?: HTMLElement): Comment 
 
   // Primary cleanup: registerDisposer on the anchor so `dispose()`,
   // `when()`, `match()`, and `each()` all clean up portal content.
-  registerDisposer(anchor as unknown as HTMLElement, () => {
+  registerDisposer(anchor, () => {
     disposed = true;
     if (portalContent) {
       dispose(portalContent);

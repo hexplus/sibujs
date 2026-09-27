@@ -17,6 +17,7 @@ import { enhance } from "../src/platform/enhance";
 import { collectStream, hydrate, renderToStream, renderToString } from "../src/platform/ssr";
 import { bindAttribute, bindDynamic } from "../src/reactivity/bindAttribute";
 import { bindAttrs, bindBoolAttr } from "../src/ui/reactiveAttr";
+import { runModule } from "./helpers/buildTransformHarness";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -108,21 +109,15 @@ describe("ARIA booleans across attribute writers", () => {
 
   it("compiled html`` templates produce the same attributes as the runtime parser", () => {
     const source =
-      "const el = html`<div aria-selected=${sel} hidden=${hide}><svg aria-hidden=${iconHidden}></svg></div>`;";
+      'import { html } from "sibujs";\n' +
+      "export default (sel, hide, iconHidden) =>\n" +
+      "  html`<div aria-selected=${sel} hidden=${hide}><svg aria-hidden=${iconHidden}></svg></div>`;";
     const result = compileHtmlTemplates(source);
     expect(result.code).not.toBeNull();
-    const build = new Function(
-      "div",
-      "__sbTagFactory",
-      "__sbSVG_NS",
-      "sel",
-      "hide",
-      "iconHidden",
-      `${result.code}\nreturn el;`,
-    ) as (...args: unknown[]) => Element;
+    const build = runModule<(...args: unknown[]) => Element>(result.code as string);
 
     const [on, setOn] = signal(false);
-    const compiled = build(div, tagFactory, SVG_NS, () => on(), false, false);
+    const compiled = build(() => on(), false, false);
     const runtime = html`<div aria-selected=${() => on()} hidden=${false}><svg aria-hidden=${false}></svg></div>`;
 
     for (const el of [compiled, runtime]) {

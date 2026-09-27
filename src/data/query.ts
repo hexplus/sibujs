@@ -3,11 +3,13 @@ import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { getRequestScopedCache } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
+import { untracked } from "../reactivity/track";
 import { globalSingleton } from "../utils/globalSingleton";
 import { isAbortError } from "./abort";
 import { notifyListeners, runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
+import { applyStructuralSharing, type StructuralSharingOption } from "./structuralSharing";
 
 /**
  * ## Callback semantics
@@ -70,8 +72,52 @@ export interface QueryOptions<T> {
   onError?: (error: Error) => void;
   /** Called on fetch settle (success or error) */
   onSettled?: () => void;
-  /** Transform fetched data before returning to consumers. Cache stores raw data. */
+  /**
+   * Transform fetched data before returning to consumers. Cache stores raw data.
+   *
+   * Runs in this observer's own reactive computation: it re-runs when the
+   * cached value changes, and when a signal it reads changes — without
+   * re-running the key effect, so such a signal never triggers a refetch. It
+   * runs once per fetch that changed the data, and its output is structurally
+   * shared against this observer's previous output for the same key, so an
+   * identical refetch notifies nobody.
+   */
   select?: (data: T) => T;
+  /**
+   * Keep data referentially stable across refetches. Default: `true`.
+   *
+   * Every refetch — `refetchInterval`, window focus, reconnect,
+   * `invalidateQueries` — produces a new object graph even when the server
+   * returned the same thing. With structural sharing on, the new result is
+   * reconciled against the previous value of the same key: if it is deeply
+   * equal the previous reference is kept and `data` subscribers are not
+   * notified at all; if only part of it changed, every unchanged nested object
+   * or array keeps its old reference, so `each()` rows and deriveds over
+   * untouched branches stay put. Only plain objects and arrays are compared —
+   * Date, Map, Set and class instances compare by identity. Cyclic data is
+   * safe: the containers on a cycle are taken as-is.
+   *
+   * Every observer of a key using the default holds the SAME reference.
+   *
+   * `setQueryData()` is an explicit write, not a fetch: when it hands over a
+   * new top-level reference, observers always receive a new top-level
+   * reference and are notified — even if every child is unchanged, as after
+   * `prev.items.push(x); return { ...prev }`. Unchanged nested subtrees are
+   * still reused beneath it.
+   *
+   * The option applies to this observer only; observers of one key may use
+   * different settings.
+   *
+   * - `false` commits every result as-is (each refetch notifies).
+   * - A function `(prev, next) => T` replaces the default reconciliation;
+   *   `prev` is this observer's previous value for the same key. Return `prev`
+   *   to report "unchanged" (ignored for an explicit write of a new
+   *   reference). It must not throw — if it does, the error is reported and
+   *   `next` is committed unshared.
+   *
+   * Also applied to this observer's `select` output.
+   */
+  structuralSharing?: StructuralSharingOption<T>;
 }
 
 export interface QueryResult<T> {
@@ -115,6 +161,57 @@ interface CacheEntry {
    * never grant commit permission (QRY-003).
    */
   generation: number;
+  /**
+   * Whether `data` was WRITTEN by `setQueryData()` rather than fetched. An
+   * explicit write of a new reference must reach observers as a new reference
+   * (see `applyStructuralSharing`); a fetched result is fully shared.
+   */
+  explicit: boolean;
+  /**
+   * The default-shared view of `data`: what every observer using the default
+   * `structuralSharing` holds, and what `getQueryData()` returns. Computed
+   * lazily by `sharedView()` and memoized on the raw reference it was built
+   * from (`sharedFrom`).
+   *
+   * `data` itself stays the raw value exactly as fetched or written. Sharing
+   * is an observer setting, and the entry used to store the result of
+   * whichever observer committed last — so an observer with
+   * `structuralSharing: false` stopped being notified whenever a default
+   * observer owned the refetch, and a custom function was applied on behalf of
+   * every observer. Keeping the raw value lets each observer apply its own
+   * setting; keeping ONE shared view per entry keeps every default observer of
+   * a key on the same reference, and reconciles only against this key's own
+   * previous value.
+   */
+  shared: unknown;
+  sharedFrom: unknown;
+  hasShared: boolean;
+}
+
+/**
+ * Structural sharing that can never fail a commit. A throwing custom sharing
+ * function is a callback exception, not a request failure (see "Callback
+ * semantics" above): report it and commit `next` unshared. Untracked, so a
+ * custom function reading a signal never subscribes whatever context the
+ * commit happens to run in.
+ */
+function shareSafely<T>(option: StructuralSharingOption<T>, prev: T | undefined, next: T, explicit: boolean): T {
+  const shared = untracked(() =>
+    runSelect("query structuralSharing", () => applyStructuralSharing(option, prev, next, explicit)),
+  );
+  return shared.ok ? shared.value : next;
+}
+
+/** The entry's default-shared value; see `CacheEntry.shared`. */
+function sharedView(entry: CacheEntry): unknown {
+  const raw = entry.data;
+  if (raw === undefined) return undefined;
+  if (entry.hasShared && Object.is(entry.sharedFrom, raw)) return entry.shared;
+  const value = shareSafely<unknown>(true, entry.hasShared ? entry.shared : undefined, raw, entry.explicit);
+  entry.shared = value;
+  entry.sharedFrom = raw;
+  entry.hasShared = true;
+  return value;
 }
 
 // Process-global cache used on the client. Under SSR the cache must be
@@ -163,6 +260,10 @@ function getOrCreateEntry(cache: Map<string, CacheEntry>, key: string, initialDa
       refetchers: new Set(),
       controller: null,
       generation: 0,
+      explicit: false,
+      shared: undefined,
+      sharedFrom: undefined,
+      hasShared: false,
     };
     cache.set(key, entry);
   }
@@ -187,6 +288,7 @@ export function query<T>(
     onError,
     onSettled,
     select,
+    structuralSharing = true,
   } = options;
 
   const resolveKey = typeof key === "function" ? key : () => key;
@@ -199,6 +301,35 @@ export function query<T>(
   const [data, setData] = signal<T | undefined>(initialData);
   const [isFetching, setIsFetching] = signal(false);
   const [error, setError] = signal<Error | undefined>(undefined);
+  // Mirrors the entry's `dataUpdatedAt`. `isStale` used to recompute off
+  // `data()` alone; with structural sharing an identical refetch no longer
+  // touches `data`, and staleness would have stayed stuck at `true`.
+  const [updatedAt, setUpdatedAt] = signal(0);
+
+  // ── This observer's view of the cache ─────────────────────────────────────
+  // `base` is the entry's value after THIS observer's sharing setting (see
+  // `viewOf`), before `select`. Without `select` it is written straight to
+  // `data`; with `select` it feeds the projection effect below.
+  const [base, setBase] = signal<T | undefined>(undefined);
+  // Non-reactive mirrors of `base` and the entry it was read from. Every memo
+  // below is scoped to ONE entry: reconciling against a value committed for a
+  // different key used to hand this observer subtrees of the previous key's
+  // cache — breaking "every observer of a key holds the same reference", and
+  // letting an in-place edit of one key's data leak into another's.
+  let baseEntry: CacheEntry | null = null;
+  let baseValue: T | undefined;
+  // Set when `base` changed because of an explicit `setQueryData()`, so the
+  // `select` output also commits a new top-level reference.
+  let baseExplicit = false;
+  // Custom `structuralSharing` memo: the last raw value it reconciled, for which
+  // entry, and the result — so a re-notification with the same raw value does
+  // not re-run the function.
+  let customEntry: CacheEntry | null = null;
+  let customFrom: unknown;
+  let customValue: T | undefined;
+  // `select` output memo, likewise scoped to the entry it was produced for.
+  let selectedEntry: CacheEntry | null = null;
+  let selectedValue: T | undefined;
 
   let disposed = false;
   let currentKey: string | null = null;
@@ -215,11 +346,89 @@ export function query<T>(
   const loading = derived(() => isFetching() && data() === undefined);
   const isStale = derived(() => {
     data();
+    updatedAt();
     if (!currentKey) return true;
     const entry = cache.get(currentKey);
     if (!entry || entry.dataUpdatedAt === 0) return true;
     return Date.now() - entry.dataUpdatedAt >= staleTime;
   });
+
+  /**
+   * The entry's value as THIS observer sees it, per its own `structuralSharing`:
+   *
+   * - default → the entry's shared view, one reference for every default
+   *   observer of the key;
+   * - `false` → the raw value, so every fetch is a new reference and notifies;
+   * - a function → applied to this observer's own previous value for the same
+   *   entry, memoized on the raw reference.
+   */
+  function viewOf(entry: CacheEntry): T | undefined {
+    const raw = entry.data as T | undefined;
+    if (raw === undefined) return undefined;
+    if (structuralSharing === false) return raw;
+    if (typeof structuralSharing !== "function") return sharedView(entry) as T;
+    const sameEntry = customEntry === entry;
+    if (sameEntry && Object.is(customFrom, raw)) return customValue;
+    const value = shareSafely(structuralSharing, sameEntry ? customValue : undefined, raw, entry.explicit);
+    customEntry = entry;
+    customFrom = raw;
+    customValue = value;
+    return value;
+  }
+
+  /**
+   * The only writer of this observer's data. A value equal to what is already
+   * held is the same reference (see `viewOf`), so the signal write is a no-op
+   * and nothing downstream re-runs or rebuilds.
+   */
+  function commitBase(entry: CacheEntry | null, value: T | undefined): void {
+    const changed = !Object.is(value, baseValue);
+    baseEntry = entry;
+    baseValue = value;
+    if (!select) {
+      setData(value);
+      return;
+    }
+    if (!changed) return;
+    baseExplicit = entry?.explicit === true;
+    setBase(value);
+  }
+
+  // ── select ────────────────────────────────────────────────────────────────
+  // A tracked computation of its own. `select` used to run inside the key
+  // effect, where every signal it read became a key-effect dependency — an
+  // unrelated signal change re-ran the staleness check and, for stale data,
+  // refetched. Here a signal read by `select` re-runs the projection only.
+  //
+  // It runs when `base` changes — once per fetch that changed the data, never
+  // again for a re-notification with the same value — and its output is shared
+  // against this observer's previous output for the same entry, so a `select`
+  // that builds a fresh object still notifies nobody for an identical refetch.
+  const stopSelect = select
+    ? effect(() => {
+        const raw = base();
+        const entry = baseEntry;
+        const explicit = baseExplicit;
+        baseExplicit = false;
+        // Nothing committed yet: `data` still holds `initialData` as given.
+        if (entry === null && selectedEntry === null) return;
+        if (raw === undefined) {
+          selectedEntry = entry;
+          selectedValue = undefined;
+          setData(undefined);
+          return;
+        }
+        // A throwing `select` keeps the previous data (see "Callback
+        // semantics"); the error is reported, never thrown into the effect.
+        const selected = runSelect("query select", () => select(raw));
+        if (!selected.ok) return;
+        const prev = selectedEntry === entry ? selectedValue : undefined;
+        const value = shareSafely(structuralSharing, prev, selected.value, explicit);
+        selectedEntry = entry;
+        selectedValue = value;
+        setData(value);
+      })
+    : null;
 
   /**
    * Release this observer's registration on the entry it currently holds.
@@ -330,7 +539,10 @@ export function query<T>(
             const settledError = entry.error;
             runCallback("query onError", () => onError?.(settledError));
           } else if (entry.data !== undefined) {
-            const settledData = entry.data as T;
+            // The value this observer holds (before `select`), not the raw
+            // one: with sharing on, an identical refetch reports the SAME
+            // reference `data` kept.
+            const settledData = viewOf(entry) as T;
             runCallback("query onSuccess", () => onSuccess?.(settledData));
           }
           runCallback("query onSettled", () => onSettled?.());
@@ -381,7 +593,12 @@ export function query<T>(
       // started the request may since have changed key or been disposed, but
       // other observers are still waiting on the result — gating the cache
       // write on the initiator's local state stranded them with no data.
+      //
+      // Stored raw. Each observer applies its own sharing setting when it is
+      // notified (`viewOf`), so a refetch returning what the cache already
+      // holds leaves every sharing observer's `data` untouched.
       entry.data = result;
+      entry.explicit = false;
       entry.dataUpdatedAt = Date.now();
       entry.error = undefined;
 
@@ -394,17 +611,16 @@ export function query<T>(
       // Only if this observer still cares about this key.
       if (disposed || currentKey !== key) return;
 
-      // `select` is this observer's own transform, not part of the request. If
-      // it throws, the request is still a success — keep the previously held
-      // data rather than committing a value that was never produced, and still
-      // leave the fetching state.
-      const selected = runSelect("query select", () => (select ? select(result as T) : (result as T)));
-      batch(() => {
-        if (selected.ok) setData(selected.value);
-        setIsFetching(false);
-        setError(undefined);
-      });
-      runCallback("query onSuccess", () => onSuccess?.(result as T));
+      // This observer is one of the entry's listeners, so the notification
+      // above has ALREADY committed its data, error and fetching state through
+      // `onCacheUpdate`. It used to run `select` and `setData` a second time
+      // here; with a `select` that builds a new object, that was a second
+      // notification — and a second rebuild of anything keyed on `data` — for
+      // every single fetch. Only an observer somehow not registered on the
+      // entry still needs the commit done for it.
+      if (!entry.listeners.has(onCacheUpdate)) onCacheUpdate();
+      const committedResult = viewOf(entry) as T;
+      runCallback("query onSuccess", () => onSuccess?.(committedResult));
     } catch (err) {
       if (entry.generation !== generation) return;
       entry.promise = null;
@@ -450,22 +666,21 @@ export function query<T>(
     const entry = cache.get(currentKey);
     if (!entry) {
       batch(() => {
-        setData(undefined);
+        commitBase(null, undefined);
         setError(undefined);
         setIsFetching(false);
+        setUpdatedAt(0);
       });
       return;
     }
-    const raw = entry.data as T | undefined;
-    // A throwing `select` must not abort this listener — `notifyListeners`
-    // already isolates observers from each other, and here it must additionally
-    // not block this observer's own error/fetching bookkeeping.
-    const selected =
-      raw !== undefined && select ? runSelect("query select", () => select(raw)) : { ok: true as const, value: raw };
+    // `select` runs in its own effect after this batch, so a throwing `select`
+    // can no longer block this observer's error/fetching bookkeeping.
+    const view = viewOf(entry);
     batch(() => {
-      if (selected.ok) setData(selected.value);
+      commitBase(entry, view);
       setError(entry.error);
       if (!entry.promise) setIsFetching(false);
+      setUpdatedAt(entry.dataUpdatedAt);
     });
   }
 
@@ -481,11 +696,11 @@ export function query<T>(
     attachToEntry(entry, key);
 
     if (entry.data !== undefined) {
-      const raw = entry.data as T;
-      const selected = runSelect("query select", () => (select ? select(raw) : raw));
+      const view = viewOf(entry);
       batch(() => {
-        if (selected.ok) setData(selected.value);
+        commitBase(entry, view);
         setError(entry.error);
+        setUpdatedAt(entry.dataUpdatedAt);
       });
     }
 
@@ -537,6 +752,7 @@ export function query<T>(
     // entry, and other observers may still need it (QRY-001). Abandoned
     // requests are cancelled when the entry itself is garbage collected.
     effectCleanup();
+    stopSelect?.();
     // The deriveds this observer owns: release their source edges and their
     // DevTools entries. A retained result keeps returning their last values.
     loading.dispose();
@@ -576,17 +792,33 @@ export function invalidateQueries(keyOrPredicate: string | ((key: string) => boo
   }
 }
 
-/** Get cached data for a query key */
+/**
+ * Get cached data for a query key — the same reference every observer using
+ * the default `structuralSharing` holds.
+ */
 export function getQueryData<T>(key: string): T | undefined {
-  return getActiveQueryCache().get(key)?.data as T | undefined;
+  const entry = getActiveQueryCache().get(key);
+  return entry ? (sharedView(entry) as T | undefined) : undefined;
 }
 
-/** Set cached data for a query key, notifying subscribers */
+/**
+ * Set cached data for a query key, notifying subscribers.
+ *
+ * An explicit write: a value (or updater result) that is a new top-level
+ * reference reaches every observer as a new top-level reference, even when it
+ * is deeply equal to the previous value — so `prev.items.push(x); return
+ * { ...prev }` is never dropped. Unchanged nested subtrees are still reused.
+ * Returning `prev` itself changes nothing.
+ */
 export function setQueryData<T>(key: string, data: T | ((prev: T | undefined) => T)): void {
   const entry = getActiveQueryCache().get(key);
   if (!entry) return;
-  const newData = typeof data === "function" ? (data as (prev: T | undefined) => T)(entry.data as T | undefined) : data;
+  const newData =
+    typeof data === "function" ? (data as (prev: T | undefined) => T)(sharedView(entry) as T | undefined) : data;
+  // Stored raw, like a fetch result; each observer applies its own sharing
+  // setting, honouring `explicit` (see `applyStructuralSharing`).
   entry.data = newData;
+  entry.explicit = true;
   entry.dataUpdatedAt = Date.now();
   // Isolated: a caller pushing data into the cache must reach every observer,
   // and must not have setQueryData() throw at them because some unrelated

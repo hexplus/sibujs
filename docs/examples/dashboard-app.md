@@ -35,7 +35,7 @@ function ThemeToggle(): HTMLElement {
     on: {
       click: () => ThemeContext.set(theme() === "light" ? "dark" : "light"),
     },
-  }, () => (theme() === "light" ? "Dark Mode" : "Light Mode")) as HTMLElement;
+  }, () => (theme() === "light" ? "Dark Mode" : "Light Mode"));
 }
 
 // ---------------------------------------------------------------------------
@@ -83,12 +83,12 @@ function Header(): HTMLElement {
           span({
             class: "badge",
             on: { click: () => store.dispatch("clearNotifications") },
-          }, () => `${notifications()}`) as HTMLElement
+          }, () => `${notifications()}`)
       ),
       span(() => userName()),
       ThemeToggle(),
     ]),
-  ]) as HTMLElement;
+  ]);
 }
 
 function Sidebar(): HTMLElement {
@@ -97,11 +97,11 @@ function Sidebar(): HTMLElement {
   return nav({
     class: () => `sidebar ${isOpen() ? "open" : "closed"}`,
   }, [
-    RouterLink({ to: "/", nodes: "Overview" }),
-    RouterLink({ to: "/users", nodes: "Users" }),
-    RouterLink({ to: "/analytics", nodes: "Analytics" }),
-    RouterLink({ to: "/settings", nodes: "Settings" }),
-  ]) as HTMLElement;
+    RouterLink({ to: "/" }, "Overview"),
+    RouterLink({ to: "/users" }, "Users"),
+    RouterLink({ to: "/analytics" }, "Analytics"),
+    RouterLink({ to: "/settings" }, "Settings"),
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -118,14 +118,14 @@ function OverviewPage(): HTMLElement {
       StatCard("Orders", "890"),
       StatCard("Growth", "+12.5%"),
     ]),
-  ]) as HTMLElement;
+  ]);
 }
 
 function StatCard(label: string, value: string): HTMLElement {
   return div("stat-card", [
     p("stat-value", value),
     p("stat-label", label),
-  ]) as HTMLElement;
+  ]);
 }
 
 // Users page — uses VirtualList for large dataset
@@ -151,9 +151,9 @@ function UsersPage(): HTMLElement {
           span("user-name", user.name),
           span("user-email", user.email),
           span("user-role", user.role),
-        ]) as HTMLElement,
+        ]),
     }),
-  ]) as HTMLElement;
+  ]);
 }
 
 // Analytics and Settings — lazy loaded
@@ -191,17 +191,17 @@ function App(): HTMLElement {
               div("error-panel", [
                 p(`Error: ${err.message}`),
                 button({ on: { click: retry } }, "Retry"),
-              ]) as HTMLElement,
+              ]),
           },
           () =>
             Suspense({
               nodes: () => Outlet(),
-              fallback: () => div("loading", "Loading...") as HTMLElement,
+              fallback: () => div("loading", "Loading..."),
             }),
         ),
       ]),
     ]),
-  ]) as HTMLElement;
+  ]);
 }
 
 // ---------------------------------------------------------------------------

@@ -447,7 +447,7 @@ import { show } from "sibujs";
 // Keeps the element in the DOM, toggles display
 show(
   () => visible(),
-  div("Content") as HTMLElement
+  div("Content")
 );
 ```
 
@@ -802,7 +802,7 @@ function Clock() {
   onMount(() => {
     const interval = setInterval(() => setTime(new Date()), 1000);
     return () => clearInterval(interval);
-  }, el as HTMLElement);
+  }, el);
 
   return el;
 }
@@ -900,7 +900,7 @@ import { canvas as canvasTag } from "sibujs";
 function MyCanvas() {
   const canvasRef = ref<HTMLCanvasElement>();
 
-  const el = canvasTag({ ref: canvasRef }) as HTMLElement;
+  const el = canvasTag({ ref: canvasRef });
 
   onMount(() => {
     const ctx = canvasRef.current!.getContext("2d");
@@ -933,7 +933,7 @@ function MyCanvas() {
 import { onMount, onUnmount } from "sibujs";
 
 function Ticker() {
-  const el = div("Ticking...") as HTMLElement;
+  const el = div("Ticking...");
   let interval: number;
 
   onMount(() => {
@@ -1133,7 +1133,7 @@ import { transition } from "sibujs/motion";
 function FadeExample() {
   const [visible, setVisible] = signal(true);
 
-  const content = div("Fading content") as HTMLElement;
+  const content = div("Fading content");
   const { enter, leave } = transition(content, {
     property: "opacity",
     duration: 300,
@@ -1175,7 +1175,7 @@ function FadeExample() {
 ```ts
 import { transition } from "sibujs/motion";
 
-const box = div("Animated box") as HTMLElement;
+const box = div("Animated box");
 
 const { enter, leave } = transition(box, {
   duration: 300,
@@ -1216,7 +1216,7 @@ await leave();
 ```ts
 import { spring } from "sibujs/motion";
 
-const follower = div("Follows mouse") as HTMLElement;
+const follower = div("Follows mouse");
 
 // Spring animation using Web Animations API
 await spring(follower, [

@@ -3,52 +3,60 @@
  * Provides optimized builds, automatic component detection, and development enhancements.
  */
 
-import { compileHtmlTemplates } from "./compileTemplates";
+import {
+  applyEdits,
+  editsSourceMap,
+  jsStringLiteral,
+  lineBreaksIn,
+  normalizeEdits,
+  type SourceEdit,
+  type SourceMapV3,
+} from "./sourceEdit";
+import { importsSibu, pureAnnotationEdits, scanModule, uniquePrefix } from "./sourceScan";
 import { analyzeStaticTemplates } from "./staticAnalysis";
+import { planHtmlTemplates } from "./templateCompiler";
 
 export interface SibuVitePluginOptions {
   /** Enable HMR support for SibuJS components */
   hmr?: boolean;
-  /** Enable automatic pure annotations for tree-shaking */
+  /**
+   * Annotate calls to side-effect-free sibujs factories (`tagFactory`,
+   * `context`, ...) as pure for tree-shaking. Only direct calls to names
+   * imported from sibujs are annotated. Default: true.
+   */
   pureAnnotations?: boolean;
   /** Component file patterns to watch */
   include?: string[];
   /** File patterns to exclude */
   exclude?: string[];
-  /** Enable dev mode features (devtools, debug logging) */
+  /**
+   * Enable dev mode features (devtools, debug logging). When omitted it is
+   * derived from Vite's own command/mode (`vite build` is production unless
+   * `--mode development`; `vite serve` is development), falling back to
+   * `NODE_ENV` only when the plugin is driven outside Vite.
+   */
   devMode?: boolean;
-  /** Enable static template optimization (default: true in production) */
+  /**
+   * Replace provably static tag-factory calls (`div({ class: "x" }, "text")`)
+   * with `staticTemplate(...)` markup. Default: **false**, in every mode.
+   *
+   * Off by default because it is not a win: `staticTemplate` parses its markup
+   * on every call, which is slower than the tag factory's `createElement` +
+   * `setAttribute` for the single-element calls that can be proven static, and
+   * the proof has to exclude every prop the factory treats specially (URL and
+   * style sanitizing, IDL-only booleans, event and ref props). The analysis is
+   * conservative and correct, but a correct pessimization is not a sane
+   * default. It previously defaulted to on and rewrote non-sibujs calls
+   * (`db.select({...})`) and the template compiler's output into invalid code.
+   */
   staticOptimize?: boolean;
-  /** Compile html`` tagged templates to direct function calls (default: true in production) */
+  /**
+   * Compile `html` tagged templates (imported from sibujs) to direct DOM
+   * construction. Default: true in production builds. A template the compiler
+   * cannot reproduce exactly is left to the runtime parser.
+   */
   compileTemplates?: boolean;
 }
-
-/**
- * Default file patterns for SibuJS component files.
- */
-const SVG_TAGS_SET = new Set([
-  "svg",
-  "circle",
-  "ellipse",
-  "g",
-  "line",
-  "path",
-  "polygon",
-  "polyline",
-  "rect",
-  "text",
-  "tspan",
-  "defs",
-  "clipPath",
-  "mask",
-  "pattern",
-  "linearGradient",
-  "radialGradient",
-  "stop",
-  "use",
-  "symbol",
-  "marker",
-]);
 
 const DEFAULT_INCLUDE = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"];
 const DEFAULT_EXCLUDE = ["node_modules/**", "dist/**", "**/*.test.*", "**/*.spec.*"];
@@ -70,58 +78,95 @@ function matchesPattern(filePath: string, patterns: string[]): boolean {
 }
 
 /**
- * Inject pure annotations into SibuJS function calls for better tree-shaking.
- * Adds \/\*#__PURE__\*\/ comments before known SibuJS factory calls.
+ * The development prologue, as an edit that adds no line.
+ *
+ * Plain JavaScript on purpose: the plugin runs with `enforce: "pre"`, so for a
+ * `.js`/`.jsx` file this text reaches the JavaScript parser as-is. It used to
+ * be a TypeScript cast, which is a syntax error in every JavaScript module.
+ *
+ * It shares the module's first line (after a hashbang, which must stay first)
+ * instead of adding lines of its own: two prepended lines shifted every stack
+ * trace and breakpoint of every sibujs module in development.
  */
-function injectPureAnnotations(code: string): string {
-  const sibuFactories = [
-    "tagFactory",
-    "context",
-    "defineComponent",
-    "withProps",
-    "withDefaults",
-    "pure",
-    "noSideEffect",
-  ];
-
-  let result = code;
-  for (const factory of sibuFactories) {
-    // Match calls like: tagFactory("div") that are not already annotated
-    const pattern = new RegExp(`(?<!/\\*#__PURE__\\*/\\s*)\\b(${factory})\\s*\\(`, "g");
-    result = result.replace(pattern, "/*#__PURE__*/ $1(");
+function devPrologueEdit(code: string): SourceEdit | null {
+  let at = 0;
+  if (code.startsWith("#!")) {
+    const nl = code.indexOf("\n");
+    if (nl === -1) return null;
+    at = nl + 1;
   }
-  return result;
+  return {
+    start: at,
+    end: at,
+    text: '/* SibuJS Dev Mode */ if (typeof globalThis !== "undefined") { globalThis.__SIBU_DEV__ = true; } ',
+  };
 }
 
 /**
- * Inject development mode helpers into the code.
- * Adds enableDebug() calls and performance instrumentation in dev mode.
+ * Replace provably static tag-factory calls with `staticTemplate` markup.
+ *
+ * `staticTemplate` lives in `sibujs/performance` — it is not exported from the
+ * package root — and it is imported under a collision-proof alias appended to
+ * the module, so neither an existing `staticTemplate` import nor a local of
+ * that name can clash. (The old guard, `!includes("import") ||
+ * !includes("staticTemplate")`, was false for any file that had an import, so
+ * the import was never added and the bundle threw a ReferenceError.)
+ *
+ * The parsed element is adopted into `document`, making it indistinguishable
+ * from a factory-built one: detached and owned by the page's document rather
+ * than a child of the template's inert fragment.
+ *
+ * The analysis runs on the ORIGINAL source, like every other step: compiled
+ * templates contain no tag-factory calls, and a call inside a template
+ * expression is rewritten in place either way. The alias prefix is derived
+ * from the same source as the template compiler's; the two use disjoint
+ * names under it (`static`/`staticTemplate` vs `t0`/`attr`/...).
  */
-function injectDevHelpers(code: string): string {
-  // Add dev-mode global flag if the file imports from sibu
-  if (
-    code.includes('from "sibu"') ||
-    code.includes("from 'sibu'") ||
-    code.includes('from "sibu/') ||
-    code.includes("from 'sibu/")
-  ) {
-    return `/* SibuJS Dev Mode */\nif (typeof globalThis !== 'undefined') { (globalThis as unknown as Record<string, unknown>).__SIBU_DEV__ = true; }\n${code}`;
-  }
-  return code;
+function staticOptimizationEdits(code: string): { edits: SourceEdit[]; append: string } | null {
+  const analysis = analyzeStaticTemplates(code);
+  if (!analysis.hasStaticPatterns) return null;
+  const P = uniquePrefix(code);
+  const edits = analysis.patterns.map((pattern) => ({
+    start: pattern.start,
+    end: pattern.end,
+    // A call spanning several lines keeps its line breaks.
+    text: `${P}static(${jsStringLiteral(pattern.templateHtml)}${lineBreaksIn(code, pattern.start, pattern.end)})`,
+  }));
+  const append =
+    `\nimport { staticTemplate as ${P}staticTemplate } from "sibujs/performance";\n` +
+    `function ${P}static(markup) {\n  return document.adoptNode(${P}staticTemplate(markup));\n}\n`;
+  return { edits, append };
+}
+
+/** The subset of Vite's config environment / resolved config the plugin reads. */
+interface ViteModeInfo {
+  command?: string;
+  mode?: string;
+}
+
+/**
+ * Resolve dev mode. An explicit option always wins; otherwise Vite's own
+ * command/mode decides. Deciding from `NODE_ENV` at plugin creation was wrong
+ * for the most common setup — the variable is usually unset while
+ * `vite.config.ts` is evaluated, so `vite build` produced a development build.
+ */
+function resolveDevMode(explicit: boolean | undefined, info: ViteModeInfo | undefined): boolean {
+  if (explicit !== undefined) return explicit;
+  if (info?.command === "build") return info.mode === "development";
+  if (info?.command === "serve") return true;
+  return typeof process !== "undefined" && process.env?.NODE_ENV !== "production";
 }
 
 /**
  * Vite plugin configuration for SibuJS projects.
  * Returns a Vite-compatible plugin object.
- *
- * Note: This is a configuration helper. For full Vite plugin functionality,
- * users should install @sibu/vite-plugin (when available).
  */
 export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
   name: string;
   enforce?: "pre" | "post";
-  config?: () => Record<string, unknown>;
-  transform?: (code: string, id: string) => { code: string; map?: unknown } | null;
+  config?: (userConfig?: unknown, env?: ViteModeInfo) => Record<string, unknown>;
+  configResolved?: (config: ViteModeInfo) => void;
+  transform?: (code: string, id: string) => { code: string; map: SourceMapV3 } | null;
   handleHotUpdate?: (ctx: { file: string; modules: unknown[] }) => void;
 } {
   const {
@@ -130,26 +175,28 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
     include = DEFAULT_INCLUDE,
     exclude = DEFAULT_EXCLUDE,
     devMode,
-    staticOptimize,
+    staticOptimize = false,
     compileTemplates,
   } = options;
 
-  // Determine dev mode: explicit option or fallback to NODE_ENV
-  const isDevMode = devMode ?? (typeof process !== "undefined" && process.env?.NODE_ENV !== "production");
+  // Provisional until Vite reports its command/mode through `config` /
+  // `configResolved`; used as-is when the plugin is driven outside Vite.
+  let isDevMode = resolveDevMode(devMode, undefined);
 
   return {
     name: "sibu-vite-plugin",
     enforce: "pre",
 
-    config() {
+    config(_userConfig?: unknown, env?: ViteModeInfo) {
+      isDevMode = resolveDevMode(devMode, env);
       return {
-        // Optimize dependency pre-bundling for sibu
+        // Optimize dependency pre-bundling for sibujs
         optimizeDeps: {
-          include: ["sibu"],
+          include: ["sibujs"],
         },
-        // Ensure sibu is treated correctly for SSR
+        // Ensure sibujs is treated correctly for SSR
         ssr: {
-          noExternal: ["sibu"],
+          noExternal: ["sibujs"],
         },
         // Define global constants for dead code elimination
         define: {
@@ -163,82 +210,71 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
       };
     },
 
-    transform(code: string, id: string): { code: string; map?: unknown } | null {
+    configResolved(config: ViteModeInfo) {
+      isDevMode = resolveDevMode(devMode, config);
+    },
+
+    transform(code: string, id: string): { code: string; map: SourceMapV3 } | null {
       // Skip files that don't match include patterns or match exclude patterns
       if (!matchesPattern(id, include) || matchesPattern(id, exclude)) {
         return null;
       }
+      // Every step below only acts on modules that import from sibujs.
+      if (!code.includes("sibujs")) return null;
+      // One scan of the module, shared by every step (memoized per source).
+      // A module that cannot be scanned with confidence is left untouched.
+      if (!scanModule(code)) return null;
 
-      let transformed = code;
-      let modified = false;
+      // Every step describes its change as edits against the ORIGINAL source;
+      // they are applied together, and the source map is generated from the
+      // same list. No step adds or removes a line of the original code.
+      const edits: SourceEdit[] = [];
+      let append = "";
 
-      // Apply pure annotations for tree-shaking
+      // Dev helpers in dev mode (first, so the flag is set before module code).
+      if (isDevMode && importsSibu(code)) {
+        const prologue = devPrologueEdit(code);
+        if (prologue) edits.push(prologue);
+      }
+
+      // Pure annotations for tree-shaking.
       if (pureAnnotations) {
-        const annotated = injectPureAnnotations(transformed);
-        if (annotated !== transformed) {
-          transformed = annotated;
-          modified = true;
-        }
+        edits.push(...pureAnnotationEdits(code));
       }
 
-      // Inject dev helpers in dev mode
-      if (isDevMode) {
-        const withDevHelpers = injectDevHelpers(transformed);
-        if (withDevHelpers !== transformed) {
-          transformed = withDevHelpers;
-          modified = true;
-        }
-      }
-
-      // Compile html`` tagged templates to direct function calls (production only by default)
+      // Compile html`` tagged templates (production only by default). The
+      // injected imports are aliased (`Fragment as __sibujs$Fragment`, ...),
+      // so they can never duplicate or collide with the file's own imports or
+      // locals.
       const shouldCompile = compileTemplates ?? !isDevMode;
-      if (shouldCompile && transformed.includes("html`")) {
-        const compiled = compileHtmlTemplates(transformed);
-        if (compiled.code) {
-          // Add imports for used HTML tags
-          const tagImports = Array.from(compiled.usedTags).filter((t) => !SVG_TAGS_SET.has(t));
-          const needsSvg = compiled.usesSvg;
-          const imports: string[] = [];
-          if (tagImports.length > 0) {
-            imports.push(`import { ${tagImports.join(", ")} } from "sibu";`);
-          }
-          if (needsSvg) {
-            imports.push(`import { tagFactory as __sbTagFactory, SVG_NS as __sbSVG_NS } from "sibu";`);
-          }
-          // Only add imports that aren't already present
-          const newImports = imports.filter((imp) => !transformed.includes(imp));
-          if (newImports.length > 0) {
-            compiled.code = `${newImports.join("\n")}\n${compiled.code}`;
-          }
-          transformed = compiled.code;
-          modified = true;
+      if (shouldCompile) {
+        const plan = planHtmlTemplates(code);
+        if (plan.compiledCount > 0) {
+          edits.push(...plan.edits);
+          append += plan.append;
         }
       }
 
-      // Static template optimization (production only by default)
-      const shouldOptimize = staticOptimize ?? !isDevMode;
-      if (shouldOptimize) {
-        const analysis = analyzeStaticTemplates(transformed);
-        if (analysis.hasStaticPatterns) {
-          // Replace from last to first to preserve indices
-          const sorted = [...analysis.patterns].sort((a, b) => b.start - a.start);
-          for (const pattern of sorted) {
-            const replacement = `staticTemplate(${JSON.stringify(pattern.templateHtml)})`;
-            transformed = transformed.slice(0, pattern.start) + replacement + transformed.slice(pattern.end);
-          }
-          // Ensure staticTemplate import exists
-          if (!transformed.includes("import") || !transformed.includes("staticTemplate")) {
-            transformed = `import { staticTemplate } from "sibu";\n${transformed}`;
-          }
-          modified = true;
+      // Static template optimization (opt-in; see the option's docs).
+      if (staticOptimize) {
+        const optimized = staticOptimizationEdits(code);
+        if (optimized) {
+          edits.push(...optimized.edits);
+          append += optimized.append;
         }
       }
 
-      if (!modified) return null;
+      if (edits.length === 0 && append === "") return null;
+      // The steps never touch overlapping ranges; if they ever did, leaving
+      // the module alone is the only safe answer.
+      const sorted = normalizeEdits(edits);
+      if (!sorted) return null;
+      const transformed = applyEdits(code, sorted, append);
+      if (transformed === code) return null;
 
       return {
         code: transformed,
-        map: undefined, // Let Vite handle source maps
+        map: editsSourceMap(code, sorted, append, id),
       };
     },
 
@@ -329,7 +365,7 @@ export function createViteConfig(
     ...(ssr
       ? {
           ssr: {
-            noExternal: ["sibu"],
+            noExternal: ["sibujs"],
             target: "node",
           },
           build: {
@@ -348,8 +384,8 @@ export function createViteConfig(
 
     // Optimize dependency handling
     optimizeDeps: {
-      include: ["sibu"],
-      // Force pre-bundling of sibu for faster dev startup
+      include: ["sibujs"],
+      // Force pre-bundling of sibujs for faster dev startup
       force: false,
     },
 

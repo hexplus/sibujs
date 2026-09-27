@@ -1,4 +1,4 @@
-import { reactiveBinding } from "../../reactivity/track";
+import { reactiveBinding, untracked } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
@@ -63,6 +63,13 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
  * same arguments; a bare element used to be accepted and then silently render
  * nothing, because the directive called it as a function only.
  *
+ * The branch is rebuilt whenever the condition's VALUE changes (`Object.is`),
+ * not only when its truthiness flips, so
+ * `when(() => selectedUser(), () => UserCard(selectedUser()!))` rebuilds the
+ * card for each different user. To rebuild only when truthiness flips, return
+ * a boolean: `when(() => !!x(), …)`. For rebuilds keyed on something other
+ * than the value itself (an id, a mode), use {@link match}.
+ *
  * @param condition Reactive getter; its value is compared to decide the branch
  * @param thenBranch Element, value, or function returning one, used when truthy
  * @param elseBranch Optional counterpart used when falsy
@@ -78,8 +85,9 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
  * when(() => isLoggedIn(), div("Welcome!"));   // also valid
  * ```
  *
- * GOTCHA — branch factories rebuild only when `condition` changes. A signal
- * read *eagerly* inside a branch is captured once and never updates:
+ * GOTCHA — branch factories rebuild only when `condition` changes. A branch
+ * factory runs untracked, so a signal read *eagerly* inside it is captured once
+ * and never updates:
  * ```ts
  * when(() => show(), () => div(`Count: ${count()}`));        // ✗ frozen at first count
  * when(() => show(), () => div(() => `Count: ${count()}`));  // ✓ reactive text child
@@ -177,8 +185,10 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
     const parent = anchor.parentNode;
     if (!parent) return;
 
-    // Skip DOM work if condition boolean hasn't changed
-    if (initialized && show === lastCondition) return;
+    // Skip DOM work if the condition's value hasn't changed. Compared by
+    // identity, not truthiness: a different truthy value (another record) is
+    // a different branch instance and must rebuild.
+    if (initialized && Object.is(show, lastCondition)) return;
     lastCondition = show;
 
     // Snapshot focus before the outgoing branch is detached — afterwards
@@ -202,7 +212,11 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
     }
 
     const branch = show ? thenBranch : elseBranch !== undefined ? elseBranch : null;
-    const attached = attachBranch(parent, anchor, branch, attachedOnce, "when");
+    // Untracked, like `each()` rows: the factory's own reads belong to the
+    // bindings it creates, not to this directive. Tracked, every eager read in
+    // the branch body became a dependency of the condition binding, so an
+    // unrelated signal change re-ran the condition for nothing.
+    const attached = untracked(() => attachBranch(parent, anchor, branch, attachedOnce, "when"));
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 
@@ -315,7 +329,8 @@ export function match<T extends string | number>(
     // `Object.hasOwn` rather than `||` so a case whose value is legitimately
     // falsy (an empty string, 0) still wins over the fallback.
     const branch = Object.hasOwn(cases, key) ? cases[key] : fallback;
-    const attached = attachBranch(parent, anchor, branch ?? null, attachedOnce, "match");
+    // Untracked for the same reason as in `when`.
+    const attached = untracked(() => attachBranch(parent, anchor, branch ?? null, attachedOnce, "match"));
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 

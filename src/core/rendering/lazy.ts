@@ -1,6 +1,7 @@
 import { reportError } from "../errors";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
+import type { Component } from "./types";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
 // that was never mounted in time to be offered to a boundary.
@@ -59,9 +60,6 @@ export function takePendingError(node: Element): Error | undefined {
   return undefined;
 }
 
-type Component = () => HTMLElement;
-type LazyImport = () => Promise<{ default: Component }>;
-
 /**
  * lazy() enables code-splitting by deferring the import of a component
  * until it is first rendered. Returns a wrapper component that shows a
@@ -81,19 +79,25 @@ type LazyImport = () => Promise<{ default: Component }>;
  * LazyDashboard();
  * ```
  *
+ * The returned component renders either the loading container (a `div`) or,
+ * once loaded, the component's own root — its return type is the union, so an
+ * SVG component stays usable without a cast.
+ *
  * @param importFn Dynamic import function returning `{ default: Component }`
  * @returns A component function that lazy-loads on first call
  */
-export function lazy(importFn: LazyImport): Component {
-  let cached: Component | null = null;
+export function lazy<R extends Node = HTMLElement>(
+  importFn: () => Promise<{ default: Component<void, R> }>,
+): Component<void, R | HTMLDivElement> {
+  let cached: Component<void, R> | null = null;
 
-  return function LazyComponent(): HTMLElement {
+  return function LazyComponent(): R | HTMLDivElement {
     // If already loaded, render immediately
     if (cached) {
       return cached();
     }
 
-    const container = div({ class: "sibu-lazy" }) as HTMLElement;
+    const container = div({ class: "sibu-lazy" });
     let disposed = false;
 
     importFn()
@@ -114,7 +118,7 @@ export function lazy(importFn: LazyImport): Component {
       });
 
     // Show loading placeholder initially
-    container.appendChild(span("sibu-lazy-loading", "Loading...") as Node);
+    container.appendChild(span("sibu-lazy-loading", "Loading..."));
 
     // Guard against stale loads if container is disposed before import resolves.
     // Previously this monkey-patched container.remove — now we hook into
@@ -140,11 +144,13 @@ export function lazy(importFn: LazyImport): Component {
  *
  * @param props.nodes Function that returns the async/lazy component
  * @param props.fallback Function that returns the loading UI
- * @returns An HTMLElement that swaps from fallback to content when ready
+ * @returns A container element that swaps from fallback to content when ready
  */
 export interface SuspenseProps {
-  nodes: () => HTMLElement;
-  fallback: () => HTMLElement;
+  /** The content's root must be an element (HTML or SVG): its loading state is read from it. */
+  nodes: () => Element;
+  /** Any node, including a text node or fragment. */
+  fallback: () => Node;
 }
 
 /**
@@ -159,8 +165,8 @@ export interface SuspenseProps {
  * the fallback are discarded. That is usually harmless (a spinner rarely holds
  * focus) but matters for a skeleton form; see the note on `when`.
  */
-export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
-  const container = div({ class: "sibu-suspense" }) as HTMLElement;
+export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
+  const container = div({ class: "sibu-suspense" });
 
   const fallbackEl = fallback();
   container.appendChild(fallbackEl);
@@ -171,7 +177,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLElement {
   // loaded. If Suspense is disposed mid-load, the child is an orphan that the
   // container's dispose-walk never reaches, so its teardown (e.g. lazy()'s
   // load guard) would never run — a leak. Track it and dispose it explicitly.
-  let childEl: HTMLElement | null = null;
+  let childEl: Element | null = null;
 
   registerDisposer(container, () => {
     suspenseDisposed = true;

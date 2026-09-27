@@ -1,11 +1,21 @@
 import { span } from "../core/rendering/html";
-import { signal } from "../core/signals/signal";
+import { type Accessor, signal } from "../core/signals/signal";
 import { getRequestStore } from "../core/ssr-context";
 import { globalSingleton } from "../utils/globalSingleton";
 
 type Translations = Record<string, string>;
 type LocaleMap = Record<string, Translations>;
-type Params = Record<string, string | number>;
+
+/**
+ * Interpolation parameters for `t()`, `translated()` and `Trans()`.
+ *
+ * A value may be a GETTER (a signal accessor or any `() => value`). Getters are
+ * called at lookup time, so inside a binding the parameter is tracked exactly
+ * like the locale: `translated("hello", { name: userName })` re-renders when
+ * either `userName` or the locale changes.
+ */
+export type TranslationParams = Record<string, string | number | (() => string | number)>;
+type Params = TranslationParams;
 
 // ============================================================================
 // OWNERSHIP
@@ -82,12 +92,39 @@ type Params = Record<string, string | number>;
 // both of which are correct whichever object the registry turns out to be. The
 // null prototype is kept as defence in depth for the case where this copy
 // creates it first.
+//
+// ============================================================================
+// LIVE DICTIONARIES
+// ============================================================================
+//
+// The locale was always a signal, but the dictionaries were not: registering
+// messages notified nobody. The most common loading flow therefore broke —
+//
+//     setLocale("es");                        // bindings re-run, "es" is empty
+//     registerTranslations("es", await load("es"));   // nobody re-runs
+//
+// and every binding kept showing raw keys until something unrelated re-ran
+// it. `revision` is a counter bumped on every dictionary mutation and read by
+// every client-side lookup, so a binding depends on "the active locale AND the
+// messages registered for it" rather than on the locale alone.
+//
+// Adding a field to the shared singleton is backwards compatible, so the key
+// stays `v1`. An OLDER copy may have created the object without the field;
+// it is attached here on first load of a copy that knows about it. Messages
+// registered through that older copy still notify nothing — the degradation is
+// the old behaviour, never a crash.
 const _i18n = globalSingleton(Symbol.for("sibujs.i18n.v1"), () => ({
   locale: signal("en"),
   locales: Object.create(null) as LocaleMap,
-}));
+  revision: signal(0),
+})) as {
+  locale: ReturnType<typeof signal<string>>;
+  locales: LocaleMap;
+  revision?: ReturnType<typeof signal<number>>;
+};
 const [clientLocale, setClientLocale] = _i18n.locale;
 const locales = _i18n.locales;
+const [revision, setRevision] = (_i18n.revision ??= signal(0));
 
 /**
  * The dictionary registered under `locale`, or `undefined`. Own properties
@@ -100,6 +137,16 @@ function dictionaryFor(locale: string): Translations | undefined {
 }
 
 /**
+ * Subscribe the current reader to dictionary mutations. Client only, for the
+ * same reason `getLocale()` never subscribes a request to the client locale: a
+ * server render reads once and never re-renders, so the subscription would be
+ * machinery nothing uses.
+ */
+function trackDictionaries(): void {
+  if (!getRequestStore()) revision();
+}
+
+/**
  * The message registered under `key` for the active locale, or `undefined` when
  * there is none. This is the single definition of "registered", so `t()` and
  * `hasTranslation()` can never disagree.
@@ -109,8 +156,13 @@ function dictionaryFor(locale: string): Translations | undefined {
  * `string` return type honest at runtime — untyped JavaScript can put anything
  * in a dictionary, and returning `Object.prototype.toString` from `t()` is
  * exactly the bug this replaces.
+ *
+ * Outside a request the read also subscribes to `revision`, so a binding
+ * re-runs when messages are registered after it first rendered — see LIVE
+ * DICTIONARIES above.
  */
 function lookup(key: string): string | undefined {
+  trackDictionaries();
   const dictionary = dictionaryFor(getLocale());
   if (dictionary === undefined || !Object.hasOwn(dictionary, key)) return undefined;
   const message = dictionary[key];
@@ -187,6 +239,12 @@ export function getLocale(): string {
  * because the assignment form would invoke the inherited `__proto__` setter for
  * a locale of that name instead of registering it. Locale names and translation
  * keys are treated literally throughout — see PROTOTYPE SAFETY above.
+ *
+ * NOTIFY. Every registration bumps the dictionary revision, so bindings that
+ * already rendered a key re-run and pick the new message up — the order of
+ * `setLocale()` and `registerTranslations()` no longer matters. The bump comes
+ * after publication, so a re-running binding can only ever see the new
+ * dictionary.
  */
 export function registerTranslations(locale: string, messages: Translations) {
   // PREPARE — every getter and proxy trap in `messages` runs here. Spreading
@@ -202,26 +260,91 @@ export function registerTranslations(locale: string, messages: Translations) {
     enumerable: true,
     configurable: true,
   });
+  // NOTIFY — dictionaries are application-global, so this is not scoped to a
+  // request: messages registered during a server render are visible to the
+  // client bindings that share the process as well.
+  setRevision((n) => n + 1);
+}
+
+/**
+ * Resolve one `{name}` placeholder. Own properties only — a message containing
+ * `{toString}` must not reach `Object.prototype` and, now that function values
+ * are called, must never CALL an inherited method. A getter is called here, at
+ * lookup time, so inside a binding it is tracked like the locale.
+ */
+function resolveParam(params: Params, name: string): string {
+  if (!Object.hasOwn(params, name)) return "";
+  const raw = params[name];
+  const value = typeof raw === "function" ? raw() : raw;
+  return value == null ? "" : String(value);
 }
 
 /**
  * Translate `key` in the current locale, falling back to the key itself when it
  * is not registered. A registered empty string is a translation and is returned
  * unchanged; the previous `|| key` discarded it and returned the key.
+ *
+ * `t()` returns a STRING — a snapshot. It is live only when it is read inside a
+ * binding (`span(() => t("hello"))`), because that binding is what re-runs.
+ * Called directly in a component body, `span(t("hello"))` renders the message
+ * once and never updates. For anything on screen prefer {@link translated},
+ * which hands the binding a getter and works for text children and attributes
+ * alike. `t()` remains the right call for one-off strings: event handlers,
+ * `confirm()` prompts, log lines, server renders.
+ *
+ * Parameter getters are resolved on every call, so `t("hi", { name: userName })`
+ * inside a binding tracks `userName` too.
  */
 export function t(key: string, params?: Params): string {
   const message = lookup(key) ?? key;
 
-  return params ? message.replace(/\{(\w+)\}/g, (_, p) => String(params[p] ?? "")) : message;
+  return params ? message.replace(/\{(\w+)\}/g, (_, p: string) => resolveParam(params, p)) : message;
 }
 
 /**
- * Trans component — renders a translated string reactively.
- * Automatically updates when the client locale changes. During SSR it renders
- * once, using the locale belonging to the current request.
+ * A LIVE translation: returns a getter that re-reads the message every time a
+ * binding calls it. Pass it anywhere the tag factories accept a reactive value
+ * — a text child or any attribute — and only that one text node or attribute
+ * updates when the locale changes, when messages for it are registered later,
+ * or when a getter parameter changes. The surrounding elements are never
+ * rebuilt, so focus, typed input values and element identity survive a language
+ * switch.
+ *
+ * During SSR the binding evaluates once, using the locale of the current
+ * request.
  *
  * @param key Translation key
- * @param params Optional interpolation parameters
+ * @param params Optional interpolation parameters; values may be getters
+ * @returns An accessor producing the translated string
+ *
+ * @example
+ * ```ts
+ * const [userName] = signal("Ada");
+ *
+ * header([
+ *   h1(translated("app.title")),
+ *   span(translated("greeting", { name: userName })),
+ *   input({ placeholder: translated("search.placeholder"), "aria-label": translated("search.label") }),
+ * ]);
+ *
+ * setLocale("es"); // text and attributes update in place — no re-render
+ * ```
+ */
+export function translated(key: string, params?: Params): Accessor<string> {
+  return () => t(key, params);
+}
+
+/**
+ * Trans component — renders a translated string reactively inside a `<span>`.
+ * Automatically updates when the client locale changes, when messages for the
+ * active locale are registered, and when a getter parameter changes. During SSR
+ * it renders once, using the locale belonging to the current request.
+ *
+ * When no wrapper element is wanted, pass {@link translated} straight to the
+ * parent instead: `p(translated("greeting"))`.
+ *
+ * @param key Translation key
+ * @param params Optional interpolation parameters; values may be getters
  * @returns An HTMLElement (span) that reactively shows the translated text
  *
  * @example
@@ -229,12 +352,12 @@ export function t(key: string, params?: Params): string {
  * registerTranslations("en", { greeting: "Hello, {name}!" });
  * registerTranslations("es", { greeting: "Hola, {name}!" });
  *
- * div([Trans("greeting", { name: "World" })]);
- * // When locale changes, the text updates automatically
+ * div([Trans("greeting", { name: userName })]);
+ * // When the locale or userName changes, the text updates automatically
  * ```
  */
 export function Trans(key: string, params?: Params): HTMLElement {
-  return span(() => t(key, params)) as HTMLElement;
+  return span(translated(key, params));
 }
 
 /**
@@ -255,7 +378,11 @@ export function hasTranslation(key: string): boolean {
  *
  * Own enumerable keys, so a locale is listed exactly when it was registered -
  * including one named `"__proto__"`, which publication now stores literally.
+ *
+ * Read inside a binding the list is live: registering a new locale re-runs it,
+ * so a language picker built from it picks up lazily loaded locales.
  */
 export function getAvailableLocales(): string[] {
+  trackDictionaries();
   return Object.keys(locales);
 }

@@ -2,6 +2,7 @@ import { devAssert } from "../dev";
 import { emitDevtools } from "../devtoolsHook";
 import { reportError } from "../errors";
 import { dispose, MAX_DRAIN_TEARDOWNS, reportDrainRunaway, withDisposerRollback } from "./dispose";
+import type { Component } from "./types";
 
 /**
  * Mounts a root component into a DOM element.
@@ -17,13 +18,14 @@ import { dispose, MAX_DRAIN_TEARDOWNS, reportDrainRunaway, withDisposerRollback 
  * disposes and removes everything in that range, including nodes a reactive
  * child rendered after mounting.
  *
- * @param component Component function, or an already-built Element/Node.
+ * @param component Component function (any root node, HTML or SVG element or
+ * fragment), or an already-built Element/Node.
  * @param container Element to mount into.
  * @returns `{ node, unmount }` — the live root node, and a teardown that
  * disposes the tree and removes it.
  */
 export function mount(
-  component: (() => Element) | Element | Node,
+  component: Component<void, Node> | Node,
   container: Element | null,
 ): { node: Node; unmount: () => void } {
   if (!container) {

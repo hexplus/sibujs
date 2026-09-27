@@ -1,9 +1,14 @@
 /**
  * Higher-order component utilities for SibuJS.
  * These functions wrap or compose components to add behavior.
+ *
+ * Each helper is generic over the wrapped component's root type `R`, so a
+ * component returning `div()` keeps its `HTMLDivElement` root and an SVG
+ * component works as well. `R` defaults to `HTMLElement`, the type these
+ * helpers used before, for callers that pass the type arguments explicitly.
  */
 
-type Component<P = unknown> = (props: P) => HTMLElement;
+import type { Component } from "../core/rendering/types";
 
 /**
  * Wraps a component with additional behavior that runs before/after rendering.
@@ -20,10 +25,10 @@ type Component<P = unknown> = (props: P) => HTMLElement;
  * });
  * ```
  */
-export function withWrapper<P>(
-  WrappedComponent: Component<P>,
-  wrapper: (component: Component<P>, props: P) => HTMLElement,
-): Component<P> {
+export function withWrapper<P, R extends Node = HTMLElement, W extends Node = R>(
+  WrappedComponent: Component<P, R>,
+  wrapper: (component: Component<P, R>, props: P) => W,
+): Component<P, W> {
   return (props: P) => wrapper(WrappedComponent, props);
 }
 
@@ -47,11 +52,11 @@ export function withWrapper<P>(
  */
 export type WithDefaultsProps<P, D> = Omit<P, keyof D> & Partial<Pick<P, Extract<keyof P, keyof D>>>;
 
-export function withDefaults<P extends object, const D extends Partial<P> = Partial<P>>(
-  component: Component<P>,
+export function withDefaults<P extends object, const D extends Partial<P> = Partial<P>, R extends Node = HTMLElement>(
+  component: Component<P, R>,
   // Reject default keys the component does not accept.
   defaults: D & { [K in Exclude<keyof D, keyof P>]: never },
-): Component<WithDefaultsProps<P, D>> {
+): Component<WithDefaultsProps<P, D>, R> {
   // Returning `Component<Partial<P>>` made EVERY prop optional, so a required
   // prop without a default could be omitted and arrive as `undefined`.
   return (props: WithDefaultsProps<P, D>) => component({ ...defaults, ...props } as unknown as P);
@@ -70,6 +75,8 @@ export function withDefaults<P extends object, const D extends Partial<P> = Part
  * const EnhancedPage = enhance(Page);
  * ```
  */
-export function compose(...wrappers: Array<(component: Component) => Component>): (component: Component) => Component {
-  return (component: Component) => wrappers.reduceRight((comp, wrapper) => wrapper(comp), component);
+export function compose<C extends Component<never, Node> = Component<unknown, HTMLElement>>(
+  ...wrappers: Array<(component: C) => C>
+): (component: C) => C {
+  return (component: C) => wrappers.reduceRight((comp, wrapper) => wrapper(comp), component);
 }

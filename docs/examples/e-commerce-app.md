@@ -102,7 +102,7 @@ function updateQuantity(productId: string, quantity: number) {
 ### Internationalization
 
 ```ts
-import { registerTranslations, t, setLocale } from "sibujs/plugins";
+import { registerTranslations, t, translated, getLocale, setLocale } from "sibujs/plugins";
 
 registerTranslations("en", {
   "nav.home": "Home",
@@ -165,7 +165,7 @@ import {
   mount, each, when,
 } from "sibujs";
 import { form as createForm, required, email as emailValidator } from "sibujs/ui";
-import { Trans } from "sibujs/plugins";
+import { Trans, translated } from "sibujs/plugins";
 
 // ---------------------------------------------------------------------------
 // Product Card
@@ -186,9 +186,9 @@ function ProductCard(product: () => Product): HTMLElement {
       button({
         class: "btn btn-primary",
         on: { click: () => addToCart(product().id) },
-      }, t("product.addToCart")),
+      }, translated("product.addToCart")),
     ]),
-  ]) as HTMLElement;
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +200,7 @@ function CartPage(): HTMLElement {
     h2(Trans("cart.total")),
     when(
       () => cartItems().length === 0,
-      () => p(t("cart.empty")) as HTMLElement,
+      () => p(translated("cart.empty")),
       () =>
         div([
           each(
@@ -208,7 +208,7 @@ function CartPage(): HTMLElement {
             (item) => {
               const data = item();
               const product = products.get(data.productId);
-              if (!product) return span("Unknown") as HTMLElement;
+              if (!product) return span("Unknown");
               return div("cart-item", [
                 span(product.name),
                 input({
@@ -227,14 +227,14 @@ function CartPage(): HTMLElement {
                 button({
                   on: { click: () => removeFromCart(data.productId) },
                 }, "\u00d7"),
-              ]) as HTMLElement;
+              ]);
             },
             { key: (item) => item.productId }
           ),
           div("cart-total", () => `${t("cart.total")}: $${cartTotal().toFixed(2)}`),
-        ]) as HTMLElement
+        ])
     ),
-  ]) as HTMLElement;
+  ]);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,9 +262,9 @@ function CheckoutPage(): HTMLElement {
     class: "checkout-form",
     on: { submit: onSubmit },
   }, [
-    h2(t("checkout.title")),
+    h2(translated("checkout.title")),
     div("form-field", [
-      label(t("checkout.name")),
+      label(translated("checkout.name")),
       input({
         type: "text",
         value: () => fields.name.value(),
@@ -275,11 +275,11 @@ function CheckoutPage(): HTMLElement {
       }),
       when(
         () => fields.name.touched() && fields.name.error() !== null,
-        () => span({ class: "error" }, () => fields.name.error()!) as HTMLElement
+        () => span({ class: "error" }, () => fields.name.error()!)
       ),
     ]),
     div("form-field", [
-      label(t("checkout.email")),
+      label(translated("checkout.email")),
       input({
         type: "email",
         value: () => fields.email.value(),
@@ -290,14 +290,14 @@ function CheckoutPage(): HTMLElement {
       }),
       when(
         () => fields.email.touched() && fields.email.error() !== null,
-        () => span({ class: "error" }, () => fields.email.error()!) as HTMLElement
+        () => span({ class: "error" }, () => fields.email.error()!)
       ),
     ]),
     button({
       type: "submit",
       class: () => `btn btn-primary ${isValid() ? "" : "disabled"}`,
-    }, t("checkout.submit")),
-  ]) as HTMLElement;
+    }, translated("checkout.submit")),
+  ]);
 }
 ```
 
@@ -351,23 +351,23 @@ function ProductListPage(): HTMLElement {
         { key: (p) => p.id }
       ),
     ]),
-  ]) as HTMLElement;
+  ]);
 }
 
 function AppNav(): HTMLElement {
   return nav("main-nav", [
-    RouterLink({ to: "/", nodes: t("nav.home") }),
-    RouterLink({ to: "/cart", nodes: () => `${t("nav.cart")} (${cartCount()})` }),
+    RouterLink({ to: "/" }, translated("nav.home")),
+    RouterLink({ to: "/cart" }, () => `${t("nav.cart")} (${cartCount()})`),
     button({
       on: {
-        click: () => setLocale(t("nav.home") === "Home" ? "es" : "en"),
+        click: () => setLocale(getLocale() === "en" ? "es" : "en"),
       },
     }, "EN/ES"),
-  ]) as HTMLElement;
+  ]);
 }
 
 function App(): HTMLElement {
-  return div("app", [AppNav(), Outlet()]) as HTMLElement;
+  return div("app", [AppNav(), Outlet()]);
 }
 
 mount(App, document.getElementById("app"));
@@ -383,6 +383,6 @@ mount(App, document.getElementById("app"));
 | `each()` with key | Product grid, cart items list |
 | `when()` | Empty cart message, form validation errors |
 | `createRouter` with guards | Authentication + empty-cart guard on checkout |
-| `registerTranslations` + `t()` | English/Spanish translations |
+| `registerTranslations` + `translated()` | English/Spanish translations that switch in place — text and attributes, no re-render |
 | `createPlugin` | Analytics tracking plugin |
 | `batch()` | Coordinated cart + UI updates |

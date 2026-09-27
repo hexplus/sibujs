@@ -16,7 +16,7 @@
 //
 // Zero runtime change — this file has no runtime exports.
 
-import type { TagProps } from "./tagFactory";
+import type { TagFunction, TagProps } from "./tagFactory";
 
 // ─── Reactive-or-literal helper ──────────────────────────────────────────
 // Most props accept either a static value or a reactive getter. Helpers
@@ -25,9 +25,9 @@ type reactive<T> = T | (() => T);
 
 // ─── Anchor ──────────────────────────────────────────────────────────────
 
-export interface AnchorProps extends TagProps {
+export interface AnchorProps extends TagProps<HTMLAnchorElement> {
   href?: reactive<string>;
-  target?: "_self" | "_blank" | "_parent" | "_top" | (string & {});
+  target?: reactive<"_self" | "_blank" | "_parent" | "_top" | (string & {})>;
   rel?: reactive<string>;
   download?: reactive<string | boolean>;
   hreflang?: reactive<string>;
@@ -71,8 +71,8 @@ export type InputType =
   | "url"
   | "week";
 
-export interface InputProps extends TagProps {
-  type?: InputType | (string & {});
+export interface InputProps extends TagProps<HTMLInputElement> {
+  type?: reactive<InputType | (string & {})>;
   name?: reactive<string>;
   value?: reactive<string | number>;
   placeholder?: reactive<string>;
@@ -98,7 +98,7 @@ export interface InputProps extends TagProps {
 
 // ─── Image ───────────────────────────────────────────────────────────────
 
-export interface ImgProps extends TagProps {
+export interface ImgProps extends TagProps<HTMLImageElement> {
   src?: reactive<string>;
   alt?: reactive<string>;
   width?: reactive<number | string>;
@@ -113,7 +113,7 @@ export interface ImgProps extends TagProps {
 
 // ─── Button ──────────────────────────────────────────────────────────────
 
-export interface ButtonProps extends TagProps {
+export interface ButtonProps extends TagProps<HTMLButtonElement> {
   type?: reactive<"button" | "submit" | "reset">;
   name?: reactive<string>;
   value?: reactive<string>;
@@ -129,7 +129,7 @@ export interface ButtonProps extends TagProps {
 
 // ─── Form ────────────────────────────────────────────────────────────────
 
-export interface FormProps extends TagProps {
+export interface FormProps extends TagProps<HTMLFormElement> {
   action?: reactive<string>;
   method?: reactive<"get" | "post" | "dialog">;
   enctype?: reactive<"application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain">;
@@ -142,7 +142,7 @@ export interface FormProps extends TagProps {
 
 // ─── Select ──────────────────────────────────────────────────────────────
 
-export interface SelectProps extends TagProps {
+export interface SelectProps extends TagProps<HTMLSelectElement> {
   name?: reactive<string>;
   value?: reactive<string>;
   disabled?: reactive<boolean>;
@@ -156,7 +156,7 @@ export interface SelectProps extends TagProps {
 
 // ─── Textarea ────────────────────────────────────────────────────────────
 
-export interface TextareaProps extends TagProps {
+export interface TextareaProps extends TagProps<HTMLTextAreaElement> {
   name?: reactive<string>;
   value?: reactive<string>;
   placeholder?: reactive<string>;
@@ -176,14 +176,14 @@ export interface TextareaProps extends TagProps {
 
 // ─── Label ───────────────────────────────────────────────────────────────
 
-export interface LabelProps extends TagProps {
+export interface LabelProps extends TagProps<HTMLLabelElement> {
   for?: reactive<string>;
   form?: reactive<string>;
 }
 
 // ─── Option / Optgroup ───────────────────────────────────────────────────
 
-export interface OptionProps extends TagProps {
+export interface OptionProps extends TagProps<HTMLOptionElement> {
   value?: reactive<string | number>;
   selected?: reactive<boolean>;
   disabled?: reactive<boolean>;
@@ -192,7 +192,7 @@ export interface OptionProps extends TagProps {
 
 // ─── Video / Audio ───────────────────────────────────────────────────────
 
-export interface MediaProps extends TagProps {
+export interface MediaProps<El extends HTMLMediaElement = HTMLMediaElement> extends TagProps<El> {
   src?: reactive<string>;
   autoplay?: reactive<boolean>;
   controls?: reactive<boolean>;
@@ -202,26 +202,21 @@ export interface MediaProps extends TagProps {
   crossorigin?: reactive<"anonymous" | "use-credentials">;
 }
 
-export interface VideoProps extends MediaProps {
+export interface VideoProps extends MediaProps<HTMLVideoElement> {
   poster?: reactive<string>;
   width?: reactive<number | string>;
   height?: reactive<number | string>;
   playsinline?: reactive<boolean>;
 }
 
-export type AudioProps = MediaProps;
+export type AudioProps = MediaProps<HTMLAudioElement>;
 
 // ─── Unified factory signature ───────────────────────────────────────────
 //
 // A typed tag function takes element-specific props (or the generic
 // children shorthand) and returns the matching DOM element subclass.
-// The `T` type parameter carries the element class so callers that need
+// The `El` type parameter carries the element class so callers that need
 // imperative access get the specific `HTMLInputElement` etc. without a
-// cast.
+// cast. Same shape as `TagFunction`, with the props type first.
 
-import type { NodeChildren } from "./types";
-
-export type TypedTagFunction<Props extends TagProps, El extends Element> = (
-  first?: Props | NodeChildren,
-  second?: NodeChildren,
-) => El;
+export type TypedTagFunction<Props extends TagProps<El>, El extends Element> = TagFunction<El, Props>;

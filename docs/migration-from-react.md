@@ -1061,25 +1061,42 @@ const router = createRouter([
 function App() {
   return div([
     nav([
-      RouterLink({ to: "/", nodes: "Home" }),
-      RouterLink({ to: "/about", nodes: "About" }),
-      RouterLink({ to: "/user/42", nodes: "User" }),
+      RouterLink({ to: "/" }, "Home"),
+      RouterLink({ to: "/about" }, "About"),
+      RouterLink({ to: "/user/42" }, "User"),
     ]),
     Route(), // renders the matched component
   ]);
 }
 
 function UserProfile() {
-  const r = route();
-  return p(`User ID: ${r.params.id}`);
+  // Safe to read once at setup: /user/42 -> /user/43 mounts a fresh instance.
+  const id = route().params.id;
+  return p(`User ID: ${id}`);
 }
 ```
 
 **Key differences:**
 - `createRouter(routes, options?)` initializes the global router. Supports `'history'` and `'hash'` modes.
 - `Route()` is the outlet that renders the matched component (equivalent to React Router's `<Routes>`).
-- `RouterLink({ to, nodes })` renders an `<a>` tag with client-side navigation.
+- `RouterLink({ to }, children)` renders an `<a>` tag with client-side navigation.
 - `route()` returns the current `RouteContext` with `path`, `params`, `query`, `hash`, and `meta`.
+- A route component is remounted whenever its own path params change (`/user/42` → `/user/43`), so reading `route().params` at setup always gives the current values. Query- and hash-only changes keep the instance. A parent layout is kept when only a child's param changes; the child remounts inside its `Outlet()`.
+- To keep one long-lived instance across param changes, give the route a constant `key` and read params reactively:
+
+```ts
+createRouter([
+  { path: "/user/:id", component: UserProfile, key: () => "user" },
+]);
+
+function UserProfile() {
+  // Reactive: re-renders the text in place on every param change.
+  return p(() => `User ID: ${route().params.id}`);
+  // Or: const state = routerState(); p(() => `User ID: ${state.params().id}`)
+}
+```
+
+`key: (r) => string` can also widen the identity — e.g. `` key: (r) => `${r.params.id}|${r.query.tab ?? ""}` `` remounts on a `?tab=` change too.
 - `router()` returns navigation functions: `push()`, `replace()`, `go()`, `back()`, `forward()`.
 - Supports route guards (`beforeEnter`), global guards (`beforeEach`, `afterEach`), async/lazy components, redirects, and nested routes.
 
@@ -1142,25 +1159,44 @@ function Greeting() {
 ### SibuJS
 
 ```ts
-import { div, p, button } from "sibujs";
+import { div, p, button, input, span, signal } from "sibujs";
+import { formatCurrency } from "sibujs/browser";
 import {
   t,
+  translated,
+  getLocale,
   setLocale,
   registerTranslations,
   Trans,
 } from "sibujs/plugins";
 
 // Register translations
-registerTranslations("en", { greeting: "Hello, {name}!" });
-registerTranslations("es", { greeting: "Hola, {name}!" });
+registerTranslations("en", {
+  greeting: "Hello, {name}!",
+  "search.placeholder": "Search…",
+  "search.label": "Search the catalog",
+});
+registerTranslations("es", {
+  greeting: "¡Hola, {name}!",
+  "search.placeholder": "Buscar…",
+  "search.label": "Buscar en el catálogo",
+});
 
 function Greeting() {
-  return div([
-    // Option 1: Trans component (auto-updates on locale change)
-    Trans("greeting", { name: "World" }),
+  const [name] = signal("World");
 
-    // Option 2: Reactive text with t()
-    p(() => t("greeting", { name: "World" })),
+  return div([
+    // Text child: translated() returns a getter, so only this text node updates
+    p(translated("greeting", { name })),
+
+    // Attributes work the same way — placeholder, title, aria-label, alt, ...
+    input({
+      placeholder: translated("search.placeholder"),
+      "aria-label": translated("search.label"),
+    }),
+
+    // Trans() is the same thing wrapped in a <span>
+    Trans("greeting", { name }),
 
     button({
       on: { click: () => setLocale("es") },
@@ -1169,11 +1205,52 @@ function Greeting() {
 }
 ```
 
+The component runs **once**. Switching the language updates each translated text
+node and attribute in place — no element is rebuilt, so focus, scroll position
+and typed input values survive. There is no need (and no reason) to wrap the app
+shell in a reactive function to make it re-translate; doing so rebuilds the whole
+shell on every switch.
+
+**Live vs. snapshot:**
+
+```ts
+p(translated("greeting", { name }))   // ✓ live — a getter the binding re-reads
+p(() => t("greeting", { name }))      // ✓ live — same thing, written by hand
+p(t("greeting", { name: "World" }))   // ✗ snapshot — rendered once, never updates
+```
+
+`t()` returns a plain string. Use it for one-off text — event handlers,
+`confirm()` prompts, log lines — and use `translated()` (or `() => t(...)`)
+for anything that stays on screen.
+
+**Lazy-loaded languages.** Registering messages notifies every binding, so the
+order does not matter:
+
+```ts
+async function switchLanguage(locale: string) {
+  setLocale(locale);                                 // keys show until messages arrive
+  registerTranslations(locale, await loadMessages(locale)); // …then every binding updates
+}
+```
+
+**Numbers and dates.** `formatNumber` / `formatCurrency` (from `sibujs/browser`)
+and `Intl.*` formatters default to the runtime locale, not the i18n locale. Pass
+the active locale inside a getter so the formatted value switches too:
+
+```ts
+span(() => formatCurrency(total(), "EUR", { locale: getLocale() }))
+span(() => new Intl.DateTimeFormat(getLocale()).format(date()))
+```
+
 **Key differences:**
 - Built-in — no extra library needed.
-- `registerTranslations(locale, messages)` to add translations.
-- `t(key, params?)` returns a translated string (reactive when used in a getter).
-- `Trans(key, params?)` returns a reactive `<span>` element that auto-updates on locale changes.
+- `registerTranslations(locale, messages)` adds translations; bindings that
+  already rendered those keys update immediately.
+- `translated(key, params?)` returns a live getter for text children and attributes.
+- `t(key, params?)` returns a translated string — live only when read inside a getter.
+- `Trans(key, params?)` returns a reactive `<span>` element.
+- Parameter values may be getters (`{ name }` where `name` is a signal), so the
+  interpolated value is live as well.
 - `setLocale(locale)` switches the active language globally.
 
 ---
@@ -1289,9 +1366,9 @@ Use this checklist when converting a React component to SibuJS:
 
 - [ ] Replace `<BrowserRouter>` with `createRouter(routes, { mode: 'history' })`
 - [ ] Replace `<Routes>/<Route>` with `Route()` outlet
-- [ ] Replace `<Link to="...">` with `RouterLink({ to: "...", nodes: "..." })`
+- [ ] Replace `<Link to="...">` with `RouterLink({ to: "..." }, "...")`
 - [ ] Replace `useNavigate()` with `router().push()`
-- [ ] Replace `useParams()` with `route().params`
+- [ ] Replace `useParams()` with `route().params` — safe to read at setup (the page remounts when its params change); in a long-lived layout or a route with a constant `key`, read it in a getter (`() => route().params.id`) or via `routerState().params()`
 
 ### Forms
 
