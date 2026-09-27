@@ -48,46 +48,52 @@ describe("sibuWebpackPlugin", () => {
     expect(() => sibuWebpackPlugin().apply(compiler)).not.toThrow();
   });
 
-  it("afterEnvironment tap pushes a pure-annotations loader rule", () => {
-    const { compiler, taps } = makeFakeCompiler();
-    sibuWebpackPlugin({ pureAnnotations: true }).apply(compiler);
-    // Invoke the afterEnvironment callback
-    taps.afterEnvironment.forEach((cb) => {
-      cb();
-    });
-    const rules = compiler.options.module.rules as any[];
-    expect(rules.length).toBe(1);
-    expect(rules[0].enforce).toBe("pre");
-    expect(rules[0].test.toString()).toContain("jt");
-  });
-
-  it("afterEnvironment preserves existing module rules", () => {
+  it("never pushes a loader rule webpack cannot resolve", () => {
+    // The plugin used to push `{ loader: "__sibu_inline_loader__" }` for every
+    // JS/TS file. No such loader exists, so every default build failed.
     const { compiler, taps } = makeFakeCompiler();
     const existing = { test: /\.css$/ };
     compiler.options.module = { rules: [existing] };
-    sibuWebpackPlugin().apply(compiler);
-    taps.afterEnvironment.forEach((cb) => {
-      cb();
-    });
-    expect(compiler.options.module.rules).toContain(existing);
-    expect(compiler.options.module.rules.length).toBe(2);
-  });
-
-  it("creates a rules array when module exists without rules", () => {
-    const { compiler, taps } = makeFakeCompiler();
-    compiler.options.module = {};
-    sibuWebpackPlugin().apply(compiler);
-    taps.afterEnvironment.forEach((cb) => {
-      cb();
-    });
-    expect(Array.isArray(compiler.options.module.rules)).toBe(true);
-    expect(compiler.options.module.rules.length).toBe(1);
-  });
-
-  it("does not register an afterEnvironment loader rule when pureAnnotations is false", () => {
-    const { compiler, taps } = makeFakeCompiler();
-    sibuWebpackPlugin({ pureAnnotations: false }).apply(compiler);
+    sibuWebpackPlugin({ pureAnnotations: true }).apply(compiler);
     expect(taps.afterEnvironment).toEqual([]);
+    expect(compiler.options.module.rules).toEqual([existing]);
+  });
+
+  it("derives dev mode from webpack's mode when devMode is omitted", () => {
+    const prod = makeFakeCompiler();
+    prod.compiler.options.mode = "production";
+    sibuWebpackPlugin().apply(prod.compiler);
+    prod.taps.environment.forEach((cb) => {
+      cb();
+    });
+    expect(prod.compiler.__sibuDefines.__SIBU_DEV__).toBe("false");
+    expect(prod.taps.done).toEqual([]);
+
+    const dev = makeFakeCompiler();
+    dev.compiler.options.mode = "development";
+    sibuWebpackPlugin().apply(dev.compiler);
+    dev.taps.environment.forEach((cb) => {
+      cb();
+    });
+    expect(dev.compiler.__sibuDefines.__SIBU_DEV__).toBe("true");
+  });
+
+  it("applies the defines through webpack's DefinePlugin when available", () => {
+    const { compiler, taps } = makeFakeCompiler();
+    const applied: Record<string, string>[] = [];
+    compiler.webpack = {
+      DefinePlugin: class {
+        constructor(private defs: Record<string, string>) {}
+        apply() {
+          applied.push(this.defs);
+        }
+      },
+    };
+    sibuWebpackPlugin({ devMode: false }).apply(compiler);
+    taps.environment.forEach((cb) => {
+      cb();
+    });
+    expect(applied).toEqual([{ __SIBU_DEV__: "false" }]);
   });
 
   it("afterResolvers sets mainFields with module first", () => {
@@ -205,30 +211,31 @@ describe("sibuWebpackPlugin", () => {
 });
 
 describe("createPureAnnotationsLoader", () => {
-  it("adds pure annotations to factory calls", () => {
+  const IMPORT =
+    'import { tagFactory, defineComponent, context, withProps, withDefaults, pure, noSideEffect } from "sibujs";\n';
+
+  it("adds pure annotations to factory calls imported from sibujs", () => {
     const loader = createPureAnnotationsLoader();
-    const out = loader("const a = tagFactory('div'); const b = defineComponent(x);");
+    const out = loader(`${IMPORT}const a = tagFactory('div'); const b = defineComponent(x);`);
     expect(out).toContain("/*#__PURE__*/ tagFactory(");
     expect(out).toContain("/*#__PURE__*/ defineComponent(");
   });
 
   it("does not double-annotate already annotated calls", () => {
     const loader = createPureAnnotationsLoader();
-    const input = "/*#__PURE__*/ tagFactory('div')";
-    const out = loader(input);
+    const out = loader(`${IMPORT}/*#__PURE__*/ tagFactory('div')`);
     expect(out.match(/__PURE__/g)?.length).toBe(1);
   });
 
   it("leaves unrelated code unchanged", () => {
     const loader = createPureAnnotationsLoader();
-    const input = "const x = someOther('div');";
+    const input = "const x = someOther('div'); const y = context('not sibujs');";
     expect(loader(input)).toBe(input);
   });
 
   it("annotates every known factory", () => {
     const loader = createPureAnnotationsLoader();
-    const src = "context(); withProps(); withDefaults(); pure(); noSideEffect();";
-    const out = loader(src);
+    const out = loader(`${IMPORT}context(); withProps(); withDefaults(); pure(); noSideEffect();`);
     expect(out.match(/__PURE__/g)?.length).toBe(5);
   });
 });
@@ -264,6 +271,12 @@ describe("createWebpackConfig", () => {
     expect(config.devtool).toBe("eval-cheap-module-source-map");
     const perf = config.performance as Record<string, unknown>;
     expect(perf.hints).toBe(false);
+  });
+
+  it("splits the sibujs package (not a nonexistent `sibu` one) into its own chunk", () => {
+    const config = createWebpackConfig();
+    const groups = (config.optimization as any).splitChunks.cacheGroups;
+    expect(groups.sibu.test.test("/app/node_modules/sibujs/dist/index.js")).toBe(true);
   });
 
   it("includes the sibu webpack plugin in the plugins array", () => {

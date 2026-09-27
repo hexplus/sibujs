@@ -15,7 +15,7 @@ describe("Trans component", () => {
 
     const el = Trans("hello");
     expect(el.tagName).toBe("SPAN");
-    // The text is rendered reactively via nodes function
+    expect(el.textContent).toBe("Hello World");
   });
 });
 

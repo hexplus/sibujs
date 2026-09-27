@@ -191,7 +191,7 @@ function SearchPage() {
   return div([
     input({ on: { input: handleInput }, value: () => query() }),
     each(() => results(), (item) => ResultItem(item), { key: (i) => i.id }),
-  ]) as HTMLElement;
+  ]);
 }
 ```
 
@@ -317,7 +317,7 @@ users.update("user-123", { name: "Updated Name" });
 
 ```ts
 function Widget(): HTMLElement {
-  const el = div({ class: "widget" }) as HTMLElement;
+  const el = div({ class: "widget" });
 
   const cleanupEffect = effect(() => {
     // reactive work

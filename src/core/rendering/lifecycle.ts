@@ -52,7 +52,7 @@ function safeCall(cb: () => unknown, hookName: string): unknown {
 function runMountCallback(
   callback: () => undefined | CleanupFn,
   hookName: string,
-  element: HTMLElement,
+  element: Element,
   isDisposed: () => boolean,
 ): void {
   const cleanup = safeCall(callback, hookName);
@@ -279,9 +279,9 @@ function registerUnmountWatcher(element: Element, cb: DisconnectCb): () => void 
  * (if you also use onUnmount, prefer that for explicit cleanup).
  *
  * @param callback Function to run after mount. May return a cleanup function.
- * @param element Optional element to observe; if provided, waits until it's connected.
+ * @param element Optional element to observe (HTML or SVG); if provided, waits until it's connected.
  */
-export function onMount(callback: () => undefined | CleanupFn, element?: HTMLElement): void {
+export function onMount(callback: () => undefined | CleanupFn, element?: Element): void {
   // No-op during SSR — lifecycle hooks are client-only
   if (typeof document === "undefined") return;
 
@@ -329,9 +329,9 @@ export function onMount(callback: () => undefined | CleanupFn, element?: HTMLEle
  * `registerDisposer` so explicit dispose() paths also trigger the callback.
  *
  * @param callback Function to run on unmount
- * @param element The element to watch for removal
+ * @param element The element to watch for removal (HTML or SVG)
  */
-export function onUnmount(callback: CleanupFn, element: HTMLElement): void {
+export function onUnmount(callback: CleanupFn, element: Element): void {
   if (typeof document === "undefined") return;
 
   let fired = false;

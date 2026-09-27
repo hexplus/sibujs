@@ -1304,6 +1304,8 @@ const state = routerState();
 </tr>
 </table>
 
+A route component is remounted when its own path params change (`/users/1` → `/users/2`), so reading `route().params.id` once at setup is safe — there is no need to watch params just to refetch. Query- and hash-only changes keep the instance, and a parent layout is kept when only a child's param changes. To keep one instance across param changes, set a constant `key` on the route (`{ path: "/users/:id", component: User, key: () => "user" }`) and read params reactively with `state.params()` or `() => route().params.id`.
+
 ### Navigation guards
 
 <table>

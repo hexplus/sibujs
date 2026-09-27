@@ -188,7 +188,7 @@ Accessible `Combobox`, `Tabs`, `Accordion`, `Popover`, `Select`, `Tooltip`, `Fil
 `machine` (finite state machines), `persist`, `optimistic`, `timeTravel`, `globalStore`; plus `hoc`, `composable`, `componentProps`, and `contracts`.
 
 ### `sibujs/plugins` — First-party plugins
-**Router** — `createRouter`, `Route`/`Outlet`/`RouterLink`, nested routes, guards (`beforeEach`, `beforeResolve`, `afterEach`), programmatic navigation, `preloadRoute`, memory router, and per-route transitions. **i18n** — `setLocale`, `t`, `Trans`, `registerTranslations`, reactive locale switching. Plus the plugin system (`modular`, `ecosystem`, `versioning`, `startup`).
+**Router** — `createRouter`, `Route`/`Outlet`/`RouterLink`, nested routes, guards (`beforeEach`, `beforeResolve`, `afterEach`), programmatic navigation, `preloadRoute`, memory router, and per-route transitions. **i18n** — `setLocale`, `t`, `translated`, `Trans`, `registerTranslations`, live locale switching for text and attributes. Plus the plugin system (`modular`, `ecosystem`, `versioning`, `startup`).
 
 ### `sibujs/ssr` — Server rendering
 `renderToString`, `renderToReadableStream`, `renderToDocument`, `hydrate`, streaming `Suspense`, `head` management, static site generation, incremental regeneration, route actions/middleware, scroll restoration, service worker & web/wasm workers, and microfrontend helpers.

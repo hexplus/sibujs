@@ -21,13 +21,13 @@ describe("generateTsConfig", () => {
     expect(co.declarationMap).toBe(false);
   });
 
-  it("adds path aliases including default sibu aliases when paths are provided", () => {
+  it("adds path aliases including default sibujs aliases when paths are provided", () => {
     const config = generateTsConfig({ paths: { "@app/*": ["src/*"] } });
     const co = config.compilerOptions as Record<string, unknown>;
     expect(co.baseUrl).toBe(".");
     const paths = co.paths as Record<string, string[]>;
-    expect(paths.sibu).toEqual(["node_modules/sibu/dist/index.d.ts"]);
-    expect(paths["sibu/*"]).toEqual(["node_modules/sibu/dist/*"]);
+    expect(paths.sibujs).toEqual(["node_modules/sibujs/dist/index.d.ts"]);
+    expect(paths["sibujs/*"]).toEqual(["node_modules/sibujs/dist/*"]);
     expect(paths["@app/*"]).toEqual(["src/*"]);
   });
 

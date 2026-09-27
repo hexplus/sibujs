@@ -90,7 +90,7 @@ function TodoInput(): HTMLElement {
       },
     }),
     button({ on: { click: addTodo } }, "Add"),
-  ]) as HTMLElement;
+  ]);
 }
 
 // `todo` is the row's reactive getter from each(). The row is built once per id
@@ -112,7 +112,7 @@ function TodoItem(todo: () => Todo): HTMLElement {
       class: "remove-btn",
       on: { click: () => removeTodo(todo().id) },
     }, "\u00d7"),
-  ]) as HTMLElement;
+  ]);
 }
 
 function FilterButtons(): HTMLElement {
@@ -123,14 +123,14 @@ function FilterButtons(): HTMLElement {
       class: () => `filter-btn ${filter() === f ? "active" : ""}`,
       on: { click: () => setFilter(f) },
     }, f.charAt(0).toUpperCase() + f.slice(1))
-  )) as HTMLElement;
+  ));
 }
 
 function TodoFooter(): HTMLElement {
   return footer("todo-footer", [
     span(() => `${activeCount()} item${activeCount() === 1 ? "" : "s"} left`),
     FilterButtons(),
-  ]) as HTMLElement;
+  ]);
 }
 
 function App(): HTMLElement {
@@ -148,7 +148,7 @@ function App(): HTMLElement {
       () => todos().length > 0,
       () => TodoFooter()
     ),
-  ]) as HTMLElement;
+  ]);
 }
 
 // ---------------------------------------------------------------------------

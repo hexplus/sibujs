@@ -1,10 +1,12 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { untracked } from "../reactivity/track";
 import { isAbortError } from "./abort";
-import { runCallback } from "./callbacks";
+import { runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
+import { applyStructuralSharing, type StructuralSharingOption } from "./structuralSharing";
 
 /**
  * Lifecycle callbacks follow the shared data-layer contract: an exception
@@ -27,6 +29,30 @@ export interface ResourceOptions<T> {
   onError?: (error: Error) => void;
   /** Called on fetch settle (success or error) */
   onSettled?: () => void;
+  /**
+   * Keep data referentially stable across refetches. Default: `true`.
+   *
+   * Each fetched result — from `refetch()` or a source change — is
+   * reconciled against the value already held: a deeply equal result keeps
+   * the previous reference and notifies nobody, and a partially changed one
+   * reuses every unchanged nested object or array. Only plain objects and
+   * arrays are compared; Date, Map, Set and class instances compare by
+   * identity. Cyclic data is safe: the containers on a cycle are taken as-is.
+   * Same contract as `QueryOptions.structuralSharing`.
+   *
+   * `mutate()` is an explicit write, not a fetch: when it hands over a new
+   * top-level reference, `data` always becomes a new top-level reference and
+   * notifies — even if every child is unchanged, as after
+   * `prev.items.push(x); return { ...prev }`. Unchanged nested subtrees are
+   * still reused beneath it.
+   *
+   * - `false` commits every result as-is.
+   * - A function `(prev, next) => T` replaces the default reconciliation;
+   *   return `prev` to report "unchanged" (ignored for a `mutate()` of a new
+   *   reference). If it throws, the error is reported and `next` is committed
+   *   unshared.
+   */
+  structuralSharing?: StructuralSharingOption<T>;
 }
 
 export interface Resource<T> {
@@ -96,6 +122,26 @@ export function resource<T, S = void>(
   // Non-reactive data tracker to avoid registering deps inside effects
   let currentData: T | undefined = options.initialValue;
 
+  /**
+   * The only writer of `data`. A refetch used to commit a fresh reference even
+   * when the payload was identical, so every binding over `data` re-ran and a
+   * `when(() => r.data(), …)` branch rebuilt, discarding in-progress input.
+   * Reconciling first makes an equal fetched result a no-op write; `explicit`
+   * marks a `mutate()`, which must commit a new reference whenever it was given
+   * one (see `applyStructuralSharing`). Untracked because `mutate()` may be
+   * called from inside a caller's effect, and a custom sharing function must
+   * not subscribe it.
+   */
+  function commitData(next: T, explicit: boolean): T {
+    const sharing = options.structuralSharing ?? true;
+    const shared = untracked(() =>
+      runSelect("resource structuralSharing", () => applyStructuralSharing(sharing, currentData, next, explicit)),
+    );
+    currentData = shared.ok ? shared.value : next;
+    setData(currentData);
+    return currentData;
+  }
+
   let abortController: AbortController | null = null;
   let disposed = false;
   let effectCleanup: (() => void) | null = null;
@@ -127,15 +173,15 @@ export function resource<T, S = void>(
       // Guard against stale responses
       if (version !== fetchVersion || disposed) return;
 
-      currentData = result;
+      let committed: T = result;
       batch(() => {
-        setData(result);
+        committed = commitData(result, false);
         setLoading(false);
       });
       // Isolated: the fetch succeeded and the data is committed. A throwing
       // onSuccess used to fall into the catch below, which then overwrote that
       // success with the callback's own error and invoked onError with it.
-      runCallback("resource onSuccess", () => options.onSuccess?.(result));
+      runCallback("resource onSuccess", () => options.onSuccess?.(committed));
     } catch (err) {
       if (version !== fetchVersion || disposed) return;
       if (isAbortError(err)) {
@@ -177,8 +223,7 @@ export function resource<T, S = void>(
     refetch: () => doFetch(source ? source() : (undefined as S)),
     mutate: (value) => {
       const newValue = typeof value === "function" ? (value as (prev: T | undefined) => T)(currentData) : value;
-      currentData = newValue;
-      setData(newValue);
+      commitData(newValue, true);
     },
     abort: () => abortController?.abort(),
     dispose: () => {

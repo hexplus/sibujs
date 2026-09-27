@@ -1,9 +1,10 @@
 import { devWarn, isDev } from "../core/dev";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
-import { resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
+import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
+import type { NodeChildren } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-import { track } from "../reactivity/track";
+import { track, untracked } from "../reactivity/track";
 import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars } from "../utils/sanitize";
 
 /**
@@ -153,6 +154,41 @@ export interface RouteBase {
   readonly children?: RouteDef[];
   readonly beforeEnter?: Guard | Guard[];
   readonly alias?: string | string[];
+  /**
+   * Identity of the mounted instance of this route's component.
+   *
+   * When a navigation stays on this route but the key changes, the outlet
+   * disposes the old instance (running its `onUnmount` / `onCleanup`
+   * callbacks and releasing its bindings) and mounts a fresh one — so a page
+   * that reads `route().params.id` once at setup always sees the right id.
+   *
+   * **Default:** the path params this record declares in its *own* path (and
+   * aliases). `/records/1` → `/records/2` remounts; `?tab=a` → `?tab=b` or a
+   * hash change does not. A parent layout is not remounted when only a child's
+   * param changes — the child's `Outlet()` remounts the child instead. A
+   * record with no params of its own is never remounted by a param change, and
+   * a `*` tail (`pathMatch`) is not part of the default: a catch-all keeps its
+   * instance and reads `pathMatch` reactively (`key: (r) => r.params.pathMatch`
+   * remounts per path).
+   *
+   * **Override:** return any string derived from the route. Return a constant
+   * to keep one long-lived instance across param changes (the instance must
+   * then read params reactively, e.g. `routerState().params()` or
+   * `() => route().params.id`). Include query values to also remount on a
+   * query change.
+   *
+   * Called untracked with the committed route. Ignored by `KeepAliveRoute()`,
+   * which already keeps one instance per full location.
+   *
+   * @example
+   * ```ts
+   * // Keep one instance for every record; the page reads params reactively.
+   * { path: "/records/:id", component: RecordPage, key: () => "record" }
+   * // Also remount when ?tab changes.
+   * { path: "/records/:id", component: RecordPage, key: (r) => `${r.params.id}|${r.query.tab ?? ""}` }
+   * ```
+   */
+  readonly key?: (route: RouteContext) => string;
 }
 
 export interface ComponentRoute extends RouteBase {
@@ -1887,6 +1923,11 @@ export function setRoutes(routes: RouteDef[]): void {
 /**
  * Read the current route as a plain snapshot.
  *
+ * Reading it once in a route component's setup is safe: when a navigation
+ * changes that route's own params, the outlet mounts a fresh instance (see
+ * `RouteBase.key`). Inside a getter — `() => route().params.id` — the read is
+ * reactive, which is what a long-lived layout or a constant-`key` route needs.
+ *
  * @returns The active {@link RouteContext} (path, params, query, hash).
  * @throws If no router has been created yet.
  */
@@ -2026,9 +2067,62 @@ export function afterEach(hook: (to: RouteContext, from: RouteContext) => void):
 // Registry of Route cleanup functions for destroyRouter
 const routeCleanups: (() => void)[] = [];
 
+// Per-record param names, derived once from the record's own path pattern.
+const ownParamNamesCache = new WeakMap<RouteDef, readonly string[]>();
+
+/**
+ * The param names a route record declares in its *own* path segment (and its
+ * aliases) — not those inherited from ancestors. The matcher only exposes the
+ * merged params of the whole chain, so attribution per record is recovered
+ * from each record's pattern, using the same `:name` / `:name?` / `*` grammar
+ * as `compileRoute`.
+ */
+function ownParamNames(record: RouteDef): readonly string[] {
+  const cached = ownParamNamesCache.get(record);
+  if (cached) return cached;
+  const aliases = record.alias == null ? [] : Array.isArray(record.alias) ? record.alias : [record.alias];
+  const names = new Set<string>();
+  for (const pattern of [record.path, ...aliases]) {
+    for (const m of pattern.matchAll(/\/:([^/]+)/g)) {
+      names.add(m[1].endsWith("?") ? m[1].slice(0, -1) : m[1]);
+    }
+    // A `*` tail (`pathMatch`) is deliberately NOT part of the default key. A
+    // catch-all is a viewer over an open-ended path space (a docs tree, a 404
+    // page), and keying on it disposed that viewer on every navigation, losing
+    // its scroll and expanded state. Such routes read `pathMatch` reactively;
+    // `key: (r) => r.params.pathMatch` opts into a remount per path.
+  }
+  const result = [...names];
+  ownParamNamesCache.set(record, result);
+  return result;
+}
+
+/**
+ * Instance identity for the component an outlet mounts for `owner`.
+ *
+ * `records` are the matched records whose params belong to this outlet level
+ * (the top-level record for `Route()`, every record below it for `Outlet()`).
+ * A custom `owner.key` wins; otherwise the key is those records' own params,
+ * so a query- or hash-only navigation never changes it. Evaluated untracked:
+ * the outlet already re-runs on every committed navigation, and a key reading
+ * some unrelated signal must not turn that signal into a remount trigger.
+ */
+function instanceKey(owner: RouteDef, records: readonly RouteDef[], route: RouteContext): string {
+  const custom = owner.key;
+  if (custom) return untracked(() => String(custom(route)));
+  const parts: (string | null)[] = [];
+  for (const record of records) {
+    for (const name of ownParamNames(record)) parts.push(name, route.params[name] ?? null);
+  }
+  return JSON.stringify(parts);
+}
+
 /**
  * The route outlet: renders whichever component matches the current route, and
- * swaps it on every navigation.
+ * swaps it when the top-level matched record or its instance key changes. By
+ * default the key is that record's own path params, so `/records/1` →
+ * `/records/2` mounts a fresh instance while a query- or hash-only change keeps
+ * the current one (see `RouteBase.key`).
  *
  * @returns A Comment anchor that manages the matched component. Like every
  * factory here it hands back a live node the caller can insert directly.
@@ -2052,6 +2146,9 @@ export function Route(): Node {
   // per-invocation token, superseded loads are simply dropped — "latest wins".
   let navSeq = 0;
   let currentTopRoute: RouteDef | null = null;
+  // Instance key (see `RouteBase.key`) of the mounted top-level component. A
+  // navigation that keeps the same record but changes this key remounts it.
+  let currentKey: string | null = null;
   // Declared before `update` so an in-flight pass can consult it. A component
   // load that resolves after teardown must lose ownership permanently,
   // including the right to run user component code. (OUT-003)
@@ -2196,6 +2293,7 @@ export function Route(): Node {
 
       if (!match) {
         currentTopRoute = null;
+        currentKey = null;
         cleanupNodes();
         return;
       }
@@ -2204,8 +2302,12 @@ export function Route(): Node {
       // For flat routes, matched[0] is the route itself.
       const routeDef = match.matched[0] || match.route;
 
-      // Skip re-render if the top-level route is the same (child routes handled by Outlet)
-      if (routeDef === currentTopRoute && currentNode) {
+      // Skip re-render if the same top-level instance still applies: same
+      // record and same instance key. The key covers only this record's own
+      // params, so a child-only param change is left to the child's Outlet and
+      // a query/hash-only change never remounts.
+      const key = instanceKey(routeDef, [routeDef], route);
+      if (routeDef === currentTopRoute && key === currentKey && currentNode) {
         return;
       }
 
@@ -2267,6 +2369,7 @@ export function Route(): Node {
           if (node) {
             // Commit only now that we know we are the latest resolution.
             currentTopRoute = routeDef;
+            currentKey = key;
             cleanupNodes();
             parent.insertBefore(node, anchor.nextSibling);
             currentNode = node;
@@ -2311,6 +2414,7 @@ export function Route(): Node {
     routeTeardown();
     cleanupNodes();
     currentTopRoute = null;
+    currentKey = null;
   };
   // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
   // layout change) releases its tracking + nodes immediately — not only on
@@ -2594,12 +2698,12 @@ export function RouterLink(
     activeClass?: string;
     exactActiveClass?: string;
     /** @deprecated Pass children positionally: `RouterLink(props, children)`. */
-    nodes?: string | Node | (string | Node)[];
+    nodes?: NodeChildren;
     target?: string;
     rel?: string;
     [key: string]: unknown;
   },
-  children?: string | Node | (string | Node)[],
+  children?: NodeChildren,
   // Returns the concrete anchor type. `RouterLink` always builds an `<a>`, so
   // declaring `HTMLElement` was needlessly lossy: reading back the very props
   // this function sets (`.href`, `.target`, `.rel`) did not type-check for
@@ -2710,20 +2814,10 @@ export function RouterLink(
     }
   });
 
-  // Set content
-  if (typeof content === "string") {
-    link.textContent = content;
-  } else if (content instanceof Node) {
-    link.appendChild(content);
-  } else if (Array.isArray(content)) {
-    content.forEach((child) => {
-      if (typeof child === "string") {
-        link.appendChild(document.createTextNode(child));
-      } else if (child instanceof Node) {
-        link.appendChild(child);
-      }
-    });
-  }
+  // Set content with the tag factories' child rules. A hand-rolled string/Node
+  // switch dropped getters silently, so `RouterLink({ to }, translated("nav.home"))`
+  // or a live cart count rendered an empty link; numbers were dropped too.
+  if (content !== undefined) appendChildren(link, content);
 
   // Handle click for internal navigation
   const onLinkClick = (e: MouseEvent) => {
@@ -3088,11 +3182,18 @@ export function __removeRouterPagehideHandler(): void {
 /**
  * Outlet renders the child route component within a layout.
  * Use inside a parent route's component to render matched children.
+ *
+ * The child is remounted when the matched child record changes or when its
+ * instance key does — by default the params declared below the top-level
+ * record, so a child-only param change remounts the child and leaves the
+ * layout in place (see `RouteBase.key`).
  */
 export function Outlet(): Node {
   const anchor = document.createComment("route-outlet-nested");
   let currentNode: Node | null = null;
   let currentChild: RouteDef | null = null;
+  // Instance key (see `RouteBase.key`) of the mounted child.
+  let currentKey: string | null = null;
   // Mirror Route()'s "latest wins" guard so a superseded child load cannot
   // resurrect stale content after a newer navigation.
   let navSeq = 0;
@@ -3110,6 +3211,7 @@ export function Outlet(): Node {
       currentNode = null;
     }
     currentChild = null;
+    currentKey = null;
   };
 
   /**
@@ -3147,8 +3249,15 @@ export function Outlet(): Node {
       return;
     }
 
-    // Same child already mounted — nothing to do.
-    if (childRoute === currentChild && currentNode) return;
+    // Same child instance still applies — nothing to do. The key covers the
+    // params declared by the records below the top level (the ones this outlet
+    // renders on behalf of). Which outlet remounts depends on where a param is
+    // declared: with `/users` → child `/:id/posts`, `/users/1/posts` →
+    // `/users/2/posts` remounts only this child and the layout keeps its
+    // instance; with `/users/:id` → child `/posts`, the id is the LAYOUT's own
+    // param, so `Route()` remounts the layout and this outlet with it.
+    const key = instanceKey(childRoute, route.matched.slice(1), route);
+    if (childRoute === currentChild && key === currentKey && currentNode) return;
 
     try {
       // Use a composite cache key so parent and child don't collide
@@ -3181,6 +3290,7 @@ export function Outlet(): Node {
       parent.insertBefore(node, anchor.nextSibling);
       currentNode = node;
       currentChild = childRoute;
+      currentKey = key;
     } catch (error) {
       if (outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
@@ -3207,6 +3317,7 @@ export function Outlet(): Node {
       currentNode = null;
     }
     currentChild = null;
+    currentKey = null;
   };
   registerDisposer(anchor, outletCleanup);
   routeCleanups.push(outletCleanup);

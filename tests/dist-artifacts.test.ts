@@ -218,6 +218,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // order check) and the contained emits took raw to ~80,290 B, so it is now
     // 80,400 B.
     //
+    // Both were raised again (raw 81,000 B, gzip baseline 27,600 B) when the tag
+    // factory learned reactive `id`, style-object getters and falsy `class`
+    // getters (a getter `id` used to be written as the function's source text),
+    // and `when()` / `DynamicComponent` gained their rebuild guards (plus the
+    // registry version that lets a late `registerComponent()` render): raw went to
+    // ~80,930 B and gzip to ~27,700 B.
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -225,8 +232,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(80_400);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(27_000 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(81_000);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(27_600 * 1.02));
   });
 });
 

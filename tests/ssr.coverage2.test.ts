@@ -621,7 +621,7 @@ describe("ssr.ts coverage2 — state serialization", () => {
   });
 
   it("escapeScriptJson escapes script-breaking and line-separator chars", () => {
-    const out = escapeScriptJson("</script><x>&  ");
+    const out = escapeScriptJson("</script><x>&\u2028\u2029");
     expect(out).toContain("\\u003c");
     expect(out).toContain("\\u003e");
     expect(out).toContain("\\u0026");

@@ -58,7 +58,13 @@ export * from "./src/core/rendering/lifecycle";
 export * from "./src/core/rendering/mount";
 export * from "./src/core/rendering/portal";
 export * from "./src/core/rendering/slots";
-export type { TagProps } from "./src/core/rendering/tagFactory";
+export type {
+  StyleMap,
+  StyleObject,
+  TagEventHandlers,
+  TagFunction,
+  TagProps,
+} from "./src/core/rendering/tagFactory";
 export { SVG_NS, tagFactory } from "./src/core/rendering/tagFactory";
 // Per-element typed prop interfaces for common form/media/link elements
 export type {
@@ -78,7 +84,7 @@ export type {
   VideoProps,
 } from "./src/core/rendering/tagPropTypes";
 // Rendering types
-export type { Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
+export type { Component, Dispose, NodeChild, NodeChildren } from "./src/core/rendering/types";
 export * from "./src/core/signals/array";
 export * from "./src/core/signals/asyncDerived";
 export * from "./src/core/signals/deepSignal";

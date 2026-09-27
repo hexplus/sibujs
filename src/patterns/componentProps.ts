@@ -5,6 +5,8 @@
  * nodes slots, and prop mapping — all with full TypeScript inference.
  */
 
+import type { Component } from "../core/rendering/types";
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -20,7 +22,7 @@
  * type ButtonProps = ComponentProps<typeof Button>; // { label: string }
  * ```
  */
-export type ComponentProps<T> = T extends (props: infer P) => HTMLElement ? P : never;
+export type ComponentProps<T> = T extends (props: infer P) => Node ? P : never;
 
 /**
  * Props that include an optional nodes slot.
@@ -34,11 +36,14 @@ type WithNodes<Props> = Props & { nodes?: Node | Node[] };
 /**
  * Define a typed component with props inference, defaults, and a setup function.
  *
- * The `setup` function receives merged props (defaults + provided) and must
- * return an HTMLElement. TypeScript infers the full props type from the generic.
+ * The `setup` function receives merged props (defaults + provided) and
+ * returns the component's root. TypeScript infers the full props type from the
+ * generic. `R` is the root type; it defaults to `HTMLElement` (every HTML tag
+ * factory's result fits) — pass it explicitly for an SVG root
+ * (`defineComponent<Props, SVGSVGElement>`).
  *
  * @param config Component configuration with optional defaults and a setup function
- * @returns A component function that accepts props and returns an HTMLElement
+ * @returns A component function that accepts props and returns the root
  *
  * @example
  * ```ts
@@ -55,13 +60,13 @@ type WithNodes<Props> = Props & { nodes?: Node | Node[] };
  * // Usage: Button({ label: 'Click me' }) — TypeScript infers props
  * ```
  */
-export function defineComponent<Props extends object>(config: {
+export function defineComponent<Props extends object, R extends Node = HTMLElement>(config: {
   defaults?: Partial<Props>;
-  setup: (props: Props) => HTMLElement;
-}): (props: Props) => HTMLElement {
+  setup: (props: Props) => R;
+}): Component<Props, R> {
   const { defaults, setup } = config;
 
-  return (props: Props): HTMLElement => {
+  return (props: Props): R => {
     const merged = defaults ? ({ ...defaults, ...props } as Props) : props;
 
     return setup(merged);
@@ -80,7 +85,7 @@ export function defineComponent<Props extends object>(config: {
  * wraps arbitrary child content.
  *
  * @param config Component configuration with optional defaults and a setup function
- * @returns A component function that accepts props (including nodes) and returns an HTMLElement
+ * @returns A component function that accepts props (including nodes) and returns the root
  *
  * @example
  * ```ts
@@ -99,13 +104,13 @@ export function defineComponent<Props extends object>(config: {
  * // Usage: Card({ title: 'Hello', nodes: p('World') })
  * ```
  */
-export function defineSlottedComponent<Props extends object>(config: {
+export function defineSlottedComponent<Props extends object, R extends Node = HTMLElement>(config: {
   defaults?: Partial<Props>;
-  setup: (props: WithNodes<Props>) => HTMLElement;
-}): (props: WithNodes<Props>) => HTMLElement {
+  setup: (props: WithNodes<Props>) => R;
+}): Component<WithNodes<Props>, R> {
   const { defaults, setup } = config;
 
-  return (props: WithNodes<Props>): HTMLElement => {
+  return (props: WithNodes<Props>): R => {
     const merged = defaults ? ({ ...defaults, ...props } as WithNodes<Props>) : props;
 
     return setup(merged);
@@ -141,9 +146,9 @@ export function defineSlottedComponent<Props extends object>(config: {
  * // Usage: SmallIconButton({ icon: 'star', label: 'Favorite' })
  * ```
  */
-export function withProps<OuterProps extends object, InnerProps extends object>(
-  component: (props: InnerProps) => HTMLElement,
+export function withProps<OuterProps extends object, InnerProps extends object, R extends Node = HTMLElement>(
+  component: Component<InnerProps, R>,
   mapProps: (outer: OuterProps) => InnerProps,
-): (props: OuterProps) => HTMLElement {
-  return (props: OuterProps): HTMLElement => component(mapProps(props));
+): Component<OuterProps, R> {
+  return (props: OuterProps): R => component(mapProps(props));
 }

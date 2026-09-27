@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createViteConfig, sibuVitePlugin } from "../src/build/vite";
+import { runModule } from "./helpers/buildTransformHarness";
+
+const TF = 'import { tagFactory } from "sibujs";\n';
 
 describe("sibuVitePlugin", () => {
   it("returns a plugin with the expected shape", () => {
@@ -14,11 +17,36 @@ describe("sibuVitePlugin", () => {
   describe("config", () => {
     it("returns a config object with optimizeDeps, ssr, define, and build", () => {
       const config = sibuVitePlugin({ devMode: true, hmr: true }).config?.() as Record<string, any>;
-      expect(config.optimizeDeps.include).toContain("sibu");
-      expect(config.ssr.noExternal).toContain("sibu");
+      expect(config.optimizeDeps.include).toEqual(["sibujs"]);
+      expect(config.ssr.noExternal).toEqual(["sibujs"]);
       expect(config.define.__SIBU_DEV__).toBe(JSON.stringify(true));
       expect(config.define.__SIBU_HMR__).toBe(JSON.stringify(true));
       expect(config.build.sourcemap).toBe(true);
+    });
+
+    it("derives dev mode from Vite's command/mode, not NODE_ENV", () => {
+      const build = sibuVitePlugin().config?.({}, { command: "build", mode: "production" }) as Record<string, any>;
+      expect(build.define.__SIBU_DEV__).toBe("false");
+      const buildDev = sibuVitePlugin().config?.({}, { command: "build", mode: "development" }) as Record<string, any>;
+      expect(buildDev.define.__SIBU_DEV__).toBe("true");
+      const serve = sibuVitePlugin().config?.({}, { command: "serve", mode: "production" }) as Record<string, any>;
+      expect(serve.define.__SIBU_DEV__).toBe("true");
+      // An explicit option still wins.
+      const forced = sibuVitePlugin({ devMode: true }).config?.({}, { command: "build", mode: "production" }) as Record<
+        string,
+        any
+      >;
+      expect(forced.define.__SIBU_DEV__).toBe("true");
+    });
+
+    it("configResolved switches the transform to production behavior for `vite build`", () => {
+      const plugin = sibuVitePlugin({ pureAnnotations: false });
+      plugin.configResolved?.({ command: "build", mode: "production" });
+      const out = plugin.transform?.('import { html } from "sibujs";\nconst el = html`<p>x</p>`;', "src/a.ts");
+      expect(out?.code).not.toContain("html`");
+      plugin.configResolved?.({ command: "serve", mode: "development" });
+      const dev = plugin.transform?.('import { html } from "sibujs";\nconst el = html`<p>x</p>`;', "src/a.ts");
+      expect(dev?.code).toContain("html`<p>x</p>`");
     });
 
     it("reflects production dev flags", () => {
@@ -52,22 +80,24 @@ describe("sibuVitePlugin", () => {
 
     it("injects pure annotations on factory calls", () => {
       const plugin = sibuVitePlugin({ devMode: false, staticOptimize: false, compileTemplates: false });
-      const result = plugin.transform?.("const x = tagFactory('div')", "src/foo.ts");
+      const result = plugin.transform?.(`${TF}const x = tagFactory('div')`, "src/foo.ts");
       expect(result).not.toBeNull();
       expect(result?.code).toContain("/*#__PURE__*/ tagFactory(");
     });
 
-    it("injects dev helpers in dev mode for files importing sibu", () => {
+    it("injects dev helpers in dev mode for files importing sibujs", () => {
       const plugin = sibuVitePlugin({
         devMode: true,
         pureAnnotations: false,
         staticOptimize: false,
         compileTemplates: false,
       });
-      const result = plugin.transform?.('import { div } from "sibu";\nconst x = 1;', "src/foo.ts");
+      const result = plugin.transform?.('import { div } from "sibujs";\nconst x = 1;', "src/foo.js");
       expect(result).not.toBeNull();
       expect(result?.code).toContain("__SIBU_DEV__ = true");
       expect(result?.code).toContain("SibuJS Dev Mode");
+      // Plain JavaScript: the prologue must parse in a .js module.
+      expect(() => new Function((result?.code as string).replace(/import[^;]*;/g, ""))).not.toThrow();
     });
 
     it("does not inject dev helpers when the file does not import sibu", () => {
@@ -81,28 +111,37 @@ describe("sibuVitePlugin", () => {
       expect(result).toBeNull();
     });
 
-    it("compiles html templates in production and adds tag imports", () => {
+    it("compiles html templates in production into a module that runs", () => {
       const plugin = sibuVitePlugin({ devMode: false, pureAnnotations: false, staticOptimize: false });
-      const result = plugin.transform?.("const el = html`<div>hi</div>`;", "src/foo.ts");
+      const result = plugin.transform?.(
+        'import { html } from "sibujs";\nexport default (t) => html`<div title=${t}>hi</div>`;',
+        "src/foo.ts",
+      );
       expect(result).not.toBeNull();
       expect(result?.code).not.toContain("html`");
-      expect(result?.code).toContain("div(");
-      expect(result?.code).toContain('import { div } from "sibu";');
+      expect(result?.code).not.toMatch(/from "sibu"/);
+      const el = runModule<(t: string) => Element>(result?.code as string)("x");
+      expect(el.outerHTML).toBe('<div title="x">hi</div>');
     });
 
-    it("adds svg tagFactory imports when compiling svg templates", () => {
+    it("compiles svg templates into SVG-namespace elements", () => {
       const plugin = sibuVitePlugin({ devMode: false, pureAnnotations: false, staticOptimize: false });
-      const result = plugin.transform?.('const el = html`<svg><circle r="2" /></svg>`;', "src/foo.ts");
-      expect(result).not.toBeNull();
-      expect(result?.code).toContain("__sbTagFactory");
-      expect(result?.code).toContain("__sbSVG_NS");
+      const result = plugin.transform?.(
+        'import { html } from "sibujs";\nexport default () => html`<svg><circle r="2" /></svg>`;',
+        "src/foo.ts",
+      );
+      const el = runModule<() => Element>(result?.code as string)();
+      expect(el.firstElementChild?.namespaceURI).toBe("http://www.w3.org/2000/svg");
     });
 
     it("does not compile templates in dev mode by default", () => {
       const plugin = sibuVitePlugin({ devMode: true, pureAnnotations: false, staticOptimize: false });
-      const result = plugin.transform?.("const el = html`<div>hi</div>`;", "src/foo.ts");
-      // No transformation paths fired -> null (html still present, not compiled)
-      expect(result).toBeNull();
+      const result = plugin.transform?.(
+        'import { html } from "sibujs";\nconst el = html`<div>hi</div>`;',
+        "src/foo.ts",
+      );
+      // Only the dev prologue is added; the template stays for the runtime.
+      expect(result?.code).toContain("html`<div>hi</div>`");
     });
 
     it("can force compileTemplates on even in dev mode", () => {
@@ -112,40 +151,58 @@ describe("sibuVitePlugin", () => {
         staticOptimize: false,
         compileTemplates: true,
       });
-      const result = plugin.transform?.("const el = html`<div>hi</div>`;", "src/foo.ts");
+      const result = plugin.transform?.(
+        'import { html } from "sibujs";\nconst el = html`<div>hi</div>`;',
+        "src/foo.ts",
+      );
       expect(result).not.toBeNull();
       expect(result?.code).not.toContain("html`");
     });
 
-    it("applies static optimization in production, replacing static tag calls with staticTemplate", () => {
+    it("does not apply static optimization unless asked to", () => {
       const plugin = sibuVitePlugin({ devMode: false, pureAnnotations: false, compileTemplates: false });
-      // analyzeStaticTemplates detects static tag calls like div({ class: "card" }).
-      const code = 'const x = div({ class: "card", id: "main" });';
+      const code = 'import { div } from "sibujs";\nconst x = div({ class: "card", id: "main" });';
+      expect(plugin.transform?.(code, "src/foo.ts")).toBeNull();
+    });
+
+    it("applies static optimization when enabled, importing staticTemplate from sibujs/performance", () => {
+      const plugin = sibuVitePlugin({
+        devMode: false,
+        pureAnnotations: false,
+        compileTemplates: false,
+        staticOptimize: true,
+      });
+      const code = 'import { div } from "sibujs";\nconst x = div({ class: "card", id: "main" });';
       const result = plugin.transform?.(code, "src/foo.ts");
-      expect(result).not.toBeNull();
-      expect(result?.code).toContain("staticTemplate(");
-      expect(result?.code).toContain('import { staticTemplate } from "sibu";');
+      expect(result?.code).toContain("__sibujs$static(");
+      expect(result?.code).toContain('import { staticTemplate as __sibujs$staticTemplate } from "sibujs/performance";');
     });
 
     it("applies static optimization to multiple static patterns (reverse-ordered replacement)", () => {
-      const plugin = sibuVitePlugin({ devMode: false, pureAnnotations: false, compileTemplates: false });
-      const code = 'const a = div({ class: "a" }); const b = span({ id: "b" });';
+      const plugin = sibuVitePlugin({
+        devMode: false,
+        pureAnnotations: false,
+        compileTemplates: false,
+        staticOptimize: true,
+      });
+      const code = 'import { div, span } from "sibujs";\nconst a = div({ class: "a" }); const b = span({ id: "b" });';
       const result = plugin.transform?.(code, "src/foo.ts");
-      expect(result).not.toBeNull();
-      expect((result?.code.match(/staticTemplate\(/g) || []).length).toBe(2);
+      expect((result?.code.match(/__sibujs\$static\("/g) || []).length).toBe(2);
     });
 
     it("returns a result object with code and map fields", () => {
       const plugin = sibuVitePlugin({ devMode: false, staticOptimize: false, compileTemplates: false });
-      const result = plugin.transform?.("tagFactory('div')", "src/foo.ts");
+      const result = plugin.transform?.(`${TF}tagFactory('div')`, "src/foo.ts");
       expect(result).toHaveProperty("code");
-      expect(result).toHaveProperty("map");
-      expect(result?.map).toBeUndefined();
+      // A real map: returning none while changing the code made Rollup warn
+      // that the source map was likely incorrect.
+      expect(result?.map).toMatchObject({ version: 3, sources: ["src/foo.ts"], names: [] });
+      expect(typeof result?.map.mappings).toBe("string");
     });
 
     it("handles windows-style backslash paths in include matching", () => {
       const plugin = sibuVitePlugin({ devMode: false, staticOptimize: false, compileTemplates: false });
-      const result = plugin.transform?.("tagFactory('div')", "src\\foo.ts");
+      const result = plugin.transform?.(`${TF}tagFactory('div')`, "src\\foo.ts");
       expect(result).not.toBeNull();
     });
   });
@@ -193,9 +250,9 @@ describe("sibuVitePlugin", () => {
       compileTemplates: false,
     });
     // .ts no longer matches custom include
-    expect(plugin.transform?.("tagFactory('div')", "src/foo.ts")).toBeNull();
+    expect(plugin.transform?.(`${TF}tagFactory('div')`, "src/foo.ts")).toBeNull();
     // .svelte matches
-    expect(plugin.transform?.("tagFactory('div')", "src/foo.svelte")).not.toBeNull();
+    expect(plugin.transform?.(`${TF}tagFactory('div')`, "src/foo.svelte")).not.toBeNull();
   });
 });
 
@@ -222,7 +279,7 @@ describe("createViteConfig", () => {
   it("produces an SSR config when ssr is true", () => {
     const config = createViteConfig({ ssr: true, entry: "server.ts" });
     const ssr = config.ssr as Record<string, any>;
-    expect(ssr.noExternal).toContain("sibu");
+    expect(ssr.noExternal).toEqual(["sibujs"]);
     expect(ssr.target).toBe("node");
     const build = config.build as Record<string, any>;
     expect(build.ssr).toBe(true);

@@ -3,36 +3,38 @@
  * Provides build optimization, pure annotations, and development enhancements.
  */
 
+import { injectPureAnnotations } from "./sourceScan";
+
 export interface SibuWebpackPluginOptions {
-  /** Enable automatic pure annotations for tree-shaking */
+  /**
+   * Accepted for API compatibility; the plugin itself no longer injects a
+   * loader. Webpack loaders must be resolvable modules, and the rule this
+   * plugin used to push named a loader that does not exist
+   * (`__sibu_inline_loader__`), which failed every build with the default
+   * options. To get pure annotations, reference a loader file that returns
+   * `createPureAnnotationsLoader()(source)`.
+   */
   pureAnnotations?: boolean;
-  /** Enable dev mode features (devtools, debug logging) */
+  /**
+   * Enable dev mode features (devtools, debug logging). When omitted it is
+   * derived from webpack's own resolved `mode`: `development` is dev,
+   * `production` and an unset mode (webpack's default is production) are not,
+   * and `mode: "none"` falls back to `NODE_ENV`.
+   */
   devMode?: boolean;
 }
 
 /**
- * Known SibuJS factory functions that should receive pure annotations.
- */
-const PURE_FACTORIES = [
-  "tagFactory",
-  "context",
-  "defineComponent",
-  "withProps",
-  "withDefaults",
-  "pure",
-  "noSideEffect",
-];
-
-/**
  * Inject pure annotations into code for better tree-shaking with webpack.
+ *
+ * Shares the scanner-based implementation with the Vite plugin: only direct
+ * calls to factories imported from sibujs are annotated — never method calls,
+ * function declarations, text inside strings/comments/templates, or a user
+ * function that merely shares a factory's name. A wrong pure annotation lets
+ * the minifier delete a call that has side effects.
  */
 function addPureAnnotations(source: string): string {
-  let result = source;
-  for (const factory of PURE_FACTORIES) {
-    const pattern = new RegExp(`(?<!/\\*#__PURE__\\*/\\s*)\\b(${factory})\\s*\\(`, "g");
-    result = result.replace(pattern, "/*#__PURE__*/ $1(");
-  }
-  return result;
+  return injectPureAnnotations(source);
 }
 
 /**
@@ -41,7 +43,7 @@ function addPureAnnotations(source: string): string {
  *
  * Usage:
  * ```js
- * const { sibuWebpackPlugin } = require('sibu/src/build/webpack');
+ * const { sibuWebpackPlugin } = require('sibujs/build');
  * module.exports = {
  *   plugins: [sibuWebpackPlugin()],
  * };
@@ -65,9 +67,7 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
   /** Apply function for webpack plugin API */
   apply: (compiler: WebpackCompiler) => void;
 } {
-  const { pureAnnotations = true, devMode } = options;
-
-  const isDevMode = devMode ?? (typeof process !== "undefined" && process.env?.NODE_ENV !== "production");
+  const { devMode } = options;
 
   return {
     name: "SibuWebpackPlugin",
@@ -86,35 +86,6 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
         }
       });
 
-      // Add the pure annotation transform as a loader via module rules
-      if (pureAnnotations) {
-        compiler.hooks?.afterEnvironment?.tap("SibuWebpackPlugin", () => {
-          if (!compiler.options.module) {
-            compiler.options.module = { rules: [] };
-          }
-          if (!compiler.options.module.rules) {
-            compiler.options.module.rules = [];
-          }
-
-          // Add a loader rule that applies pure annotations to JS/TS files
-          compiler.options.module.rules.push({
-            test: /\.[jt]sx?$/,
-            exclude: /node_modules/,
-            enforce: "pre" as const,
-            use: [
-              {
-                loader: {
-                  // Inline loader function
-                  ident: "sibu-pure-annotations-loader",
-                  loader: "__sibu_inline_loader__",
-                  options: {},
-                },
-              },
-            ],
-          });
-        });
-      }
-
       // Add resolver alias for sibu modules
       compiler.hooks?.afterResolvers?.tap("SibuWebpackPlugin", () => {
         if (!compiler.options.resolve) {
@@ -130,7 +101,7 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
       });
 
       // Emit build information in dev mode
-      if (isDevMode) {
+      const tapDoneLogger = () =>
         compiler.hooks?.done?.tap("SibuWebpackPlugin", (stats: unknown) => {
           const statsObj = stats as { toJson?: (opts: Record<string, boolean>) => Record<string, unknown> } | undefined;
           const info = statsObj?.toJson?.({ modules: false, chunks: false });
@@ -142,10 +113,21 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
             }
           }
         });
-      }
 
-      // Define global constants for dead code elimination
+      // An explicit option needs nothing from webpack and is decided now.
+      if (devMode === true) tapDoneLogger();
+
+      // Everything mode-dependent is decided in `environment`, NOT here.
+      // webpack 5 calls `apply()` on the configured plugins BEFORE it applies
+      // its option defaults, so `compiler.options.mode` is still `undefined`
+      // here when the config does not set it — and the old fallback to
+      // NODE_ENV (usually unset, i.e. "development") put
+      // `__SIBU_DEV__ = true` into production bundles. `environment` fires
+      // after the defaults are applied.
       compiler.hooks?.environment?.tap("SibuWebpackPlugin", () => {
+        const isDevMode = devMode ?? resolveWebpackDevMode(compiler.options);
+        if (devMode === undefined && isDevMode) tapDoneLogger();
+
         if (!compiler.options.plugins) {
           compiler.options.plugins = [];
         }
@@ -157,14 +139,42 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
 
         // Store defines on the compiler for DefinePlugin integration
         (compiler as WebpackCompiler).__sibuDefines = defines;
+        // Apply them when running under a real webpack (5+ exposes its API on
+        // the compiler). Storing them alone never reached the bundle.
+        const DefinePlugin = (compiler as { webpack?: { DefinePlugin?: new (d: Record<string, string>) => unknown } })
+          .webpack?.DefinePlugin;
+        if (DefinePlugin) {
+          (new DefinePlugin(defines) as { apply: (c: WebpackCompiler) => void }).apply(compiler);
+        }
       });
     },
   };
 }
 
 /**
+ * Dev mode from webpack's options once its defaults are applied. webpack
+ * treats an unset `mode` as production (it may keep `mode` itself undefined
+ * and only derive production defaults from it, such as
+ * `optimization.nodeEnv: "production"`). Only `mode: "none"` carries no
+ * answer, and falls back to `NODE_ENV`.
+ */
+function resolveWebpackDevMode(options: WebpackCompiler["options"]): boolean {
+  const mode = options.mode;
+  if (mode === "development") return true;
+  if (mode === "production" || mode === undefined) return false;
+  return typeof process !== "undefined" && process.env?.NODE_ENV !== "production";
+}
+
+/**
  * Create a standalone webpack loader function for pure annotation injection.
- * Can be used directly in webpack module rules.
+ *
+ * Webpack resolves loaders by path, so wrap it in a loader module and point a
+ * rule at that file:
+ * ```js
+ * // sibu-pure-loader.cjs
+ * const { createPureAnnotationsLoader } = require("sibujs/build");
+ * module.exports = createPureAnnotationsLoader();
+ * ```
  */
 export function createPureAnnotationsLoader(): (source: string) => string {
   return function sibuPureAnnotationsLoader(source: string): string {
@@ -177,7 +187,7 @@ export function createPureAnnotationsLoader(): (source: string) => string {
  *
  * Usage:
  * ```js
- * const { createWebpackConfig } = require('sibu/src/build/webpack');
+ * const { createWebpackConfig } = require('sibujs/build');
  * module.exports = createWebpackConfig({
  *   entry: './src/index.ts',
  *   mode: 'production',
@@ -266,9 +276,10 @@ export function createWebpackConfig(
         : {
             chunks: "all",
             cacheGroups: {
-              // Separate sibu framework code into its own chunk
+              // Separate sibujs framework code into its own chunk (the package
+              // directory is `sibujs`; matching `sibu` never selected anything)
               sibu: {
-                test: /[\\/]node_modules[\\/]sibu[\\/]/,
+                test: /[\\/]node_modules[\\/]sibujs[\\/]/,
                 name: "sibu",
                 chunks: "all",
                 priority: 20,

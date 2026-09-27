@@ -107,6 +107,12 @@ A request that never calls `setLocale()` follows the application default (`"en"`
 unless the application changed it at startup). An SSR request never writes to
 that default: it cannot change what a concurrent request, or the client, renders.
 
+Live bindings — `translated(key)`, `Trans(key)`, `() => t(key)` — evaluate once
+on the server with the request's locale. Server renders subscribe neither to the
+client locale nor to dictionary registration, so a later `registerTranslations()`
+never re-runs anything a request rendered. On the client the same bindings
+update in place when the locale changes or messages arrive.
+
 ### `withSSR()` is not request-scoped
 
 ```ts
