@@ -7,7 +7,21 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.7.0] — 2026-09-26
+
+### Upgrade notes
+
+Behaviour that changes for existing code:
+
+- **Route components remount when their own path params change**
+  (`/records/1` → `/records/2`). Give the route a constant `key` to keep one
+  instance across param changes.
+- **`setQueryData()` / `resource.mutate()` handed a new object always notify.**
+  Fetched results that are deeply equal keep their reference; pass
+  `structuralSharing: false` to commit every result as-is.
+- **`staticOptimize` is off by default** in the Vite plugin.
+- **Signals read inside `when()` / `match()` branch factories** no longer re-run
+  the condition or selector.
 
 ### Fixed — production build optimizations produced broken bundles
 
