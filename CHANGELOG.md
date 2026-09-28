@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.9.0] — 2026-09-28
 
 ### Upgrade notes
 
