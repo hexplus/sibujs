@@ -232,11 +232,14 @@ const META_PATHS: MetaPath[] = [
     },
   },
   {
-    label: "meta() with an unrelated reactive attribute",
-    reactive: true,
+    // The directive itself is STATIC: only an unrelated attribute is live, and
+    // it cannot create or redirect a refresh. So this path is judged like the
+    // static ones — forbidden refused, allowed kept. See `reactiveMetaElements`.
+    label: "meta() static directive beside an unrelated reactive attribute",
+    reactive: false,
     build: (c) => {
       const [label] = signal("n");
-      return meta({ "http-equiv": "refresh", content: c, name: () => label() });
+      return meta({ "http-equiv": "refresh", content: c, "data-state": () => label() });
     },
   },
   {
@@ -347,12 +350,15 @@ describe("meta refresh — reactive paths never publish ANY directive", () => {
     }
   }
 
-  it("a reactive binding claims an element that already holds a directive, and withdraws it", () => {
-    const el = document.createElement("meta");
-    bindAttrs(el, { "http-equiv": "refresh", content: "5;url=/safe" });
-    expect(verdict(el)).toBe("allowed");
-    bindAttribute(el, "name", () => "n");
-    expect(verdict(el)).toBe("not-refresh");
+  it("a reactive refresh-relevant binding claims an element that already holds a directive, and withdraws it", () => {
+    for (const name of ["content", "CONTENT", "Content", "http-equiv", "HTTP-EQUIV", "Http-Equiv"]) {
+      const el = document.createElement("meta");
+      bindAttrs(el, { "http-equiv": "refresh", content: "5;url=/safe" });
+      expect(verdict(el)).toBe("allowed");
+      const lower = name.toLowerCase();
+      bindAttribute(el, name, () => (lower === "content" ? "5;url=/safe" : "refresh"));
+      expect(verdict(el), name).toBe("not-refresh");
+    }
   });
 
   it("a reactive binding whose first value REMOVES the attribute still claims the element", () => {

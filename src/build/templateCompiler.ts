@@ -39,8 +39,9 @@
  * the runtime's execute phase step by step:
  *
  *   - static / boolean attribute   → `setAttribute`, as the runtime does (its
- *     `setTrustedAttribute` adds only the contextual element policy, which
- *     cannot refuse a static write outside `<meta>` — left to the runtime)
+ *     `setTrustedAttribute` refuses only `srcdoc` and the contextual element
+ *     policy, which cannot refuse a static write outside `<meta>` — both are
+ *     left to the runtime)
  *   - expression / mixed attribute → `bindAttrs` (sibujs/ui), which commits
  *     through the same `bindAttribute` / `setSafeAttribute` primitives
  *   - `on:event=${fn}`             → `addEventListener` when it is a function
@@ -57,6 +58,7 @@
  *     render; the compiler must not move or swallow that error),
  *   - any `<meta>` element (the runtime judges its static attributes against
  *     the meta-refresh policy; a plain `setAttribute` cannot),
+ *   - a static `srcdoc` attribute (the runtime refuses it on every path),
  *   - quasis with escapes the cooked string cannot represent.
  *
  * Only templates tagged by an `html` binding IMPORTED FROM SIBUJS are
@@ -403,6 +405,11 @@ function generateBody(roots: TmplChild[], h: Helpers): string | null {
     // static write. The emitted `setAttribute` cannot reproduce that verdict,
     // so these templates stay with the runtime.
     if (el.tag.toLowerCase() === "meta") return null;
+    // Likewise a STATIC `srcdoc` (any casing): the runtime refuses it on every
+    // path, and the emitted `setAttribute` would write it.
+    for (const attr of el.attrs) {
+      if ((attr.t === 0 || attr.t === 4) && attr.name.toLowerCase() === "srcdoc") return null;
+    }
     const v = `e${n++}`;
     h.tags.add(el.tag);
     if (el.svg) h.svg = true;

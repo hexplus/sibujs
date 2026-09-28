@@ -1,6 +1,7 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
+import { sanitizeUrl } from "../utils/sanitize";
 
 export interface ImageLoaderState {
   /** Reactive loading state: "pending" | "loaded" | "error". */
@@ -27,6 +28,10 @@ export interface ImageLoaderState {
  * Accepts a reactive `src` getter OR a plain string. When a getter is given
  * and its value changes, the previous load is abandoned and a new one
  * starts.
+ *
+ * The URL passes the framework's canonical URL policy first (`http:`,
+ * `https:`, relative, …). A refused URL — `javascript:`, `data:`, `blob:`, … —
+ * requests nothing and reports `status() === "error"`.
  *
  * @example
  * ```ts
@@ -92,6 +97,15 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
     // resetState() notifies subscribers synchronously; one may have disposed the
     // loader or started a newer load. Neither may be followed by a request here.
     if (disposed || token !== startToken) return;
+    // The canonical URL policy, before an `Image` exists — the same one
+    // `preloadImage()` and every attribute writer apply. A refused (or empty)
+    // URL starts no request and reports `error`, which is what the browser
+    // would have reported for an unloadable source.
+    const safe = sanitizeUrl(String(url));
+    if (!safe) {
+      setStatus("error");
+      return;
+    }
     const img = new Image();
     current = img;
     currentSettled = false;
@@ -110,7 +124,7 @@ export function imageLoader(src: string | (() => string)): ImageLoaderState {
       currentSettled = true;
       setStatus("error");
     };
-    img.src = url;
+    img.src = safe;
   }
 
   let srcEffectTeardown: (() => void) | null = null;

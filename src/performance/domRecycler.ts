@@ -175,12 +175,33 @@ export function prefetch(url: string): void {
 
 /**
  * Preloads an image and returns a promise that resolves when loaded.
+ *
+ * The URL goes through the same canonical policy (`sanitizeUrl`) as
+ * `preloadResource()`, `prefetch()` and every attribute writer, BEFORE an
+ * `Image` exists: a refused URL creates no element and starts no request. The
+ * promise then rejects with an `Error` — never stays pending — so an `await`
+ * cannot hang on it. The message does not repeat the URL.
+ *
+ * An empty (or whitespace-only) `src` names no image, which is not a policy
+ * refusal; it rejects with its own message, as the browser would have fired
+ * `error` for it anyway.
  */
 export function preloadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
+    const safe = sanitizeUrl(String(src));
+    if (!safe) {
+      reject(
+        new Error(
+          String(src).trim() === ""
+            ? "preloadImage: no image URL was given."
+            : "preloadImage: refusing an image URL outside the URL policy.",
+        ),
+      );
+      return;
+    }
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = reject;
-    img.src = src;
+    img.src = safe;
   });
 }

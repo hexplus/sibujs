@@ -463,7 +463,7 @@ refused, and they are refused because there is no safe interpretation of one.
 
 | Source | Trust | Policy applied |
 |---|---|---|
-| Static text of an `html\`\`` template — tag names, attribute values, text | **Developer-authored markup** | Contextual element policy only |
+| Static text of an `html\`\`` template — tag names, attribute values, text | **Developer-authored markup** | Contextual element policy, and `srcdoc` refused |
 | `${…}` interpolations in an `html\`\`` template | Runtime data, untrusted by default | Full policy (`setSafeAttribute`); children become text nodes |
 | Props, `bindAttrs` values, getters, `enhance()` values | Runtime data, untrusted by default | Full policy |
 | A `Node` the application built and passed in | Trusted application object | Appended as-is |
@@ -478,7 +478,59 @@ below). The value policies (URL allowlist, `on*`, `style` filtering) are skipped
 for static source; the *contextual* rules are not, because they hold regardless
 of source and because a static attribute combines with runtime ones on the same
 element. Static writes go through `setTrustedAttribute()`, which applies exactly
-those rules and then writes.
+those rules — plus the one attribute no source can vouch for, `srcdoc` — and
+then writes.
+
+```text
+STATIC TEMPLATE SOURCE     developer-authored / trusted
+RUNTIME VALUES             untrusted by default
+CONTEXTUAL ELEMENT RULES   apply regardless of source, where combining
+                           attributes could create a dangerous browser behavior
+```
+
+Interpolation is what changes the classification, because it is the only point
+at which data the developer did not type enters the markup:
+
+```ts
+html`<button onclick="developerCode()">`   // kept — the developer wrote this handler
+html`<button onclick=${runtimeString}>`    // refused — a string would become code
+html`<button onclick="run(${id})">`        // refused — ANY interpolation makes the
+                                           //   assembled value runtime data
+html`<a href=${runtimeUrl}>`               // URL allowlist; a refused value is omitted
+html`<a href="java${part}:x()">`           // judged on the ASSEMBLED string, never per
+                                           //   fragment, so split schemes are caught
+```
+
+A mixed value (static text around one or more `${…}`) is concatenated first and
+committed once through `setSafeAttribute`, exactly like a single expression.
+
+**`srcdoc` is refused even in static source.** Static trust covers text the
+developer typed; it cannot vouch for a nested *document* the browser parses
+after attribute decoding, and no trusted-document API exists. Every SSR
+serializer has always omitted it, so a static `srcdoc` kept on the client made
+the two disagree about the same template.
+
+### SSR is conservative about static trust
+
+The SSR serializer receives DOM, not template source: it cannot know which
+attributes a developer typed. It therefore applies the runtime *value* policy to
+everything it emits — a static `onclick` or `javascript:` href is dropped from
+the server HTML, and a static `style` is filtered per declaration — and hydration
+replaces the tree with the client's. Server output is a security boundary of its
+own, so where the two differ, the server is the stricter one, never the other way
+round.
+
+| Attribute | Client, static source | Client, runtime value | SSR (`renderToString` = `renderToStream`) |
+|---|---|---|---|
+| `href` / `src` / `action` / … | kept | allowlist; refused → omitted | allowlist; refused → omitted |
+| `srcset` | kept | per-candidate parser | per-candidate parser |
+| `style` | kept | per-declaration filter | per-declaration filter |
+| `srcdoc` | refused | refused | omitted |
+| `on*` string | kept | refused | omitted |
+| `<meta>` refresh | contextual rule | contextual rule (+ reactive rule) | contextual rule (element dropped) |
+| `<script>` `src`/`type`/… | kept | refused | `<script>` never serialized |
+| SVG `xlink:href` | kept | allowlist, XLink namespace | SVG is emitted as text only |
+| SVG `attributeName` | contextual rule | contextual rule | SVG is emitted as text only |
 
 ### Explicit trust-decision APIs
 
@@ -494,6 +546,17 @@ definition:
 | `loadRemoteModule`, `wasm()` and friends | The module origin — **required** via `allowedOrigins`, or waived with `unsafelyAllowAnyOrigin` |
 | `worker()`, `workerFn()`, `createWorkerPool()` | The function's source. Only a function object is accepted; a string throws a `TypeError` rather than being evaluated |
 | `serviceWorker(scriptUrl)` | The worker script, which controls its whole scope |
+
+### Resource helpers
+
+`preloadResource()`, `prefetch()`, `preloadImage()`, `imageLoader()`,
+`preloadCritical()` and `preloadModule()` all pass their URL through the same
+canonical `sanitizeUrl` before anything is created. `preloadImage()` rejects its
+promise for a refused (or empty) URL rather than leaving it pending, and
+`imageLoader()` reports `status() === "error"`; neither creates an `Image` or
+starts a request. `favicon()` is the one documented exception: `data:` icons are
+its purpose, and an icon link only ever fetches an image, never navigates to or
+executes it.
 
 ## Contextual element policy
 
@@ -512,11 +575,19 @@ which a dangerous combination is written first and detected afterwards.
   written: `meta({ content: x, "http-equiv": "refresh" })` refuses the
   `http-equiv` write, `html\`<meta content=${x} http-equiv="refresh">\`` refuses
   the static one.
-- **Reactive meta** — a `<meta>` that carries any reactive binding may never
-  carry a refresh directive, safe or not, matching `Head()`'s rule for reactive
-  entries: a browser schedules the navigation as soon as the directive is valid,
-  and nothing can withdraw it. The first reactive binding claims the element and
-  withdraws any directive already present.
+- **Reactive meta** — a `<meta>` whose `http-equiv` or `content` (any casing,
+  including a `bindDynamic` name that later becomes one of them) is written by a
+  live binding may never carry a refresh directive, safe or not: a browser
+  schedules the navigation as soon as the directive is valid, and nothing can
+  withdraw it. The first such binding claims the element — even when its first
+  value is a removal — and withdraws any directive already present, whatever
+  order the static and reactive attributes arrive in. A live binding on any
+  *other* attribute (`data-*`, `name`, `id`) does not claim the element: a
+  refresh is a function of `http-equiv` and `content` alone, so such a binding
+  can neither create a directive nor redirect one, and a static, approved
+  directive beside it is kept. `Head()` keeps the broader rule (any reactive
+  attribute in an entry withholds a refresh) because it republishes an entry by
+  swapping in a fresh element, which re-inserts the directive on every change.
 - **`<script>` sources** — a runtime value may not set `src`, `href`,
   `xlink:href`, `type` or `language` on a script element, whatever its scheme:
   an allowed `https:` URL there is remote code execution. Static source may name

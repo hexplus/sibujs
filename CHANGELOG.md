@@ -20,8 +20,13 @@ Behaviour that changes for existing code:
   `type` or `language`.** `` html`<script src=${url}>` `` renders without `src`.
   Static template source may still name a script; load a runtime-chosen one
   with `Head({ script })`.
-- **A `<meta>` with any reactive attribute never carries a refresh directive**,
-  on every API — not only in `Head()`.
+- **A `<meta>` whose `http-equiv` or `content` is reactive never carries a
+  refresh directive**, on every API — not only in `Head()`. A live binding on
+  any other attribute leaves a static directive in place.
+- **A static `srcdoc` in an `html` template is refused**, as SSR always did.
+- **`preloadImage()` and `imageLoader()` apply the URL allowlist.** A refused
+  URL — including `data:` and `blob:` — requests nothing: `preloadImage()`
+  rejects with an `Error`, and `imageLoader()` reports `status() === "error"`.
 - **`svgElement()` and `DOMPool.acquire()` refuse `script`, `iframe`,
   `object`, `embed`, `frame` and `frameset`**, as the tag factories always have.
 - **`worker()`, `workerFn()` and `createWorkerPool()` throw a `TypeError` for
@@ -65,9 +70,9 @@ Behaviour that changes for existing code:
   break the server-rendered form.
 - **Tag factories ignore inherited properties.** A polluted `Object.prototype`
   added its keys as attributes to every element.
-- **`preloadCritical()` applies the URL allowlist.** `RouterLink`'s pass-through
-  attributes use the shared attribute writer instead of their own copy of the
-  policy.
+- **`preloadCritical()`, `preloadImage()` and `imageLoader()` apply the URL
+  allowlist.** `RouterLink`'s pass-through attributes use the shared attribute
+  writer instead of their own copy of the policy.
 
 ## [4.7.0] — 2026-09-26
 

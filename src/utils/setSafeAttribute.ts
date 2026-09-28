@@ -321,9 +321,10 @@ export function setSafeAttribute(
  * the same markup would in an HTML file. That trust model is documented in
  * `docs/architecture/attribute-security.md`.
  *
- * The CONTEXTUAL rules still apply, because they hold regardless of where a
- * value came from and because a static attribute combines with runtime ones on
- * the same element: `<meta content=${x} http-equiv="refresh">` writes the
+ * Two rules still apply. `srcdoc` is refused outright, as on every path. And
+ * the CONTEXTUAL rules apply, because they hold regardless of where a value
+ * came from and because a static attribute combines with runtime ones on the
+ * same element: `<meta content=${x} http-equiv="refresh">` writes the
  * runtime `content` first, when it is still inert, and the static
  * `http-equiv` second — the write that actually creates the directive. Only a
  * check at that second write, against the whole element, can see it.
@@ -331,6 +332,16 @@ export function setSafeAttribute(
  * Returns `false` when the write was refused (and not performed).
  */
 export function setTrustedAttribute(el: Element, name: string, value: string): boolean {
+  // `srcdoc` is refused on EVERY path, static source included. Static trust
+  // covers what the developer typed; it cannot vouch for a nested DOCUMENT the
+  // browser will parse after attribute decoding, and no trusted-document API
+  // exists (see `isHtmlContentAttribute`). Every SSR serializer has always
+  // omitted it, so keeping it here made the client and the server disagree
+  // about the same template.
+  if (isHtmlContentAttribute(name)) {
+    if (DEV) devWarn(`html: refusing static attribute "${name}" — the browser parses it as a nested document.`);
+    return false;
+  }
   const refusal = contextualAttributeRefusal(el, name, value, "static");
   if (refusal !== ContextualRefusal.None) {
     warnContextualRefusal("html (static attribute)", name, refusal);

@@ -177,14 +177,30 @@ const SCRIPT_SOURCE_ATTRIBUTES = new Set(["src", "href", "xlink:href", "type", "
 const SVG_ANIMATION_ELEMENTS = new Set(["animate", "set", "animateMotion", "animateTransform", "animateColor"]);
 
 /**
- * `<meta>` elements that carry at least one reactive attribute binding.
+ * `<meta>` elements whose REFRESH-RELEVANT state is reactive: a live binding
+ * has written `http-equiv` or `content` (any casing).
  *
  * A browser processes a refresh directive when the element is inserted (and,
- * in some engines, when its attributes change while connected), and removing
+ * in some engines, when those attributes change while connected), and removing
  * the element afterwards is not a defined cancellation. A binding that could
  * later need to withdraw a directive therefore must never be allowed to hold
  * one — even a safe one, because the question is reversibility rather than
- * safety. This is the same contract `Head()` enforces for reactive entries; see
+ * safety.
+ *
+ * WHY ONLY THOSE TWO ATTRIBUTES. Whether a `<meta>` is a refresh directive, and
+ * where it points, is a function of `http-equiv` and `content` and nothing
+ * else — the HTML pragma processing reads no other attribute. A reactive
+ * `data-state`, `name` or `id` can therefore neither create a directive nor
+ * change its destination: the directive stays exactly the static one the
+ * policy already approved, and a document declaratively refreshes at most once
+ * however often an engine re-processes it. Claiming on such bindings withdrew a
+ * perfectly static, approved directive merely because an unrelated attribute
+ * was live, which protected nothing.
+ *
+ * `Head()` keeps the broader rule — any reactive attribute in an entry
+ * withholds a refresh — for a reason specific to it: it republishes an entry by
+ * SWAPPING in a fresh element, so every reactive change re-inserts the
+ * directive. The DOM writers mutate the element in place. See
  * `utils/headEntry.ts` § "NATIVE REFRESH DIRECTIVES MUST BE STATIC".
  *
  * Membership is permanent for the element's lifetime: the WeakSet never keeps
@@ -220,10 +236,10 @@ function metaSnapshot(el: Element, canonical: string | null, value: string | nul
 }
 
 /**
- * Record that `el` carries a reactive binding, and withdraw any refresh
- * directive it already holds — from server markup, from a static prop written
- * a moment earlier, or from anything else. After this call the element can
- * never hold a directive again. See {@link reactiveMetaElements}.
+ * Record that `el`'s refresh-relevant state is reactive, and withdraw any
+ * refresh directive it already holds — from server markup, from a static prop
+ * written a moment earlier, or from anything else. After this call the element
+ * can never hold a directive again. See {@link reactiveMetaElements}.
  */
 function claimReactiveMeta(el: Element): void {
   if (reactiveMetaElements.has(el)) return;
@@ -236,10 +252,15 @@ function claimReactiveMeta(el: Element): void {
 
 function metaRefusal(el: Element, name: string, value: string | null, origin: AttributeWriteOrigin): ContextualRefusal {
   if (!isHtmlNamespace(el)) return ContextualRefusal.None;
-  if (origin === "reactive") claimReactiveMeta(el);
 
   const canonical = canonicalAttrName(name);
+  // Any other attribute cannot participate in a refresh directive, so it is
+  // neither judged nor allowed to claim the element. See `reactiveMetaElements`.
   if (canonical !== "http-equiv" && canonical !== "content") return ContextualRefusal.None;
+  // Claimed BEFORE the value is judged — and even when the write is a removal —
+  // so a reactive binding owns the element from its first run, whatever order
+  // it and the static attributes arrive in.
+  if (origin === "reactive") claimReactiveMeta(el);
   // Removing either half of a directive can never create one.
   if (value === null) return ContextualRefusal.None;
   // Fast path for the overwhelmingly common `<meta name=… content=…>`: with no
