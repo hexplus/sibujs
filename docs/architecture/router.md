@@ -322,10 +322,39 @@ outlet re-evaluates, reading ITS OWNER's route
   happened to be created while a page rendered) falls back to the router's
   route once the instance's scope is released.
 
-`route()` inside a direct `AsyncComponent` after its first `await`, or in code
-the application defers itself (a timer, an event handler that creates new
-computations), runs outside any scope and reads the router's route. Use
-`lazy()` for code-split pages: its factory runs inside the scope.
+#### What the scope does and does not reach
+
+The route scope is an owner scope: synchronous, and carried only by work the
+framework itself schedules. SibuJS carries it through `lazy()` and `Suspense`
+content, `Portal`, `when`/`match`/`each`, `KeepAlive`, `onMount`/`onUnmount`
+callbacks (and the cleanup an `onMount` callback returns), and the router
+outlets. It does not follow the application's own asynchronous continuations:
+there is no async context propagation.
+
+So inside a **direct `AsyncComponent`** only the code before the first `await`
+is scoped:
+
+```ts
+const Page = async () => {
+  route();        // this instance's route
+  effect(...);    // follows this instance
+  await work();
+  route();        // the router's route
+  effect(...);    // unscoped: follows the router, even while this page is outgoing
+  return div();
+};
+```
+
+The continuation after an `await` is the application's code; the framework
+never gets control of it until the promise settles, so it cannot re-enter the
+scope there. The same applies to code the application defers itself — a timer,
+or an event handler that creates new computations.
+
+`lazy()` is not the same execution model. There the framework owns the
+continuation: it awaits the module, then invokes the module's (synchronous)
+factory inside the scope, so the whole render is scoped. Prefer `lazy()` for
+code-split pages that read the route while rendering. A `lazy()` module whose
+factory is itself `async` has the same limit as a direct `AsyncComponent`.
 
 ### Outlet ownership
 
@@ -898,10 +927,12 @@ for the ordering and the reasoning. That was MEM-001.
 
 ## Known limitations
 
-- **Route scope does not cross application-owned async boundaries.** A
-  computation created after an `await` inside a direct `AsyncComponent`, or
-  from a timer or event handler, reads the router's route rather than its
-  instance's. See [Route-instance scope](#route-instance-scope).
+- **Route scope does not cross application-owned async boundaries.** Code
+  after the first `await` inside a direct `AsyncComponent` (or an `async`
+  factory exported by a `lazy()` module), and computations created from a
+  timer or event handler, read the router's route rather than their
+  instance's. Pinned by `tests/router-route-instance-scope.test.ts`. See
+  [What the scope does and does not reach](#what-the-scope-does-and-does-not-reach).
 
 - **SSR and hydration router behaviour is not covered** by the hardening
   passes. `routerSSR.ts` has its own suite, but server-match and

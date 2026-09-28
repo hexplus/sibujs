@@ -5,6 +5,7 @@ import { takePendingError } from "../core/rendering/lazy";
 import { onMount } from "../core/rendering/lifecycle";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { bindOwnerScope } from "../reactivity/track";
 import { ErrorDisplay } from "./ErrorDisplay";
 
 export interface ErrorBoundaryOptions {
@@ -489,14 +490,18 @@ export function ErrorBoundary(
               }
               replaceChildrenSafely(asyncContainer, el);
             })
-            .catch((e: unknown) => {
-              // Swallowed rather than reported: the boundary that would have
-              // shown this error no longer exists. Returning keeps the
-              // rejection handled, so it never surfaces as an unhandled one.
-              if (asyncDisposed) return;
-              const err = handleError(e);
-              replaceChildrenSafely(asyncContainer, tryRenderFallback(err));
-            });
+            .catch(
+              // The fallback is rendered later, in the owner scope of the
+              // render that produced the async child.
+              bindOwnerScope((e: unknown) => {
+                // Swallowed rather than reported: the boundary that would have
+                // shown this error no longer exists. Returning keeps the
+                // rejection handled, so it never surfaces as an unhandled one.
+                if (asyncDisposed) return;
+                const err = handleError(e);
+                replaceChildrenSafely(asyncContainer, tryRenderFallback(err));
+              }),
+            );
 
           return asyncContainer;
         }

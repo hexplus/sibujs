@@ -14,6 +14,7 @@
  *    one that throws.
  */
 import { afterEach, describe, expect, it } from "vitest";
+import { ErrorBoundary } from "../src/components/ErrorBoundary";
 import { match, when } from "../src/core/rendering/directives";
 import { dispose } from "../src/core/rendering/dispose";
 import { each } from "../src/core/rendering/each";
@@ -23,6 +24,8 @@ import { Portal } from "../src/core/rendering/portal";
 import { derived } from "../src/core/signals/derived";
 import { effect } from "../src/core/signals/effect";
 import { signal } from "../src/core/signals/signal";
+import { createChunkRegistry, lazyChunk } from "../src/performance/chunkLoader";
+import { defineRemoteComponent } from "../src/platform/microfrontend";
 import { bindOwnerScope, getOwnerScope, runWithOwnerScope } from "../src/reactivity/track";
 
 const flush = async () => {
@@ -209,6 +212,61 @@ describe("owner scope: deferred renders carry the creation scope", () => {
     expect(seen).toEqual([scope]);
   });
 
+  it("lazyChunk()", async () => {
+    const seen: unknown[] = [];
+    const Probe = () => {
+      stops.push(effect(() => seen.push(getOwnerScope())));
+      return document.createElement("b");
+    };
+    const Chunk = lazyChunk("probe-chunk", () => Promise.resolve({ default: Probe }), createChunkRegistry());
+    const host = document.createElement("div");
+    host.appendChild(runWithOwnerScope(scope, () => Chunk()));
+    document.body.appendChild(host);
+    await flush();
+    stops.push(() => dispose(host));
+    expect(seen).toEqual([scope]);
+  });
+
+  it("defineRemoteComponent()", async () => {
+    const seen: unknown[] = [];
+    const Probe = () => {
+      stops.push(effect(() => seen.push(getOwnerScope())));
+      return document.createElement("b");
+    };
+    const Remote = defineRemoteComponent("probe-remote", () => Promise.resolve({ default: Probe }));
+    const host = document.createElement("div");
+    host.appendChild(runWithOwnerScope(scope, () => Remote()));
+    document.body.appendChild(host);
+    await flush();
+    stops.push(() => dispose(host));
+    expect(seen).toEqual([scope]);
+  });
+
+  it("ErrorBoundary: the fallback for a rejected async child", async () => {
+    const seen: unknown[] = [];
+    const host = document.createElement("div");
+    host.appendChild(
+      runWithOwnerScope(scope, () =>
+        ErrorBoundary(
+          {
+            fallback: () => {
+              stops.push(effect(() => seen.push(getOwnerScope())));
+              return document.createElement("b");
+            },
+          },
+          () => Promise.reject(new Error("boom")) as unknown as Element,
+        ),
+      ),
+    );
+    document.body.appendChild(host);
+    await flush();
+    stops.push(() => dispose(host));
+    // Rendered once from the rejection handler and again when the boundary
+    // re-renders on its error state: both in the boundary's scope.
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s === scope)).toBe(true);
+  });
+
   it("Portal()", async () => {
     expect(await scopeSeenBy((probe) => Portal(() => probe() as Element))).toEqual([scope]);
   });
@@ -227,5 +285,118 @@ describe("owner scope: deferred renders carry the creation scope", () => {
     await flush();
     dispose(el);
     expect(seen).toEqual([scope, scope]);
+  });
+});
+
+describe("owner scope: a cleanup returned by onMount() keeps the registration scope", () => {
+  const scope = { name: "page" };
+
+  /** Register `onMount` in `registrationScope`; the cleanup it returns records its scope. */
+  function mountWithCleanup(
+    el: Element,
+    registrationScope: unknown,
+    onMounted: () => void = () => {},
+  ): { mounted: unknown[]; cleaned: unknown[] } {
+    const mounted: unknown[] = [];
+    const cleaned: unknown[] = [];
+    runWithOwnerScope(registrationScope, () => {
+      onMount(() => {
+        mounted.push(getOwnerScope());
+        onMounted();
+        return () => {
+          cleaned.push(getOwnerScope());
+        };
+      }, el);
+    });
+    return { mounted, cleaned };
+  }
+
+  it("the onMount callback runs in the registration scope", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { mounted } = mountWithCleanup(el, scope);
+    await flush();
+    expect(mounted).toEqual([scope]);
+    dispose(el);
+  });
+
+  it("on a normal dispose", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { mounted, cleaned } = mountWithCleanup(el, scope);
+    await flush();
+    dispose(el);
+    expect(mounted).toEqual([scope]);
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("on a native removal, seen by the observer", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { cleaned } = mountWithCleanup(el, scope);
+    await flush();
+    el.remove();
+    await flush();
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("when the mount callback removes its own element (cleanup runs immediately)", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { cleaned } = mountWithCleanup(el, scope, () => el.remove());
+    await flush();
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("when the mount callback disposes its own element (cleanup runs immediately)", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { cleaned } = mountWithCleanup(el, scope, () => dispose(el));
+    await flush();
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("when the element connects after registration (observer-driven mount)", async () => {
+    const el = document.createElement("div");
+    const { mounted, cleaned } = mountWithCleanup(el, scope);
+    await flush();
+    document.body.appendChild(el);
+    await flush();
+    dispose(el);
+    expect(mounted).toEqual([scope]);
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("disposing from another owner scope does not change the cleanup's scope", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { cleaned } = mountWithCleanup(el, scope);
+    await flush();
+    runWithOwnerScope({ name: "disposer" }, () => dispose(el));
+    expect(cleaned).toEqual([scope]);
+  });
+
+  it("an unscoped registration stays unscoped, whoever disposes it", async () => {
+    const el = document.createElement("div");
+    document.body.appendChild(el);
+    const { mounted, cleaned } = mountWithCleanup(el, null);
+    await flush();
+    runWithOwnerScope({ name: "disposer" }, () => dispose(el));
+    expect(mounted).toEqual([null]);
+    expect(cleaned).toEqual([null]);
+  });
+
+  it("an onUnmount callback keeps its registration scope, whoever disposes it", async () => {
+    const seen: unknown[] = [];
+    const scoped = document.createElement("div");
+    const unscoped = document.createElement("div");
+    document.body.append(scoped, unscoped);
+    runWithOwnerScope(scope, () => onUnmount(() => seen.push(getOwnerScope()), scoped));
+    onUnmount(() => seen.push(getOwnerScope()), unscoped);
+    runWithOwnerScope({ name: "disposer" }, () => {
+      dispose(scoped);
+      dispose(unscoped);
+    });
+    expect(seen).toEqual([scope, null]);
   });
 });

@@ -41,7 +41,8 @@ factory runs inside it:
 
 - effects, deriveds and bindings the page creates — in setup or later, through
   `when`/`match`/`each`, `lazy()`, `Suspense`, `Portal` or `onMount` — read
-  that scope;
+  that scope, and `onMount`/`onUnmount` callbacks and the cleanup an `onMount`
+  callback returns stay pinned to it however they are triggered;
 - a kept instance is handed each new route; a replaced one keeps its own until
   it is disposed, and its effect cleanups, `onUnmount` callbacks and disposers
   run in its scope;
@@ -51,9 +52,15 @@ factory runs inside it:
   outlived it falls back to the router's route.
 
 Navigation timing, guards, `afterEach`, navigation generations, supersession,
-loaders, SSR and hydration are unchanged. Reading `route()` after an `await`
-inside a direct `AsyncComponent`, or from a timer, runs outside any scope and
-reads the router's route; use `lazy()` for code-split pages.
+loaders, SSR and hydration are unchanged.
+
+The scope is synchronous and carried only through work the framework
+schedules. In a direct `AsyncComponent` (an `async` factory) only the code
+before the first `await` is scoped: code after it — and any effect it creates —
+reads the router's route, as does code run from a timer or event handler.
+`lazy()` is different: the framework awaits the module and then calls its
+factory inside the scope, so prefer `lazy()` for code-split pages that read the
+route while rendering.
 
 ### Fixed — `query()` refetched when a reactive key recomputed to the same key
 
@@ -69,8 +76,10 @@ real key change, `refetch()`, `invalidateQueries()`, `refetchInterval`,
 
 Every effect, derived and binding records the owner scope current when it is
 created and runs in it every time, whoever triggers it; the framework's
-deferred renders carry it too. It is not a public API; the router's
-route-instance scope is built on it. See `docs/architecture/reactivity.md`.
+deferred renders carry it too — including `lazyChunk()`,
+`defineRemoteComponent()` and an `ErrorBoundary` fallback for a rejected async
+child. It is not a public API; the router's route-instance scope is built on
+it. See `docs/architecture/reactivity.md`.
 
 ## [4.9.0] — 2026-09-28
 

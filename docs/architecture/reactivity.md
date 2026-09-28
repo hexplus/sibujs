@@ -117,12 +117,21 @@ subscribers created during that run inherit it, and so on down the tree
 - `track()`/`retrack()` save and restore the previous scope around every run,
   including one that throws, so a scope never leaks into unrelated code.
 - An effect's cleanups run in the effect's scope, on re-run and on dispose.
-- Work the framework defers past a subscriber run — the first render of
-  `when`/`match`/`each`/`KeepAlive`, `lazy()` and `Suspense` content,
-  `Portal` content, `onMount`/`onUnmount` callbacks, router outlets — captures
-  the scope with `bindOwnerScope`. Work the *application* defers (a timer, an
-  `await` continuation, an event handler creating new computations) does not
-  carry it: there is no async context propagation.
+- Work the framework defers past a subscriber run carries the scope: the first
+  render of `when`/`match`/`each`/`KeepAlive`, `lazy()`, `lazyChunk()`,
+  `defineRemoteComponent()` and `Suspense` content, `Portal` content, an
+  `ErrorBoundary` fallback for a rejected async child, and router outlets
+  capture it with `bindOwnerScope`.
+- Lifecycle callbacks are stored and invoked later by someone else, so they
+  are *pinned* to the scope they were registered in — `null` included — rather
+  than inheriting whatever scope invokes them: `onMount` callbacks, the cleanup
+  an `onMount` callback returns (also when it runs immediately because the
+  callback removed or disposed its own element), and `onUnmount` callbacks,
+  whether they fire from `dispose()` or from the unmount observer.
+- Work the *application* defers (a timer, an `await` continuation — including
+  the rest of an `async` component after its first `await` — or an event
+  handler creating new computations) does not carry it: there is no async
+  context propagation.
 
 The core never interprets the value. Its one consumer today is the router,
 which scopes each route instance to the route it was committed with (see

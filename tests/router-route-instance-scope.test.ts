@@ -104,7 +104,8 @@ afterEach(() => {
  * A page that observes `route().params[param]` from every kind of computation a
  * route instance owns: an effect, a derived read by a DOM binding, a
  * `routerState()` getter, an effect cleanup, an `onUnmount` teardown, a
- * `when()` branch rendered after setup, and an effect created in `onMount`.
+ * `when()` branch rendered after setup, an effect created in `onMount`, and the
+ * cleanup `onMount` returns.
  */
 function observingPage(obs: ReturnType<typeof observations>, param: string, tick?: () => number) {
   return () => {
@@ -152,7 +153,7 @@ function observingPage(obs: ReturnType<typeof observations>, param: string, tick
         obs.push(mine, route().params[param], "onMount effect");
       });
       registerDisposer(el, stop);
-      return undefined;
+      return () => obs.push(mine, route().params[param], "onMount cleanup");
     }, el);
 
     onUnmount(() => obs.push(mine, route().params[param], "onUnmount"), el);
@@ -338,7 +339,7 @@ describe("route-instance scope: an outgoing instance never observes the incoming
     expect(host.querySelector("section")).toBeNull();
   });
 
-  it("async route component: while the incoming chunk loads, the outgoing page stays live on its own route", async () => {
+  it("lazy() route component: while the incoming chunk loads, the outgoing page stays live on its own route", async () => {
     const obs = observations();
     const [tick, setTick] = signal(0);
     const gate = deferred<{ default: () => HTMLElement }>();
@@ -573,5 +574,245 @@ describe("route-instance scope: an outgoing instance never observes the incoming
     await settle();
     expect(obs.foreign("1", "1")).toEqual([]);
     expect(host.querySelector("[data-page]")).toBeNull();
+  });
+});
+
+describe("route-instance scope: onMount-returned cleanups", () => {
+  /** A page whose onMount-returned cleanup records `owner=>observed`. */
+  function cleanupPage(seen: string[], param = "id") {
+    return () => {
+      const mine = String(route().params[param]);
+      const el = document.createElement("div");
+      el.dataset.page = mine;
+      onMount(() => {
+        return () => seen.push(`${mine}=>${String(route().params[param])}`);
+      }, el);
+      return el;
+    };
+  }
+
+  it("/user/1 → /user/2: page 1's onMount cleanup tears down on route 1", async () => {
+    const seen: string[] = [];
+    await start([{ path: "/user/:id", component: cleanupPage(seen) }], "/user/1");
+    await navigate("/user/2");
+    await settle();
+    expect(seen).toEqual(["1=>1"]);
+  });
+
+  it("a top-level replacement: the cleanup never sees the next route's (missing) params", async () => {
+    const seen: string[] = [];
+    await start(
+      [
+        { path: "/user/:id", component: cleanupPage(seen) },
+        { path: "/settings", component: () => document.createElement("form") },
+      ],
+      "/user/1",
+    );
+    await navigate("/settings");
+    await settle();
+    expect(seen).toEqual(["1=>1"]);
+  });
+
+  it("a nested child replacement: the child's cleanup keeps the child's route", async () => {
+    const seen: string[] = [];
+    const Layout = () => {
+      const el = document.createElement("section");
+      el.appendChild(Outlet());
+      return el;
+    };
+    await start(
+      [{ path: "/users", component: Layout, children: [{ path: "/:id", component: cleanupPage(seen) }] }],
+      "/users/1",
+    );
+    await navigate("/users/2");
+    await settle();
+    await navigate("/users/3");
+    await settle();
+    expect(seen).toEqual(["1=>1", "2=>2"]);
+  });
+
+  it("KeepAlive eviction: an evicted view's cleanup runs on that view's own route", async () => {
+    const seen: string[] = [];
+    await start([{ path: "/user/:id", component: cleanupPage(seen) }], "/user/1", () => KeepAliveRoute({ max: 1 }));
+    await navigate("/user/2");
+    await settle();
+    expect(seen).toEqual(["1=>1"]);
+    await navigate("/user/3");
+    await settle();
+    expect(seen).toEqual(["1=>1", "2=>2"]);
+  });
+
+  it("KeepAlive: a view detached into the cache runs its cleanup on its own route", async () => {
+    // Detaching is a native removal, seen by the unmount observer after the
+    // navigation committed — the router is not disposing anything, so only
+    // the cleanup's own pinned scope can give it route 1.
+    const seen: string[] = [];
+    await start([{ path: "/user/:id", component: cleanupPage(seen) }], "/user/1", () => KeepAliveRoute({ max: 5 }));
+    await navigate("/user/2");
+    await settle();
+    expect(seen).toEqual(["1=>1"]);
+  });
+
+  it("teardown order: every owned cleanup reads the outgoing route, and the scope is released only afterwards", async () => {
+    const seen: string[] = [];
+    const holder: { outliving: (() => string) | null } = { outliving: null };
+    const Page = () => {
+      const mine = route().params.id;
+      const record = (site: string) => seen.push(`${site}:${mine}=>${route().params.id}`);
+      const el = document.createElement("div");
+      const child = document.createElement("span");
+      el.appendChild(child);
+      holder.outliving ??= derived(() => String(route().params.id));
+      registerDisposer(el, () => record("parent disposer"));
+      registerDisposer(child, () => record("child disposer"));
+      registerDisposer(
+        el,
+        effect((onCleanup) => {
+          route().params.id;
+          onCleanup(() => record("effect cleanup"));
+        }),
+      );
+      onUnmount(() => record("onUnmount"), el);
+      onMount(() => () => record("onMount cleanup"), el);
+      return el;
+    };
+    await start([{ path: "/user/:id", component: Page }], "/user/1");
+    expect(holder.outliving?.()).toBe("1");
+
+    await navigate("/user/2");
+    await settle();
+    const page1 = seen.filter((e) => e.includes(":1=>"));
+    expect(page1).toEqual(
+      expect.arrayContaining([
+        "child disposer:1=>1",
+        "parent disposer:1=>1",
+        "effect cleanup:1=>1",
+        "onUnmount:1=>1",
+        "onMount cleanup:1=>1",
+      ]),
+    );
+    // Children tear down before their parent.
+    expect(page1.indexOf("child disposer:1=>1")).toBeLessThan(page1.indexOf("parent disposer:1=>1"));
+    expect(seen.some((e) => e.includes(":1=>2"))).toBe(false);
+
+    // Released after teardown: the computation that outlived page 1 now
+    // follows the router.
+    expect(holder.outliving?.()).toBe("2");
+  });
+});
+
+describe("route-instance scope: direct AsyncComponent vs lazy()", () => {
+  /**
+   * A direct AsyncComponent — an `async` factory, NOT `lazy()`. Only the part
+   * before its first `await` runs inside the instance's route scope; the
+   * continuation is the application's own async code, which SibuJS cannot
+   * re-enter. These tests pin that documented limit.
+   */
+  function asyncPage(gates: Map<string, Promise<void>>, log: string[]) {
+    return async () => {
+      const mine = route().params.id;
+      const el = document.createElement("div");
+      el.dataset.page = mine;
+      log.push(`before:${mine}=>${route().params.id}`);
+      registerDisposer(
+        el,
+        effect(() => {
+          log.push(`effect-before-await:${mine}=>${route().params.id}`);
+        }),
+      );
+      await gates.get(mine);
+      log.push(`after:${mine}=>${route().params.id}`);
+      registerDisposer(
+        el,
+        effect(() => {
+          log.push(`effect-after-await:${mine}=>${route().params.id}`);
+        }),
+      );
+      return el;
+    };
+  }
+
+  it("direct AsyncComponent: code before the first await is scoped; code after it reads the router-global route", async () => {
+    const log: string[] = [];
+    const gate1 = deferred<void>();
+    const gates = new Map<string, Promise<void>>([
+      ["1", gate1.promise],
+      ["2", Promise.resolve()],
+    ]);
+    await start([{ path: "/user/:id", component: asyncPage(gates, log) }], "/user/1");
+    expect(log).toContain("before:1=>1");
+
+    // Navigate while page 1's continuation is still parked on its await.
+    await navigate("/user/2");
+    await settle();
+    gate1.resolve();
+    await settle();
+
+    // Documented limit: the continuation runs after the router moved to
+    // /user/2 and reads the router's route, not instance 1's.
+    expect(log).toContain("after:1=>2");
+    // Its superseded result never mounts; page 2 does.
+    expect(host.querySelector('[data-page="1"]')).toBeNull();
+    expect(host.querySelector('[data-page="2"]')).not.toBeNull();
+  });
+
+  it("direct AsyncComponent: an effect created before the await follows the instance; one created after it follows the router", async () => {
+    const log: string[] = [];
+    const gate2 = deferred<void>();
+    const gates = new Map<string, Promise<void>>([
+      ["1", Promise.resolve()],
+      ["2", gate2.promise],
+    ]);
+    await start([{ path: "/user/:id", component: asyncPage(gates, log) }], "/user/1");
+    expect(host.querySelector('[data-page="1"]')).not.toBeNull();
+
+    // Page 1 stays mounted while page 2's async factory waits.
+    await navigate("/user/2");
+    await settle();
+    expect(host.querySelector('[data-page="1"]')).not.toBeNull();
+
+    expect(log.filter((e) => e.startsWith("effect-before-await:1=>"))).toEqual(["effect-before-await:1=>1"]);
+    // Documented limit: the post-await effect is unscoped, so it observes the
+    // incoming route while page 1 is still mounted.
+    expect(log).toContain("effect-after-await:1=>2");
+
+    gate2.resolve();
+    await settle();
+    expect(host.querySelector('[data-page="2"]')).not.toBeNull();
+  });
+
+  it("lazy(): the factory runs after module resolution inside the instance's scope", async () => {
+    const log: string[] = [];
+    const gate = deferred<void>();
+    const Page = () => {
+      const mine = route().params.id;
+      const el = document.createElement("div");
+      el.dataset.page = mine;
+      registerDisposer(
+        el,
+        effect(() => {
+          log.push(`${mine}=>${route().params.id}`);
+        }),
+      );
+      return el;
+    };
+    await start(
+      [
+        { path: "/user/:id", component: lazy(() => gate.promise.then(() => ({ default: Page }))) },
+        { path: "/settings", component: lazy(() => new Promise<never>(() => {})) },
+      ],
+      "/user/1",
+    );
+    gate.resolve();
+    await settle();
+    expect(host.querySelector('[data-page="1"]')).not.toBeNull();
+
+    await navigate("/user/2");
+    await settle();
+    // Leave for a page whose chunk never arrives: page 2 stays mounted, on route 2.
+    await navigate("/settings");
+    await settle();
+
+    expect(log).toEqual(["1=>1", "2=>2"]);
   });
 });

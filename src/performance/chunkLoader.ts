@@ -5,6 +5,7 @@
 
 import { reportError } from "../core/errors";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
+import { bindOwnerScope } from "../reactivity/track";
 import { sanitizeUrl } from "../utils/sanitize";
 
 /** Dispose every child of `el` (running reactive teardowns) then detach it. */
@@ -404,17 +405,21 @@ export function lazyChunk(
         const mod = await loader();
         return typeof mod === "function" ? mod : (mod as { default: () => HTMLElement }).default;
       })
-      .then((component) => {
-        if (disposed) return;
-        const node = component();
-        // Building the component may itself have torn the container down.
-        if (disposed) {
-          dispose(node);
-          return;
-        }
-        clearChildren(container);
-        container.appendChild(node);
-      })
+      .then(
+        // Instantiated after the chunk resolves, in the owner scope of the
+        // render that asked for it — as `lazy()` does.
+        bindOwnerScope((component: () => HTMLElement) => {
+          if (disposed) return;
+          const node = component();
+          // Building the component may itself have torn the container down.
+          if (disposed) {
+            dispose(node);
+            return;
+          }
+          clearChildren(container);
+          container.appendChild(node);
+        }),
+      )
       .catch((err) => {
         if (disposed) return;
         clearChildren(container);
