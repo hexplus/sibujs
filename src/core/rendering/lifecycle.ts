@@ -27,6 +27,15 @@ import { registerDisposer } from "./dispose";
 type CleanupFn = () => void;
 
 /**
+ * What an `onMount` callback may return: nothing, or a cleanup function.
+ * `void` rather than `undefined`, because a block body with no `return` is
+ * inferred as `() => void`. Any other return value — including a promise — is
+ * not part of this type.
+ */
+// biome-ignore lint/suspicious/noConfusingVoidType: intentional "cleanup or nothing" return — `undefined` would reject a block body with no `return`.
+type MountCallback = () => void | CleanupFn;
+
+/**
  * `fn`, pinned to the owner scope `scope`: it runs in that scope wherever it is
  * eventually called from — a dispose walk, the mutation observer, another
  * owner's teardown — and `null` ("no scope") is pinned like any other value.
@@ -69,7 +78,7 @@ function safeCall(cb: () => unknown, hookName: string): unknown {
  * by the time it is returned the callback's scope has been restored away.
  */
 function runMountCallback(
-  callback: () => undefined | CleanupFn,
+  callback: MountCallback,
   hookName: string,
   element: Element,
   isDisposed: () => boolean,
@@ -296,13 +305,18 @@ function registerUnmountWatcher(element: Element, cb: DisconnectCb): () => void 
  * Uses queueMicrotask to defer execution until after the current synchronous
  * rendering pass completes.
  *
- * Optionally returns a cleanup function that will be called on unmount
- * (if you also use onUnmount, prefer that for explicit cleanup).
+ * The callback may return nothing or a cleanup function. When an `element` is
+ * provided, the returned cleanup runs once, when that element is unmounted or
+ * disposed (if you also use onUnmount, prefer that for explicit cleanup).
  *
- * @param callback Function to run after mount. May return a cleanup function.
+ * Other return values are not part of the typed API; the runtime ignores them
+ * if they are encountered. Async callbacks are not supported: a promise is not
+ * a cleanup.
+ *
+ * @param callback Function to run after mount. Returns nothing or a cleanup function.
  * @param element Optional element to observe (HTML or SVG); if provided, waits until it's connected.
  */
-export function onMount(callback: () => undefined | CleanupFn, element?: Element): void {
+export function onMount(callback: MountCallback, element?: Element): void {
   // No-op during SSR — lifecycle hooks are client-only
   if (typeof document === "undefined") return;
   // The callback runs after the render that registered it, so it runs in that
