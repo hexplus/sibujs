@@ -27,8 +27,14 @@ export interface InfiniteQueryOptions<TData, TPageParam = number> {
    * unbounded.
    */
   maxPages?: number;
-  /** Whether to fetch on creation. Default: true */
-  enabled?: boolean;
+  /**
+   * Whether the query may load its first page. Default: `true`.
+   *
+   * A function is reactive: while it returns `false` the query stays idle, and
+   * each time it turns `true` the query loads from `initialPageParam`, as a key
+   * change does.
+   */
+  enabled?: boolean | (() => boolean);
   /** Retry options */
   retry?: RetryOptions;
   /** Called on successful page fetch */
@@ -83,6 +89,10 @@ export function infiniteQuery<TData, TPageParam = number>(
   } = options;
 
   const resolveKey = typeof key === "function" ? key : () => key;
+  // Through a derived so the effect re-runs only when the boolean flips, not
+  // on every change of a signal the function happens to read.
+  const enabledGate = typeof enabled === "function" ? derived(() => Boolean(enabled())) : null;
+  const isEnabled = enabledGate ?? (() => enabled);
 
   const [pages, setPages] = signal<TData[]>([]);
   const [isFetching, setIsFetching] = signal(false);
@@ -196,7 +206,7 @@ export function infiniteQuery<TData, TPageParam = number>(
 
   const effectCleanup = effect(() => {
     resolveKey();
-    if (enabled) {
+    if (isEnabled()) {
       abortController?.abort();
       batch(() => {
         setPages([]);
@@ -248,6 +258,7 @@ export function infiniteQuery<TData, TPageParam = number>(
     loading.dispose();
     hasNextPage.dispose();
     hasPreviousPage.dispose();
+    enabledGate?.dispose();
   }
 
   return {
