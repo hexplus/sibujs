@@ -89,7 +89,10 @@ export function KeepAlive(
       // leaving an empty fragment with no parentNode — it could then never be
       // detached or re-attached, breaking caching. Wrap multi-root/fragment
       // content in a layout-transparent container so it moves as a unit.
-      if (node instanceof DocumentFragment) {
+      // Detected by `nodeType`, not `instanceof DocumentFragment`: a fragment
+      // built in another realm (an iframe's document) failed that check, went
+      // in unwrapped, and was emptied on insertion.
+      if (node.nodeType === 11 /* DOCUMENT_FRAGMENT_NODE */) {
         const wrapper = document.createElement("div");
         wrapper.style.display = "contents";
         wrapper.appendChild(node);

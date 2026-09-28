@@ -16,8 +16,9 @@ export interface KeyboardOptions {
  * `KeyboardEvent.key`). On every key event the signal is replaced with a
  * new Set instance so reactive subscribers see the change.
  *
- * Also listens to `window.blur` to clear stuck keys if the window loses
- * focus mid-press — otherwise held modifiers can "ghost" forever.
+ * Also listens to `blur` on the target's window (the global `window`, or the
+ * window of the document a `target` element belongs to) to clear stuck keys
+ * if it loses focus mid-press — otherwise held modifiers can "ghost" forever.
  *
  * @example
  * ```ts
@@ -41,6 +42,11 @@ export function keyboard(options: KeyboardOptions = {}): {
   }
 
   const target: HTMLElement | Window = options.target ?? window;
+  // Clear stuck keys when the window the TARGET lives in loses focus. For an
+  // element hosted in an iframe that is the iframe's window; the global
+  // `window` blurs and focuses independently of it. Resolved once, so the
+  // listener is removed from exactly the window it was added to.
+  const view: Window = options.target?.ownerDocument?.defaultView ?? window;
   const filter = options.keys ? new Set(options.keys) : null;
 
   const onDown = (e: KeyboardEvent) => {
@@ -67,7 +73,7 @@ export function keyboard(options: KeyboardOptions = {}): {
 
   target.addEventListener("keydown", onDown as EventListener);
   target.addEventListener("keyup", onUp as EventListener);
-  window.addEventListener("blur", onBlur);
+  view.addEventListener("blur", onBlur);
 
   function isPressed(key: string): boolean {
     return pressed().has(key);
@@ -76,7 +82,7 @@ export function keyboard(options: KeyboardOptions = {}): {
   function dispose() {
     target.removeEventListener("keydown", onDown as EventListener);
     target.removeEventListener("keyup", onUp as EventListener);
-    window.removeEventListener("blur", onBlur);
+    view.removeEventListener("blur", onBlur);
   }
 
   return { pressed, isPressed, dispose };

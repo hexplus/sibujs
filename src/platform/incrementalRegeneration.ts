@@ -16,6 +16,10 @@ export interface ISROptions<T> {
  * `true` while a revalidation is pending or after one fails, and returns to
  * `false` when a revalidation succeeds.
  *
+ * `revalidate()` called while a revalidation is running joins it instead of
+ * starting another: the fetcher runs once, and every caller's promise settles
+ * — resolving, or rejecting with the same error — when that fetch does.
+ *
  * @throws RangeError when `revalidateAfter` is not a positive finite number.
  */
 export function createISR<T>(options: ISROptions<T>): {
@@ -36,7 +40,10 @@ export function createISR<T>(options: ISROptions<T>): {
   const [stale, setStale] = signal<boolean>(initialData === undefined);
 
   const controller = new AbortController();
-  let inFlight = false;
+  // The active logical revalidation. A boolean used to deduplicate the fetch
+  // but handed a concurrent caller an already-resolved promise, so
+  // `await revalidate()` returned before the running fetch had finished.
+  let inFlight: Promise<void> | null = null;
   let disposed = false;
   let deadline: ReturnType<typeof setTimeout> | undefined;
 
@@ -61,10 +68,10 @@ export function createISR<T>(options: ISROptions<T>): {
     }, revalidateAfter);
   };
 
-  const revalidate = async (): Promise<void> => {
-    if (disposed || inFlight) return;
-    if (controller.signal.aborted) return;
-    inFlight = true;
+  // One fetch and its outcome. Exactly one deadline is armed per settled fetch
+  // (none once disposed), whichever path started it and however many callers
+  // joined it.
+  const run = async (): Promise<void> => {
     try {
       const result = await fetcher({ signal: controller.signal });
       if (disposed || controller.signal.aborted) return;
@@ -79,9 +86,44 @@ export function createISR<T>(options: ISROptions<T>): {
       // single transient error.
       if (!disposed && !controller.signal.aborted) armDeadline();
       throw err;
-    } finally {
-      inFlight = false;
     }
+  };
+
+  /**
+   * Start a revalidation, or join the one already running: a concurrent call
+   * returns the SAME promise, so every caller settles when that fetch settles
+   * and sees the same rejection. The fetcher runs once. After it settles, the
+   * next call starts a new fetch.
+   */
+  const revalidate = (): Promise<void> => {
+    if (disposed || controller.signal.aborted) return Promise.resolve();
+    if (inFlight) return inFlight;
+    let resolve!: () => void;
+    let reject!: (err: unknown) => void;
+    const current = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    // Published before the fetcher is called, so a revalidate() issued from
+    // inside the fetcher joins this request instead of starting another.
+    inFlight = current;
+    // Cleared before the callers resume, so a caller that revalidates again as
+    // soon as it wakes starts a fresh fetch. The identity check keeps a settle
+    // from clearing any request but its own.
+    const release = () => {
+      if (inFlight === current) inFlight = null;
+    };
+    run().then(
+      () => {
+        release();
+        resolve();
+      },
+      (err) => {
+        release();
+        reject(err);
+      },
+    );
+    return current;
   };
 
   // Initial fetch: fire-and-forget, so attach .catch to surface fetcher
