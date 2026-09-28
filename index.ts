@@ -45,7 +45,7 @@ export * from "./src/core/rendering/dynamic";
 export * from "./src/core/rendering/each";
 export * from "./src/core/rendering/fragment";
 // htm — tagged template literal for HTML-like syntax (no compiler)
-export { html } from "./src/core/rendering/htm";
+export { __renderParsedTemplate, html } from "./src/core/rendering/htm";
 // HTML tag factories (including SVG with correct namespace)
 export * from "./src/core/rendering/html";
 export * from "./src/core/rendering/keepAlive";

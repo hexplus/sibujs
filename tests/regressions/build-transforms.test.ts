@@ -276,9 +276,11 @@ describe("template compiler parity", () => {
     expectParity(tpl("Hello"));
   });
 
-  it("regression: a top-level ${expr} is left to the runtime", () => {
+  it("regression: a top-level ${expr} compiles through the runtime executor, with identical output", () => {
     const result = compileHtmlTemplates(tpl("${s.x}"));
-    expect(result.compiledCount).toBe(0);
+    expect(result.compiledCount).toBe(1);
+    expectParity(tpl("${s.x}"), () => ({ x: "text" }));
+    expectParity(tpl("<b>a</b>${s.x}"), () => ({ x: "text" }));
   });
 
   it("regression: regex and comments inside ${} do not break expression scanning", () => {

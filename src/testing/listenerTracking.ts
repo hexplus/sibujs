@@ -90,8 +90,12 @@ export function enableListenerTracking(): void {
     if (opts?.signal) {
       const signal = opts.signal;
       const onAbort = () => drop(this, type, entry);
-      add.call(signal, "abort", onAbort, { once: true });
-      releases.push(() => remove.call(signal, "abort", onAbort));
+      // The signal's OWN methods, not this realm's captured ones: an
+      // AbortSignal from another realm (an iframe's controller, or Node's under
+      // Vitest 4's jsdom environment) fails this realm's EventTarget brand
+      // check, which turned tracking into a TypeError from addEventListener.
+      signal.addEventListener("abort", onAbort, { once: true });
+      releases.push(() => signal.removeEventListener("abort", onAbort));
     }
     if (releases.length > 0) {
       entry.release = () => {

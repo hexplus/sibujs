@@ -123,6 +123,12 @@ jobs:
                 # "22 latest" does not verify the floor, and an unverified floor is
                 # the gap this matrix exists to close. `22` and `24` track the
                 # current release lines.
+                #
+                # The test toolchain must install and start on the floor too.
+                # `vite` is a direct devDependency held at ^6 for that reason:
+                # Vitest 4 accepts Vite 6, 7 or 8, but Vite 7 and 8 (and Vite 8's
+                # rolldown) require Node ^20.19.0 || >=22.12.0, and on 22.3.0
+                # Vitest failed at startup looking for a rolldown native binding.
                 node: ["22.3.0", 22, 24]
         steps:
             - uses: actions/checkout@v4

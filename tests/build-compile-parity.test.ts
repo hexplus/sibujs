@@ -142,17 +142,17 @@ const CASES: Case[] = [
   { name: "multiple roots are wrapped", src: mod("html`<li>a</li><li>b</li>`"), expect: "compiled" },
   { name: "text around a single element root", src: mod("html`\n  <div>x</div>\n`"), expect: "compiled" },
   {
-    name: "top-level expression is left to the runtime",
+    name: "top-level expression compiles through the runtime executor",
     src: mod("html`${s.x}`"),
     scope: () => ({ x: "text" }),
-    expect: "skipped",
+    expect: "compiled",
   },
   {
-    name: "top-level function expression is left to the runtime",
+    name: "top-level function expression compiles through the runtime executor",
     src: mod("html`<b>a</b>${() => s.count()}`"),
     scope: counterScope,
     update: (s) => s.setCount(5),
-    expect: "skipped",
+    expect: "compiled",
   },
   {
     name: "regex, comments and nested templates inside ${}",
@@ -220,10 +220,10 @@ const CASES: Case[] = [
     expect: "compiled",
   },
   {
-    name: "dynamic value is left to the runtime (content-attribute commit)",
+    name: "dynamic value compiles through the runtime executor (content-attribute commit)",
     src: mod("html`<input value=${s.v}>`"),
     scope: () => ({ v: "typed" }),
-    expect: "skipped",
+    expect: "compiled",
   },
   {
     name: "whitespace collapsing around expressions",
@@ -240,6 +240,12 @@ const CASES: Case[] = [
     name: "attribute-position expression behaves like the runtime",
     src: mod('html`<div ${s.x} class="a">b</div>`'),
     scope: () => ({ x: "y" }),
+    expect: "compiled",
+  },
+  {
+    name: "<link> compiles through the runtime executor (stylesheet rule on static rel)",
+    src: mod('html`<head><link href=${s.u} rel="stylesheet"><link rel=${s.r} href="/static.css"></head>`'),
+    scope: () => ({ u: "https://attacker.example/x.css", r: "stylesheet" }),
     expect: "compiled",
   },
   {
@@ -289,12 +295,28 @@ describe("compileHtmlTemplates execution parity with the runtime parser", () => 
     });
   }
 
-  it("a template the runtime rejects is not compiled, so it still throws at render time", () => {
+  it("a template the runtime rejects compiles to the same error, thrown at render time on every call", () => {
     const src = mod("html`<script>${s.code}</script>`");
     const result = compileHtmlTemplates(src);
-    expect(result.compiledCount).toBe(0);
-    expect(() => runModule<(s: Scope) => Element>(src)({ code: "x" })).toThrow(/raw-text/);
-    expect(() => runModule<(s: Scope) => Element>(result.code ?? src)({ code: "x" })).toThrow(/raw-text/);
+    expect(result.compiledCount).toBe(1);
+    const runtime = runModule<(s: Scope) => Element>(src);
+    const compiled = runModule<(s: Scope) => Element>(result.code ?? src);
+    let runtimeError = "";
+    let compiledError = "";
+    try {
+      runtime({ code: "x" });
+    } catch (e) {
+      runtimeError = (e as Error).message;
+    }
+    for (let i = 0; i < 2; i++) {
+      try {
+        compiled({ code: "x" });
+      } catch (e) {
+        compiledError = (e as Error).message;
+      }
+      expect(compiledError).toBe(runtimeError);
+    }
+    expect(runtimeError).toMatch(/raw-text/);
   });
 
   it("compiled output renders the same DOM on every call (no shared nodes)", () => {

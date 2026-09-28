@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { div } from "../src/core/rendering/html";
 import { sanitizeCSSValue } from "../src/utils/sanitize";
 
@@ -28,7 +28,7 @@ import { sanitizeCSSValue } from "../src/utils/sanitize";
 
 const CAP = 100;
 
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

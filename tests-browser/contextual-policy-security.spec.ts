@@ -36,6 +36,9 @@ interface Api {
   staticScriptSource(): boolean;
   probeRuns(): number;
   svgScriptRefused(): boolean;
+  runtimeStylesheets(): number;
+  staticStylesheet(): boolean;
+  probeStyleApplied(): string;
   urlCases(inputs: string[]): Array<{ input: string; kept: string | null; scheme: string | null }>;
 }
 
@@ -103,6 +106,22 @@ test("a runtime <script src> is never requested; the static control is", async (
   await page.waitForFunction(() => ((window as unknown as { __probeRuns?: number }).__probeRuns ?? 0) >= 1);
   expect(await api(page, "probeRuns")).toBe(1);
   expect(runtimeRequests(), "the runtime-chosen script was requested").toBe(0);
+});
+
+test("a runtime-chosen stylesheet is never requested; the static control is applied", async ({ page }) => {
+  // The preload of the reactive-flip case may legitimately fetch the file (a
+  // preload never applies it); what must never happen is it becoming a
+  // stylesheet. So requests are counted per variant, and the flip is judged by
+  // the DOM plus the applied style.
+  const plainRequests = await protect(page, "**/contextual-policy-probe.css?runtime");
+  expect(await api(page, "runtimeStylesheets"), "a runtime href was left on a stylesheet link").toBe(0);
+  expect(await api(page, "probeStyleApplied"), "runtime CSS was applied").toBe("");
+
+  await api(page, "staticStylesheet");
+  await page.waitForFunction(
+    () => getComputedStyle(document.documentElement).getPropertyValue("--contextual-probe").trim() === "applied",
+  );
+  expect(plainRequests(), "a runtime stylesheet URL was requested").toBe(0);
 });
 
 test("svgElement refuses an SVG <script>", async ({ page }) => {

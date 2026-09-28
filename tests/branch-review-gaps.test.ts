@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { swipe } from "../src/browser/swipe";
 import { urlState } from "../src/browser/urlState";
 import { setRuntimeErrorHandler } from "../src/core/errors";
@@ -24,7 +24,7 @@ import { hotkey } from "../src/ui/a11y";
 import { TransitionGroup } from "../src/ui/TransitionGroup";
 import { tooltip } from "../src/widgets/Tooltip";
 
-let handler: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);
@@ -1141,7 +1141,20 @@ describe("createHttpMock in jsdom", () => {
     // Cross-realm: the body may be this realm's FormData, the runtime's own
     // FormData/Blob, or text — duck-typed rather than instanceof.
     if (body && typeof (body as FormData).get === "function") return String((body as FormData).get(name) ?? "");
-    const text = body && typeof (body as Blob).text === "function" ? await (body as Blob).text() : String(body ?? "");
+    // jsdom's Blob (which Vitest 4's jsdom environment hands back) has no
+    // `.text()`; FileReader reads a Blob of either realm.
+    const readBlob = (blob: Blob): Promise<string> =>
+      typeof blob.text === "function"
+        ? blob.text()
+        : new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result));
+            reader.onerror = () => reject(reader.error);
+            reader.readAsText(blob);
+          });
+    const isBlob =
+      body !== null && typeof body === "object" && Object.prototype.toString.call(body) === "[object Blob]";
+    const text = isBlob ? await readBlob(body as Blob) : String(body ?? "");
     // What must never happen: the object stringified into the body.
     expect(text).not.toContain("[object ");
     return text;

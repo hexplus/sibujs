@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { imageLoader } from "../src/browser/imageLoader";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { effect } from "../src/core/signals/effect";
@@ -15,8 +15,8 @@ const settle = async () => {
   }
 };
 
-let handler: ReturnType<typeof vi.fn>;
-let unhandled: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
+let unhandled: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);

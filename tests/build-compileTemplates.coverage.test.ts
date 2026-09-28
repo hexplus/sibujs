@@ -104,8 +104,11 @@ describe("compileHtmlTemplates - coverage edge cases", () => {
     expect(staticOnly).not.toContain("sibujs/ui");
     const dynamic = compile("const a = html`<p title=${t}>${c}</p>`;").code ?? "";
     expect(dynamic).toContain(
-      'import { Fragment as __sibujs$Fragment, registerDisposer as __sibujs$registerDisposer } from "sibujs";',
+      'import { Fragment as __sibujs$Fragment, dispose as __sibujs$dispose, registerDisposer as __sibujs$registerDisposer } from "sibujs";',
     );
+    const executed = compile("const a = html`${t}`;").code ?? "";
+    expect(executed).toContain('import { __renderParsedTemplate as __sibujs$run } from "sibujs";');
+    expect(executed).not.toContain("sibujs/ui");
     expect(dynamic).toContain('import { bindAttrs as __sibujs$bindAttrs } from "sibujs/ui";');
   });
 

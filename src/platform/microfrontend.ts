@@ -1,6 +1,7 @@
 import { reportError } from "../core/errors";
 import { registerDisposer, replaceChildrenSafely } from "../core/rendering/dispose";
 import { div, span } from "../core/rendering/html";
+import type { Component } from "../core/rendering/types";
 import { signal } from "../core/signals/signal";
 import { globalSingleton } from "../utils/globalSingleton";
 
@@ -189,8 +190,12 @@ export function loadRemoteModule(
 // defineRemoteComponent
 // --------------------------------------------------------------------------
 
-type Component = () => HTMLElement;
-type RemoteLoader = () => Promise<{ default: Component }>;
+/**
+ * Loads the remote module whose `default` export is the component. Its root may
+ * be any `Element` — an SVG root included — using the public `Component` type
+ * rather than a private `() => HTMLElement` that forced a cast.
+ */
+type RemoteLoader<R extends Element = HTMLElement> = () => Promise<{ default: Component<void, R> }>;
 
 /**
  * Register a remote component that loads on demand.
@@ -218,10 +223,16 @@ type RemoteLoader = () => Promise<{ default: Component }>;
  * document.body.appendChild(RemoteHeader());
  * ```
  */
-export function defineRemoteComponent(name: string, loader: RemoteLoader): Component {
-  let cached: Component | null = null;
+export function defineRemoteComponent<R extends Element = HTMLElement>(
+  name: string,
+  loader: RemoteLoader<R>,
+): Component<void, R | HTMLElement> {
+  // `R | HTMLElement`: until the module has loaded, a call returns the
+  // placeholder container (an HTMLElement); afterwards it returns the remote
+  // component's own root. The default `R` keeps the previous `() => HTMLElement`.
+  let cached: Component<void, R> | null = null;
 
-  return function RemoteComponent(): HTMLElement {
+  return function RemoteComponent(): R | HTMLElement {
     // Fast path: module already loaded
     if (cached) {
       return cached();

@@ -158,6 +158,17 @@ function attachBranch(
   return { node, owned };
 }
 
+/**
+ * Retire a branch node: disposed when the directive BUILT it (a factory call or
+ * a text node), detached either way. A bare element the caller handed in is
+ * never disposed — its bindings belong to whoever created it. Shared by the
+ * branch switch and the anchor teardown of `when` and `match`.
+ */
+function releaseBranchNode(node: Node, owned: boolean): void {
+  if (owned) dispose(node);
+  node.parentNode?.removeChild(node);
+}
+
 export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: NodeChild): Comment {
   const anchor = document.createComment("when");
   let currentNode: Node | null = null;
@@ -206,8 +217,7 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
     // updating, with nothing logged. Detaching is enough; teardown belongs to
     // whoever created it.
     if (currentNode?.parentNode) {
-      if (currentNodeOwned) dispose(currentNode);
-      currentNode.parentNode.removeChild(currentNode);
+      releaseBranchNode(currentNode, currentNodeOwned);
       currentNode = null;
     }
 
@@ -233,6 +243,15 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   registerDisposer(anchor, () => {
     disposed = true;
     stopBinding();
+    // The branch is a SIBLING of the anchor, not a child, so no ancestor
+    // `dispose()` walk and no removal of the anchor alone reaches it. The
+    // anchor owns the range it renders into — as `each`, `KeepAlive`, `Portal`
+    // and every router outlet already treat theirs — so its teardown releases
+    // the branch. Without this, unmounting a `when()` root, or switching away
+    // from an outer `when()` / `match()` whose branch was this one, left the
+    // branch on the page with its bindings still live.
+    if (currentNode) releaseBranchNode(currentNode, currentNodeOwned);
+    currentNode = null;
   });
 
   if (!initialized) {
@@ -321,8 +340,7 @@ export function match<T extends string | number>(
     const focused = currentNode ? captureFocusWithin([currentNode]) : null;
 
     if (currentNode?.parentNode) {
-      if (currentNodeOwned) dispose(currentNode);
-      currentNode.parentNode.removeChild(currentNode);
+      releaseBranchNode(currentNode, currentNodeOwned);
       currentNode = null;
     }
 
@@ -346,6 +364,9 @@ export function match<T extends string | number>(
   registerDisposer(anchor, () => {
     disposed = true;
     stopBinding();
+    // The matched case is a sibling the anchor owns; see `when`.
+    if (currentNode) releaseBranchNode(currentNode, currentNodeOwned);
+    currentNode = null;
   });
 
   if (!initialized) {

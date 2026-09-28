@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { effect } from "../src/core/signals/effect";
 import { form } from "../src/ui/form";
@@ -8,8 +8,8 @@ import { TransitionGroup } from "../src/ui/TransitionGroup";
 
 const macrotask = () => new Promise((r) => setTimeout(r, 0));
 
-let handler: ReturnType<typeof vi.fn>;
-let unhandled: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
+let unhandled: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);
@@ -236,7 +236,11 @@ describe("TransitionGroup callback failures", () => {
     group.track([c, d]);
     await macrotask();
     expect(entered).toEqual(["c", "d"]);
-    expect(handler.mock.calls.map((call) => call[0].message).sort()).toEqual(["enter c", "leave a", "leave b"]);
+    expect(handler.mock.calls.map((call) => (call[0] as Error).message).sort()).toEqual([
+      "enter c",
+      "leave a",
+      "leave b",
+    ]);
     expect(unhandled).not.toHaveBeenCalled();
 
     // Reconciliation completed despite the failures: d is tracked, a is not.

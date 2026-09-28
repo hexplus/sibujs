@@ -520,17 +520,29 @@ replaces the tree with the client's. Server output is a security boundary of its
 own, so where the two differ, the server is the stricter one, never the other way
 round.
 
-| Attribute | Client, static source | Client, runtime value | SSR (`renderToString` = `renderToStream`) |
-|---|---|---|---|
-| `href` / `src` / `action` / … | kept | allowlist; refused → omitted | allowlist; refused → omitted |
-| `srcset` | kept | per-candidate parser | per-candidate parser |
-| `style` | kept | per-declaration filter | per-declaration filter |
-| `srcdoc` | refused | refused | omitted |
-| `on*` string | kept | refused | omitted |
-| `<meta>` refresh | contextual rule | contextual rule (+ reactive rule) | contextual rule (element dropped) |
-| `<script>` `src`/`type`/… | kept | refused | `<script>` never serialized |
-| SVG `xlink:href` | kept | allowlist, XLink namespace | SVG is emitted as text only |
-| SVG `attributeName` | contextual rule | contextual rule | SVG is emitted as text only |
+The complete matrix. `renderToString` and `renderToStream` share one serializer
+and are asserted byte-identical; hydration is REPLACEMENT hydration, so the live
+tree after it is the client tree — the first two columns — never the server's.
+
+| Feature | Client, static source | Client, runtime value | SSR (string = stream) | Hydration |
+|---|---|---|---|---|
+| `on*` string | kept (developer code) | refused | omitted | client columns |
+| `href` / `src` / `action` / … | kept | allowlist; refused → omitted | allowlist; refused → omitted | client columns |
+| `srcset` | kept | per-candidate parser | per-candidate parser | client columns |
+| `style` | kept | per-declaration filter | per-declaration filter, with or without a DOM | client columns |
+| `srcdoc` | refused | refused | omitted | client columns |
+| `<meta>` refresh | contextual rule | contextual rule (+ reactive rule) | contextual rule (element dropped) | client columns |
+| `<script>` `src`/`type`/… | kept | refused | `<script>` never serialized | client columns |
+| `<link rel=stylesheet>` `href` | kept | refused (stylesheet rule) | serializes the post-policy DOM | client columns |
+| SVG `href` / `xlink:href` | n/a — `html` does not create SVG links | allowlist, XLink namespace | SVG emitted as escaped text only | client columns |
+| SVG `attributeName` | n/a — as above | contextual rule | SVG emitted as escaped text only | client columns |
+
+Every difference in the table is one of two deliberate kinds: static source is
+trusted where runtime data is not (the trust model), and SSR is at least as
+strict as the client because it cannot see provenance. The stylesheet row is the
+one place SSR does not add its own check: the rule is about who chose the
+`href`, which only the writer knows, and every framework writer enforces it
+before the DOM the server serializes is built.
 
 ### Explicit trust-decision APIs
 
@@ -542,6 +554,8 @@ definition:
 |---|---|
 | `Head({ script: [{ src }] })`, `renderToDocument({ scripts })`, `renderRouteToDocument({ scripts })` | The script URL (after the scheme allowlist) |
 | `Head({ base: { href } })` | The base URL every relative URL resolves against |
+| `Head({ link: [{ rel: "stylesheet", href }] })`, `renderToDocument({ links })`, `renderRouteToDocument({ links })` | The stylesheet URL — the explicit API for a runtime-chosen stylesheet |
+| The text of a `style()` element, `customElement({ styles })` | Stylesheet source, applied unsanitized as a stylesheet shipped with the app would be. Runtime CSS belongs in `scopedStyle()` (sanitized) or `style` props (sanitized per declaration) |
 | `trustHTML()` → `renderToDocument({ headExtra })`, `staticTemplate` / `precompile` | Raw HTML, parsed as markup |
 | `loadRemoteModule`, `wasm()` and friends | The module origin — **required** via `allowedOrigins`, or waived with `unsafelyAllowAnyOrigin` |
 | `worker()`, `workerFn()`, `createWorkerPool()` | The function's source. Only a function object is accepted; a string throws a `TypeError` rather than being evaluated |
@@ -596,15 +610,35 @@ which a dangerous combination is written first and detected afterwards.
   `<animateMotion>` / `<animateTransform>` may not target a URL, event-handler or
   nested-document attribute, since `to` / `values` would be written into it
   without passing the URL policy.
+- **Stylesheets** — a runtime-chosen `href` never ends up on a `<link>` whose
+  `rel` contains the `stylesheet` token (`rel` is a token list: ASCII whitespace
+  separated, ASCII case-insensitive, so `alternate StyleSheet` counts and
+  `stylesheets` does not). A well-formed `https:` URL is not a trusted
+  stylesheet: hostile CSS can redress or hide UI, overlay controls, spoof
+  content, load further subresources and leak data through selector side
+  channels. Two writes can complete the state and both are judged before they
+  happen — a runtime `href` on a link whose `rel` already says `stylesheet`, and
+  a `rel` of any origin that says `stylesheet` on a link whose *current* `href`
+  was chosen at runtime — so `html\`<link href=${url} rel="stylesheet">\``, a
+  reactive `preload` → `stylesheet` flip and a reactive `href` swap are all
+  refused, and no stylesheet is ever requested and then withdrawn. Provenance
+  describes the `href` the link holds now, not its history: a runtime `href`
+  that was refused, removed (a binding going to `null`) or replaced by static
+  source no longer counts, so the link is judged by the value that replaced it.
+  The record is set before a runtime `href` is written and settled from the
+  outcome after every `href` commit, so it never under-reports. A runtime `rel`
+  over a *static* `href` is allowed: the developer named that resource. Static
+  source may name a stylesheet; `Head({ link })` is the explicit API for a
+  runtime-chosen one.
 
 Refusal reconciles the slot, as for `on*`: the attribute the write claimed is
 removed, and removal can never create one of these states. The SSR serializer
 additionally drops a `<meta>` whose emitted attributes form a forbidden
 directive, which only DOM built *outside* the framework's writers can reach.
 
-The template compiler leaves every template containing a `<meta>` to the
-runtime, because its emitted `setAttribute` cannot reproduce the static-write
-check.
+The template compiler renders every template containing a `<meta>`, a `<link>`
+or a static `srcdoc` through the runtime's own executor, because its emitted
+`setAttribute` cannot reproduce the static-write check.
 
 ### Dangerous elements: one list
 
@@ -615,6 +649,59 @@ tag name consults it: the tag factories (and `customElement()`), `svgElement()`
 elements whose contents are a program (`<script>`, `<style>`) are likewise one
 predicate, `isCodeTextElement()`, shared by `html\`\``'s interpolation refusal
 and the SSR serializer's stripping.
+
+## Explicit design decisions
+
+### Static inline event handlers stay trusted
+
+`html\`<button onclick="developerCode()">\`` keeps its handler, and this is a
+decision rather than an open limitation. Static `html` template source is
+application source code: the developer who can type an inline handler there can
+equally type `developerCode()` into the module around it, so refusing it would
+remove no injection boundary — it would only break legitimate markup and make
+static template text mean something other than the same HTML in a file.
+
+The boundary that matters is the one the tests pin exhaustively: **an attribute
+containing ANY interpolation is runtime-derived as a whole** and goes through the
+runtime policy, which refuses every `on*` string — `onclick=${v}`,
+`onclick="foo(${v})"`, `ONCLICK="${v}"`, `onerror="a();${v}"`, every handler
+name, every casing, every position. Fragments are never judged separately.
+
+### CSP considerations
+
+A Content Security Policy is a second, independent layer, not a substitute for
+the framework rules above — every runtime path is refused whether or not a CSP
+is present.
+
+- **Inline handlers.** A static inline handler is inline script: a CSP without
+  `'unsafe-inline'` in `script-src` blocks it. Applications that want a strict
+  CSP should attach listeners with `on: { click: fn }` / `on:click=${fn}`
+  (`addEventListener`, which CSP does not restrict) instead of static `on*`
+  attributes.
+- **Stylesheets.** `style-src 'self'` limits which stylesheets load at all,
+  including ones an application names through the explicit APIs; it is the
+  natural complement to the stylesheet rule.
+- **Inline styles.** `style` attributes are affected by `style-src
+  'unsafe-inline'` / `'unsafe-hashes'` in engines that enforce it for
+  attributes; the framework's per-declaration filter applies regardless.
+
+## Implementation limitations (not security gaps)
+
+- **SVG and MathML are not serialized by SSR.** A non-HTML element is emitted as
+  its escaped text content: no tag, no attribute, no namespace. The graphic is
+  missing from the server HTML — and text inside it (an SVG `<text>`, even the
+  body of an SVG `<script>`) appears as plain text — until hydration replaces the
+  tree with the client's, which builds real SVG in the SVG namespace under the
+  client policy. Security-wise the server output is strictly weaker than the
+  client: no SVG attribute, `href`, `attributeName`, `on*` or element can reach
+  it, and the text is escaped. `tests/security-svg-ssr.test.ts` pins this.
+- **The no-DOM style parser is stricter than CSSOM about malformed input.**
+  Without a DOM, a style attribute is split by a structural declaration parser
+  and each declaration receives the DOM path's verdict. Input it cannot read
+  unambiguously (an unterminated string or comment, unbalanced brackets, braces)
+  drops the whole attribute rather than guessing, and values are not normalized
+  the way CSSOM normalizes them (`red` is not rewritten), which changes
+  formatting but never a verdict.
 
 ## Deliberately raw paths
 

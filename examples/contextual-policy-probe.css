@@ -1,0 +1,6 @@
+/* Loaded only by examples/contextual-policy-security-browser.html. When this
+   stylesheet is APPLIED the probe property is set, so the spec can tell an
+   applied stylesheet from one that was never requested. */
+:root {
+  --contextual-probe: applied;
+}

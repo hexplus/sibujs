@@ -1,5 +1,5 @@
 import "fake-indexeddb/auto";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { offlineStore, type SyncAdapter } from "../src/data/offlineStore";
 
 interface Todo extends Record<string, unknown> {
@@ -65,7 +65,7 @@ describe("offlineStore — change coalescing", () => {
 });
 
 describe("offlineStore — rejected push", () => {
-  let warn: ReturnType<typeof vi.spyOn>;
+  let warn: MockInstance<(...args: unknown[]) => void>;
   beforeEach(() => {
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });

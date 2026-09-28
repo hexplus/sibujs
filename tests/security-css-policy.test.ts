@@ -25,8 +25,10 @@ import { describe, expect, it } from "vitest";
 import { html } from "../src/core/rendering/htm";
 import { div } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
+import { createTheme } from "../src/ecosystem/ui/componentAdapter";
 import { collectStream, renderToStream, renderToString } from "../src/platform/ssr";
 import { bindAttrs } from "../src/ui/reactiveAttr";
+import { removeScopedStyle, scopedStyle } from "../src/ui/scopedStyle";
 import { sanitizeCSSDeclaration, sanitizeCSSValue, sanitizeStyleAttribute } from "../src/utils/sanitize";
 
 /** [property, value] pairs that must never reach an element. */
@@ -199,5 +201,68 @@ describe("CSS policy — property-qualified rules compare the EXACT property nam
     }
     // An ordinary filter is not a progid filter.
     expect(sanitizeCSSDeclaration("filter", "blur(2px)")).toBe("blur(2px)");
+  });
+});
+
+describe("scopedStyle() stylesheet text — the canonical CSS constructs, one decoder", () => {
+  const cssOf = (scope: string) => document.head.querySelector(`style[data-sibu-scope="${scope}"]`)?.textContent ?? "";
+
+  const BYPASSES: [string, string][] = [
+    ["@import without a trailing semicolon", '.a { color: red; }\n@import "https://attacker.example/x.css"'],
+    ["@import before a block, no semicolon", '@import "https://attacker.example/x.css" .a { color: red; }'],
+    ["image-set() string URL", '.a { background-image: image-set("https://attacker.example/a.png" 1x); }'],
+    ["-webkit-image-set()", ".a { background-image: -webkit-image-set(url(https://attacker.example/a.png) 1x); }"],
+    ["image() string URL", '.a { background-image: image("https://attacker.example/a.png"); }'],
+    ["src() string URL", '.a { background-image: src("https://attacker.example/a.png"); }'],
+    // A CSS escape: `\` + newline is a line continuation; `\r` (backslash, r)
+    // is the letter r. Both spell `url(` to a CSS parser.
+    ["escaped-newline url(", ".a { background: u\\\nrl(https://attacker.example/a); }"],
+    ["simple-escape url(", ".a { background: u\\rl(https://attacker.example/a); }"],
+    [
+      "nested url() inside image-set",
+      ".a { background: image-set(url(https://attacker.example/a) 1x, url(https://attacker.example/b) 2x); }",
+    ],
+  ];
+
+  for (const [label, css] of BYPASSES) {
+    it(`PoC: strips ${label}`, () => {
+      const { scope } = scopedStyle(css);
+      expect(cssOf(scope)).not.toContain("attacker.example");
+      removeScopedStyle(scope);
+    });
+  }
+
+  it("keeps property names that merely END in a blocked one", () => {
+    const { scope } = scopedStyle(".a { scroll-behavior: smooth; overscroll-behavior: contain; color: red; }");
+    const css = cssOf(scope);
+    expect(css).toContain("scroll-behavior: smooth");
+    expect(css).toContain("overscroll-behavior: contain");
+    removeScopedStyle(scope);
+  });
+
+  it("still strips the real property-qualified constructs", () => {
+    const { scope } = scopedStyle(".a { behavior: url(x.htc); -moz-binding: url(x.xml#y); color: red; }");
+    const css = cssOf(scope);
+    expect(css).not.toMatch(/(^|[;{\s])behavior\s*:/);
+    expect(css).not.toContain("x.xml");
+    expect(css).toContain("color: red");
+    removeScopedStyle(scope);
+  });
+});
+
+describe("theme variables — the inline-style policy applies to every inline writer", () => {
+  it("PoC: a blocked theme variable is never written; safe ones are, and updates are judged too", () => {
+    const theme = createTheme({
+      prefix: "t",
+      variables: { "--bg": "url(https://attacker.example/leak)", "--fg": "#123456" },
+    });
+    const root = document.createElement("div");
+    const release = theme.applyTo(root);
+    expect(root.style.getPropertyValue("--bg")).toBe("");
+    expect(root.style.getPropertyValue("--fg").trim()).toBe("#123456");
+    theme.setTheme({ variables: { "--fg": "image-set('https://attacker.example/a.png' 1x)", "--ok": "2px" } });
+    expect(root.getAttribute("style") ?? "").not.toContain("attacker.example");
+    expect(root.style.getPropertyValue("--ok").trim()).toBe("2px");
+    release();
   });
 });

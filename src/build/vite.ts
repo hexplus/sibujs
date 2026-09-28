@@ -51,9 +51,11 @@ export interface SibuVitePluginOptions {
    */
   staticOptimize?: boolean;
   /**
-   * Compile `html` tagged templates (imported from sibujs) to direct DOM
-   * construction. Default: true in production builds. A template the compiler
-   * cannot reproduce exactly is left to the runtime parser.
+   * Compile `html` tagged templates (imported from sibujs) at build time.
+   * Default: true in production builds. Most templates become direct DOM
+   * construction; the rest are parsed at build time and rendered by the
+   * runtime's own executor, so no template is parsed in the browser (the sole
+   * exception is a template consisting of one invalid escape sequence).
    */
   compileTemplates?: boolean;
 }

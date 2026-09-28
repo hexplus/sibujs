@@ -3,71 +3,11 @@
 // ============================================================================
 
 import { globalSingleton } from "../utils/globalSingleton";
+import { sanitizeStylesheetText } from "../utils/sanitize";
 
 // Shared via globalSingleton so a duplicated copy of this module doesn't restart
 // at 0 and emit colliding `sibu-s*` scope ids (cross-bundle style collisions).
 const _scope = globalSingleton(Symbol.for("sibujs.scopedStyle.v1"), () => ({ n: 0 }));
-
-/**
- * Decode CSS escape sequences so the sanitizer can catch obfuscated
- * dangerous tokens. An attacker can otherwise hide `url(` as `\75 rl(`
- * or `expression` as `e\78 pression`, bypassing a naive regex.
- *
- * This function decodes:
- *   - Hex escapes `\XXXXXX` (1–6 hex digits, optional trailing whitespace)
- *   - Character escapes `\X` for any non-hex character
- *
- * The output is exact CSS text (with the escapes resolved), which is
- * then matched against the literal attack patterns.
- */
-function decodeCssEscapes(css: string): string {
-  return css.replace(/\\([0-9a-f]{1,6})[ \t\n\r\f]?|\\([^\n])/gi, (_match, hex, ch) => {
-    if (hex) {
-      const code = Number.parseInt(hex, 16);
-      if (Number.isFinite(code) && code > 0 && code <= 0x10ffff) {
-        try {
-          return String.fromCodePoint(code);
-        } catch {
-          return "";
-        }
-      }
-      return "";
-    }
-    return ch || "";
-  });
-}
-
-/**
- * Sanitize CSS to prevent data exfiltration and other CSS-based attacks.
- * Strips dangerous patterns while preserving normal styling.
- *
- * Strategy: decode CSS escape sequences first so obfuscated tokens
- * (`\75 rl(`, `e\78 pression`, etc.) can't bypass the pattern scan.
- * Then strip the dangerous constructs. The returned CSS is the
- * decoded-and-sanitized form — any legitimate CSS escapes are resolved
- * to their literal characters, which browsers accept just fine.
- */
-function sanitizeCSS(css: string): string {
-  let sanitized = decodeCssEscapes(css);
-
-  // Remove @import rules (can load external stylesheets for data exfiltration)
-  sanitized = sanitized.replace(/@import\s+[^;]+;/gi, "/* @import removed */");
-
-  // Remove url() values — handles quoted content, escaped parens, and whitespace.
-  // Matches: url(...), url("..."), url('...'), url(\n...\n)
-  sanitized = sanitized.replace(/url\s*\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)/gi, "/* url() removed */");
-
-  // Remove expression() (IE legacy, can execute JS) — same robust pattern
-  sanitized = sanitized.replace(/expression\s*\(\s*(?:"[^"]*"|'[^']*'|[^)]*)\s*\)/gi, "/* expression() removed */");
-
-  // Remove -moz-binding (Firefox legacy, can execute JS)
-  sanitized = sanitized.replace(/-moz-binding\s*:[^;]+;/gi, "/* -moz-binding removed */");
-
-  // Remove behavior (IE legacy, can execute HTC files)
-  sanitized = sanitized.replace(/behavior\s*:[^;]+;/gi, "/* behavior removed */");
-
-  return sanitized;
-}
 
 /**
  * Find where the FIRST compound selector ends.
@@ -326,16 +266,19 @@ function scopeStylesheet(css: string, attr: string): string {
  * and prefixing all selectors.
  * Returns the scope attribute name and injects the CSS into the document.
  *
- * CSS is sanitized to remove dangerous patterns (`url()`, `@import`,
- * `expression()`, `-moz-binding`, `behavior`). If you need `url()` for
- * background images, use inline styles via the `style` prop instead.
+ * CSS is sanitized by the framework's stylesheet-text policy
+ * (`sanitizeStylesheetText`): `url()`, `image-set()`, `image()`, `src()`,
+ * `expression()`, `@import`, `behavior`, `-moz-binding` and `progid:` filters
+ * are removed. For a content image use an `<img>`; for a decorative one, a
+ * stylesheet you ship.
  */
 export function scopedStyle(css: string): { scope: string; attr: string } {
   const id = `sibu-s${_scope.n++}`;
   const attr = `data-${id}`;
 
-  // Sanitize CSS to prevent data exfiltration attacks
-  const safeCss = sanitizeCSS(css);
+  // The canonical stylesheet-text policy (utils/sanitize). This module used to
+  // carry its own copy, which had drifted from the inline-style policy.
+  const safeCss = sanitizeStylesheetText(css);
 
   // Rewrite every selector into a ROOT-ANCHORED pair. See `scopeSelector`.
   const scopedCSS = scopeStylesheet(safeCss, attr);

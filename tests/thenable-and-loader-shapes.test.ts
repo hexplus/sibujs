@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { div } from "../src/core/rendering/html";
 import { lazyIsland, mountIslands, registerIsland, unregisterIsland } from "../src/platform/islands";
 import { Suspense } from "../src/plugins/router";
@@ -27,8 +27,8 @@ const flush = async () => {
   await new Promise((r) => setTimeout(r, 0));
 };
 
-let warn: ReturnType<typeof vi.spyOn>;
-let error: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
+let error: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

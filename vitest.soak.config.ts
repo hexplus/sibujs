@@ -27,7 +27,10 @@ export default defineConfig({
     // entries, router state). Parallel workers would interleave and make the
     // baselines meaningless.
     fileParallelism: false,
+    // One fork, shared by every soak file: Vitest 4's spelling of the former
+    // `poolOptions.forks.singleFork` (removed in v4).
     pool: "forks",
-    poolOptions: { forks: { singleFork: true } },
+    maxWorkers: 1,
+    isolate: false,
   },
 });

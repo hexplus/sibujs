@@ -180,6 +180,16 @@ function applyMetaEntry(
 interface HeadProps {
   title?: string | (() => string);
   meta?: Record<string, string | (() => string)>[];
+  /**
+   * `<link>` elements to add to `<head>`.
+   *
+   * TRUST BOUNDARY for stylesheets: `{ rel: "stylesheet", href }` is the
+   * framework's explicit API for a stylesheet whose URL is a runtime value.
+   * The generic writers refuse to let a runtime `href` become an applied
+   * stylesheet at all (see `utils/elementPolicy.ts`), because a well-formed
+   * URL is not trusted CSS. Naming it here is the trust decision: first-party
+   * or pinned URLs only, and a CSP `style-src` as the second layer.
+   */
   link?: Record<string, string>[];
   /**
    * External scripts to add to `<head>`.

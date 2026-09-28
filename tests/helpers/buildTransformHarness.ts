@@ -14,9 +14,9 @@
  */
 
 import { context } from "../../src/core/rendering/context";
-import { registerDisposer } from "../../src/core/rendering/dispose";
+import { dispose, registerDisposer } from "../../src/core/rendering/dispose";
 import { Fragment } from "../../src/core/rendering/fragment";
-import { html as runtimeHtml } from "../../src/core/rendering/htm";
+import { __renderParsedTemplate, html as runtimeHtml } from "../../src/core/rendering/htm";
 import * as tags from "../../src/core/rendering/html";
 import { SVG_NS, tagFactory } from "../../src/core/rendering/tagFactory";
 import { signal } from "../../src/core/signals/signal";
@@ -27,7 +27,18 @@ import { bindAttrs } from "../../src/ui/reactiveAttr";
 export const MODULES: Record<string, Record<string, unknown>> = {
   // `html` is exported from the root twice (the `<html>` tag factory via the
   // wildcard, the template tag explicitly); the explicit export wins.
-  sibujs: { ...tags, html: runtimeHtml, Fragment, registerDisposer, SVG_NS, tagFactory, signal, context },
+  sibujs: {
+    ...tags,
+    html: runtimeHtml,
+    __renderParsedTemplate,
+    Fragment,
+    dispose,
+    registerDisposer,
+    SVG_NS,
+    tagFactory,
+    signal,
+    context,
+  },
   "sibujs/ui": { bindAttrs },
   "sibujs/performance": { staticTemplate },
 };

@@ -7,12 +7,24 @@ import { injectPureAnnotations } from "./sourceScan";
 
 export interface SibuWebpackPluginOptions {
   /**
-   * Accepted for API compatibility; the plugin itself no longer injects a
-   * loader. Webpack loaders must be resolvable modules, and the rule this
-   * plugin used to push named a loader that does not exist
+   * NOT applied by the plugin — pure annotations under webpack need a loader
+   * rule, and webpack loaders must be resolvable module files. Setting this to
+   * `true` logs how to add the one-line loader instead of silently doing
+   * nothing:
+   *
+   * ```js
+   * // sibu-pure-loader.cjs
+   * module.exports = require("sibujs/build").createPureAnnotationsLoader();
+   *
+   * // webpack.config.js
+   * module: {
+   *   rules: [{ test: /\.[cm]?[jt]sx?$/, exclude: /node_modules/, use: "./sibu-pure-loader.cjs" }],
+   * }
+   * ```
+   *
+   * The rule this plugin used to push named a loader that does not exist
    * (`__sibu_inline_loader__`), which failed every build with the default
-   * options. To get pure annotations, reference a loader file that returns
-   * `createPureAnnotationsLoader()(source)`.
+   * options; the option is kept so existing configs keep compiling.
    */
   pureAnnotations?: boolean;
   /**
@@ -73,6 +85,15 @@ export function sibuWebpackPlugin(options: SibuWebpackPluginOptions = {}): {
     name: "SibuWebpackPlugin",
 
     apply(compiler: WebpackCompiler): void {
+      // An option that silently does nothing is a bug report waiting to
+      // happen: say so, and say what to do instead.
+      if (options.pureAnnotations === true) {
+        console.warn(
+          "[SibuWebpackPlugin] `pureAnnotations` is not applied by the plugin: webpack needs a loader file. " +
+            'Create sibu-pure-loader.cjs containing `module.exports = require("sibujs/build").createPureAnnotationsLoader();` ' +
+            'and add a module rule `{ test: /\\.[cm]?[jt]sx?$/, exclude: /node_modules/, use: "./sibu-pure-loader.cjs" }`.',
+        );
+      }
       // Inject global defines via webpack's DefinePlugin-compatible mechanism
       compiler.hooks?.compilation?.tap("SibuWebpackPlugin", (compilation: unknown) => {
         // Register define expressions for dead code elimination

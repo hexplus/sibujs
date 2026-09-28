@@ -512,7 +512,32 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): Eleme
     tmpl = parseTemplate(strings);
     cache.set(strings, tmpl);
   }
+  return renderTemplate(tmpl, values);
+}
 
+/**
+ * Render a template the build-time compiler has ALREADY PARSED. Internal: the
+ * entry point compiled `html` templates call, not an API for applications.
+ *
+ * The compiler emits most templates as straight-line DOM code. Some it cannot
+ * reproduce exactly — an expression on `value` / `checked`, a top-level
+ * `${expr}`, a `<meta>`, a static `srcdoc` — and those used to be left to this
+ * module's parser at runtime. Passing the tree the compiler's line-for-line
+ * port of that parser produced to the runtime's own executor compiles them too,
+ * with output identical to the runtime BY CONSTRUCTION: it is the runtime.
+ *
+ * TRUST BOUNDARY: `tree` is template SOURCE. Its tag names and static
+ * attributes are treated exactly like text typed into an `html` template, so it
+ * must only ever be a constant the compiler emitted — never data built at
+ * runtime. Interpolated `values` keep the runtime policy.
+ *
+ * @internal
+ */
+export function __renderParsedTemplate(tree: readonly unknown[], values: unknown[]): Element {
+  return renderTemplate(tree as TmplChild[], values);
+}
+
+function renderTemplate(tmpl: TmplChild[], values: unknown[]): Element {
   // Fast path: single root element (most common case)
   if (tmpl.length === 1 && tmpl[0].t === 0) {
     return executeElement(tmpl[0].el, values);
