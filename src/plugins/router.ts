@@ -1,7 +1,7 @@
 import { devWarn, isDev } from "../core/dev";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
-import type { NodeChildren } from "../core/rendering/types";
+import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track, untracked } from "../reactivity/track";
@@ -125,7 +125,12 @@ function isPathnameAncestor(target: string, current: string): boolean {
 // TYPES & INTERFACES
 // ============================================================================
 
-export type Component = () => Element;
+/**
+ * A route component. An alias of the public `Component` (props-less, any
+ * `Element` root), kept under this name so existing imports of the router's
+ * `Component` continue to work.
+ */
+export type Component = PublicComponent<void, Element>;
 export type AsyncComponent = () => Promise<Element>;
 export type LazyComponent = () => Promise<{ default: Component }>;
 export type Params = Record<string, string>;

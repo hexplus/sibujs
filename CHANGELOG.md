@@ -31,6 +31,10 @@ Behaviour that changes for existing code:
   `object`, `embed`, `frame` and `frameset`**, as the tag factories always have.
 - **`worker()`, `workerFn()` and `createWorkerPool()` throw a `TypeError` for
   anything but a function.**
+- **A runtime value can no longer choose an applied stylesheet.**
+  `link({ rel: "stylesheet", href })` and a runtime `href` on any stylesheet
+  link render without `href`. Name the stylesheet in static template source,
+  or load a runtime-chosen one with `Head({ link })`.
 
 ### Security
 
@@ -73,6 +77,57 @@ Behaviour that changes for existing code:
 - **`preloadCritical()`, `preloadImage()` and `imageLoader()` apply the URL
   allowlist.** `RouterLink`'s pass-through attributes use the shared attribute
   writer instead of their own copy of the policy.
+- **Runtime values cannot select an applied stylesheet.** A well-formed
+  `https:` or relative URL passed the URL allowlist and then applied whatever
+  CSS it pointed at. A runtime-chosen `href` now never ends up on a `<link>`
+  whose `rel` contains the `stylesheet` token, whichever of `rel` and `href`
+  arrives first and through any reactive transition (`preload` →
+  `stylesheet`, a swapped `href`); the check runs before the write, so nothing is
+  requested and then withdrawn.
+- **`scopedStyle()` uses the framework's CSS policy.** It carried its own copy
+  that had drifted: an `@import` without a trailing `;`, `image-set()`,
+  `image()`, `src()` and escaped-newline spellings of `url(` all survived, and
+  `scroll-behavior` was stripped as if it were `behavior`.
+- **Theme variables are filtered like every other inline style.**
+  `createTheme()` / `setTheme()` wrote custom-property values without the
+  per-declaration policy, so a `url(…)` value reached the element.
+- **Server rendering without a DOM filters `style` per declaration.** One
+  blocked declaration used to drop the whole attribute, siblings included; the
+  declaration list is now parsed structurally and only the blocked declarations
+  are dropped. Unreadable input (an unterminated string, unbalanced brackets)
+  is still dropped whole.
+
+### Fixed
+
+- **Unmounting a `when()` or `match()` root removes its content.** The branch
+  is rendered as a sibling of the directive's anchor, and only the anchor was
+  removed, so the branch stayed on the page with its bindings still live. The
+  same gap left an inner directive's content behind when an outer `when()` or
+  `match()` switched away from it. The anchor now owns its branch, as `each()`,
+  `KeepAlive`, `Portal` and the router outlets already did.
+- **`formatNumber()` and `formatCurrency()` follow the i18n locale.** Without
+  an explicit `locale` they use the active `setLocale()` locale when the i18n
+  plugin is loaded (request-scoped during SSR), and a formatter called inside a
+  binding re-formats when the locale switches. An explicit `locale` still wins.
+- **`defineRemoteComponent()` accepts any `Element` root.** An SVG-rooted
+  remote component no longer needs a cast; the default types are unchanged. The
+  router's exported `Component` is now an alias of the public `Component`.
+- **Compiled `html` templates match the runtime in the remaining cases:**
+  - every template is compiled — an expression on `value` / `checked`, a
+    top-level `${expr}`, a `<meta>`, a static `srcdoc` and an escape with no
+    cooked value are rendered by the runtime's own executor from a tree parsed
+    at build time, and `${…}` inside `<script>` / `<style>` throws the runtime's
+    error on every call;
+  - a compiled function child is released by `disposeNodeOwn()` on its element,
+    not only by `dispose()`;
+  - the development warning for a non-function `on:event` handler is emitted by
+    compiled code too.
+- **`enableListenerTracking()` accepts an `AbortSignal` from another realm**
+  (an iframe's controller, or the runtime's own in a test environment). It
+  subscribed to the signal through this realm's `EventTarget`, which threw.
+- **`sibuWebpackPlugin({ pureAnnotations: true })` explains itself.** The
+  option was silently ignored; it now logs how to add the one-line loader that
+  applies pure annotations under webpack.
 
 ## [4.7.0] — 2026-09-26
 

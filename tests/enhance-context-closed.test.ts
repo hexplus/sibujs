@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { enhance } from "../src/platform/enhance";
 
 // ---------------------------------------------------------------------------
@@ -22,8 +22,8 @@ import { enhance } from "../src/platform/enhance";
 // must keep working.
 // ---------------------------------------------------------------------------
 
-let warn: ReturnType<typeof vi.spyOn>;
-let error: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
+let error: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

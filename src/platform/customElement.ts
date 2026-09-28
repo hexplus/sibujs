@@ -13,6 +13,7 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 export interface CustomElementOptions {
   shadow?: boolean;
   mode?: "open" | "closed";
+  /** Stylesheet source for the element's shadow root, applied unsanitized — developer CSS, not runtime data. */
   styles?: string;
   observedAttributes?: string[];
   // NOTE: there is deliberately no `extends` option. Customized built-in

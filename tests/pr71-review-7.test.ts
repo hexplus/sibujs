@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { globalStore, type Middleware } from "../src/patterns/globalStore";
 
 type Count = { count: number };
 
-let handler: ReturnType<typeof vi.fn>;
-let unhandled: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
+let unhandled: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);

@@ -43,7 +43,7 @@ const filtered = derived(() =>
 
 ### Compile `html` templates at build time
 
-The SibuJS Vite plugin includes an **optional template compiler** that transforms `html\`...\`` tagged templates into direct tag factory function calls at build time. This eliminates the runtime parser entirely — the result is identical performance to hand-written Props Object code. Compiling HTML templates is optional; the runtime parser works out of the box without any build step.
+The SibuJS Vite plugin includes an **optional template compiler** that compiles `html\`...\`` tagged templates at build time. Most templates become direct DOM construction code; the rest are parsed at build time and handed to the runtime's own executor. Either way the browser never parses a template, and the output is the same DOM the runtime parser builds — same elements, attributes, bindings and security policy. Compiling HTML templates is optional; the runtime parser works out of the box without any build step.
 
 ```ts
 // vite.config.ts
@@ -51,7 +51,7 @@ import { sibuVitePlugin } from "sibujs/build";
 
 export default {
   plugins: [
-    sibuVitePlugin() // compileTemplates enabled by default in production
+    sibuVitePlugin() // compileTemplates is on by default for production builds
   ]
 };
 ```
@@ -65,18 +65,29 @@ const el = html`<div class=${cls}>
 </div>`;
 ```
 
-**After compilation (production build output):**
+**After compilation (production build output, abridged):**
 
 ```ts
-const el = ((v) => div({
-  class: v[0]
-}, [
-  span(v[1]),
-  button({ on: { click: v[2] } }, "Click")
-]))([cls, () => count(), handler]);
+const el = __sibujs$t0((cls), (() => count()), (handler));
+
+function __sibujs$t0(v0, v1, v2) {
+  const e0 = document.createElement("div");
+  __sibujs$attr(e0, "class", v0);          // the runtime's attribute policy
+  e0.appendChild(document.createTextNode(" "));
+  const e1 = document.createElement("span");
+  __sibujs$child(e1, v1);                  // reactive child, owned by <span>
+  e0.appendChild(e1);
+  // …
+  return e0;
+}
 ```
 
-The compiler handles: static/dynamic attributes, event handlers, expression children, nested elements, self-closing/void elements, SVG, and mixed static+dynamic attribute values.
+Expressions stay in place (so source maps stay accurate) and the helpers commit
+values through the same primitives the runtime uses. A template that direct
+code cannot reproduce exactly — an expression on `value` / `checked`, a
+top-level `${expr}`, a `<meta>`, a static `srcdoc` — is emitted as a call to the
+runtime's executor with the tree parsed at build time, so it is still never
+parsed in the browser.
 
 Without the build step, the runtime parser caches results per call site via `WeakMap` — the ~1.5x parsing cost only applies on the first render of each component. Subsequent renders are equally fast regardless of authoring style.
 

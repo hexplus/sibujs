@@ -17,6 +17,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { imageLoader } from "../src/browser/imageLoader";
+import { compileHtmlTemplates } from "../src/build/compileTemplates";
 import { planHtmlTemplates } from "../src/build/templateCompiler";
 import { html } from "../src/core/rendering/htm";
 import { a, button, meta } from "../src/core/rendering/html";
@@ -28,6 +29,7 @@ import { collectStream, renderToStream, renderToString } from "../src/platform/s
 import { bindAttribute, bindDynamic } from "../src/reactivity/bindAttribute";
 import { bindAttrs } from "../src/ui/reactiveAttr";
 import { type MetaRefreshDecision, resolveMetaRefreshPolicy } from "../src/utils/metaRefresh";
+import { runModule } from "./helpers/buildTransformHarness";
 
 const XLINK_NS = "http://www.w3.org/1999/xlink";
 
@@ -388,15 +390,18 @@ describe("srcdoc is refused on every path, static source included", () => {
     expect(html`<iframe srcdoc=${() => "<p>x</p>"}></iframe>`.hasAttribute("srcdoc")).toBe(false);
   });
 
-  it("the template compiler leaves a static-srcdoc template to the runtime", () => {
+  it("the template compiler routes a static-srcdoc template through the runtime executor", () => {
     const code = [
       'import { html } from "sibujs";',
-      'export const a = () => html`<iframe srcdoc="<p>x</p>"></iframe>`;',
-      'export const b = () => html`<div title="t"></div>`;',
+      'export default () => html`<iframe srcdoc="<p>x</p>" title="t"></iframe>`;',
     ].join("\n");
     const plan = planHtmlTemplates(code);
     expect(plan.compiledCount).toBe(1);
-    expect(plan.skippedCount).toBe(1);
+    expect(plan.append).toContain("__renderParsedTemplate");
+    const compiled = compileHtmlTemplates(code).code ?? "";
+    const el = runModule<() => Element>(compiled)();
+    expect(el.hasAttribute("srcdoc")).toBe(false);
+    expect(el.getAttribute("title")).toBe("t");
   });
 });
 
@@ -446,5 +451,38 @@ describe("contextual rules hold across static/runtime combinations", () => {
       }
       expect(svgElement(tag, { attributeName: "opacity" }).getAttribute("attributeName")).toBe("opacity");
     }
+  });
+});
+
+describe("html`` executable attributes — interpolation never crosses the static trust boundary", () => {
+  const value = "doSomething()";
+  it("the cases the static model must never admit", () => {
+    const cases: Element[] = [
+      html`<button onclick=${value}>x</button>`,
+      html`<button onclick="foo(${value})">x</button>`,
+      html`<button ONCLICK="${value}">x</button>`,
+      html`<img onerror="foo(${value})">`,
+      html`<img OnError=${value}>`,
+      html`<body onload="a();${value}"></body>`,
+      html`<svg onload="${value}"></svg>`,
+    ];
+    for (const el of cases) {
+      const names = el.getAttributeNames().filter((n) => /^on/i.test(n));
+      expect(names, el.outerHTML).toEqual([]);
+    }
+  });
+
+  it("every on* name and position: an assembled value with ANY interpolation is refused", () => {
+    const names = ["onclick", "onerror", "onload", "onmouseover", "onfocus", "onanimationstart", "ONCLICK", "OnClick"];
+    for (const name of names) {
+      const whole = html([`<div ${name}=`, "></div>"] as unknown as TemplateStringsArray, value);
+      const prefix = html([`<div ${name}="a(`, ')"></div>'] as unknown as TemplateStringsArray, value);
+      const suffix = html([`<div ${name}="`, ';b()"></div>'] as unknown as TemplateStringsArray, value);
+      for (const el of [whole, prefix, suffix]) expect(el.hasAttribute(name), `${name}: ${el.outerHTML}`).toBe(false);
+    }
+  });
+
+  it("the static half of the boundary is the developer's own code, kept verbatim", () => {
+    expect(html`<img onerror="handleImageError(this)">`.getAttribute("onerror")).toBe("handleImageError(this)");
   });
 });

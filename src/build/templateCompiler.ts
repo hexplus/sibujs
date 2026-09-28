@@ -44,31 +44,40 @@
  *     left to the runtime)
  *   - expression / mixed attribute → `bindAttrs` (sibujs/ui), which commits
  *     through the same `bindAttribute` / `setSafeAttribute` primitives
- *   - `on:event=${fn}`             → `addEventListener` when it is a function
+ *   - `on:event=${fn}`             → `addEventListener` when it is a function,
+ *     and the runtime's development warning when it is not
  *   - function child               → `Fragment([fn])`, the same `""` comment
- *     placeholder + `bindChildNode` the runtime creates
+ *     placeholder + `bindChildNode` the runtime creates, with its cleanup
+ *     registered on the ELEMENT as the runtime registers it — so
+ *     `disposeNodeOwn(el)` releases it, not only a full `dispose(el)`
  *
- * Templates that are left for the runtime (see `compileTemplate` for the full
- * list, each with its reason):
+ * Templates the straight-line code cannot reproduce exactly are STILL compiled,
+ * into a call to `__renderParsedTemplate(tree, values)`: the runtime's own
+ * executor, handed the tree this module already parsed. Parsing moves to build
+ * time and the output is the runtime's by construction. That covers:
  *   - an expression or mixed value on `value` / `checked` (the runtime commits
  *     it with `syncValueProperty: false`, which no public primitive exposes),
  *   - a top-level `${expr}` (its runtime placeholder is `<!--bind:htm-->`,
- *     owned by the wrapper — not reproducible through public API),
- *   - `${expr}` inside `<script>` / `<style>` (the runtime throws on first
- *     render; the compiler must not move or swallow that error),
+ *     owned by the wrapper),
  *   - any `<meta>` element (the runtime judges its static attributes against
  *     the meta-refresh policy; a plain `setAttribute` cannot),
  *   - a static `srcdoc` attribute (the runtime refuses it on every path),
- *   - quasis with escapes the cooked string cannot represent.
+ *   - quasis with an escape that has no cooked value (the runtime receives
+ *     `undefined` and reads it as the text "undefined").
+ *
+ * `${expr}` inside `<script>` / `<style>` compiles to a function that throws
+ * the runtime's own error on every call, exactly when and as often as the
+ * runtime throws it. The one template left to the runtime is a lone quasi with
+ * no cooked value (`html\`\u{\``): the runtime fails on it with an engine
+ * `TypeError` whose text the compiler cannot reproduce.
  *
  * Only templates tagged by an `html` binding IMPORTED FROM SIBUJS are
  * compiled. `foo.html\`\``, a local `html` helper, or any file that also uses
  * the imported name in a way that could shadow it are left alone.
  *
- * Remaining observable difference: the runtime's development-only warning for
- * a non-function `on:event` handler is not emitted by compiled code (the
- * compiler is a production optimization; the listener is skipped exactly as
- * the runtime skips it).
+ * The development-only warning for a non-function `on:event` handler is
+ * emitted by compiled code too, guarded by the same `__SIBU_DEV__` define the
+ * Vite and webpack plugins set, so it folds out of production builds.
  */
 
 import { jsStringLiteral, lineBreaksIn, type SourceEdit } from "./sourceEdit";
@@ -383,14 +392,16 @@ const IDL_SYNCED_ATTRS = new Set(["value", "checked"]);
 
 interface Helpers {
   prefix: string;
-  used: Set<"attr" | "str" | "on" | "child">;
+  used: Set<"attr" | "str" | "on" | "child" | "run">;
   tags: Set<string>;
   svg: boolean;
 }
 
 /**
- * Generate the body of a construction function, or `null` when the template
- * must stay with the runtime (reasons documented at each `return null`).
+ * Generate straight-line DOM code for a construction function, or `null` when
+ * that code cannot reproduce the runtime exactly (reasons documented at each
+ * `return null`). A `null` template is then compiled through the runtime's own
+ * executor instead — see `__renderParsedTemplate`.
  */
 function generateBody(roots: TmplChild[], h: Helpers): string | null {
   const lines: string[] = [];
@@ -403,7 +414,7 @@ function generateBody(roots: TmplChild[], h: Helpers): string | null {
     // runtime applies to its STATIC attributes too, judged against the whole
     // element — `<meta content=${x} http-equiv="refresh">` is refused at the
     // static write. The emitted `setAttribute` cannot reproduce that verdict,
-    // so these templates stay with the runtime.
+    // so these templates go through the runtime executor.
     if (el.tag.toLowerCase() === "meta") return null;
     // Likewise a STATIC `srcdoc` (any casing): the runtime refuses it on every
     // path, and the emitted `setAttribute` would write it.
@@ -431,7 +442,7 @@ function generateBody(roots: TmplChild[], h: Helpers): string | null {
           // The runtime commits a non-function value here with
           // `syncValueProperty: false` (content attribute, not the IDL
           // property). `bindAttrs` uses the IDL property for `value`/`checked`,
-          // so for those two names the results differ — leave to the runtime.
+          // so for those two names the results differ — runtime executor.
           if (IDL_SYNCED_ATTRS.has(attr.name.toLowerCase())) return null;
           h.used.add("attr");
           if (attr.t === 1) {
@@ -490,7 +501,7 @@ function generateBody(roots: TmplChild[], h: Helpers): string | null {
     } else {
       // A top-level expression: the runtime renders a function value after a
       // `bind:htm` comment owned by the wrapper, and may unwrap a lone Node
-      // value. Neither is reproducible through public API — runtime fallback.
+      // value. Neither is reproducible through public API — runtime executor.
       return null;
     }
   }
@@ -517,9 +528,14 @@ function helperSource(h: Helpers): string {
     out.push(`function ${P}str(value) {\n  return value == null ? "" : String(value);\n}`);
   }
   if (h.used.has("on")) {
+    // The runtime's development warning, verbatim, behind the same define the
+    // build plugins set (`__SIBU_DEV__`), so a production build folds it away.
     out.push(
       `function ${P}on(el, name, handler) {\n` +
         `  if (typeof handler === "function") el.addEventListener(name, handler);\n` +
+        `  else if (typeof __SIBU_DEV__ !== "undefined" && __SIBU_DEV__) {\n` +
+        "    console.warn(`[SibuJS] html: on:${name} handler is not a function (got ${typeof handler}). Event listener was not attached.`);\n" +
+        "  }\n" +
         "}",
     );
   }
@@ -531,7 +547,13 @@ function helperSource(h: Helpers): string {
     out.push(
       `function ${P}child(el, value) {\n` +
         `  if (typeof value === "function") {\n` +
-        `    el.appendChild(${P}Fragment([value]));\n` +
+        // The runtime registers the binding's cleanup on the ELEMENT; Fragment
+        // registers it on the placeholder. Owning the placeholder's disposal
+        // from the element makes `disposeNodeOwn(el)` release it as well.
+        `    const frag = ${P}Fragment([value]);\n` +
+        "    const ph = frag.firstChild;\n" +
+        "    el.appendChild(frag);\n" +
+        `    ${P}registerDisposer(el, () => ${P}dispose(ph));\n` +
         "  } else if (value instanceof Node) {\n" +
         "    el.appendChild(value);\n" +
         "  } else if (Array.isArray(value)) {\n" +
@@ -552,12 +574,23 @@ function helperSource(h: Helpers): string {
 function importSource(h: Helpers): string {
   const P = h.prefix;
   const core: string[] = [];
-  if (h.used.has("child")) core.push(`Fragment as ${P}Fragment`);
-  if (h.used.has("attr")) core.push(`registerDisposer as ${P}registerDisposer`);
+  if (h.used.has("child")) core.push(`Fragment as ${P}Fragment`, `dispose as ${P}dispose`);
+  if (h.used.has("attr") || h.used.has("child")) core.push(`registerDisposer as ${P}registerDisposer`);
+  if (h.used.has("run")) core.push(`__renderParsedTemplate as ${P}run`);
   const lines: string[] = [];
   if (core.length > 0) lines.push(`import { ${core.join(", ")} } from "sibujs";`);
   if (h.used.has("attr")) lines.push(`import { bindAttrs as ${P}bindAttrs } from "sibujs/ui";`);
   return lines.join("\n");
+}
+
+/** Record every element a parsed tree creates, for `usedTags` / `usesSvg`. */
+function collectTags(children: TmplChild[], h: Helpers): void {
+  for (const child of children) {
+    if (child.t !== 0) continue;
+    h.tags.add(child.el.tag);
+    if (child.el.svg) h.svg = true;
+    collectTags(child.el.children, h);
+  }
 }
 
 // ── Planning ─────────────────────────────────────────────────────────────────
@@ -631,30 +664,61 @@ export function planHtmlTemplates(code: string): TemplatePlan {
     const strings: string[] = [];
     for (const qs of tmpl.quasis) {
       const cooked = cookEscapes(code.slice(qs.start, qs.end));
-      // An escape with no cooked value reaches the runtime as `undefined`;
-      // there is no compile-time equivalent to emit.
-      if (cooked === null) return null;
+      if (cooked === null) {
+        // An escape with no cooked value reaches the runtime as `undefined`,
+        // which its parser reads as the text "undefined" — except in a
+        // template that is ONE such quasi, where it fails with an engine
+        // TypeError this module cannot reproduce. That one stays runtime.
+        if (tmpl.quasis.length === 1) return null;
+        strings.push("undefined");
+        continue;
+      }
       strings.push(cooked);
     }
+    const name = `${h.prefix}t${functions.length}`;
+    const params = tmpl.exprs.map((_, i) => `v${i}`).join(", ");
     let roots: TmplChild[];
     try {
       roots = parseTemplate(strings);
     } catch (err) {
-      // The runtime throws for this template on first render; compiling would
-      // move that error to a different time or hide it.
-      if (err instanceof RuntimeParseError) return null;
+      // The runtime throws for this template on EVERY call (the failed parse is
+      // never cached), after the expressions were evaluated as arguments. A
+      // function that throws the same error reproduces both.
+      if (err instanceof RuntimeParseError) {
+        const message =
+          `html: dynamic \${...} expressions are not allowed inside <${err.message}> (raw-text context). ` +
+          "Build the content separately and append it as a Node.";
+        functions.push(`function ${name}(${params}) {\n  throw new Error(${jsStringLiteral(message)});\n}`);
+        return name;
+      }
       throw err;
     }
     // Generate into a scratch helper state so a bail-out leaves no trace.
     const scratch: Helpers = { prefix: h.prefix, used: new Set(), tags: new Set(), svg: false };
     const body = generateBody(roots, scratch);
-    if (body === null) return null;
+    if (body === null) {
+      // Straight-line code cannot reproduce it: hand the parsed tree to the
+      // runtime's own executor. The tree is a JSON constant (strings, numbers
+      // and booleans only); U+2028/U+2029 are escaped so the literal is valid
+      // in every supported engine.
+      const tree = JSON.stringify(roots)
+        .replace(/\u2028/g, "\\u2028")
+        .replace(/\u2029/g, "\\u2029");
+      h.used.add("run");
+      collectTags(roots, h);
+      // Built on the FIRST call and memoised on the function itself. This code
+      // is appended after the module body, so a top-level `const` would still
+      // be in its temporal dead zone when a template runs during module
+      // evaluation; the function declaration is hoisted.
+      functions.push(
+        `function ${name}(${params}) {\n  return ${h.prefix}run(${name}.tree || (${name}.tree = ${tree}), [${params}]);\n}`,
+      );
+      return name;
+    }
     for (const u of scratch.used) h.used.add(u);
     for (const t of scratch.tags) h.tags.add(t);
     if (scratch.svg) h.svg = true;
 
-    const name = `${h.prefix}t${functions.length}`;
-    const params = tmpl.exprs.map((_, i) => `v${i}`).join(", ");
     functions.push(`function ${name}(${params}) {\n  ${body}\n}`);
     return name;
   };

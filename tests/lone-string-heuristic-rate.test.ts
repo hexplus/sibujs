@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { div, p, span } from "../src/core/rendering/html";
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ import { div, p, span } from "../src/core/rendering/html";
 // change to the heuristic surfaces as a changed list rather than silent drift.
 // ---------------------------------------------------------------------------
 
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

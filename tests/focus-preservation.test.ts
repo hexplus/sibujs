@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { when } from "../src/core/rendering/directives";
 import { div, input } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
@@ -22,7 +22,7 @@ import { signal } from "../src/core/signals/signal";
 // render to a microtask. Two turns covers both.
 const flushMicrotasks = () => Promise.resolve().then(() => Promise.resolve());
 
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

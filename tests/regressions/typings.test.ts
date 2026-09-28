@@ -44,7 +44,9 @@ import {
   tagFactory,
 } from "../../index";
 import { defineComponent, withDefaults, withProps, withWrapper } from "../../patterns";
+import type { Component as RouterComponent } from "../../plugins";
 import { dispose } from "../../src/core/rendering/dispose";
+import { defineRemoteComponent } from "../../ssr";
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -326,5 +328,29 @@ describe("regression: props accept live values", () => {
     expect(link.getAttribute("target")).toBe("_blank");
     dispose(pw);
     dispose(link);
+  });
+});
+
+describe("regression: no private Component types (BUGS.md B3)", () => {
+  it("regression: an SVG-rooted remote component needs no cast", async () => {
+    const Remote = defineRemoteComponent("svg-icon", async () => ({ default: () => svg({ viewBox: "0 0 1 1" }) }));
+    expectTypeOf(Remote).toEqualTypeOf<Component<void, SVGSVGElement | HTMLElement>>();
+    const first = Remote();
+    expect(first.tagName).toBe("DIV");
+    await flush();
+    // Once loaded, the remote component's own SVG root is returned.
+    expect(Remote().tagName.toLowerCase()).toBe("svg");
+  });
+
+  it("regression: the default remote component type is unchanged", () => {
+    // Existing callers typed the result as `() => HTMLElement`; it still is one.
+    const Remote: () => HTMLElement = defineRemoteComponent("html", async () => ({ default: () => div("x") }));
+    expectTypeOf(Remote()).toMatchTypeOf<HTMLElement>();
+  });
+
+  it("regression: the router's Component is the public Component", () => {
+    expectTypeOf<RouterComponent>().toEqualTypeOf<Component<void, Element>>();
+    const svgRoute: RouterComponent = () => svg();
+    expect(svgRoute().tagName.toLowerCase()).toBe("svg");
   });
 });

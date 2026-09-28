@@ -92,12 +92,16 @@ function warnContextualRefusal(label: string, name: string, refusal: ContextualR
       "",
       'the element would become a <meta http-equiv="refresh"> directive the shared refresh policy forbids ' +
         "(a destination outside the URL allowlist, or a directive too malformed to read unambiguously)",
-      "a <meta> with a reactive attribute may never carry a refresh directive: a browser schedules the " +
-        "navigation as soon as the directive is valid, and nothing can withdraw it when the state changes back",
+      "a <meta> whose http-equiv or content is reactive may never carry a refresh directive: a browser " +
+        "schedules the navigation as soon as the directive is valid, and nothing can withdraw it when the state " +
+        "changes back",
       "a runtime value may not choose the program a <script> runs; name the script in static template " +
         "source, or load it through Head({ script }) as an explicit trust decision",
       "an SVG animation may not target a URL, event-handler or nested-document attribute; its to / values " +
         "would be written into that attribute without passing the URL policy",
+      'a runtime-chosen href may not become an applied <link rel="stylesheet">: a well-formed URL is not a ' +
+        "trusted stylesheet. Name the stylesheet in static template source, or load a runtime-chosen one through " +
+        "Head({ link }) as an explicit trust decision",
     ];
     return `${label}: refusing "${name}" in this element's context — ${reasons[refusal]}. The write was not performed.`;
   });

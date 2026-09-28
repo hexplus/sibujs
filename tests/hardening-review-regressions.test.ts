@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { match, when } from "../src/core/rendering/directives";
 import { div, input, span } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
@@ -14,7 +14,7 @@ import { sanitizeCSSDeclaration, sanitizeCSSValue, sanitizeStyleAttribute } from
 
 const flush = () => Promise.resolve().then(() => Promise.resolve());
 
-let warn: ReturnType<typeof vi.spyOn>;
+let warn: MockInstance<(...args: unknown[]) => void>;
 
 beforeEach(() => {
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { gamepad } from "../src/browser/gamepad";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { effect } from "../src/core/signals/effect";
@@ -8,8 +8,8 @@ import { TransitionGroup } from "../src/ui/TransitionGroup";
 
 const macrotask = () => new Promise((r) => setTimeout(r, 0));
 
-let handler: ReturnType<typeof vi.fn>;
-let unhandled: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
+let unhandled: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);

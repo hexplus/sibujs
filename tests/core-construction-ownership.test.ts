@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { catchError } from "../src/core/rendering/catch";
 import { dispose, MAX_DRAIN_TEARDOWNS, registerDisposer } from "../src/core/rendering/dispose";
@@ -19,7 +19,7 @@ const subscribers = (accessor: unknown): number =>
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
-let handler: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);

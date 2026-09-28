@@ -552,6 +552,86 @@ function blockedCssReason(value: string): number {
   return -1;
 }
 
+/**
+ * Functions that fetch (or, in legacy engines, execute) their argument — the
+ * functional forms among {@link BLOCKED_CSS_NEEDLES}. `-webkit-image-set` is
+ * matched by the optional vendor prefix in `stripCssFunctions`.
+ */
+const STYLESHEET_BLOCKED_FUNCTIONS = ["url", "image-set", "image", "src", "expression"] as const;
+
+/**
+ * Remove every call to a blocked function from stylesheet text, with its whole
+ * argument list.
+ *
+ * Scanned rather than regex-matched: a regex that stops at the first `)`
+ * leaves the rest of `image-set(url(a) 1x, "https://…" 2x)` behind, string URL
+ * included. Parentheses are balanced and quoted strings skipped, so the call is
+ * removed exactly. An unterminated call removes everything to the end of the
+ * text — fail closed.
+ */
+function stripCssFunctions(css: string): string {
+  // Built from the list, so the list is the single spelling of "blocked function". `image-set` precedes
+  // `image` in it, which is what makes the alternation pick the longer name.
+  const pattern = new RegExp(`(?:-webkit-)?(${STYLESHEET_BLOCKED_FUNCTIONS.join("|")})\\s*\\(`, "gi");
+  let out = "";
+  let last = 0;
+  for (let match = pattern.exec(css); match !== null; match = pattern.exec(css)) {
+    // Part of a longer identifier (`my-url(`, `background-image(`)? Not a call
+    // to a blocked function; only a boundary before the name counts.
+    const before = match.index > 0 ? css[match.index - 1] : "";
+    if (/[\w-]/.test(before)) continue;
+    let depth = 1;
+    let i = pattern.lastIndex;
+    let quote = "";
+    for (; i < css.length && depth > 0; i++) {
+      const ch = css[i];
+      if (quote) {
+        if (ch === "\\") i++;
+        else if (ch === quote) quote = "";
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    }
+    out += `${css.slice(last, match.index)}/* ${match[1].toLowerCase()}() removed */`;
+    last = i;
+    pattern.lastIndex = i;
+  }
+  return out + css.slice(last);
+}
+
+/**
+ * Sanitize the TEXT of a stylesheet (not an inline `style` attribute): the
+ * policy behind `scopedStyle()`.
+ *
+ * It is the same policy as the inline-style one, applied to a different
+ * grammar: the canonical escape decoder (`decodeCssEscapes`, all three escape
+ * productions) and the same blocked constructs — every fetching or executing
+ * function in {@link STYLESHEET_BLOCKED_FUNCTIONS}, `@import`, and the
+ * property-qualified `behavior`, `-moz-binding` and `progid:` filters. It used
+ * to be a private copy inside `scopedStyle.ts` that had drifted: its decoder
+ * missed the escaped-newline production, it knew nothing of `image-set()`,
+ * `image()` or `src()`, an `@import` without a trailing `;` survived, and its
+ * `behavior` pattern also stripped `scroll-behavior`.
+ *
+ * Blocked constructs are replaced by a comment naming what was removed, so the
+ * remaining rules keep their structure. The returned text is the DECODED form
+ * (escapes resolved), which is what the scan judged.
+ */
+export function sanitizeStylesheetText(css: string): string {
+  let text = css.includes("\\") ? decodeCssEscapes(css) : css;
+  // `@import` up to its terminating `;`, or to the next block or the end when
+  // the author (or attacker) left the `;` off.
+  text = text.replace(/@import\b[^;{}]*;?/gi, "/* @import removed */");
+  text = stripCssFunctions(text);
+  // Property-qualified constructs match only a whole property NAME, never the
+  // tail of a longer one (`scroll-behavior`). The capture keeps the boundary
+  // character; lookbehind is avoided for the Safari 15.4 support floor.
+  text = text.replace(/(^|[;{\s])behavior\s*:[^;}]*;?/gi, "$1/* behavior removed */");
+  text = text.replace(/(^|[;{\s])-moz-binding\s*:[^;}]*;?/gi, "$1/* -moz-binding removed */");
+  text = text.replace(/(^|[;{\s])(-ms-)?filter\s*:[^;}]*progid[^;}]*;?/gi, "$1/* filter:progid removed */");
+  return text;
+}
+
 export function sanitizeCSSValue(value: string, context?: StyleSanitizerContext): string {
   const reason = blockedCssReason(value);
   if (reason === -1) return value;
@@ -605,6 +685,115 @@ function blockedDeclarationReason(property: string, value: string): number {
 }
 
 /**
+ * Split a `style` attribute into `[property, value, important]` declarations
+ * without a CSS engine, or return `null` when the text cannot be read
+ * unambiguously.
+ *
+ * Structural, not `split(";")`: a `;` ends a declaration only outside quoted
+ * strings, parentheses and brackets, so `background: url('a;b.png')` and
+ * `content: "a;b"` stay whole. Escapes are carried through untouched (the
+ * verdict decodes them later), comments are removed, and `!important` is
+ * recognised. A declaration that is not one — no colon, an empty or malformed
+ * property name, an empty value — is skipped, as CSSOM skips it.
+ *
+ * FAIL CLOSED: an unterminated string or comment, unbalanced parentheses or
+ * brackets, and braces (which have no place in a declaration list) make the
+ * whole attribute unreadable, and `null` drops it. Guessing where a broken
+ * string ends is how a declaration the sanitizer never saw would reach the
+ * browser.
+ */
+function parseStyleDeclarations(css: string): [string, string, boolean][] | null {
+  const chunks: string[] = [];
+  let buf = "";
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < css.length; i++) {
+    const ch = css[i];
+    if (quote) {
+      buf += ch;
+      if (ch === "\\" && i + 1 < css.length) buf += css[++i];
+      else if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === "\\") {
+      buf += ch;
+      if (i + 1 < css.length) buf += css[++i];
+      continue;
+    }
+    if (ch === "/" && css[i + 1] === "*") {
+      const end = css.indexOf("*/", i + 2);
+      if (end === -1) return null;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") {
+      if (--depth < 0) return null;
+    } else if (ch === "{" || ch === "}") return null;
+    else if (ch === ";" && depth === 0) {
+      chunks.push(buf);
+      buf = "";
+      continue;
+    }
+    buf += ch;
+  }
+  if (quote || depth !== 0) return null;
+  chunks.push(buf);
+
+  const out: [string, string, boolean][] = [];
+  for (const chunk of chunks) {
+    const colon = chunk.indexOf(":");
+    if (colon === -1) continue;
+    const rawName = chunk.slice(0, colon).trim();
+    if (!/^(--[\w-]+|-?[a-zA-Z_][\w-]*)$/.test(rawName)) continue;
+    let value = chunk.slice(colon + 1).trim();
+    const bang = /!\s*important\s*$/i.exec(value);
+    if (bang) value = value.slice(0, bang.index).trim();
+    if (value === "") continue;
+    // Custom properties are case-sensitive; every other name folds, as the
+    // HTML parser and CSSOM fold it.
+    const property = rawName.startsWith("--") ? rawName : canonicalAttrName(rawName);
+    out.push([property, value, bang !== null]);
+  }
+  return out;
+}
+
+/**
+ * Sanitize a `style` attribute WITHOUT a DOM, declaration by declaration.
+ *
+ * The no-DOM half of {@link sanitizeStyleAttribute}, and exported so the two
+ * halves can be compared in one process. It used to judge the whole list as
+ * one value, so a single blocked declaration dropped every sibling with it:
+ * the server rendered `color: red; background: url(…); margin: 1rem` with no
+ * style at all while the client kept the color and margin. Each declaration
+ * now receives the same verdict the DOM path gives it — `blockedDeclarationReason`,
+ * property-qualified rules included — and only the blocked ones are dropped.
+ *
+ * Input the parser cannot read unambiguously yields `""`: nothing is guessed.
+ */
+export function sanitizeStyleDeclarationList(cssText: string, context?: StyleSanitizerContext): string {
+  const input = String(cssText);
+  const declarations = parseStyleDeclarations(input);
+  if (declarations === null) {
+    // Announced like a dropped declaration, naming the whole list: there is no
+    // single declaration to blame when the list itself is unreadable.
+    if (blockedCssReason(input) !== -1) warnDroppedDeclaration(input, blockedCssReason(input), context);
+    return "";
+  }
+  const kept: string[] = [];
+  for (const [property, value, important] of declarations) {
+    const reason = blockedDeclarationReason(property, value);
+    if (reason !== -1) {
+      warnDroppedDeclaration(value, reason, { property, element: context?.element });
+      continue;
+    }
+    kept.push(`${property}: ${value}${important ? " !important" : ""}`);
+  }
+  return kept.join("; ");
+}
+
+/**
  * Sanitize a WHOLE `style` attribute — a declaration list, not one value.
  *
  * `sanitizeCSSValue` judges a single property value. A style attribute is a
@@ -627,9 +816,10 @@ function blockedDeclarationReason(property: string, value: string): number {
  * element is created detached and never inserted, so assigning to it parses
  * without fetching anything or affecting layout.
  *
- * Without a DOM (SSR in a bare runtime) there is no parser available, so the
- * conservative all-or-nothing check applies: a list containing anything
- * dangerous is dropped entirely rather than partially trusted.
+ * Without a DOM (SSR in a bare runtime) there is no CSSOM, so the list is split
+ * by {@link sanitizeStyleDeclarationList} instead and each declaration receives
+ * the same verdict — only the blocked declarations are dropped, and input the
+ * parser cannot read unambiguously is dropped whole.
  *
  * Every dropped declaration is announced via `console.warn` in development —
  * exactly one warning per declaration, naming the property, the value, the
@@ -645,11 +835,9 @@ export function sanitizeStyleAttribute(cssText: string, context?: StyleSanitizer
   const input = String(cssText);
   if (input.trim() === "") return "";
 
-  if (typeof document === "undefined") {
-    // No parser: the list is judged as one value, so the warning necessarily
-    // names the whole list rather than a single declaration.
-    return sanitizeCSSValue(input, context) === "" ? "" : input;
-  }
+  // No CSSOM (SSR in a bare runtime): the structural declaration parser below,
+  // with the same per-declaration verdicts.
+  if (typeof document === "undefined") return sanitizeStyleDeclarationList(input, context);
 
   const probe = document.createElement("div");
   try {

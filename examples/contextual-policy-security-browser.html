@@ -15,7 +15,7 @@
       // As in meta-refresh-security-browser.html, every attribute mutation is
       // followed by a synchronous sample of every connected <meta>, so the trace
       // is the complete sequence of observable states.
-      import { a, html, meta, signal } from "../dist/index.js";
+      import { a, html, link, meta, signal } from "../dist/index.js";
       import { svgElement } from "../dist/extras.js";
 
       const params = new URLSearchParams(location.search);
@@ -102,6 +102,26 @@
         },
         probeRuns() {
           return window.__probeRuns || 0;
+        },
+        runtimeStylesheets() {
+          // Every runtime path to an applied stylesheet: props, template
+          // interpolation in both attribute orders, and a reactive rel flip.
+          const css = "/examples/contextual-policy-probe.css?runtime";
+          document.head.appendChild(link({ rel: "stylesheet", href: css }));
+          document.head.appendChild(html`<link href=${css} rel="stylesheet" />`);
+          const [rel, setRel] = signal("preload");
+          document.head.appendChild(link({ rel: () => rel(), as: "style", href: `${css}&flip` }));
+          setRel("stylesheet");
+          return Array.from(document.querySelectorAll('link[rel~="stylesheet" i]')).filter((l) =>
+            (l.getAttribute("href") || "").includes("runtime"),
+          ).length;
+        },
+        staticStylesheet() {
+          document.head.appendChild(html`<link rel="stylesheet" href="/examples/contextual-policy-probe.css?static" />`);
+          return true;
+        },
+        probeStyleApplied() {
+          return getComputedStyle(document.documentElement).getPropertyValue("--contextual-probe").trim();
         },
         svgScriptRefused() {
           try {

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { registerDisposer } from "../src/core/rendering/dispose";
 import { div } from "../src/core/rendering/html";
@@ -7,7 +7,7 @@ import { componentAdapter, createTheme } from "../src/ecosystem/ui/componentAdap
 import { globalStore, type Middleware } from "../src/patterns/globalStore";
 import { defineElement } from "../src/platform/customElement";
 
-let handler: ReturnType<typeof vi.fn>;
+let handler: Mock<(...args: unknown[]) => unknown>;
 beforeEach(() => {
   handler = vi.fn();
   setRuntimeErrorHandler(handler);

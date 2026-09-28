@@ -151,6 +151,8 @@ export const ContextualRefusal = {
   ScriptSource: 3,
   /** An SVG animation may not target a URL, handler or document attribute. */
   AnimationTarget: 4,
+  /** A runtime-written `href` may not become an applied stylesheet. */
+  StylesheetSource: 5,
 } as const;
 
 export type ContextualRefusal = (typeof ContextualRefusal)[keyof typeof ContextualRefusal];
@@ -287,6 +289,76 @@ function animationRefusal(name: string, value: string | null): ContextualRefusal
 }
 
 /**
+ * `<link>` elements whose `href` was chosen at RUNTIME — written by a runtime
+ * writer, or claimed by a reactive binding (even one whose first value removed
+ * it).
+ *
+ * THE STYLESHEET RULE. A URL can be well-formed and still not be trusted for
+ * what it selects: on `<link rel="stylesheet">` an `https:` or relative `href`
+ * passes `sanitizeUrl` and then applies whatever CSS it points at — enough to
+ * redress or hide UI, overlay controls, spoof content, load further
+ * subresources and leak page data through selector side channels. So, as for
+ * `<script src>`, the verdict is about PROVENANCE rather than scheme: a
+ * runtime-chosen `href` never ends up on a link whose `rel` contains the
+ * `stylesheet` token. Two writes can complete that state, and each is judged
+ * against the element as it stands, before it happens:
+ *
+ *   - a runtime `href` on a link whose `rel` already says `stylesheet`;
+ *   - a `rel` of ANY origin that says `stylesheet` on a link whose `href` is
+ *     runtime-chosen — which is what makes the verdict independent of
+ *     attribute order (`html\`<link href=${url} rel="stylesheet">\``) and of
+ *     reactive transitions (`preload` → `stylesheet`).
+ *
+ * A runtime `rel` over a STATIC `href` is allowed: the developer named that
+ * resource, and runtime data only chooses whether to apply it. The explicit API
+ * for a runtime-chosen stylesheet is `Head({ link })`, a documented trust
+ * decision.
+ *
+ * Membership is permanent: once runtime data has chosen the `href`, no later
+ * write can launder it into a stylesheet.
+ */
+const runtimeHrefLinks = new WeakSet<Element>();
+
+/**
+ * Does a `rel` value contain the `stylesheet` token? `rel` is a token list:
+ * split on ASCII whitespace and compared ASCII case-insensitively, so
+ * `"alternate StyleSheet"` counts and `"stylesheets"` does not.
+ */
+function relHasStylesheet(rel: string | null): boolean {
+  if (rel === null) return false;
+  const lower = canonicalAttrName(rel);
+  // Almost every `rel` lacks the substring altogether; only then tokenize.
+  if (!lower.includes("stylesheet")) return false;
+  const tokens = lower.split(/[\t\n\f\r ]+/);
+  for (let i = 0; i < tokens.length; i++) if (tokens[i] === "stylesheet") return true;
+  return false;
+}
+
+function stylesheetRefusal(
+  el: Element,
+  name: string,
+  value: string | null,
+  origin: AttributeWriteOrigin,
+): ContextualRefusal {
+  if (!isHtmlNamespace(el)) return ContextualRefusal.None;
+  const canonical = canonicalAttrName(name);
+  if (canonical === "href") {
+    if (origin === "static") return ContextualRefusal.None;
+    if (origin === "reactive" || value !== null) runtimeHrefLinks.add(el);
+    if (value === null) return ContextualRefusal.None;
+    return relHasStylesheet(el.getAttribute("rel")) ? ContextualRefusal.StylesheetSource : ContextualRefusal.None;
+  }
+  if (canonical === "rel") {
+    // Removing or narrowing `rel` can only stop a stylesheet, never start one.
+    if (!relHasStylesheet(value)) return ContextualRefusal.None;
+    return runtimeHrefLinks.has(el) && el.hasAttribute("href")
+      ? ContextualRefusal.StylesheetSource
+      : ContextualRefusal.None;
+  }
+  return ContextualRefusal.None;
+}
+
+/**
  * The contextual verdict for ONE pending attribute write.
  *
  * @param el     The element the write targets, in its CURRENT state.
@@ -305,6 +377,7 @@ export function contextualAttributeRefusal(
 ): ContextualRefusal {
   const local = el.localName;
   if (local === "meta") return metaRefusal(el, name, value, origin);
+  if (local === "link") return stylesheetRefusal(el, name, value, origin);
   if (local === "script") {
     if (origin === "static" || value === null) return ContextualRefusal.None;
     return SCRIPT_SOURCE_ATTRIBUTES.has(canonicalAttrName(name))

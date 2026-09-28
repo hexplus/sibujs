@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { gamepad } from "../src/browser/gamepad";
 import { setRuntimeErrorHandler } from "../src/core/errors";
 import { action, copyOnClick } from "../src/core/rendering/action";
@@ -125,8 +125,8 @@ describe("infiniteQuery after dispose", () => {
 // 29. copyOnClick reports clipboard failures.
 // ---------------------------------------------------------------------------
 describe("copyOnClick failures", () => {
-  let handler: ReturnType<typeof vi.fn>;
-  let unhandled: ReturnType<typeof vi.fn>;
+  let handler: Mock<(...args: unknown[]) => unknown>;
+  let unhandled: Mock<(...args: unknown[]) => unknown>;
   beforeEach(() => {
     handler = vi.fn();
     setRuntimeErrorHandler(handler);

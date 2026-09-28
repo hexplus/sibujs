@@ -4,6 +4,7 @@ import type { NodeChildren } from "../../core/rendering/types";
 import { effect } from "../../core/signals/effect";
 import { signal } from "../../core/signals/signal";
 import { globalSingleton } from "../../utils/globalSingleton";
+import { sanitizeCSSDeclaration } from "../../utils/sanitize";
 
 // ---------------------------------------------------------------------------
 // Theme System
@@ -39,7 +40,13 @@ const _themeLayers = globalSingleton(
 function commitThemeProperty(root: HTMLElement, name: string, record: PropertyLayers): void {
   const top = record.layers[record.layers.length - 1];
   if (top) {
-    root.style.setProperty(name, top.value);
+    // Theme values are runtime data (a theme picker, stored preferences), and
+    // this is an inline-style write: it goes through the same per-declaration
+    // policy as every `style` prop. A blocked value (`url(…)`, `image-set(…)`, …)
+    // resolves to "" — `setProperty` then removes the property rather than
+    // writing it. The restore path below writes back the element's OWN previous
+    // value, which is not runtime data.
+    root.style.setProperty(name, sanitizeCSSDeclaration(name, String(top.value), { element: root }));
     return;
   }
   _themeLayers.get(root)?.delete(name);

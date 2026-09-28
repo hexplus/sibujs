@@ -14,7 +14,7 @@
  * Both are widened here — every form accepted everywhere — with a dev warning
  * only where a shape is genuinely ambiguous rather than merely unusual.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { show, when } from "../src/core/rendering/directives";
 import { div, span } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
@@ -80,7 +80,7 @@ describe("RouterLink honours a reactive class", () => {
 });
 
 describe("show() and when() accept both an element and a thunk", () => {
-  let warn: ReturnType<typeof vi.spyOn>;
+  let warn: MockInstance<(...args: unknown[]) => void>;
 
   beforeEach(() => {
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -21,20 +21,43 @@ jobs:
                   node-version: "22"
                   registry-url: "https://registry.npmjs.org"
 
+            # Releases are normally published by hand (`npm run publish:npm`)
+            # BEFORE the GitHub release is created, and that release is what
+            # triggers this workflow — so publishing again failed every run
+            # with "You cannot publish over the previously published versions".
+            # When the version is already on npm there is nothing to do; the
+            # workflow still publishes a release nobody published by hand.
+            # `npm view` prints nothing for a version that does not exist.
+            - name: Check whether this version is already published
+              id: published
+              run: |
+                  VERSION="$(node -p "require('./package.json').version")"
+                  if [ -n "$(npm view "sibujs@${VERSION}" version 2>/dev/null)" ]; then
+                    echo "exists=true" >> "$GITHUB_OUTPUT"
+                    echo "sibujs@${VERSION} is already on npm; nothing to publish."
+                  else
+                    echo "exists=false" >> "$GITHUB_OUTPUT"
+                  fi
+
             - name: Upgrade npm
+              if: steps.published.outputs.exists != 'true'
               run: npm install -g npm@latest
 
             # npm ci, not npm install: the job that holds the publish token
             # installs exactly what the committed lockfile pins, verifying
             # every integrity hash, instead of resolving something newer.
             - name: Install dependencies
+              if: steps.published.outputs.exists != 'true'
               run: npm ci
 
             - name: Build
+              if: steps.published.outputs.exists != 'true'
               run: npm run build
 
             - name: Run tests
+              if: steps.published.outputs.exists != 'true'
               run: npm test
 
             - name: Publish to npm
+              if: steps.published.outputs.exists != 'true'
               run: npm publish --access public

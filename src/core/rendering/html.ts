@@ -156,6 +156,13 @@ export const template = tagFactory("template");
 export const base = tagFactory("base");
 export const link = tagFactory("link");
 export const meta = tagFactory("meta");
+/**
+ * `<style>`. Its text is STYLESHEET SOURCE, applied unsanitized exactly like a
+ * stylesheet shipped with the application — a trust boundary, since a tag
+ * factory cannot tell a literal from runtime data. For CSS that comes from
+ * runtime data use `scopedStyle()` (sanitized stylesheet text) or `style` props
+ * (sanitized per declaration).
+ */
 export const style = tagFactory("style");
 
 // Common SVG elements — created with SVG namespace for correct rendering

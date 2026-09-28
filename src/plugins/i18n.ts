@@ -121,6 +121,7 @@ const _i18n = globalSingleton(Symbol.for("sibujs.i18n.v1"), () => ({
   locale: ReturnType<typeof signal<string>>;
   locales: LocaleMap;
   revision?: ReturnType<typeof signal<number>>;
+  getLocale?: () => string;
 };
 const [clientLocale, setClientLocale] = _i18n.locale;
 const locales = _i18n.locales;
@@ -207,6 +208,12 @@ export function getLocale(): string {
   }
   return clientLocale();
 }
+
+// Published on the shared singleton so modules that must NOT import this plugin
+// — `formatNumber()` / `formatCurrency()` — can still follow the active locale,
+// through this one definition of it (request-scoped on the server, reactive on
+// the client). First copy wins, like the singleton itself.
+_i18n.getLocale ??= getLocale;
 
 /**
  * Register translation messages for a locale.
