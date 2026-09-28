@@ -72,6 +72,89 @@ describe("query", () => {
     });
   });
 
+  describe("reactive enabled", () => {
+    it("stays idle while a function `enabled` is false, then fetches when it turns true", async () => {
+      const [userId, setUserId] = signal<number | null>(null);
+      const fn = vi.fn().mockImplementation(async ({ key }: { key: string }) => `data-${key}`);
+      const q = query(() => `user:${userId()}`, fn, { enabled: () => userId() != null });
+
+      await tick();
+      expect(fn).not.toHaveBeenCalled();
+      expect(q.fetching()).toBe(false);
+
+      setUserId(7);
+      await tick();
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(q.data()).toBe("data-user:7");
+      q.dispose();
+    });
+
+    it("blocks refetch(), invalidateQueries and the interval while false", async () => {
+      vi.useFakeTimers();
+      const [on, setOn] = signal(true);
+      const fn = vi.fn().mockResolvedValue("v");
+      const q = query("gated", fn, { enabled: on, refetchInterval: 100 });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fn).toHaveBeenCalledTimes(1);
+
+      setOn(false);
+      await q.refetch();
+      invalidateQueries("gated");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(fn).toHaveBeenCalledTimes(1);
+
+      // Re-enabling refetches the data invalidated while idle.
+      setOn(true);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fn).toHaveBeenCalledTimes(2);
+      q.dispose();
+    });
+
+    it("does not re-run when the function's dependencies change but its answer does not", async () => {
+      const [count, setCount] = signal(1);
+      const fn = vi.fn().mockResolvedValue("v");
+      // staleTime 0: any re-run of the key effect would refetch.
+      const q = query("steady", fn, { enabled: () => count() > 0 });
+      await tick();
+      expect(fn).toHaveBeenCalledTimes(1);
+
+      setCount(2);
+      setCount(3);
+      await tick();
+      expect(fn).toHaveBeenCalledTimes(1);
+      q.dispose();
+    });
+
+    it("an empty key holds the query idle without a shared cache entry", async () => {
+      const fn = vi.fn().mockResolvedValue("v");
+      const a = query("", fn, { initialData: "a" });
+      const b = query("", fn, { initialData: "b" });
+
+      await tick();
+      expect(fn).not.toHaveBeenCalled();
+      expect(a.data()).toBe("a");
+      expect(b.data()).toBe("b");
+      expect(getQueryData("")).toBe(undefined);
+      a.dispose();
+      b.dispose();
+    });
+
+    it("leaving a key for the empty key releases it and clears fetching", async () => {
+      const [key, setKey] = signal("live");
+      const deferred = createDeferred<string>();
+      const q = query(key, () => deferred.promise, { cacheTime: 0 });
+      expect(q.fetching()).toBe(true);
+
+      setKey("");
+      expect(q.fetching()).toBe(false);
+
+      deferred.resolve("late");
+      await tick();
+      expect(q.fetching()).toBe(false);
+      q.dispose();
+    });
+  });
+
   describe("caching", () => {
     it("shares cached data between instances with staleTime", async () => {
       const fn = vi.fn().mockResolvedValue("cached");

@@ -7,6 +7,35 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Added — reactive `enabled` for `query()` and `infiniteQuery()`
+
+`enabled` accepts `() => boolean` as well as a boolean. A function used to be
+taken as an always-true value, so a query meant to wait fetched immediately.
+Now the query stays idle while the function returns `false` and starts as soon
+as it returns `true`:
+
+```ts
+query(() => `user:${userId()}`, fetchUser, { enabled: () => userId() != null });
+```
+
+- `query()`: while disabled, nothing fetches — not the key effect, `refetch()`,
+  `invalidateQueries()`, `refetchInterval`, focus or reconnect. Turning it on
+  follows the usual staleness rules, so data invalidated while idle is fetched.
+- `infiniteQuery()`: each time it turns on, the query loads from
+  `initialPageParam`, as a key change does.
+- The function is read through a derived, so a change to a signal it reads
+  that leaves the answer the same does not re-run the query.
+
+### Fixed — idle `query()` observers on the empty key shared a cache entry
+
+A `query()` whose key is `""` never fetched, but it still attached to a cache
+entry under `""`, shared by every such query: the first one's `initialData`
+showed up in all of them. The empty key now attaches to nothing. Moving from a
+real key to `""` releases the previous entry for garbage collection and clears
+`fetching()`.
+
 ## [4.8.0] — 2026-09-27
 
 ### Upgrade notes

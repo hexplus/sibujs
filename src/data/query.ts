@@ -54,8 +54,21 @@ export interface QueryOptions<T> {
   staleTime?: number;
   /** Time in ms to keep unused cache entries. Default: 300000 (5 min) */
   cacheTime?: number;
-  /** Whether to fetch on creation. Default: true */
-  enabled?: boolean;
+  /**
+   * Whether the query may fetch. Default: `true`.
+   *
+   * A function is reactive: while it returns `false` the query stays idle
+   * (nothing fetches — not the key effect, `refetch()`, `invalidateQueries`,
+   * the interval, focus or reconnect), and it fetches as soon as it returns
+   * `true`, following the usual staleness rules.
+   *
+   * ```ts
+   * query(() => `user:${userId()}`, fetchUser, { enabled: () => userId() != null });
+   * ```
+   *
+   * An empty key (`""`) also holds a query idle, without creating a cache entry.
+   */
+  enabled?: boolean | (() => boolean);
   /** Retry options for failed fetches */
   retry?: RetryOptions;
   /** Initial data before first fetch */
@@ -292,6 +305,12 @@ export function query<T>(
   } = options;
 
   const resolveKey = typeof key === "function" ? key : () => key;
+  // A function `enabled` is read through a derived so the key effect re-runs
+  // only when the boolean actually flips — a dependency of the function that
+  // changes without changing the answer must not re-run the staleness check
+  // (and, for stale data, refetch).
+  const enabledGate = typeof enabled === "function" ? derived(() => Boolean(enabled())) : null;
+  const isEnabled = enabledGate ?? (() => enabled);
 
   // Bind this query instance to one cache map for its whole lifetime. Resolving
   // at creation (inside the request's SSR scope) keeps later async resolutions
@@ -503,7 +522,9 @@ export function query<T>(
   }
 
   async function doFetch(): Promise<void> {
-    if (disposed || !currentKey || !enabled) return;
+    // Untracked: `refetch()` called from a caller's effect must not subscribe
+    // that effect to this query's `enabled`.
+    if (disposed || !currentKey || !untracked(isEnabled)) return;
     const key = currentKey;
     // getOrCreateEntry + attach on every fetch. After clearQueryCache() the
     // first refetcher recreates the entry and the rest deduplicate onto it, so
@@ -686,8 +707,22 @@ export function query<T>(
 
   const effectCleanup = effect(() => {
     const key = resolveKey();
+    // Read before any early return, so an idle query still re-runs when
+    // `enabled` flips.
+    const on = isEnabled();
     const keyChanged = currentKey !== key;
     currentKey = key;
+
+    // An empty key holds the query idle. It used to attach to a real cache
+    // entry under "", shared by every idle query — so the first one's
+    // `initialData` showed up in all the others. Detaching also releases the
+    // previous key's entry for GC; a request still in flight for it is no
+    // longer this observer's, so its fetching flag comes down now.
+    if (key === "") {
+      detachFromEntry();
+      setIsFetching(false);
+      return;
+    }
 
     // One call handles both transitions: a changed key, and an unchanged key
     // whose entry object was replaced. Detaching from the previous entry,
@@ -709,19 +744,19 @@ export function query<T>(
     // subscribers mount with the same key.
     if (!keyChanged && currentKey === key && entry.data !== undefined) {
       const isDataStale = entry.dataUpdatedAt === 0 || Date.now() - entry.dataUpdatedAt >= staleTime;
-      if (enabled && isDataStale && !entry.promise) doFetch();
+      if (on && isDataStale && !entry.promise) doFetch();
       return;
     }
 
     const isDataStale = entry.dataUpdatedAt === 0 || Date.now() - entry.dataUpdatedAt >= staleTime;
-    if (enabled && (entry.data === undefined || isDataStale)) {
+    if (on && (entry.data === undefined || isDataStale)) {
       doFetch();
     }
   });
 
   if (refetchInterval && refetchInterval > 0) {
     intervalTimer = setInterval(() => {
-      if (!disposed && currentKey && enabled) doFetch();
+      if (!disposed && currentKey) doFetch();
     }, refetchInterval);
   }
 
@@ -731,13 +766,13 @@ export function query<T>(
   if (typeof globalThis !== "undefined" && typeof globalThis.addEventListener === "function") {
     if (refetchOnWindowFocus) {
       focusHandler = () => {
-        if (!disposed && currentKey && enabled) doFetch();
+        if (!disposed && currentKey) doFetch();
       };
       globalThis.addEventListener("focus", focusHandler);
     }
     if (refetchOnReconnect) {
       onlineHandler = () => {
-        if (!disposed && currentKey && enabled) doFetch();
+        if (!disposed && currentKey) doFetch();
       };
       globalThis.addEventListener("online", onlineHandler);
     }
@@ -757,6 +792,7 @@ export function query<T>(
     // DevTools entries. A retained result keeps returning their last values.
     loading.dispose();
     isStale.dispose();
+    enabledGate?.dispose();
     if (intervalTimer) clearInterval(intervalTimer);
     detachFromEntry();
     // Guard removeEventListener in case the runtime added addEventListener

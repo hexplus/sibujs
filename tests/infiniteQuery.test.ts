@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { signal } from "../src/core/signals/signal";
 import { infiniteQuery } from "../src/data/infiniteQuery";
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -132,6 +133,26 @@ describe("infiniteQuery", () => {
     await tick();
     expect(fn).not.toHaveBeenCalled();
     expect(query.loading()).toBe(false);
+
+    query.dispose();
+  });
+
+  it("treats a function `enabled` reactively", async () => {
+    const [ready, setReady] = signal(false);
+    const fn = vi.fn().mockResolvedValue({ items: [1] });
+    const query = infiniteQuery("reactive-enabled", fn, {
+      getNextPageParam: () => undefined,
+      initialPageParam: 0,
+      enabled: () => ready(),
+    });
+
+    await tick();
+    expect(fn).not.toHaveBeenCalled();
+
+    setReady(true);
+    await tick();
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(query.pages()).toEqual([{ items: [1] }]);
 
     query.dispose();
   });
