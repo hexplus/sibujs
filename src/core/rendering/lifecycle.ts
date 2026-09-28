@@ -20,6 +20,7 @@
  * ```
  */
 
+import { bindOwnerScope } from "../../reactivity/track";
 import { type RuntimeErrorPhase, reportError } from "../errors";
 import { registerDisposer } from "./dispose";
 
@@ -284,6 +285,9 @@ function registerUnmountWatcher(element: Element, cb: DisconnectCb): () => void 
 export function onMount(callback: () => undefined | CleanupFn, element?: Element): void {
   // No-op during SSR — lifecycle hooks are client-only
   if (typeof document === "undefined") return;
+  // The callback runs after the render that registered it, so it carries that
+  // render's owner scope: an effect it creates belongs where the component does.
+  callback = bindOwnerScope(callback);
 
   if (element) {
     // Disposed flag — if the element is disposed before it ever connects,
@@ -333,6 +337,9 @@ export function onMount(callback: () => undefined | CleanupFn, element?: Element
  */
 export function onUnmount(callback: CleanupFn, element: Element): void {
   if (typeof document === "undefined") return;
+  // Teardown runs in the owner scope of the render that registered it, however
+  // the element leaves (dispose, or a native removal seen by the observer).
+  callback = bindOwnerScope(callback);
 
   let fired = false;
   const fireOnce = () => {

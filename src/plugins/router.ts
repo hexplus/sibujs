@@ -4,7 +4,7 @@ import { appendChildren, resolveClassValue, type TagProps } from "../core/render
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-import { track, untracked } from "../reactivity/track";
+import { bindOwnerScope, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -986,13 +986,13 @@ class ComponentLoader {
    * resolved, so the import happens once and later mounts call the module's
    * factory directly.
    */
-  async instantiate(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
+  async instantiate(plan: RoutePlan, route: RouteDef, routePath: string, scope?: RouteScope): Promise<Element> {
     if (plan.kind === "factory") {
-      return this.instantiateFactory(plan.component, route, routePath);
+      return this.instantiateFactory(plan.component, route, routePath, scope);
     }
 
     const factory = await this.resolveModuleFactory(plan, route, routePath);
-    return this.instantiateFactory(factory, route, routePath);
+    return this.instantiateFactory(factory, route, routePath, scope);
   }
 
   /**
@@ -1053,9 +1053,12 @@ class ComponentLoader {
     component: Component,
     route: RouteDef,
     routePath: string,
+    scope: RouteScope | undefined,
     depth = 0,
   ): Promise<Element> {
-    const result = component();
+    // The factory runs in the instance's route scope, so everything it creates
+    // reads the route this instance was committed with (see `RouteScope`).
+    const result = scope ? runWithOwnerScope(scope, component) : component();
 
     // Runtime thenable detection on the *real* invocation — never a second,
     // speculative call made only to classify. (RC-003)
@@ -1066,7 +1069,7 @@ class ComponentLoader {
     if (depth === 0 && this.isFactoryLike(value)) {
       const factory = this.extractFactory(value, routePath);
       this.planCache.set(this.keyFor(route), { kind: "factory", component: factory });
-      return this.instantiateFactory(factory, route, routePath, depth + 1);
+      return this.instantiateFactory(factory, route, routePath, scope, depth + 1);
     }
 
     throw new Error(`Component for route "${routePath}" must return Element, got ${typeof value}`);
@@ -1719,9 +1722,17 @@ export class SibuRouter {
     return this.loader.loadPlan(route, routePath);
   }
 
-  /** Create exactly one real instance from an already-resolved plan. */
-  async instantiateComponent(plan: RoutePlan, route: RouteDef, routePath: string): Promise<Element> {
-    return this.loader.instantiate(plan, route, routePath);
+  /**
+   * Create exactly one real instance from an already-resolved plan. With a
+   * `scope`, the factory runs in it (see `RouteScope`).
+   */
+  async instantiateComponent(
+    plan: RoutePlan,
+    route: RouteDef,
+    routePath: string,
+    scope?: RouteScope,
+  ): Promise<Element> {
+    return this.loader.instantiate(plan, route, routePath, scope);
   }
 
   /** Resolve a route's module/factory without creating any component instance. */
@@ -1962,6 +1973,130 @@ export function setRoutes(routes: RouteDef[]): void {
 }
 
 // ============================================================================
+// ROUTE-INSTANCE SCOPE
+// ============================================================================
+
+/**
+ * The route one mounted route instance was committed with.
+ *
+ * A navigation commits the router's route first; the outlet swaps the
+ * component afterwards — a microtask later for a synchronous page, a whole
+ * chunk download later for a lazy one. If route instances read the
+ * router-global route, the outgoing page re-runs its effects against the
+ * INCOMING route's params in that window, and its teardown sees them too.
+ *
+ * So each instance reads its own scope instead. Outlets create one per
+ * instance, run the component factory in it (an owner scope, see
+ * reactivity/track-core.ts, so every computation the page creates — now or
+ * later, through its directives — inherits it), and then:
+ *
+ * - an instance the outlet KEEPS across a navigation (same record and instance
+ *   key: a query/hash-only change, or a layout whose child changed) is handed
+ *   the new route — it follows the navigation, as before;
+ * - an instance being REPLACED is never updated: it keeps observing its own
+ *   route until it is disposed, and its teardown runs in its scope;
+ * - a KeepAlive view keeps its route while cached and gets the new route when
+ *   it is shown again.
+ *
+ * Once the instance is disposed the scope is released: a computation that
+ * outlived it (an app-lifetime derived that happened to be created while the
+ * page rendered) is not the page's, and falls back to the router-global route.
+ */
+class RouteScope {
+  private readonly get: () => RouteContext | null;
+  private readonly set: (route: RouteContext | null) => void;
+  private released = false;
+
+  constructor(route: RouteContext) {
+    const [get, set] = signal<RouteContext | null>(route);
+    this.get = get;
+    this.set = set;
+  }
+
+  /** The instance's route, or `null` once released. Reactive. */
+  read(): RouteContext | null {
+    return this.get();
+  }
+
+  /** Hand a kept instance the route of the navigation that kept it. */
+  update(route: RouteContext): void {
+    if (!this.released) this.set(route);
+  }
+
+  /**
+   * Called when the instance is disposed. The switch to "no scope" is
+   * published a microtask later, once the whole dispose has finished: a
+   * teardown the instance registered after this one (an `onMount` effect, say)
+   * may still be alive at this point, and must not re-run against the
+   * router-global route on its way out.
+   */
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    queueMicrotask(() => this.set(null));
+  }
+}
+
+/** The route scope of whichever route instance owns the running code, if any. */
+function activeRouteScope(): RouteScope | null {
+  const scope = getOwnerScope();
+  return scope instanceof RouteScope ? scope : null;
+}
+
+/**
+ * The route as the caller should see it: its route instance's committed route
+ * when it runs inside one, otherwise the router's current route.
+ */
+function scopedRoute(router: SibuRouter): RouteContext {
+  const scope = activeRouteScope();
+  if (scope) {
+    const committed = scope.read();
+    if (committed !== null) return committed;
+  }
+  return router.currentRoute;
+}
+
+// Scope of every mounted route instance, by the instance's root node.
+const instanceScopes = new WeakMap<Node, RouteScope>();
+
+/**
+ * Create one route instance for `route`, inside a fresh scope, and bind the
+ * scope's lifetime to the node: disposing the node releases it — after every
+ * teardown the node owns has run, so the teardown still reads the instance's
+ * own route.
+ */
+async function instantiateScoped(
+  router: SibuRouter,
+  plan: RoutePlan,
+  routeDef: RouteDef,
+  routePath: string,
+  route: RouteContext,
+): Promise<Element> {
+  const scope = new RouteScope(route);
+  const node = await router.instantiateComponent(plan, routeDef, routePath, scope);
+  if (node) {
+    instanceScopes.set(node, scope);
+    registerDisposer(node, () => scope.release());
+  }
+  return node;
+}
+
+/** Forward a kept instance the route of the navigation that kept it. */
+function updateInstanceRoute(node: Node | null, route: RouteContext): void {
+  if (node) instanceScopes.get(node)?.update(route);
+}
+
+/**
+ * `dispose()` for a node an outlet owns: a route instance is torn down in its
+ * own scope, so a teardown reading `route()` sees the route it was created for.
+ */
+function disposeOwned(node: Node): void {
+  const scope = instanceScopes.get(node);
+  if (scope) runWithOwnerScope(scope, () => dispose(node));
+  else dispose(node);
+}
+
+// ============================================================================
 // COMPATIBILITY API (uses global router instance)
 // ============================================================================
 
@@ -1973,12 +2108,19 @@ export function setRoutes(routes: RouteDef[]): void {
  * `RouteBase.key`). Inside a getter — `() => route().params.id` — the read is
  * reactive, which is what a long-lived layout or a constant-`key` route needs.
  *
+ * Inside a route instance (anything its component creates, and any effect,
+ * derived or binding created from there) this is the route THAT INSTANCE was
+ * committed with. An instance the outlet keeps across a navigation follows it;
+ * an instance being replaced keeps its own route until it is disposed, so its
+ * effects and teardown never observe the next page's params. Everywhere else
+ * it is the router's current route.
+ *
  * @returns The active {@link RouteContext} (path, params, query, hash).
  * @throws If no router has been created yet.
  */
 export function route(): RouteContext {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
-  return _routerRef.current.currentRoute;
+  return scopedRoute(_routerRef.current);
 }
 
 /**
@@ -1992,7 +2134,7 @@ export function router() {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   return {
-    currentRoute: _routerRef.current.currentRoute,
+    currentRoute: scopedRoute(_routerRef.current),
     isReady: _routerRef.current.isReady,
     isNavigating: _routerRef.current.isNavigating,
     push: (to: NavigationTarget) => _routerRef.current?.push(to),
@@ -2211,7 +2353,7 @@ export function Route(): Node {
   /** Lifecycle-safe discard of a node this pass built but may not commit. */
   const release = (node: Node | null) => {
     if (!node) return;
-    dispose(node);
+    disposeOwned(node);
     node.parentNode?.removeChild(node);
   };
 
@@ -2221,7 +2363,7 @@ export function Route(): Node {
       // Run reactive disposers attached during route render BEFORE detaching.
       // Without dispose(), every effect/binding/listener inside the route
       // subtree leaks across navigations.
-      dispose(node);
+      disposeOwned(node);
       if (node.parentNode) {
         node.parentNode.removeChild(node);
       }
@@ -2331,7 +2473,9 @@ export function Route(): Node {
     // Claim the latest navigation slot. Any update still in flight for an
     // earlier slot becomes stale and must not mutate the DOM when it resolves.
     const seq = ++navSeq;
-    const route = _routerRef.current.currentRoute;
+    // The route as this outlet's owner sees it: the router's route for a
+    // top-level outlet, the enclosing instance's route for a nested one.
+    const route = scopedRoute(_routerRef.current);
 
     try {
       const match = _routerRef.current["matcher"].match(route.path);
@@ -2353,6 +2497,8 @@ export function Route(): Node {
       // a query/hash-only change never remounts.
       const key = instanceKey(routeDef, [routeDef], route);
       if (routeDef === currentTopRoute && key === currentKey && currentNode) {
+        // Kept across this navigation: the instance follows it.
+        updateInstanceRoute(currentNode, route);
         return;
       }
 
@@ -2400,7 +2546,7 @@ export function Route(): Node {
           // may synchronously navigate, dispose this outlet's owner, or
           // otherwise invalidate the generation — and for a direct
           // AsyncComponent it also awaits, so ownership can move either way.
-          const node = await _routerRef.current.instantiateComponent(plan, routeDef, route.path);
+          const node = await instantiateScoped(_routerRef.current, plan, routeDef, route.path, route);
 
           // Second ownership check, immediately before the synchronous commit,
           // re-reading the parent rather than trusting one captured earlier.
@@ -2444,9 +2590,11 @@ export function Route(): Node {
   };
   const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
-    queueMicrotask(() => {
-      if (!routeInitialized && anchor.parentNode) wrappedUpdate();
-    });
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!routeInitialized && anchor.parentNode) wrappedUpdate();
+      }),
+    );
   }
 
   const routeCleanup = () => {
@@ -2565,7 +2713,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     const seq = ++updateSeq;
     const router = _routerRef.current;
 
-    const route = router.currentRoute;
+    const route = scopedRoute(router);
     const match = router["matcher"].match(route.path);
     if (!match) return;
 
@@ -2593,7 +2741,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
 
     // Same route — skip
-    if (cacheKey === currentKey && currentNode) return;
+    if (cacheKey === currentKey && currentNode) {
+      updateInstanceRoute(currentNode, route);
+      return;
+    }
 
     // Not mounted yet — `track()` runs this once at creation, before the caller
     // has appended the anchor. Short-circuit before loading anything; the
@@ -2622,7 +2773,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         // registers effects and listeners, and none of it would ever be owned.
         if (kaTorn || seq !== updateSeq) return;
 
-        node = await router.instantiateComponent(plan, routeDef, route.path);
+        node = await instantiateScoped(router, plan, routeDef, route.path, route);
       } catch (error) {
         if (kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
@@ -2636,14 +2787,14 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       // The node exists and holds resources now, so losing ownership here
       // means disposing it — returning would leak every disposer it registered.
       if (kaTorn || seq !== updateSeq) {
-        dispose(node);
+        disposeOwned(node);
         return;
       }
     }
 
     const parent = anchor.parentNode;
     if (!parent) {
-      if (!fromCache) dispose(node);
+      if (!fromCache) disposeOwned(node);
       return;
     }
 
@@ -2653,10 +2804,13 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // Detach the outgoing view — dispose it only if it isn't cached.
     if (currentNode && currentNode !== node) {
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
-      if (!currentCached) dispose(currentNode);
+      if (!currentCached) disposeOwned(currentNode);
     }
 
     if (fromCache) {
+      // A cached view shown again follows the navigation that shows it; while
+      // it was cached it kept its own route.
+      updateInstanceRoute(node, route);
       // Touch LRU order.
       const idx = lruOrder.indexOf(cacheKey);
       if (idx !== -1) lruOrder.splice(idx, 1);
@@ -2676,7 +2830,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         }
         const evictNode = cache.get(evictKey);
         if (evictNode) {
-          dispose(evictNode);
+          disposeOwned(evictNode);
           if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
           cache.delete(evictKey);
         }
@@ -2696,9 +2850,11 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   };
   const kaTeardown = track(wrappedUpdate);
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) wrappedUpdate();
-    });
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!initialized && anchor.parentNode) wrappedUpdate();
+      }),
+    );
   }
 
   const kaCleanup = () => {
@@ -2711,7 +2867,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     updateSeq++;
     kaTeardown();
     for (const node of cache.values()) {
-      dispose(node);
+      disposeOwned(node);
       if (node.parentNode) node.parentNode.removeChild(node);
     }
     cache.clear();
@@ -2719,7 +2875,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     if (currentNode?.parentNode) currentNode.parentNode.removeChild(currentNode);
     // An uncached current view is not in `cache`, so it would otherwise be
     // detached but never torn down.
-    if (currentNode && !currentCached) dispose(currentNode);
+    if (currentNode && !currentCached) disposeOwned(currentNode);
     currentNode = null;
     currentKey = "";
     currentCached = false;
@@ -3081,7 +3237,9 @@ export function Suspense(props: {
     cleanupNodes();
   });
 
-  queueMicrotask(render);
+  // Rendered in a microtask, in the owner scope the boundary was created in —
+  // content built inside a route instance belongs to that instance's route.
+  queueMicrotask(bindOwnerScope(render));
 
   return anchor;
 }
@@ -3247,7 +3405,7 @@ export function Outlet(): Node {
     if (currentNode) {
       // Dispose first so the child's reactive bindings/listeners are released —
       // a bare removeChild would leak them on every nested navigation.
-      dispose(currentNode);
+      disposeOwned(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       currentNode = null;
     }
@@ -3267,14 +3425,18 @@ export function Outlet(): Node {
   /** Lifecycle-safe discard of a node this pass built but may not commit. */
   const release = (node: Node | null) => {
     if (!node) return;
-    dispose(node);
+    disposeOwned(node);
     node.parentNode?.removeChild(node);
   };
 
   const update = async () => {
     if (outletTorn || !_routerRef.current) return;
     const seq = ++navSeq;
-    const route = _routerRef.current.currentRoute;
+    // The enclosing layout instance's route. It changes only when the layout's
+    // outlet keeps the layout across a navigation — an outgoing layout's
+    // Outlet never sees the next route, so it leaves its child alone until
+    // the layout itself is disposed.
+    const route = scopedRoute(_routerRef.current);
 
     // Left the nested area (or matched a flat route): drop any stale child so
     // the layout doesn't keep rendering the previous page's content.
@@ -3298,7 +3460,11 @@ export function Outlet(): Node {
     // instance; with `/users/:id` → child `/posts`, the id is the LAYOUT's own
     // param, so `Route()` remounts the layout and this outlet with it.
     const key = instanceKey(childRoute, route.matched.slice(1), route);
-    if (childRoute === currentChild && key === currentKey && currentNode) return;
+    if (childRoute === currentChild && key === currentKey && currentNode) {
+      // Kept across this navigation: the child follows it.
+      updateInstanceRoute(currentNode, route);
+      return;
+    }
 
     try {
       // Use a composite cache key so parent and child don't collide
@@ -3314,7 +3480,7 @@ export function Outlet(): Node {
       // Create exactly one instance. Arbitrary user code: it may synchronously
       // navigate, dispose this outlet's owner, or otherwise invalidate the
       // generation — an `await` is not the only way ownership moves.
-      const node = await _routerRef.current.instantiateComponent(plan, childRoute, cacheKey);
+      const node = await instantiateScoped(_routerRef.current, plan, childRoute, cacheKey, route);
 
       // Second ownership check, immediately before the synchronous commit, and
       // re-reading the parent rather than trusting one captured earlier. The
@@ -3340,9 +3506,13 @@ export function Outlet(): Node {
 
   const outletTeardown = track(update);
   if (!anchor.parentNode) {
-    queueMicrotask(() => {
-      if (anchor.parentNode) update();
-    });
+    // The deferred first pass must read the same route the binding does: the
+    // enclosing instance's, carried by the owner scope.
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (anchor.parentNode) update();
+      }),
+    );
   }
   const outletCleanup = () => {
     if (outletTorn) return;
@@ -3353,7 +3523,7 @@ export function Outlet(): Node {
     navSeq++;
     outletTeardown();
     if (currentNode) {
-      dispose(currentNode);
+      disposeOwned(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       currentNode = null;
     }
@@ -3404,12 +3574,14 @@ export function routerState(): {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const router = _routerRef.current;
+  // Route reads are scoped like `route()`: inside a route instance they are
+  // that instance's committed route.
   return {
-    currentPath: () => router.currentRoute.path,
-    params: () => router.currentRoute.params,
-    query: () => router.currentRoute.query,
-    hash: () => router.currentRoute.hash,
-    meta: () => router.currentRoute.meta,
+    currentPath: () => scopedRoute(router).path,
+    params: () => scopedRoute(router).params,
+    query: () => scopedRoute(router).query,
+    hash: () => scopedRoute(router).hash,
+    meta: () => scopedRoute(router).meta,
     isNavigating: () => router.isNavigating,
     isReady: () => router.isReady,
   };

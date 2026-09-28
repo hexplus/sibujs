@@ -7,6 +7,71 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Upgrade notes
+
+Behaviour that changes for existing code:
+
+- **A route page reads its own route.** Inside a route instance, `route()`,
+  `routerState()` and `router().currentRoute` return the route that instance
+  was committed with. An instance the outlet keeps (a query- or hash-only
+  change, a layout whose child changed) still follows every navigation; an
+  instance being replaced no longer sees the next route. Code outside route
+  instances is unaffected.
+- **A nested `Outlet()` inside an outgoing layout keeps its child** until the
+  layout is disposed, instead of clearing it as soon as the navigation commits.
+- **A `KeepAliveRoute()` view stops following navigations while it is cached**
+  and is handed the current route when shown again.
+- **`query()` no longer refetches when its key getter re-runs to the same
+  key.** Data that went stale is refetched by `refetch()`, invalidation, the
+  interval, focus or reconnect — not by an unrelated signal change.
+
+### Fixed — an outgoing route page observed the next route's params
+
+A navigation commits the router's route first; the outlet swaps the component
+a microtask later, or a whole chunk download later for a lazy page. Every
+computation the outgoing page owned read the router-global route, so in that
+window it re-ran against the incoming route: `/user/1` → `/user/2` made page 1's
+effects fetch user 2, `/user/1` → `/settings` ran them with `params.id`
+`undefined`, and teardown code saw the same. Pages had to guard every read.
+
+Each instance an outlet mounts now gets its own route scope, and its component
+factory runs inside it:
+
+- effects, deriveds and bindings the page creates — in setup or later, through
+  `when`/`match`/`each`, `lazy()`, `Suspense`, `Portal` or `onMount` — read
+  that scope;
+- a kept instance is handed each new route; a replaced one keeps its own until
+  it is disposed, and its effect cleanups, `onUnmount` callbacks and disposers
+  run in its scope;
+- nested `Outlet()`s read their layout's scope, and `KeepAliveRoute()` views
+  keep theirs while cached;
+- once an instance is disposed its scope is released, so a computation that
+  outlived it falls back to the router's route.
+
+Navigation timing, guards, `afterEach`, navigation generations, supersession,
+loaders, SSR and hydration are unchanged. Reading `route()` after an `await`
+inside a direct `AsyncComponent`, or from a timer, runs outside any scope and
+reads the router's route; use `lazy()` for code-split pages.
+
+### Fixed — `query()` refetched when a reactive key recomputed to the same key
+
+``query(() => `user:${id() % 10}`, fetchUser)`` re-ran its key effect when
+`id` went from 1 to 11, and with the default `staleTime: 0` that re-run
+refetched `user:1`. Wrapping the key in `derived()` was the workaround. A
+same-key re-run now fetches only when `enabled` has just turned on, or when the
+observer had to re-attach because its cache entry was replaced. First mount, a
+real key change, `refetch()`, `invalidateQueries()`, `refetchInterval`,
+`refetchOnWindowFocus` and `refetchOnReconnect` fetch as before.
+
+### Added — owner scope in the reactive core (internal)
+
+Every effect, derived and binding records the owner scope current when it is
+created and runs in it every time, whoever triggers it; the framework's
+deferred renders carry it too. It is not a public API; the router's
+route-instance scope is built on it. See `docs/architecture/reactivity.md`.
+
 ## [4.9.0] — 2026-09-28
 
 ### Upgrade notes

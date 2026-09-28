@@ -1,4 +1,4 @@
-import { track } from "../../reactivity/track";
+import { bindOwnerScope, track } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 
@@ -129,9 +129,11 @@ export function KeepAlive(
   const untrack = track(update);
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!initialized && anchor.parentNode) update();
-    });
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!initialized && anchor.parentNode) update();
+      }),
+    );
   }
 
   // When the anchor is disposed (via when/match/each/dispose), tear down the

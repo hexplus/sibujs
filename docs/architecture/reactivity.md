@@ -95,6 +95,41 @@ Two properties are worth stating precisely:
   even though the net value is identical. This is a conservative
   over-approximation — an extra run, never a missed one.
 
+### Owner scope
+
+Some state belongs to *where a computation was created*, not to whoever happens
+to trigger it later. The core carries one opaque value for that, the **owner
+scope**:
+
+```text
+runWithOwnerScope(scope, factory)
+   │  every subscriber created while `factory` runs stamps `scope`
+   ▼
+effect / derived / binding        (stamp taken on its first run)
+   │  every later run — from any drain, batch or pull — reinstates the stamp
+   ▼
+subscribers created during that run inherit it, and so on down the tree
+```
+
+- The stamp is taken once, on the subscriber's first run, and never changes.
+  A subscriber created outside any scope stays unscoped even when a scoped
+  write later triggers it.
+- `track()`/`retrack()` save and restore the previous scope around every run,
+  including one that throws, so a scope never leaks into unrelated code.
+- An effect's cleanups run in the effect's scope, on re-run and on dispose.
+- Work the framework defers past a subscriber run — the first render of
+  `when`/`match`/`each`/`KeepAlive`, `lazy()` and `Suspense` content,
+  `Portal` content, `onMount`/`onUnmount` callbacks, router outlets — captures
+  the scope with `bindOwnerScope`. Work the *application* defers (a timer, an
+  `await` continuation, an event handler creating new computations) does not
+  carry it: there is no async context propagation.
+
+The core never interprets the value. Its one consumer today is the router,
+which scopes each route instance to the route it was committed with (see
+[router.md § Route-instance scope](./router.md#route-instance-scope)).
+
+Cost: one pointer save/restore per run, and one property per subscriber.
+
 ### Scheduling
 
 Writes notify synchronously by default. `batch(fn)` defers notification until

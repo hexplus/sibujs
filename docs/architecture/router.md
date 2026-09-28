@@ -54,6 +54,8 @@ update history (unless skipHistory)
     │
     ▼
 set current route  ──► outlet re-renders reactively
+    │                    (instances read their own route — see
+    │                     "Route-instance scope")
     │
     ▼
 run afterEach hooks
@@ -272,6 +274,58 @@ renders that record. A constant keeps one instance across param changes; the
 instance must then read params reactively. The key is evaluated untracked.
 `KeepAliveRoute()` ignores `key`: it already keeps one instance per full
 location.
+
+### Route-instance scope
+
+The router commits a navigation by writing its route state; the outlet swaps
+the component afterwards — a microtask later for a synchronous page, a whole
+chunk download later for a lazy one. Committing the route after the DOM swap is
+not an option: `navigate()` would then resolve before `route()` reflects it,
+and guards, `afterEach`, history and the navigation generation all key off the
+commit.
+
+So the invariant is enforced on the read side instead:
+
+> Once navigation from A to B commits, no reactive computation owned by route
+> instance A observes B's params, query or hash as if they belonged to A.
+
+Every instance an outlet mounts gets a **route scope** — a small signal holding
+the route that instance was committed with. The component factory runs inside
+it as an [owner scope](./reactivity.md#owner-scope), so every effect, derived
+and binding the page creates — during setup or later, through its directives —
+reads that route from `route()`, `routerState()` and `router().currentRoute`.
+
+```text
+navigation A → B commits the router's route
+      │
+      ▼
+outlet re-evaluates, reading ITS OWNER's route
+      │
+      ├── same record + same instance key ──► instance kept: its scope is
+      │                                        handed B, and it follows B
+      │
+      └── otherwise ──► instance replaced: its scope is never written again.
+                        It keeps observing A while B loads, and is disposed —
+                        teardown included — in its own scope. The scope is
+                        released a microtask after disposal.
+```
+
+- A nested `Outlet()` reads its layout's scope, so it reacts only when its
+  layout is kept. An outgoing layout's `Outlet()` leaves its child alone until
+  the layout itself is disposed.
+- A `KeepAliveRoute()` view keeps its route while cached and is handed the new
+  route when shown again.
+- Code outside any route instance — an app shell, a test, code after `await
+  navigate()` — reads the router's route, which is current as soon as the
+  navigation commits.
+- A computation that outlives its instance (an app-lifetime `derived()` that
+  happened to be created while a page rendered) falls back to the router's
+  route once the instance's scope is released.
+
+`route()` inside a direct `AsyncComponent` after its first `await`, or in code
+the application defers itself (a timer, an event handler that creates new
+computations), runs outside any scope and reads the router's route. Use
+`lazy()` for code-split pages: its factory runs inside the scope.
 
 ### Outlet ownership
 
@@ -843,6 +897,11 @@ already-committed navigation. See
 for the ordering and the reasoning. That was MEM-001.
 
 ## Known limitations
+
+- **Route scope does not cross application-owned async boundaries.** A
+  computation created after an `await` inside a direct `AsyncComponent`, or
+  from a timer or event handler, reads the router's route rather than its
+  instance's. See [Route-instance scope](#route-instance-scope).
 
 - **SSR and hydration router behaviour is not covered** by the hardening
   passes. `routerSSR.ts` has its own suite, but server-match and
