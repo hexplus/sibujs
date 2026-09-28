@@ -282,8 +282,12 @@ export function svgElement(
   for (const child of nodes) {
     if (typeof child === "string") {
       el.appendChild(document.createTextNode(child));
-    } else if (child instanceof Node) {
-      el.appendChild(child);
+    } else if (typeof (child as { nodeType?: unknown } | null)?.nodeType === "number") {
+      // `nodeType`, not `instanceof Node`: a node from another document or
+      // realm (an iframe) failed that check and was silently dropped. Native
+      // `appendChild` is the final validator — it adopts a foreign node and
+      // throws a TypeError for anything that only looks like one.
+      el.appendChild(child as Node);
     }
   }
 

@@ -7,7 +7,24 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.9.0] — 2026-09-28
+
+### Upgrade notes
+
+Behaviour that changes for existing code:
+
+- **A reordered query is the same route everywhere.** `navigate("/s?b=2&a=1")`
+  from `/s?a=1&b=2` now fails as `duplicate`, as `RouterLink` already treated
+  the two as one target, and `KeepAliveRoute` serves both from one cached view.
+- **`svgElement()` appends a child from another document or iframe** instead
+  of silently dropping it. A non-Node value that only imitates one (a plain
+  object with a `nodeType`) now reaches `appendChild`, which throws a
+  `TypeError`.
+- **`longPress` ignores a second pointer** while a press is pending: another
+  pointer going down, up, or leaving neither starts, restarts, completes nor
+  cancels it.
+- **`keyboard({ target })` clears held keys on the blur of the target's own
+  window** — an element in an iframe no longer resets on the top window's blur.
 
 ### Added — reactive `enabled` for `query()` and `infiniteQuery()`
 
@@ -43,6 +60,51 @@ Changing a `query()` key while a request for the old key was in flight left
 data, or `enabled` off): the old request's settle no longer reaches the
 observer. On a key change, `fetching()` now mirrors the new key — `true` only
 while a request for it is in flight.
+
+### Fixed — router query identity
+
+The router had two definitions of "same query", and neither was sound.
+`RouterLink` joined the *decoded* entries as `k=v`, so an encoded `&` or `=`
+read as a delimiter: `?a=x%26b%3Dy` was exact-active for `?a=x&b=y`. Duplicate
+detection compared `JSON.stringify(query)`, which depends on parameter order.
+And `RouterLink` kept every value of a repeated key while `route().query`
+keeps the last, so `/s?tag=a&tag=b` was never exact-active on itself.
+
+One canonical identity now serves duplicate detection, `RouterLink`
+exact-active, and the `KeepAliveRoute` cache key. It parses a query exactly as
+`RouteContext.query` does — `URLSearchParams` decoding, **last value wins** for
+a repeated key (`Params` stays `Record<string, string>`) — and compares the
+sorted entries structurally, so it is order-independent and collision-free.
+
+### Fixed — `longPress` stranded timers
+
+A second `pointerdown` overwrote the pending timer's handle, so the first
+timeout could no longer be cancelled: it fired after release, and even after
+the action was disposed. There is now at most one pending timer, owned by the
+pointer that started the press, and `pointercancel` ends a press like
+`pointerup` and `pointerleave` do. Cleanup leaves no timer behind.
+
+### Fixed — DOM ownership across documents and realms
+
+- **`KeepAlive`** recognizes a `DocumentFragment` by `nodeType`. A fragment
+  built in an iframe failed `instanceof DocumentFragment`, went in unwrapped,
+  and was emptied on insertion — its content could never be re-attached.
+- **`svgElement()`** recognizes a child node by `nodeType`, not `instanceof
+  Node`.
+- **`clickOutside`** listens on the element's `ownerDocument`, not the global
+  `document`, so it works for an element in an iframe; a non-Node event target
+  counts as outside instead of throwing.
+- **`trapFocus`** wraps focus using the element's own document's
+  `activeElement`.
+- **`keyboard({ target })`** listens for `blur` on the target's window.
+
+### Fixed — `createISR().revalidate()` resolved before the fetch finished
+
+A call made while a revalidation was running returned at once, although the
+fetch had not completed. Concurrent calls now join the running revalidation:
+the fetcher runs once, and every caller's promise settles — resolving, or
+rejecting with the same error — when that fetch does. A settled fetch arms
+exactly one deadline (none after `dispose()`).
 
 ## [4.8.0] — 2026-09-27
 

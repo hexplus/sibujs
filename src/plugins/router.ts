@@ -98,13 +98,42 @@ function normalizePathname(path: string): string {
   return trimmed || "/";
 }
 
-/** Order-independent serialization, so `?b=2&a=1` and `?a=1&b=2` compare equal. */
-function normalizeQuery(query: string | Params): string {
-  const params = new URLSearchParams(query);
-  return [...params.entries()]
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([k, v]) => `${k}=${v}`)
-    .join("&");
+/**
+ * Parse a raw query string (without the leading `?`) into route `Params`.
+ *
+ * The one parser behind `RouteContext.query` and every query comparison.
+ * Decoding is `URLSearchParams`' (`+` is a space, `%XX` is decoded). A repeated
+ * key keeps its **last** value — `Params` is `Record<string, string>`, so
+ * `?tag=a&tag=b` is `{ tag: "b" }`.
+ */
+function parseQuery(query: string): Params {
+  return Object.fromEntries(new URLSearchParams(query));
+}
+
+/**
+ * Canonical identity of a `Params` record: its entries sorted by key and
+ * serialized as JSON. Order-independent, and collision-free because JSON
+ * escapes every structural character inside a key or value. Keys are unique in
+ * a record, so sorting by key alone is a total order; the comparator is still a
+ * proper three-way one, as `Array.prototype.sort()` requires.
+ */
+function paramsIdentity(params: Params): string {
+  return JSON.stringify(Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
+/**
+ * Canonical identity of a query — the ONE definition of "same query" the router
+ * uses: duplicate-navigation detection, `RouterLink` exact-active matching, and
+ * the `KeepAliveRoute` cache key. A raw string is parsed exactly as
+ * `RouteContext.query` is, so a URL and the route it produces always agree.
+ *
+ * It replaced a `k=v` join of *decoded* entries (`?a=x%26b%3Dy` and `?a=x&b=y`
+ * collapsed onto `a=x&b=y`) and an insertion-ordered `JSON.stringify` in
+ * `isSameRoute()` (`?b=2&a=1` differed from `?a=1&b=2` there, but not for
+ * `RouterLink`).
+ */
+function queryIdentity(query: string | Params): string {
+  return paramsIdentity(typeof query === "string" ? parseQuery(query) : query);
 }
 
 /**
@@ -138,6 +167,12 @@ export type Params = Record<string, string>;
 export interface RouteContext {
   readonly path: string;
   readonly params: Params;
+  /**
+   * The decoded query (`+` is a space, `%XX` is decoded). A repeated key keeps
+   * its last value: `?tag=a&tag=b` is `{ tag: "b" }`. Two locations are the
+   * same route — for duplicate detection and `RouterLink` exact-active — when
+   * their queries have the same entries in any order.
+   */
   readonly query: Params;
   readonly hash: string;
   readonly meta: RouteMeta;
@@ -1286,7 +1321,7 @@ export class SibuRouter {
 
   private createRouteContext(fullPath: string): RouteContext {
     const { path, query: queryString, hash } = splitRouteUrl(fullPath);
-    const query = Object.fromEntries(new URLSearchParams(queryString));
+    const query = parseQuery(queryString);
 
     const match = this.matcher.match(path || "/");
     const params = match?.params || {};
@@ -1564,10 +1599,14 @@ export class SibuRouter {
     // A placeholder that has resolved to nothing is never the same route as a
     // target that resolved to a real match.
     if (from.matched.length === 0 && to.matched.length > 0) return false;
+    // Query identity is `queryIdentity()`, the same one `RouterLink` uses for
+    // exact-active. `JSON.stringify(query)` was insertion-ordered, so
+    // `?b=2&a=1` was not a duplicate of `?a=1&b=2` here while `RouterLink`
+    // called them the same target.
     return (
       from.path === to.path &&
-      JSON.stringify(from.params) === JSON.stringify(to.params) &&
-      JSON.stringify(from.query) === JSON.stringify(to.query) &&
+      paramsIdentity(from.params) === paramsIdentity(to.params) &&
+      queryIdentity(from.query) === queryIdentity(to.query) &&
       from.hash === to.hash
     );
   }
@@ -2546,9 +2585,9 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // Key the cached view by the full location, not just `route.path`.
     // `route.path` strips the query/hash, so "/search?q=a" and "/search?q=b"
     // would collide and KeepAlive would serve one query's cached DOM/state
-    // for the other.
-    const queryStr = Object.keys(route.query).length > 0 ? `?${new URLSearchParams(route.query).toString()}` : "";
-    const cacheKey = `${route.path}${queryStr}${route.hash ? `#${route.hash}` : ""}`;
+    // for the other. The query part is `queryIdentity()`, so a reordered query
+    // is the same cached view, as it is the same route everywhere else.
+    const cacheKey = JSON.stringify([route.path, queryIdentity(route.query), route.hash]);
 
     // Check if this route should be cached
     const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
@@ -2742,7 +2781,7 @@ export function RouterLink(
   // both sides of every active-state comparison are normalized the same way.
   const { path: hrefPathRaw, query: hrefQueryRaw, hash: hrefHash } = splitRouteUrl(href);
   const targetPath = normalizePathname(hrefPathRaw);
-  const targetQuery = normalizeQuery(hrefQueryRaw);
+  const targetQuery = queryIdentity(hrefQueryRaw);
 
   const link = document.createElement("a");
   link.href = href;
@@ -2778,7 +2817,7 @@ export function RouterLink(
     const isExactActive =
       kind === "internal" &&
       currentPath === targetPath &&
-      normalizeQuery(route.query) === targetQuery &&
+      queryIdentity(route.query) === targetQuery &&
       route.hash === hrefHash;
 
     const classes: string[] = [];

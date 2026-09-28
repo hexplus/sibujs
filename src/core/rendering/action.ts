@@ -98,13 +98,20 @@ export function action<T>(element: HTMLElement, action: ActionFn<T> | string, pa
  * ```
  */
 export const clickOutside: ActionFn<() => void> = (element, callback) => {
+  // The element's own document, not the global one: an element hosted in an
+  // iframe or another document receives its pointer events there, and the
+  // global `document` never sees them. Captured once so cleanup removes the
+  // listener from exactly the document it was added to, even if the element is
+  // adopted elsewhere in between.
+  const doc = element.ownerDocument;
   const handler = (e: Event) => {
-    if (!element.contains(e.target as Node)) {
-      callback();
-    }
+    const target = e.target as Node | null;
+    // `contains()` throws for a target that is not a Node (a window, or any
+    // other EventTarget). `nodeType` asks "is this a Node" in any realm.
+    if (!(typeof target?.nodeType === "number" && element.contains(target))) callback();
   };
-  document.addEventListener("pointerdown", handler, true);
-  return () => document.removeEventListener("pointerdown", handler, true);
+  doc.addEventListener("pointerdown", handler, true);
+  return () => doc.removeEventListener("pointerdown", handler, true);
 };
 
 /**
@@ -117,8 +124,17 @@ export interface LongPressOptions {
   callback: () => void;
 }
 
+/** Every way a press ends before it is long: release, leaving, or the platform taking the pointer over. */
+const PRESS_END_EVENTS = ["pointerup", "pointerleave", "pointercancel"] as const;
+
 /**
  * Fires a callback after a sustained press on the element.
+ *
+ * One press at a time, owned by the pointer that started it: only that
+ * pointer's `pointerup`, `pointerleave` or `pointercancel` ends it, and another
+ * pointer going down meanwhile is ignored. The same pointer going down again
+ * restarts the press. Cleanup cancels a pending press, so the callback never
+ * fires after the action is disposed.
  *
  * @example
  * ```ts
@@ -127,14 +143,13 @@ export interface LongPressOptions {
  */
 export const longPress: ActionFn<LongPressOptions> = (element, options) => {
   const duration = options.duration ?? 500;
+  // The ONE pending timer. A second `pointerdown` used to overwrite this
+  // handle, leaving the first timeout unreachable by `cancel()` — it fired
+  // after release, and even after the action was disposed.
   let timer: ReturnType<typeof setTimeout> | null = null;
-
-  const start = () => {
-    timer = setTimeout(() => {
-      options.callback();
-      timer = null;
-    }, duration);
-  };
+  // The pointer that owns the pending press. `undefined` is a valid owner: an
+  // event without a `pointerId` (a synthetic `Event`) is one anonymous pointer.
+  let owner: number | undefined;
 
   const cancel = () => {
     if (timer !== null) {
@@ -143,15 +158,30 @@ export const longPress: ActionFn<LongPressOptions> = (element, options) => {
     }
   };
 
+  const start = (e: Event) => {
+    const id = (e as PointerEvent).pointerId;
+    // A second pointer while a press is pending — another finger, a pen next to
+    // a mouse — neither starts a press of its own nor disturbs this one.
+    if (timer !== null && id !== owner) return;
+    cancel();
+    owner = id;
+    timer = setTimeout(() => {
+      timer = null;
+      options.callback();
+    }, duration);
+  };
+
+  const end = (e: Event) => {
+    if (timer !== null && (e as PointerEvent).pointerId === owner) cancel();
+  };
+
   element.addEventListener("pointerdown", start);
-  element.addEventListener("pointerup", cancel);
-  element.addEventListener("pointerleave", cancel);
+  for (const type of PRESS_END_EVENTS) element.addEventListener(type, end);
 
   return () => {
     cancel();
     element.removeEventListener("pointerdown", start);
-    element.removeEventListener("pointerup", cancel);
-    element.removeEventListener("pointerleave", cancel);
+    for (const type of PRESS_END_EVENTS) element.removeEventListener(type, end);
   };
 };
 
@@ -228,11 +258,15 @@ export const trapFocus: ActionFn<void> = (element) => {
 
     const first = elements[0];
     const last = elements[elements.length - 1];
+    // The focused element of the document the trap lives in. The global
+    // `document.activeElement` is another document's focus when the element
+    // is hosted in an iframe, so the wrap-around never triggered there.
+    const active = element.ownerDocument.activeElement;
 
-    if (e.shiftKey && document.activeElement === first) {
+    if (e.shiftKey && active === first) {
       e.preventDefault();
       last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
+    } else if (!e.shiftKey && active === last) {
       e.preventDefault();
       first.focus();
     }
