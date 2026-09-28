@@ -155,6 +155,50 @@ describe("query", () => {
     });
   });
 
+  describe("key change with a request in flight", () => {
+    it("switching to a key with fresh cached data clears fetching", async () => {
+      const seed = query("fresh", async () => "cached", { staleTime: 60_000 });
+      await tick();
+      seed.dispose();
+      const [key, setKey] = signal("slow");
+      const deferred = createDeferred<string>();
+      const q = query(key, ({ key }) => (key === "slow" ? deferred.promise : Promise.resolve("refetched")), {
+        staleTime: 60_000,
+      });
+      expect(q.fetching()).toBe(true);
+
+      setKey("fresh");
+      expect(q.data()).toBe("cached");
+      expect(q.fetching()).toBe(false);
+
+      deferred.resolve("late");
+      await tick();
+      expect(q.fetching()).toBe(false);
+      expect(q.data()).toBe("cached");
+      q.dispose();
+    });
+
+    it("switching to a key another observer is fetching reports fetching until it settles", async () => {
+      const [key, setKey] = signal("a");
+      const a = createDeferred<string>();
+      const b = createDeferred<string>();
+      const fetcher = ({ key }: { key: string }) => (key === "a" ? a.promise : b.promise);
+      const other = query("b", fetcher);
+      const q = query(key, fetcher);
+
+      setKey("b");
+      expect(q.fetching()).toBe(true);
+
+      b.resolve("B");
+      await tick();
+      expect(q.fetching()).toBe(false);
+      expect(q.data()).toBe("B");
+      a.resolve("A");
+      other.dispose();
+      q.dispose();
+    });
+  });
+
   describe("caching", () => {
     it("shares cached data between instances with staleTime", async () => {
       const fn = vi.fn().mockResolvedValue("cached");

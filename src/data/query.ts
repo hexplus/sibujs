@@ -730,6 +730,14 @@ export function query<T>(
     const entry = getOrCreateEntry(cache, key, initialData);
     attachToEntry(entry, key);
 
+    // `fetching` described the previous key's request, whose settle no longer
+    // reaches this observer (it is detached, and the settle is gated on
+    // `currentKey`). Leaving it set stranded the flag at `true` when the new
+    // key needed no fetch. Mirror the new entry instead: a request already in
+    // flight for it clears the flag through `onCacheUpdate` when it settles,
+    // and a fetch started below raises it again.
+    if (keyChanged) setIsFetching(entry.promise !== null);
+
     if (entry.data !== undefined) {
       const view = viewOf(entry);
       batch(() => {

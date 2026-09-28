@@ -36,6 +36,14 @@ showed up in all of them. The empty key now attaches to nothing. Moving from a
 real key to `""` releases the previous entry for garbage collection and clears
 `fetching()`.
 
+### Fixed — `fetching()` stuck at `true` after a key change
+
+Changing a `query()` key while a request for the old key was in flight left
+`fetching()` at `true` for good when the new key needed no fetch (fresh cached
+data, or `enabled` off): the old request's settle no longer reaches the
+observer. On a key change, `fetching()` now mirrors the new key — `true` only
+while a request for it is in flight.
+
 ## [4.8.0] — 2026-09-27
 
 ### Upgrade notes
