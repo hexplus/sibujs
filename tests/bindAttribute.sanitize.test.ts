@@ -9,7 +9,7 @@ describe("bindAttribute (with sanitization)", () => {
 
     bindAttribute(a, "href", href);
     // sanitizeUrl blocks javascript: — returns empty string
-    expect(a.getAttribute("href")).toBe("");
+    expect(a.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("should block javascript: in src attributes", () => {
@@ -17,7 +17,7 @@ describe("bindAttribute (with sanitization)", () => {
     const img = document.createElement("img");
 
     bindAttribute(img, "src", src);
-    expect(img.getAttribute("src")).toBe("");
+    expect(img.getAttribute("src")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("should allow safe URLs in href", () => {
@@ -87,7 +87,7 @@ describe("bindDynamic (security)", () => {
     const el = document.createElement("a");
 
     bindDynamic(el, "href", "javascript:alert(1)");
-    expect(el.getAttribute("href")).toBe("");
+    expect(el.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("should sanitize URL attributes regardless of name case (HTML attrs are case-insensitive)", () => {
@@ -95,11 +95,11 @@ describe("bindDynamic (security)", () => {
     // "HREF"/"Href" must still be recognized as a URL attribute — otherwise the
     // javascript: URL would reach the live DOM (browser treats HREF as href).
     bindDynamic(a, "HREF", "javascript:alert(1)");
-    expect(a.getAttribute("HREF")).toBe("");
+    expect(a.getAttribute("HREF")).toBeNull(); // refused URL is omitted, not emptied
 
     const img = document.createElement("img");
     bindDynamic(img, "SRC", "javascript:alert(1)");
-    expect(img.getAttribute("SRC")).toBe("");
+    expect(img.getAttribute("SRC")).toBeNull();
   });
 });
 
@@ -108,6 +108,6 @@ describe("bindAttribute (URL attr case-insensitivity)", () => {
     const [href] = signal("javascript:alert(1)");
     const a = document.createElement("a");
     bindAttribute(a, "HREF", href);
-    expect(a.getAttribute("HREF")).toBe("");
+    expect(a.getAttribute("HREF")).toBeNull(); // refused URL is omitted, not emptied
   });
 });

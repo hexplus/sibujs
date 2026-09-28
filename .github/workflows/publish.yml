@@ -24,8 +24,11 @@ jobs:
             - name: Upgrade npm
               run: npm install -g npm@latest
 
+            # npm ci, not npm install: the job that holds the publish token
+            # installs exactly what the committed lockfile pins, verifying
+            # every integrity hash, instead of resolving something newer.
             - name: Install dependencies
-              run: npm install
+              run: npm ci
 
             - name: Build
               run: npm run build

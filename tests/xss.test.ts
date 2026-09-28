@@ -142,7 +142,7 @@ describe("tagFactory XSS prevention", () => {
 
   it("sanitizes href with javascript: protocol", () => {
     const el = a({ href: "javascript:alert(1)", nodes: "click" });
-    expect(el.getAttribute("href")).toBe("");
+    expect(el.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("stores attribute values safely via setAttribute", () => {

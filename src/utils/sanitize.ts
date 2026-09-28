@@ -10,6 +10,9 @@ export function stripControlChars(value: string): string {
   return value.replace(/[\x00-\x20\x7f-\x9f]+/g, "");
 }
 
+const ASCII_UPPER = /[A-Z]/;
+const ASCII_UPPER_G = /[A-Z]/g;
+
 /**
  * Fold an attribute name to the form the HTML parser will use.
  *
@@ -25,7 +28,11 @@ export function stripControlChars(value: string): string {
  * committed under another.
  */
 export function canonicalAttrName(name: string): string {
-  return name.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
+  // Already-lowercase names — nearly all of them — skip the callback replace.
+  // This runs on every attribute commit via the contextual element policy.
+  return ASCII_UPPER.test(name)
+    ? name.replace(ASCII_UPPER_G, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32))
+    : name;
 }
 
 /**
@@ -99,6 +106,23 @@ export function sanitizeUrl(url: string): string {
   // OUTPUT: the caller's value, minus only the outer padding.
   const output = url.replace(OUTER_TRIM, "");
 
+  // A leading slash pair that contains a BACKSLASH (`\\host`, `\/host`,
+  // `/\host`). The WHATWG parser reads these as protocol-relative, but
+  // Chromium on Windows resolves `\\host\share` as a UNC path — a `file:` URL,
+  // outside the allowlist, and an SMB credential-leak vector — even against an
+  // `https:` page. No web URL needs this spelling (`//host` is the protocol-
+  // relative form and stays allowed), so the ambiguity is refused rather than
+  // resolved in the engine's favour. Found by tests-browser/, which checks the
+  // engine's own reading of every kept URL.
+  if (
+    probe.length >= 2 &&
+    (probe[0] === "\\" || probe[0] === "/") &&
+    (probe[1] === "\\" || probe[1] === "/") &&
+    (probe[0] === "\\" || probe[1] === "\\")
+  ) {
+    return "";
+  }
+
   // Detect an explicit scheme: the first ":" before any "/", "?", or "#".
   // If there's no scheme, treat as relative URL (safe).
   const lower = probe.toLowerCase();
@@ -125,37 +149,102 @@ export function sanitizeUrl(url: string): string {
 }
 
 /**
- * The only descriptors a srcset candidate may carry: a width (`640w`) or a
- * pixel density (`2x`, `1.5x`). Anything else means the candidate is malformed.
+ * The only descriptor a srcset candidate may carry: a width (`640w`) or a pixel
+ * density (`2x`, `1.5x`). Anything else means the candidate is malformed.
  *
- * WHY THIS IS VALIDATED: candidates are split on the first whitespace run, and
+ * WHY THIS IS VALIDATED: a candidate's URL ends at the first whitespace, and
  * whitespace is exactly what an obfuscated scheme hides behind. Given
  * `java\tscript:alert(1) 1x`, the URL half is just `java` — which passes the
  * allowlist as a relative URL — and the dangerous remainder rides along in the
- * descriptor half. Requiring a well-formed descriptor drops such candidates
- * instead of reassembling them.
+ * descriptor half. Requiring exactly one well-formed descriptor (or none) drops
+ * such candidates instead of reassembling them. Stricter than the browser,
+ * which also accepts `h` descriptors and exponent notation: a candidate this
+ * check cannot read confidently is dropped, never guessed at.
  */
-const SRCSET_DESCRIPTOR = /^\s+\d+(\.\d+)?[wx]$/;
+const SRCSET_DESCRIPTOR = /^\d+(\.\d+)?[wx]$/;
+
+function isSrcsetWhitespace(ch: string): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f";
+}
 
 /**
- * Sanitizes a srcset attribute value by splitting on commas, running each
- * URL through sanitizeUrl, and re-joining. Invalid candidates are dropped.
+ * Sanitizes a srcset attribute value: each candidate's URL goes through
+ * `sanitizeUrl`, and invalid or refused candidates are dropped.
+ *
+ * STRUCTURAL, NOT `split(",")`. The browser splits a srcset with the WHATWG
+ * "parse a srcset attribute" algorithm, in which a candidate's URL is the run
+ * of NON-WHITESPACE characters — commas included — and only a comma that ends
+ * that run (or follows its descriptors) separates candidates. Splitting on
+ * every comma disagreed with the browser about where candidates begin and end:
+ * `https://cdn.example/i.jpg?w=100,h=200 2x` was cut into two candidates and
+ * republished as a different, broken list, and `data:image/svg+xml,… 1x` had
+ * its tail promoted to a candidate of its own. Tokenizing exactly as the
+ * browser does means the candidate judged is the candidate the browser loads.
+ *
+ * The output is rebuilt only from kept candidates, each a URL containing no
+ * whitespace followed by at most one validated descriptor, so the browser's
+ * reading of the OUTPUT is exactly the list this function approved.
  */
 export function sanitizeSrcset(value: string): string {
-  const parts = value.split(",");
+  const input = String(value);
   const out: string[] = [];
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i].trim();
-    if (!part) continue;
-    // Candidate = URL [descriptor]. Split on first whitespace run.
-    const m = part.match(/^(\S+)(\s+.+)?$/);
-    if (!m) continue;
-    // A descriptor that is not a valid width/density means this candidate was
-    // never a well-formed candidate — drop it rather than re-emitting it.
-    if (m[2] !== undefined && !SRCSET_DESCRIPTOR.test(m[2])) continue;
-    const safe = sanitizeUrl(m[1]);
+  let i = 0;
+  const n = input.length;
+
+  while (i < n) {
+    // Splitting loop: skip whitespace and separator commas.
+    while (i < n && (isSrcsetWhitespace(input[i]) || input[i] === ",")) i++;
+    if (i >= n) break;
+
+    // URL: every non-whitespace code point, commas included.
+    const urlStart = i;
+    while (i < n && !isSrcsetWhitespace(input[i])) i++;
+    let url = input.slice(urlStart, i);
+
+    const descriptors: string[] = [];
+    if (url.endsWith(",")) {
+      // A URL ending in commas ends the candidate: no descriptors.
+      url = url.replace(/,+$/, "");
+    } else {
+      // Descriptor tokenizer: whitespace separates descriptors, a comma outside
+      // parentheses ends the candidate, parentheses group.
+      let current = "";
+      let inParens = false;
+      while (i < n) {
+        const ch = input[i];
+        if (inParens) {
+          current += ch;
+          if (ch === ")") inParens = false;
+          i++;
+          continue;
+        }
+        if (isSrcsetWhitespace(ch)) {
+          if (current) descriptors.push(current);
+          current = "";
+          i++;
+          continue;
+        }
+        if (ch === ",") {
+          i++;
+          break;
+        }
+        if (ch === "(") inParens = true;
+        current += ch;
+        i++;
+      }
+      if (current) descriptors.push(current);
+    }
+
+    if (url === "") continue;
+    if (descriptors.length > 1) continue;
+    if (descriptors.length === 1 && !SRCSET_DESCRIPTOR.test(descriptors[0])) continue;
+    const safe = sanitizeUrl(url);
     if (!safe) continue;
-    out.push(m[2] ? `${safe}${m[2]}` : safe);
+    // `sanitizeUrl` trims outer control characters, which can expose a comma
+    // at either end; the browser would then split the OUTPUT differently from
+    // how it was judged. Such a candidate cannot be republished faithfully.
+    if (safe.startsWith(",") || safe.endsWith(",")) continue;
+    out.push(descriptors.length === 1 ? `${safe} ${descriptors[0]}` : safe);
   }
   return out.join(", ");
 }
@@ -288,7 +377,17 @@ const BLOCKED_CSS_NEEDLES = [
   "@import",
   "image-set(",
   "filter:progid",
+  // CSS Images 4 `image("…")` and CSS Values 5 `src("…")` take a URL as a
+  // plain STRING, so they fetch without ever spelling `url(`. Support is thin
+  // today, which is exactly when a blocklist should get ahead of it.
+  "image(",
+  "src(",
 ] as const;
+
+// Indices of the property-qualified constructs, for `blockedDeclarationReason`.
+const CSS_REASON_MOZ_BINDING = 4;
+const CSS_REASON_BEHAVIOR = 5;
+const CSS_REASON_PROGID = 8;
 
 /**
  * Describe an element well enough to find it in a page full of similar ones.
@@ -362,6 +461,8 @@ function warnDroppedDeclaration(value: string, reason: number, ctx?: StyleSaniti
       "@import pulls in a remote stylesheet",
       "image-set() fetches remote images, the same exfiltration channel as url()",
       "filter:progid activates legacy scriptable filters",
+      "image() fetches its string argument as a URL, the same exfiltration channel as url()",
+      "src() fetches its string argument as a URL, the same exfiltration channel as url()",
     ];
     const declaration = ctx?.property ? `${ctx.property}: ${value}` : value;
     const where = describeElement(ctx?.element);
@@ -410,18 +511,21 @@ function warnDroppedDeclaration(value: string, reason: number, ctx?: StyleSaniti
  * The security decision, with no reporting attached: which blocked construct
  * does `value` contain, if any?
  *
- * Separated from `sanitizeCSSValue` so a caller that tests the same declaration
- * twice — `sanitizeStyleAttribute` checks the value alone AND joined to its
- * property name, because `behavior:` and `filter:progid` only match once the
- * name is present — can decide ONCE whether to announce it. With the warning
- * built into the check, one dropped declaration produced two identical console
- * messages.
+ * Separated from `sanitizeCSSValue` so a caller that makes more than one check
+ * per declaration — `blockedDeclarationReason` adds the property-qualified
+ * rules — can decide ONCE whether to announce it. With the warning built into
+ * the check, one dropped declaration produced two identical console messages.
  *
  * @param value CSS value (or `property:value` pair) to judge.
  * @returns Index into {@link BLOCKED_CSS_NEEDLES} of the construct that blocks
  * it, or `-1` when the value is safe. An index rather than the reason text, so
  * production never touches the prose.
  */
+function normalizeCssForScan(value: string): string {
+  const normalized = value.includes("\\") ? decodeCssEscapes(value) : value;
+  return normalized.toLowerCase().replace(/\s+/g, "");
+}
+
 function blockedCssReason(value: string): number {
   // Fast path: every blocked construct is gated by one of `(` (url/expression/
   // image-set), `:` (javascript:/vbscript:/behavior:/filter:progid), or `@`
@@ -437,8 +541,7 @@ function blockedCssReason(value: string): number {
   // Without a `\` there is nothing to decode, and skipping the scan keeps the
   // decoder off the path of the values that reach here most often: legitimate
   // functional notation like `calc(…)`, `rgba(…)`, `var(…)`, gradients.
-  const normalized = value.includes("\\") ? decodeCssEscapes(value) : value;
-  const lower = normalized.toLowerCase().replace(/\s+/g, "");
+  const lower = normalizeCssForScan(value);
   // Scanning the table costs one pass over the same needles the inlined `||`
   // chain tested, and it yields WHICH construct matched so the dev warning can
   // name it. Only values that already passed CSS_DANGER_GATE get here, so this
@@ -454,6 +557,51 @@ export function sanitizeCSSValue(value: string, context?: StyleSanitizerContext)
   if (reason === -1) return value;
   warnDroppedDeclaration(value, reason, context);
   return "";
+}
+
+/**
+ * Sanitize ONE declaration — a property and its value — for the object-style
+ * APIs (`style: { prop: value }`, reactive per-property getters).
+ *
+ * Some blocked constructs are property-qualified (`behavior`, `-moz-binding`,
+ * a `progid:` filter). The object form used to judge the value alone, so
+ * `style: "behavior: x.htc"` was dropped while `style: { behavior: "x.htc" }`
+ * was written — one authoring intent, two verdicts. Both forms now reach the
+ * same decision through `blockedDeclarationReason`.
+ *
+ * @returns The value when the declaration is allowed, or `""` when it is
+ * dropped (which removes the property when handed to `setProperty`).
+ */
+export function sanitizeCSSDeclaration(property: string, value: string, context?: StyleSanitizerContext): string {
+  const reason = blockedDeclarationReason(property, value);
+  if (reason === -1) return value;
+  warnDroppedDeclaration(value, reason, { property, element: context?.element });
+  return "";
+}
+
+/**
+ * The security decision for one DECLARATION: the value's own verdict, then the
+ * property-qualified constructs — judged on the EXACT property name.
+ *
+ * Matching a needle such as `behavior:` against the joined `property:value`
+ * text was a substring test, so `scroll-behavior: smooth` and
+ * `overscroll-behavior: contain` were dropped as if they were IE's `behavior`.
+ * Comparing the name exactly removes those false positives, and it keeps the
+ * common case cheap: no joined string is built, so a value that fails the
+ * `CSS_DANGER_GATE` fast path costs one string comparison per rule.
+ *
+ * @returns Index into {@link BLOCKED_CSS_NEEDLES}, or `-1` when allowed.
+ */
+function blockedDeclarationReason(property: string, value: string): number {
+  const reason = blockedCssReason(value);
+  if (reason !== -1) return reason;
+  const name = canonicalAttrName(property);
+  if (name === "behavior") return CSS_REASON_BEHAVIOR;
+  if (name === "-moz-binding") return CSS_REASON_MOZ_BINDING;
+  if ((name === "filter" || name === "-ms-filter") && normalizeCssForScan(value).includes("progid:")) {
+    return CSS_REASON_PROGID;
+  }
+  return -1;
 }
 
 /**
@@ -515,15 +663,11 @@ export function sanitizeStyleAttribute(cssText: string, context?: StyleSanitizer
   for (let i = 0; i < probe.style.length; i++) {
     const property = probe.style[i];
     const value = probe.style.getPropertyValue(property);
-    // Check the value on its own AND joined to its property name: the danger
-    // list contains property-qualified forms (`behavior:`, `filter:progid`)
-    // that only match once the name is present.
-    //
-    // Both checks go through `blockedCssReason`, which does not report. One
-    // dropped declaration is one problem, so it is announced exactly once here
-    // regardless of which of the two checks caught it.
-    let reason = blockedCssReason(value);
-    if (reason === -1) reason = blockedCssReason(`${property}:${value}`);
+    // The same declaration-level decision the object form uses: the value on
+    // its own, then the property-qualified constructs on the exact property
+    // name. Decided by index, not by an empty-string sentinel, so an empty
+    // value on a blocked property cannot slip through, and announced once.
+    const reason = blockedDeclarationReason(property, value);
     if (reason !== -1) {
       warnDroppedDeclaration(value, reason, { property, element: context?.element });
       continue;
@@ -733,6 +877,32 @@ export function sanitizeAttributeString(attr: string, value: string, context?: S
   // to all of them rather than only to the tag factory.
   if (lower === "style") return sanitizeStyleAttribute(value, context);
   return value;
+}
+
+/**
+ * The value that will actually be committed for attribute `attr`, or `null`
+ * when the attribute must be OMITTED.
+ *
+ * THE single answer to "what does a refused value become?", shared by every
+ * DOM writer (`setSafeAttribute`), every `<head>` path (`utils/headEntry.ts`)
+ * and every SSR serializer. It used to have three answers: `Head()` and both
+ * servers omitted a refused URL, while the generic DOM writers published it as
+ * `href=""` — and the SSR serializer then dropped that empty attribute again,
+ * so the server HTML and the hydrated DOM disagreed about the same element.
+ *
+ * Omission is the correct answer because `href=""` is not "no href": an empty
+ * URL attribute resolves against the current document, so `<a href="">` links
+ * to the page itself and `<link href="">` / `<script src="">` reference it.
+ *
+ * `""` is only ever a rejection for a POLICY sink (`isPolicyAttribute`: URL
+ * attributes, `srcset`, `style`). For inert text attributes an empty string is
+ * a legitimate value and is returned as authored. (The live DOM writers keep an
+ * AUTHORED empty value — see `setSafeAttribute`.)
+ */
+export function resolveAttributeValue(attr: string, value: string, context?: StyleSanitizerContext): string | null {
+  if (!isPolicyAttribute(attr)) return value;
+  const safe = sanitizeAttributeString(attr, value, context);
+  return safe === "" ? null : safe;
 }
 
 /**

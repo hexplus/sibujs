@@ -78,7 +78,7 @@ describe("event-handler attributes are refused (A03)", () => {
   it("reactive href is protocol-sanitized at bind time", () => {
     const el = document.createElement("a");
     bindAttribute(el, "href", () => "javascript:alert(1)");
-    expect(el.getAttribute("href")).toBe(""); // dangerous scheme collapses to empty
+    expect(el.getAttribute("href")).toBeNull(); // dangerous scheme is omitted, not emptied
   });
 });
 

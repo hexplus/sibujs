@@ -123,7 +123,18 @@ function reconcile(prev: unknown, next: unknown, depth: number, walk: Walk, newR
     // a hole in `prev` → a real element in `next` is one too.
     const hasPrev = Object.hasOwn(prevRecord, key);
     const shared = hasPrev ? reconcile(prevRecord[key], nextChild, depth + 1, walk, false) : nextChild;
-    copy[key] = shared;
+    // `"__proto__"` is DEFINED, never assigned. `copy` inherits from
+    // `Object.prototype`, so `copy["__proto__"] = x` would invoke the inherited
+    // setter and turn a JSON payload's OWN `"__proto__"` key into the rebuilt
+    // object's prototype — `{"__proto__": {"isAdmin": true}}` from a server
+    // response surfacing as an inherited `data.isAdmin === true`. It is the only
+    // key with an inherited setter, so every other key keeps the cheap
+    // assignment rather than paying for a descriptor on large payloads.
+    if (key === "__proto__") {
+      Object.defineProperty(copy, key, { value: shared, writable: true, enumerable: true, configurable: true });
+    } else {
+      copy[key] = shared;
+    }
     if (!hasPrev || !Object.is(shared, prevRecord[key])) allFromPrev = false;
     if (!Object.is(shared, nextChild)) allFromNext = false;
   }

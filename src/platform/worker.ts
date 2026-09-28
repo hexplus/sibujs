@@ -29,6 +29,32 @@ export interface UseWorkerReturn<TInput, TOutput> {
 }
 
 /**
+ * The source text of a worker function — and the explicit trust decision the
+ * worker helpers require.
+ *
+ * Every helper here turns a FUNCTION into a `blob:` worker by serializing its
+ * source. The declared parameter type says "function", but nothing enforced it
+ * at runtime, and plain JavaScript can pass anything: a string's `toString()`
+ * returns the string itself, so `worker(untrustedText)` evaluated data as code
+ * in a same-origin worker (cookies-bearing `fetch`, IndexedDB) — `eval()` with
+ * no one having decided to call it.
+ *
+ * A function object is code that already shipped in the application bundle,
+ * which is the trust decision these APIs rest on; anything else is refused.
+ * The source is read through `Function.prototype.toString`, not the function's
+ * own (overridable) `toString` property.
+ */
+function workerSource(fn: unknown, api: string): string {
+  if (typeof fn !== "function") {
+    throw new TypeError(
+      `${api}: expected a function, got ${typeof fn}. Worker code must be a function defined in your ` +
+        "source — a string would be evaluated as code.",
+    );
+  }
+  return Function.prototype.toString.call(fn);
+}
+
+/**
  * worker creates a Web Worker from an inline function and provides
  * reactive state for its result, error, and loading status.
  *
@@ -52,6 +78,9 @@ export interface UseWorkerReturn<TInput, TOutput> {
 export function worker<TInput = unknown, TOutput = unknown>(
   workerFn: (e: MessageEvent<TInput>) => void,
 ): UseWorkerReturn<TInput, TOutput> {
+  // Validated before anything else: a non-function is refused synchronously,
+  // never serialized. See `workerSource`.
+  const fnBody = workerSource(workerFn, "worker");
   const [result, setResult] = signal<TOutput | null>(null);
   const [error, setError] = signal<Error | null>(null);
   const [loading, setLoading] = signal(false);
@@ -71,7 +100,6 @@ export function worker<TInput = unknown, TOutput = unknown>(
       throw new Error("Web Workers are not supported in this environment");
     }
 
-    const fnBody = workerFn.toString();
     const blob = new Blob([`self.onmessage = ${fnBody};`], { type: "application/javascript" });
     blobUrl = URL.createObjectURL(blob);
     worker = new Worker(blobUrl);
@@ -150,12 +178,17 @@ export interface UseWorkerFnReturn<TArgs extends unknown[], TResult> {
  * The function must be self-contained -- it cannot reference variables
  * from the outer scope. Arguments are serialized via postMessage.
  *
+ * **Trust boundary:** the function's source is evaluated in a `blob:` worker,
+ * which is equivalent to `eval()`. Only a function object is accepted — never
+ * a string, and never a function built from untrusted input.
+ *
  * @param fn A pure function to execute in a worker thread.
  * @returns An object with run, loading, and terminate.
  */
 export function workerFn<TArgs extends unknown[], TResult>(
   fn: (...args: TArgs) => TResult,
 ): UseWorkerFnReturn<TArgs, TResult> {
+  const fnStr = workerSource(fn, "workerFn");
   const [loading, setLoading] = signal(false);
 
   let worker: Worker | null = null;
@@ -177,7 +210,6 @@ export function workerFn<TArgs extends unknown[], TResult>(
       throw new Error("Web Workers are not supported in this environment");
     }
 
-    const fnStr = fn.toString();
     const blob = new Blob(
       [
         `self.onmessage = function(e) {
@@ -262,6 +294,9 @@ export interface WorkerPool<TInput, TOutput> {
  * Tasks are distributed across workers using round-robin scheduling.
  * Each worker is created from the same inline function.
  *
+ * **Trust boundary:** as with `worker()`, the function's source is evaluated in
+ * a `blob:` worker. Only a function object is accepted, never a string.
+ *
  * @param workerFn The function body to run inside each worker.
  * @param poolSize Number of workers in the pool (defaults to navigator.hardwareConcurrency or 4).
  * @returns An object with execute and terminate.
@@ -270,6 +305,7 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
   workerFn: (e: MessageEvent<TInput>) => void,
   poolSize?: number,
 ): WorkerPool<TInput, TOutput> {
+  const fnBody = workerSource(workerFn, "createWorkerPool");
   const size = poolSize || (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 4;
 
   type Slot = { data: TInput; resolve: (v: TOutput) => void; reject: (e: Error) => void };
@@ -340,7 +376,6 @@ export function createWorkerPool<TInput = unknown, TOutput = unknown>(
     if (typeof Worker === "undefined") {
       throw new Error("Web Workers are not supported in this environment");
     }
-    const fnBody = workerFn.toString();
     const blob = new Blob([`self.onmessage = ${fnBody};`], { type: "application/javascript" });
     blobUrl = URL.createObjectURL(blob);
     for (let i = 0; i < size; i++) {

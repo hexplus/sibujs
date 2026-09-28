@@ -496,7 +496,7 @@ export function enhance(target: Element | string, setup: EnhanceSetup): () => vo
             // `syncValueProperty: false` keeps this an ATTRIBUTE writer, as its
             // name and existing behaviour promise: `attr(el, "value", …)` must
             // set the content attribute, not the IDL property.
-            setSafeAttribute(el, name, next, { syncValueProperty: false, label: "enhance attr()" });
+            setSafeAttribute(el, name, next, { syncValueProperty: false, label: "enhance attr()", reactive: true });
           }),
         );
       });

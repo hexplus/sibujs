@@ -97,7 +97,7 @@ export function bindBoolAttr(el: HTMLElement, attr: string, getter: boolean | ((
       return;
     }
 
-    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr" });
+    setSafeAttribute(el, attr, Boolean(value), { label: "bindBoolAttr", reactive: true });
   }
 
   // Owner-stamped like every DOM binding, so a failure on a later scheduled run

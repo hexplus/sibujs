@@ -35,6 +35,7 @@
  * dropped; the benefit is that no unreadable directive is ever emitted.
  */
 
+import { DEV } from "../core/dev";
 import { canonicalAttrName, sanitizeUrl, stripControlChars } from "./sanitize";
 
 /**
@@ -64,6 +65,11 @@ function trimAsciiWhitespace(value: string): string {
   return value.slice(start, end);
 }
 
+/**
+ * The `reason` is a development aid, so every call site passes it as
+ * `DEV ? "…" : ""`: the verdict ships in every bundle — this parser is part of
+ * the core attribute policy — while the explanation folds out of production.
+ */
 const forbidden = (reason: string): MetaRefreshDecision => ({ kind: "forbidden", reason });
 
 /**
@@ -86,14 +92,14 @@ export function parseMetaRefreshContent(content: string): MetaRefreshDecision {
   // `url=` must not be readable as anything other than what the browser
   // will see.
   const raw = trimAsciiWhitespace(stripControlChars(content));
-  if (raw === "") return forbidden("empty content");
+  if (raw === "") return forbidden(DEV ? "empty content" : "");
 
   // --- delay ---------------------------------------------------------------
   let i = 0;
   while (i < raw.length && raw[i] >= "0" && raw[i] <= "9") i++;
-  if (i === 0) return forbidden("missing or non-numeric delay");
+  if (i === 0) return forbidden(DEV ? "missing or non-numeric delay" : "");
   const delay = Number.parseInt(raw.slice(0, i), 10);
-  if (!Number.isFinite(delay)) return forbidden("unparseable delay");
+  if (!Number.isFinite(delay)) return forbidden(DEV ? "unparseable delay" : "");
 
   while (i < raw.length && isAsciiWhitespace(raw[i])) i++;
 
@@ -102,7 +108,7 @@ export function parseMetaRefreshContent(content: string): MetaRefreshDecision {
 
   // Anything between the delay and a `;` that is not whitespace means the
   // delay token did not actually end where it appeared to (`0url=/x`).
-  if (raw[i] !== ";" && raw[i] !== ",") return forbidden("unexpected text after delay");
+  if (raw[i] !== ";" && raw[i] !== ",") return forbidden(DEV ? "unexpected text after delay" : "");
   i++;
 
   while (i < raw.length && isAsciiWhitespace(raw[i])) i++;
@@ -111,10 +117,10 @@ export function parseMetaRefreshContent(content: string): MetaRefreshDecision {
   const keyStart = i;
   while (i < raw.length && !isAsciiWhitespace(raw[i]) && raw[i] !== "=") i++;
   const key = raw.slice(keyStart, i).toLowerCase();
-  if (key !== "url") return forbidden(`unsupported refresh key ${JSON.stringify(key)}`);
+  if (key !== "url") return forbidden(DEV ? `unsupported refresh key ${JSON.stringify(key)}` : "");
 
   while (i < raw.length && isAsciiWhitespace(raw[i])) i++;
-  if (raw[i] !== "=") return forbidden("missing '=' after url");
+  if (raw[i] !== "=") return forbidden(DEV ? "missing '=' after url" : "");
   i++;
   while (i < raw.length && isAsciiWhitespace(raw[i])) i++;
 
@@ -125,18 +131,18 @@ export function parseMetaRefreshContent(content: string): MetaRefreshDecision {
     const close = raw.indexOf(quote, i + 1);
     // An unterminated quote is genuinely ambiguous: browsers disagree about
     // where such a destination ends, so it is refused rather than guessed.
-    if (close === -1) return forbidden("unterminated quoted destination");
+    if (close === -1) return forbidden(DEV ? "unterminated quoted destination" : "");
     destination = raw.slice(i + 1, close);
     const rest = trimAsciiWhitespace(raw.slice(close + 1));
-    if (rest !== "") return forbidden("trailing text after quoted destination");
+    if (rest !== "") return forbidden(DEV ? "trailing text after quoted destination" : "");
   } else {
     destination = trimAsciiWhitespace(raw.slice(i));
     // A second assignment means two competing destinations; which one wins is
     // not something to guess at.
-    if (/[;,]/.test(destination)) return forbidden("multiple refresh assignments");
+    if (/[;,]/.test(destination)) return forbidden(DEV ? "multiple refresh assignments" : "");
   }
 
-  if (destination === "") return forbidden("empty destination");
+  if (destination === "") return forbidden(DEV ? "empty destination" : "");
 
   // --- protocol policy -----------------------------------------------------
   // Delegated, never re-implemented: `sanitizeUrl` is the single authority on
@@ -144,7 +150,7 @@ export function parseMetaRefreshContent(content: string): MetaRefreshDecision {
   // obfuscations (`java\tscript:`, leading control bytes) an attacker reaches
   // for. It returns "" for anything it refuses.
   const sanitizedDestination = sanitizeUrl(destination);
-  if (sanitizedDestination === "") return forbidden("destination uses a disallowed protocol");
+  if (sanitizedDestination === "") return forbidden(DEV ? "destination uses a disallowed protocol" : "");
 
   return { kind: "allowed", delay, destination, sanitizedDestination };
 }
@@ -175,7 +181,7 @@ export function resolveMetaRefreshPolicy(attributes: ReadonlyMap<string, string>
   }
 
   if (duplicateName !== undefined) {
-    return forbidden(`duplicate case-insensitive attribute ${JSON.stringify(duplicateName)}`);
+    return forbidden(DEV ? `duplicate case-insensitive attribute ${JSON.stringify(duplicateName)}` : "");
   }
 
   if (typeof httpEquiv !== "string") return { kind: "not-refresh" };

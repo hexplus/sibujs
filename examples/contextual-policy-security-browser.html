@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS contextual element policy — browser fixture</title>
+  </head>
+  <body>
+    <script type="module">
+      // Real-engine proof for the contextual element policy (utils/elementPolicy.ts):
+      // the GENERIC DOM APIs — meta(), html``, reactive bindings — must never
+      // connect a refresh directive the shared policy refuses, and a runtime
+      // value must never choose the program a <script> runs. jsdom neither
+      // navigates nor executes scripts, so only a real engine can show it.
+      //
+      // As in meta-refresh-security-browser.html, every attribute mutation is
+      // followed by a synchronous sample of every connected <meta>, so the trace
+      // is the complete sequence of observable states.
+      import { a, html, meta, signal } from "../dist/index.js";
+      import { svgElement } from "../dist/extras.js";
+
+      const params = new URLSearchParams(location.search);
+      window.__arrivedAt = params.get("arrived") || null;
+      window.__XSS = false;
+
+      let trace = [];
+      const sample = () => {
+        for (const m of document.querySelectorAll("meta")) {
+          trace.push({ httpEquiv: m.getAttribute("http-equiv"), content: m.getAttribute("content") });
+        }
+      };
+      for (const [owner, method] of [
+        [Element.prototype, "setAttribute"],
+        [Element.prototype, "removeAttribute"],
+        [Node.prototype, "appendChild"],
+        [Node.prototype, "insertBefore"],
+      ]) {
+        const original = owner[method];
+        owner[method] = function (...args) {
+          const result = original.apply(this, args);
+          sample();
+          return result;
+        };
+      }
+
+      const PROTECTED = "/examples/should-never-load.html";
+      const PROBE = "/examples/contextual-policy-probe.js";
+
+      const liveRefresh = () =>
+        Array.from(document.querySelectorAll("meta")).filter(
+          (m) => (m.getAttribute("http-equiv") || "").trim().toLowerCase() === "refresh" && m.hasAttribute("content"),
+        );
+
+      window.__t = {
+        reset() {
+          for (const m of Array.from(document.querySelectorAll("meta:not([charset])"))) m.remove();
+          trace = [];
+          window.__XSS = false;
+          window.__probeRuns = 0;
+          return true;
+        },
+        connectedRefreshStates() {
+          return trace.filter(
+            (o) => (o.httpEquiv || "").trim().toLowerCase() === "refresh" && o.content !== null,
+          );
+        },
+        genericReactiveRefresh() {
+          const [content, setContent] = signal("harmless");
+          document.head.appendChild(meta({ "http-equiv": "refresh", content: () => content() }));
+          setContent(`0;url=${PROTECTED}`);
+          return liveRefresh().length;
+        },
+        genericStaticForbidden() {
+          document.head.appendChild(meta({ "http-equiv": "refresh", content: "0;url=javascript:window.__XSS=true" }));
+          document.head.appendChild(meta({ content: "0;url=data:text/html,x", "http-equiv": "refresh" }));
+          return liveRefresh().length;
+        },
+        templateContentBeforeEquiv() {
+          const payload = "0;url=javascript:window.__XSS=true";
+          document.head.appendChild(html`<meta content=${payload} http-equiv="refresh" />`);
+          return liveRefresh().length;
+        },
+        staticSafeRefresh(tag) {
+          document.head.appendChild(meta({ "http-equiv": "refresh", content: `0;url=?arrived=${tag}` }));
+          return liveRefresh().length;
+        },
+        arrivedAt() {
+          return window.__arrivedAt;
+        },
+        xss() {
+          return window.__XSS;
+        },
+        runtimeScriptSource() {
+          const el = html`<script src=${`${PROBE}?runtime`}><\/script>`;
+          document.body.appendChild(el);
+          return el.hasAttribute("src");
+        },
+        staticScriptSource() {
+          // The positive control: developer-authored static template source may
+          // name a script, and a real engine runs it.
+          document.body.appendChild(html`<script src="/examples/contextual-policy-probe.js?static"><\/script>`);
+          return true;
+        },
+        probeRuns() {
+          return window.__probeRuns || 0;
+        },
+        svgScriptRefused() {
+          try {
+            svgElement("script", { href: `${PROBE}?svg` });
+            return false;
+          } catch {
+            return true;
+          }
+        },
+        urlCases(inputs) {
+          return inputs.map((input) => {
+            const kept = a({ href: input }).getAttribute("href");
+            let scheme = null;
+            if (kept !== null) {
+              // The engine's own reading of the committed attribute.
+              const probe = document.createElement("a");
+              probe.setAttribute("href", kept);
+              scheme = probe.protocol;
+            }
+            return { input, kept, scheme };
+          });
+        },
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

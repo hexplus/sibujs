@@ -16,6 +16,15 @@ export interface ServiceWorkerState {
 /**
  * serviceWorker registers and manages a service worker.
  *
+ * TRUST BOUNDARY: `scriptUrl` is CODE. A service worker runs with authority
+ * over every page in its scope and persists across reloads, so this is the
+ * strongest code-loading primitive in the framework. The browser enforces
+ * same-origin, a secure context and a JavaScript MIME type — it does NOT
+ * protect against a same-origin URL that serves attacker-influenced content
+ * (a JSONP endpoint, an upload directory). Pass only a literal path to a worker
+ * script you ship; never a value derived from the URL, storage or an API
+ * response.
+ *
  * LIFECYCLE CONTRACT
  * ------------------
  * Registration is asynchronous and `unregister()` can be called at any point

@@ -225,6 +225,16 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // registry version that lets a late `registerComponent()` render): raw went to
     // ~80,930 B and gzip to ~27,700 B.
     //
+    // Raised again (raw 85,500 B, gzip baseline 29,000 B) for the contextual
+    // element policy. The meta-refresh parser used to live only behind `Head()`
+    // and SSR; every generic writer now consults it — with the element
+    // snapshot, the runtime `<script>` source rule and the SVG animation rule
+    // (`utils/elementPolicy.ts`) — so `meta({ "http-equiv": "refresh", content })`
+    // can no longer publish what `Head()` refuses. With the browser-accurate
+    // srcset tokenizer and the object-form style check that brought raw to
+    // ~85,080 B and gzip to ~29,030 B, after the parser's refusal reasons were
+    // folded out of production.
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -232,8 +242,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(81_000);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(27_600 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(85_500);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(29_000 * 1.02));
   });
 });
 

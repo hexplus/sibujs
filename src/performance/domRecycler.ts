@@ -4,6 +4,7 @@
 
 import { DEV, devWarn } from "../core/dev";
 import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { isBlockedElement } from "../utils/elementPolicy";
 import { sanitizeUrl } from "../utils/sanitize";
 
 /**
@@ -21,6 +22,12 @@ export class DOMPool {
    * Get a recycled element or create a new one.
    */
   acquire(tag: string): HTMLElement {
+    // Same element policy as the tag factories: the tag name is a runtime
+    // value here, and a pooled `<script>` / `<iframe>` is a script-execution
+    // or foreign-document sink waiting for its first `src`.
+    if (isBlockedElement(tag)) {
+      throw new Error(`DOMPool: refusing to create <${tag}> — tag is blocked for security reasons.`);
+    }
     const pool = this.pools.get(tag);
     if (pool && pool.length > 0) {
       const el = pool.pop() as HTMLElement;

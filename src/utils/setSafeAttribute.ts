@@ -25,8 +25,9 @@
  * guarantees every writer runs the existing one.
  */
 
-import { DEV, devWarn } from "../core/dev";
-import { isEventHandlerAttr, isHtmlContentAttribute, sanitizeAttributeString } from "./sanitize";
+import { DEV, devWarn, devWarnLazy } from "../core/dev";
+import { ContextualRefusal, contextualAttributeRefusal } from "./elementPolicy";
+import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue } from "./sanitize";
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -70,6 +71,36 @@ export interface SafeAttributeOptions {
   syncValueProperty?: boolean;
   /** Label used in the dev warning when an event-handler attribute is refused. */
   label?: string;
+  /**
+   * The value comes from a live binding that may rewrite it after the element
+   * is connected. Contextual rules that depend on reversibility — a `<meta>`
+   * with any reactive attribute may never carry a refresh directive — key off
+   * this. Every reactive writer (`bindAttribute`, `bindDynamic`, `bindBoolAttr`,
+   * `bindData`, `enhance()`'s `attr()`) passes `true`.
+   */
+  reactive?: boolean;
+}
+
+/**
+ * Explain a contextual refusal. Development only: the prose lives INSIDE the
+ * `devWarnLazy` callback — not in a module-level table — so a production build
+ * drops it together with the callback. See `ContextualRefusal`.
+ */
+function warnContextualRefusal(label: string, name: string, refusal: ContextualRefusal): void {
+  devWarnLazy(() => {
+    const reasons = [
+      "",
+      'the element would become a <meta http-equiv="refresh"> directive the shared refresh policy forbids ' +
+        "(a destination outside the URL allowlist, or a directive too malformed to read unambiguously)",
+      "a <meta> with a reactive attribute may never carry a refresh directive: a browser schedules the " +
+        "navigation as soon as the directive is valid, and nothing can withdraw it when the state changes back",
+      "a runtime value may not choose the program a <script> runs; name the script in static template " +
+        "source, or load it through Head({ script }) as an explicit trust decision",
+      "an SVG animation may not target a URL, event-handler or nested-document attribute; its to / values " +
+        "would be written into that attribute without passing the URL policy",
+    ];
+    return `${label}: refusing "${name}" in this element's context — ${reasons[refusal]}. The write was not performed.`;
+  });
 }
 
 /** Typed property setter — avoids `@ts-expect-error` at each call site. */
@@ -112,12 +143,17 @@ function namespaceFor(el: Element, name: string): string | null {
  *   - other booleans — HTML boolean-attribute semantics, via the IDL property
  *     for `checked`/`disabled`/`selected` where that is the live state.
  *   - `value`/`checked` strings — IDL property when `syncValueProperty`.
- *   - everything else — `sanitizeAttributeString`, which applies the URL
- *     allowlist, the per-candidate `srcset` split, and the `style`
- *     declaration-list policy, then passes inert values through. "Inert" is a
- *     claim about the attributes that reach this branch, not about
- *     `setAttribute` in general — `srcdoc` is refused above precisely because
- *     the browser parses it rather than storing it.
+ *   - contextual rules (`utils/elementPolicy`) — REFUSED, and the slot
+ *     cleared, when the element's attributes after the write would form a
+ *     forbidden meta refresh, a runtime `<script>` source, or an SVG animation
+ *     aimed at a URL / handler / document attribute.
+ *   - everything else — `resolveAttributeValue`, which applies the URL
+ *     allowlist, the `srcset` candidate parser, and the `style`
+ *     declaration-list policy, then passes inert values through. A non-empty
+ *     value the policy refuses is OMITTED (the attribute is removed), never
+ *     written as `href=""`; an authored `""` is written as authored. "Inert" is a claim about the attributes that reach
+ *     this branch, not about `setAttribute` in general — `srcdoc` is refused
+ *     above precisely because the browser parses it rather than storing it.
  */
 export function setSafeAttribute(
   el: Element,
@@ -142,6 +178,34 @@ export function setSafeAttribute(
     // would satisfy "I did not create a handler" while the page still has one.
     // Security here is a postcondition on the attribute, not a property of this
     // particular write.
+    if (ns) el.removeAttributeNS(ns, localName);
+    else el.removeAttribute(name);
+    return false;
+  }
+
+  // CONTEXTUAL policy — rules whose verdict depends on the element and its
+  // other attributes rather than on this one `(name, value)` pair: a meta
+  // refresh directive, a runtime `<script src>`, an SVG animation retargeted at
+  // a link. Judged on the snapshot the element WOULD have, before anything is
+  // written, because these sinks act the moment they become valid.
+  //
+  // The string judged is the one the branches below commit for every name the
+  // contextual rules care about (`http-equiv`, `content`, `src`, `type`,
+  // `attributeName`, …): none of them is boolean-IDL-synced or rewritten by
+  // `sanitizeAttributeString` in a way that matters — a runtime `<script src>`
+  // is refused whatever the URL sanitizer would have made of it.
+  //
+  // `null`/`undefined`/`false` are removals. They are still passed through: a
+  // reactive binding claims its element even when its first value removes
+  // the attribute, so a later static write is judged with that knowledge.
+  const pending = value == null || value === false ? null : value === true ? "" : String(value);
+  const refusal = contextualAttributeRefusal(el, name, pending, options.reactive ? "reactive" : "runtime");
+  if (refusal !== ContextualRefusal.None) {
+    warnContextualRefusal(options.label ?? "setSafeAttribute", name, refusal);
+    // RECONCILE, as for `on*`: the slot this write claimed is cleared, so a
+    // value that was acceptable before this write cannot keep standing beside
+    // the context that now makes it dangerous. Removal can never create one of
+    // these states, so it is always safe to perform.
     if (ns) el.removeAttributeNS(ns, localName);
     else el.removeAttribute(name);
     return false;
@@ -209,10 +273,27 @@ export function setSafeAttribute(
     return true;
   }
 
-  // `sanitizeAttributeString` keys off the attribute NAME, and the URL set it
+  // `resolveAttributeValue` keys off the attribute NAME, and the URL set it
   // consults already contains `xlink:href` — so the prefixed name is passed in
   // whole even though the write itself uses the local name plus a namespace.
-  const safe = sanitizeAttributeString(name, str, { element: el });
+  //
+  // `null` means OMIT: a refused URL (or a style/srcset with nothing left) is
+  // removed, never published as `href=""` — the same answer `Head()` and every
+  // SSR serializer give, so a server-rendered element and its hydrated
+  // replacement agree. See `resolveAttributeValue`.
+  //
+  // An AUTHORED empty value is not a refusal, and keeps its original meaning on
+  // a live element: `a({ href: "" })` is a deliberate self-link (focusable, link
+  // role, pointer cursor), and a getter toggling to `""` relies on the link
+  // staying a link. Only a non-empty value the policy reduced to nothing is
+  // omitted. (`Head()` and the SSR serializers omit `""` too, by their own
+  // documented rule; that pre-dates this primitive and is unchanged.)
+  const safe = str === "" ? "" : resolveAttributeValue(name, str, { element: el });
+  if (safe === null) {
+    if (ns) el.removeAttributeNS(ns, localName);
+    else el.removeAttribute(name);
+    return true;
+  }
 
   // No-op check on the SANITIZED result, never on the caller's raw input.
   //
@@ -227,5 +308,34 @@ export function setSafeAttribute(
 
   if (ns) el.setAttributeNS(ns, name, safe);
   else el.setAttribute(name, safe);
+  return true;
+}
+
+/**
+ * Commit an attribute from STATIC TEMPLATE SOURCE — text the developer typed
+ * into an `html``` template, never a runtime value.
+ *
+ * Static source is developer-authored markup, so the VALUE policies of
+ * {@link setSafeAttribute} (URL allowlist, `on*`, `style` filtering) do not
+ * apply: `html\`<a href="/x" onclick="…">\`` means what it says, exactly as
+ * the same markup would in an HTML file. That trust model is documented in
+ * `docs/architecture/attribute-security.md`.
+ *
+ * The CONTEXTUAL rules still apply, because they hold regardless of where a
+ * value came from and because a static attribute combines with runtime ones on
+ * the same element: `<meta content=${x} http-equiv="refresh">` writes the
+ * runtime `content` first, when it is still inert, and the static
+ * `http-equiv` second — the write that actually creates the directive. Only a
+ * check at that second write, against the whole element, can see it.
+ *
+ * Returns `false` when the write was refused (and not performed).
+ */
+export function setTrustedAttribute(el: Element, name: string, value: string): boolean {
+  const refusal = contextualAttributeRefusal(el, name, value, "static");
+  if (refusal !== ContextualRefusal.None) {
+    warnContextualRefusal("html (static attribute)", name, refusal);
+    return false;
+  }
+  el.setAttribute(name, value);
   return true;
 }

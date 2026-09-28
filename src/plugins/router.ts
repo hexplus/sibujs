@@ -5,7 +5,8 @@ import type { NodeChildren } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { track, untracked } from "../reactivity/track";
-import { isUrlAttribute, sanitizeStyleAttribute, sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 /**
  * Split a router URL into path, query and hash at the FIRST `#` and then the
@@ -2788,29 +2789,25 @@ export function RouterLink(
   });
   registerDisposer(link, effectCleanup);
 
-  // Set other attributes (sanitize to prevent XSS). Checks are
+  // Set other attributes through the framework's ONE attribute primitive.
+  //
+  // This loop used to carry a private copy of the policy — its own URL check,
+  // its own style branch, its own `on*` test — which is the shape every drift in
+  // this codebase has started from: a rule added to `setSafeAttribute` (srcdoc,
+  // the contextual element policy) never reached RouterLink. The name check is
   // case-insensitive: HTML attribute names are, so `HREF`/`ONCLICK` must be
   // treated like `href`/`onclick` — otherwise a spread prop would bypass the
   // href sanitization above or set a live event-handler attribute.
   Object.entries(attrs).forEach(([key, value]) => {
     const lkey = key.toLowerCase();
-    // Skip the canonical href (already sanitized) and any on* event handler.
+    // Skip the canonical href (already sanitized) and anything `on`-prefixed:
+    // stricter than the shared `on[a-z]` guard, and kept so no name the link
+    // previously refused becomes writable.
     if (lkey === "href" || (lkey[0] === "o" && lkey[1] === "n")) return;
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-      const str = String(value);
-      // Other URL-bearing attributes (src, xlink:href, …) still need protocol
-      // sanitization; drop them when unsafe instead of writing a live URI.
-      if (isUrlAttribute(lkey)) {
-        const safe = sanitizeUrl(str);
-        if (safe) link.setAttribute(key, safe);
-      } else if (lkey === "style") {
-        // Inline style is a CSS-injection sink (url() exfiltration, legacy
-        // expression()/behavior). Uses the shared declaration-list sanitizer so
-        // one dangerous declaration no longer discards the safe ones with it.
-        link.setAttribute(key, sanitizeStyleAttribute(str, { element: link }));
-      } else {
-        link.setAttribute(key, str);
-      }
+      // Stringified first: RouterLink has always written `download: true` as
+      // the text "true", not with boolean-attribute presence semantics.
+      setSafeAttribute(link, key, String(value), { syncValueProperty: false, label: "RouterLink" });
     }
   });
 

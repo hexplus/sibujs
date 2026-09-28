@@ -33,6 +33,23 @@ import {
 } from "../src/platform/ssr";
 import { callbackSlot } from "./helpers/mocks";
 
+/**
+ * Make serializing `node` throw.
+ *
+ * The serializer reads DOM state through the NATIVE prototype accessors, so a
+ * `<form>` control named "attributes" / "childNodes" cannot clobber what it
+ * sees. An own-property override on the element is therefore invisible to it by
+ * design; poisoning an `Attr` the serializer must read is not.
+ */
+function poisonSerialization(node: Element, message: string): void {
+  node.setAttribute("data-poison", "");
+  Object.defineProperty(node.getAttributeNode("data-poison") as Attr, "name", {
+    get() {
+      throw new Error(message);
+    },
+  });
+}
+
 const el = (tag: string) => document.createElement(tag);
 
 describe("ssr.ts coverage2 — renderToString node types", () => {
@@ -72,11 +89,7 @@ describe("ssr.ts coverage2 — renderToString node types", () => {
   it("emits an SSR error comment when a fragment child throws", () => {
     const frag = document.createDocumentFragment();
     const child = el("span");
-    Object.defineProperty(child, "attributes", {
-      get() {
-        throw new Error("frag-child-explode");
-      },
-    });
+    poisonSerialization(child, "frag-child-explode");
     frag.appendChild(child);
     const out = renderToString(frag);
     expect(out).toContain("SSR error");
@@ -138,13 +151,8 @@ describe("ssr.ts coverage2 — renderToString node types", () => {
   it("emits an SSR error comment when child rendering throws", () => {
     const parent = el("div");
     const child = el("span");
-    // Force renderToString to throw while serializing the child by making
-    // Array.from(child.childNodes) blow up via a poisoned attributes getter.
-    Object.defineProperty(child, "attributes", {
-      get() {
-        throw new Error("attr-explode");
-      },
-    });
+    // Force renderToString to throw while serializing the child.
+    poisonSerialization(child, "attr-explode");
     parent.appendChild(child);
     const out = renderToString(parent);
     // Dev mode includes the message inside the SSR error comment.
@@ -456,11 +464,7 @@ describe("ssr.ts coverage2 — streaming", () => {
 
     const parent = el("div");
     const child = el("span");
-    Object.defineProperty(child, "attributes", {
-      get() {
-        throw new Error("stream-explode");
-      },
-    });
+    poisonSerialization(child, "stream-explode");
     parent.appendChild(child);
     const out = await collectStream(renderToStream(parent));
     expect(out).toContain("SSR error");
@@ -469,11 +473,7 @@ describe("ssr.ts coverage2 — streaming", () => {
   it("renderToStream emits an error comment when a fragment child throws", async () => {
     const frag = document.createDocumentFragment();
     const child = el("span");
-    Object.defineProperty(child, "attributes", {
-      get() {
-        throw new Error("stream-frag-explode");
-      },
-    });
+    poisonSerialization(child, "stream-frag-explode");
     frag.appendChild(child);
     const out = await collectStream(renderToStream(frag));
     expect(out).toContain("SSR error");

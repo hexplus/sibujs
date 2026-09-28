@@ -181,7 +181,26 @@ interface HeadProps {
   title?: string | (() => string);
   meta?: Record<string, string | (() => string)>[];
   link?: Record<string, string>[];
+  /**
+   * External scripts to add to `<head>`.
+   *
+   * TRUST BOUNDARY: this is the framework's explicit API for loading a script
+   * whose URL is a runtime value, and naming it here IS the trust decision —
+   * the URL passes the scheme allowlist, but an allowed `https:` URL is still a
+   * program that runs with the page's full authority. Pass only URLs you
+   * control or pin (a first-party path, a CDN URL with `integrity`). The
+   * generic writers refuse to let a runtime value choose a `<script>` source
+   * at all; see `docs/architecture/attribute-security.md` § Trust model.
+   */
   script?: Record<string, string>[];
+  /**
+   * The document `<base>`.
+   *
+   * TRUST BOUNDARY: `href` passes the scheme allowlist, but an allowed `https:`
+   * base still re-homes every relative URL on the page — relative `<script
+   * src>`, stylesheets, form actions and `fetch("/api")` alike. Treat it like a
+   * script URL: first-party values only.
+   */
   base?: { href?: string; target?: string };
 }
 

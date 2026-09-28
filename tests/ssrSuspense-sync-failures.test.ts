@@ -68,7 +68,11 @@ describe("ssrSuspense failure containment", () => {
 
   it("rendering the resolved element throwing resolves with the fallback HTML", async () => {
     const poisoned = div("content") as HTMLElement;
-    Object.defineProperty(poisoned, "childNodes", {
+    // The serializer reads through native prototype accessors (an own-property
+    // `childNodes` override is invisible to it, as a clobbering form control
+    // would be), so the failure is planted on an attribute it must read.
+    poisoned.setAttribute("data-poison", "");
+    Object.defineProperty(poisoned.getAttributeNode("data-poison") as Attr, "name", {
       get() {
         throw new Error("render exploded");
       },
