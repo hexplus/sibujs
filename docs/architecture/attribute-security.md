@@ -618,12 +618,17 @@ which a dangerous combination is written first and detected afterwards.
   content, load further subresources and leak data through selector side
   channels. Two writes can complete the state and both are judged before they
   happen — a runtime `href` on a link whose `rel` already says `stylesheet`, and
-  a `rel` of any origin that says `stylesheet` on a link whose `href` was chosen
-  at runtime — so `html\`<link href=${url} rel="stylesheet">\``, a reactive
-  `preload` → `stylesheet` flip and a reactive `href` swap are all refused, and
-  no stylesheet is ever requested and then withdrawn. A runtime `rel` over a
-  *static* `href` is allowed: the developer named that resource. Static source
-  may name a stylesheet; `Head({ link })` is the explicit API for a
+  a `rel` of any origin that says `stylesheet` on a link whose *current* `href`
+  was chosen at runtime — so `html\`<link href=${url} rel="stylesheet">\``, a
+  reactive `preload` → `stylesheet` flip and a reactive `href` swap are all
+  refused, and no stylesheet is ever requested and then withdrawn. Provenance
+  describes the `href` the link holds now, not its history: a runtime `href`
+  that was refused, removed (a binding going to `null`) or replaced by static
+  source no longer counts, so the link is judged by the value that replaced it.
+  The record is set before a runtime `href` is written and settled from the
+  outcome after every `href` commit, so it never under-reports. A runtime `rel`
+  over a *static* `href` is allowed: the developer named that resource. Static
+  source may name a stylesheet; `Head({ link })` is the explicit API for a
   runtime-chosen one.
 
 Refusal reconciles the slot, as for `on*`: the attribute the write claimed is
@@ -631,8 +636,8 @@ removed, and removal can never create one of these states. The SSR serializer
 additionally drops a `<meta>` whose emitted attributes form a forbidden
 directive, which only DOM built *outside* the framework's writers can reach.
 
-The template compiler renders every template containing a `<meta>` (or a static
-`srcdoc`) through the runtime's own executor, because its emitted
+The template compiler renders every template containing a `<meta>`, a `<link>`
+or a static `srcdoc` through the runtime's own executor, because its emitted
 `setAttribute` cannot reproduce the static-write check.
 
 ### Dangerous elements: one list

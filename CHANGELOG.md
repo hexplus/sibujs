@@ -7,7 +7,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
-## [Unreleased]
+## [4.8.0] — 2026-09-27
 
 ### Upgrade notes
 
@@ -83,7 +83,11 @@ Behaviour that changes for existing code:
   whose `rel` contains the `stylesheet` token, whichever of `rel` and `href`
   arrives first and through any reactive transition (`preload` →
   `stylesheet`, a swapped `href`); the check runs before the write, so nothing is
-  requested and then withdrawn.
+  requested and then withdrawn. Compiled `html` templates apply the same rule:
+  every `<link>` is rendered by the runtime's executor. The rule follows the
+  `href` the link holds now — a runtime `href` that was refused, removed or
+  replaced by static source does not block the static stylesheet that replaced
+  it.
 - **`scopedStyle()` uses the framework's CSS policy.** It carried its own copy
   that had drifted: an `@import` without a trailing `;`, `image-set()`,
   `image()`, `src()` and escaped-newline spellings of `url(` all survived, and

@@ -243,6 +243,12 @@ const CASES: Case[] = [
     expect: "compiled",
   },
   {
+    name: "<link> compiles through the runtime executor (stylesheet rule on static rel)",
+    src: mod('html`<head><link href=${s.u} rel="stylesheet"><link rel=${s.r} href="/static.css"></head>`'),
+    scope: () => ({ u: "https://attacker.example/x.css", r: "stylesheet" }),
+    expect: "compiled",
+  },
+  {
     name: "aliased html import",
     src: 'import { html as h } from "sibujs";\nexport default (s) => h`<b class=${s.c}>x</b>`;\n',
     scope: () => ({ c: "k" }),

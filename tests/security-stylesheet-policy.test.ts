@@ -19,6 +19,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
+import { compileHtmlTemplates } from "../src/build/compileTemplates";
 import { dispose } from "../src/core/rendering/dispose";
 import { html } from "../src/core/rendering/htm";
 import { link } from "../src/core/rendering/html";
@@ -28,8 +29,12 @@ import { Head } from "../src/platform/head";
 import { collectStream, renderToStream, renderToString } from "../src/platform/ssr";
 import { bindAttribute, bindDynamic } from "../src/reactivity/bindAttribute";
 import { bindAttrs } from "../src/ui/reactiveAttr";
+import { setSafeAttribute, setTrustedAttribute } from "../src/utils/setSafeAttribute";
+import { runModule } from "./helpers/buildTransformHarness";
 
 const EVIL = "https://attacker.example/evil.css";
+const RUNTIME = "/runtime.css";
+const TRUSTED = "/trusted.css";
 
 /** Is this element, as it stands, an applied stylesheet loading `href`? */
 function loadsStylesheet(el: Element): boolean {
@@ -40,7 +45,10 @@ function loadsStylesheet(el: Element): boolean {
 /** Every intermediate state of every <link>, recorded after each mutation. */
 const states: string[] = [];
 const originals: [Record<string, unknown>, string, unknown][] = [];
-function installTrace(): void {
+/** Runtime-chosen URLs the trace flags when they appear on an applied stylesheet. */
+let watched: readonly string[] = [EVIL];
+function installTrace(urls: readonly string[] = [EVIL]): void {
+  watched = urls;
   const proto = Element.prototype as unknown as Record<string, (...a: unknown[]) => unknown>;
   for (const method of ["setAttribute", "removeAttribute"] as const) {
     const original = proto[method];
@@ -49,8 +57,9 @@ function installTrace(): void {
       const result = original.apply(this, args);
       // Only a stylesheet loading a RUNTIME-chosen URL is a violation; a static,
       // developer-authored one is allowed by the trust model.
-      if (this.localName === "link" && loadsStylesheet(this) && this.getAttribute("href") === EVIL) {
-        states.push(EVIL);
+      const href = this.getAttribute("href");
+      if (this.localName === "link" && loadsStylesheet(this) && href !== null && watched.includes(href)) {
+        states.push(href);
       }
       return result;
     };
@@ -59,6 +68,7 @@ function installTrace(): void {
 afterEach(() => {
   for (const [proto, method, original] of originals.splice(0)) proto[method] = original;
   states.length = 0;
+  watched = [EVIL];
   document.head.innerHTML = "";
   document.body.innerHTML = "";
 });
@@ -194,6 +204,186 @@ describe("reactive transitions never pass through an applied stylesheet", () => 
     setRel(null);
     expect(el.hasAttribute("rel")).toBe(false);
     expect(el.getAttribute("href")).toBe("/app.css");
+  });
+});
+
+/**
+ * Provenance describes the CURRENT `href`, not the element's history. The
+ * invariant is unchanged — a link whose current `href` came from runtime data
+ * never becomes an applied stylesheet — but a runtime `href` that was refused,
+ * removed or replaced by static source no longer blocks what replaced it.
+ */
+describe("stylesheet provenance follows the current href", () => {
+  interface Sequence {
+    label: string;
+    run(el: HTMLLinkElement): void;
+    /** Is the final state an applied stylesheet (loading `TRUSTED`)? */
+    applied: boolean;
+  }
+  const SEQUENCES: Sequence[] = [
+    {
+      label: "runtime href → removed → static href → rel stylesheet",
+      run(el) {
+        setSafeAttribute(el, "href", RUNTIME);
+        setSafeAttribute(el, "href", null);
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+    {
+      label: "runtime href → static replacement → rel stylesheet",
+      run(el) {
+        setSafeAttribute(el, "href", RUNTIME);
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+    {
+      label: "runtime HREF → static replacement → STATIC rel stylesheet",
+      run(el) {
+        setSafeAttribute(el, "HREF", RUNTIME);
+        setTrustedAttribute(el, "href", TRUSTED);
+        setTrustedAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+    {
+      label: "a refused runtime href does not taint: stylesheet → runtime href → preload → static href → stylesheet",
+      run(el) {
+        setSafeAttribute(el, "rel", "stylesheet");
+        setSafeAttribute(el, "href", RUNTIME);
+        setSafeAttribute(el, "rel", "preload");
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+    {
+      label: "a runtime href the URL policy removes leaves no mark",
+      run(el) {
+        setSafeAttribute(el, "href", "javascript:alert(1)");
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+    {
+      label: "runtime href survives → runtime rel stylesheet is refused",
+      run(el) {
+        setSafeAttribute(el, "href", RUNTIME);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: false,
+    },
+    {
+      label: "runtime href survives → STATIC rel stylesheet is refused",
+      run(el) {
+        setSafeAttribute(el, "href", RUNTIME);
+        setTrustedAttribute(el, "rel", "stylesheet");
+      },
+      applied: false,
+    },
+    {
+      label: "static href → runtime replacement → rel stylesheet is refused",
+      run(el) {
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "href", RUNTIME);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: false,
+    },
+    {
+      label: "a runtime write equal to the static value still counts as runtime (conservative)",
+      run(el) {
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: false,
+    },
+    {
+      label: "reactive href stays runtime across values",
+      run(el) {
+        const [href, setHref] = signal("/a.css");
+        bindAttribute(el, "href", () => href());
+        setHref("/b.css");
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: false,
+    },
+    {
+      label: "reactive href → null → static href → rel stylesheet",
+      run(el) {
+        const [href, setHref] = signal<string | null>("/a.css");
+        bindAttribute(el, "href", () => href());
+        setHref(null);
+        setTrustedAttribute(el, "href", TRUSTED);
+        setSafeAttribute(el, "rel", "stylesheet");
+      },
+      applied: true,
+    },
+  ];
+
+  for (const connected of [false, true]) {
+    for (const c of SEQUENCES) {
+      it(`${c.label} (${connected ? "connected" : "detached"})`, () => {
+        installTrace([EVIL, RUNTIME, "/a.css", "/b.css"]);
+        const el = document.createElement("link");
+        if (connected) document.head.appendChild(el);
+        c.run(el);
+        expect(loadsStylesheet(el), el.outerHTML).toBe(c.applied);
+        if (c.applied) expect(el.getAttribute("href")).toBe(TRUSTED);
+        expect(states, "a runtime href was on an applied stylesheet between two writes").toEqual([]);
+      });
+    }
+  }
+
+  it("a reactive href going to null and back is judged again", () => {
+    installTrace([RUNTIME]);
+    const [href, setHref] = signal<string | null>(RUNTIME);
+    const [rel, setRel] = signal("preload");
+    const el = link({ rel: () => rel(), href: () => href() });
+    setHref(null);
+    setRel("stylesheet");
+    expect(el.getAttribute("rel")).toBe("stylesheet");
+    setHref(RUNTIME);
+    expect(loadsStylesheet(el), el.outerHTML).toBe(false);
+    expect(states).toEqual([]);
+  });
+
+  it("a runtime rel over a static href, in either attribute order", () => {
+    const [rel, setRel] = signal("preload");
+    const a = html`<link href="/static.css" rel=${() => rel()}>`;
+    const b = html`<link rel=${() => rel()} href="/static.css">`;
+    setRel("stylesheet");
+    for (const el of [a, b]) {
+      expect(loadsStylesheet(el), el.outerHTML).toBe(true);
+      expect(el.getAttribute("href")).toBe("/static.css");
+    }
+  });
+});
+
+describe("compiled templates apply the same stylesheet rule", () => {
+  const compile = (template: string) => {
+    const src = `import { html } from "sibujs";\nexport default (s) => html\`${template}\`;\n`;
+    const result = compileHtmlTemplates(src);
+    expect(result.compiledCount).toBeGreaterThan(0);
+    return runModule<(s: Record<string, unknown>) => Element>(result.code ?? src);
+  };
+
+  it("PoC: a compiled runtime href with a static stylesheet rel is refused, in either order", () => {
+    installTrace();
+    const a = compile('<link href=${s.url} rel="stylesheet">')({ url: EVIL });
+    const b = compile('<link rel="stylesheet" href=${s.url}>')({ url: EVIL });
+    for (const el of [a, b]) expect(loadsStylesheet(el), el.outerHTML).toBe(false);
+    expect(states).toEqual([]);
+  });
+
+  it("a compiled static stylesheet link is still applied", () => {
+    const el = compile('<link rel="stylesheet" href="/static.css">')({});
+    expect(loadsStylesheet(el)).toBe(true);
   });
 });
 

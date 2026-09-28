@@ -26,7 +26,7 @@
  */
 
 import { DEV, devWarn, devWarnLazy } from "../core/dev";
-import { ContextualRefusal, contextualAttributeRefusal } from "./elementPolicy";
+import { ContextualRefusal, contextualAttributeRefusal, settleAttributeProvenance } from "./elementPolicy";
 import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue } from "./sanitize";
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
@@ -165,6 +165,15 @@ export function setSafeAttribute(
   value: unknown,
   options: SafeAttributeOptions = {},
 ): boolean {
+  const written = commitSafeAttribute(el, name, value, options);
+  // Provenance follows the OUTCOME, whichever branch below produced it: a
+  // runtime `href` still on a `<link>` is recorded as runtime, one that was
+  // refused, sanitized away or removed is not. See `settleAttributeProvenance`.
+  if (el.localName === "link") settleAttributeProvenance(el, name, options.reactive ? "reactive" : "runtime");
+  return written;
+}
+
+function commitSafeAttribute(el: Element, name: string, value: unknown, options: SafeAttributeOptions): boolean {
   const ns = namespaceFor(el, name);
   const localName = ns ? name.slice(name.indexOf(":") + 1) : name;
 
@@ -352,5 +361,6 @@ export function setTrustedAttribute(el: Element, name: string, value: string): b
     return false;
   }
   el.setAttribute(name, value);
+  if (el.localName === "link") settleAttributeProvenance(el, name, "static");
   return true;
 }

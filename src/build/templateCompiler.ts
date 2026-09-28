@@ -40,8 +40,8 @@
  *
  *   - static / boolean attribute   → `setAttribute`, as the runtime does (its
  *     `setTrustedAttribute` refuses only `srcdoc` and the contextual element
- *     policy, which cannot refuse a static write outside `<meta>` — both are
- *     left to the runtime)
+ *     policy, which cannot refuse a static write outside `<meta>` and `<link>`
+ *     — all three are left to the runtime)
  *   - expression / mixed attribute → `bindAttrs` (sibujs/ui), which commits
  *     through the same `bindAttribute` / `setSafeAttribute` primitives
  *   - `on:event=${fn}`             → `addEventListener` when it is a function,
@@ -61,6 +61,8 @@
  *     owned by the wrapper),
  *   - any `<meta>` element (the runtime judges its static attributes against
  *     the meta-refresh policy; a plain `setAttribute` cannot),
+ *   - any `<link>` element (the stylesheet rule refuses a static `rel` that
+ *     would apply a runtime-chosen `href`),
  *   - a static `srcdoc` attribute (the runtime refuses it on every path),
  *   - quasis with an escape that has no cooked value (the runtime receives
  *     `undefined` and reads it as the text "undefined").
@@ -415,7 +417,12 @@ function generateBody(roots: TmplChild[], h: Helpers): string | null {
     // element — `<meta content=${x} http-equiv="refresh">` is refused at the
     // static write. The emitted `setAttribute` cannot reproduce that verdict,
     // so these templates go through the runtime executor.
-    if (el.tag.toLowerCase() === "meta") return null;
+    // A `<link>` likewise: the stylesheet rule refuses a STATIC `rel` that
+    // would apply a runtime-chosen `href` (`<link href=${url} rel="stylesheet">`
+    // writes the runtime `href` first), and the emitted `setAttribute` would
+    // turn that `rel` on.
+    const tag = el.tag.toLowerCase();
+    if (tag === "meta" || tag === "link") return null;
     // Likewise a STATIC `srcdoc` (any casing): the runtime refuses it on every
     // path, and the emitted `setAttribute` would write it.
     for (const attr of el.attrs) {

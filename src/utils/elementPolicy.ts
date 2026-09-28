@@ -289,9 +289,8 @@ function animationRefusal(name: string, value: string | null): ContextualRefusal
 }
 
 /**
- * `<link>` elements whose `href` was chosen at RUNTIME — written by a runtime
- * writer, or claimed by a reactive binding (even one whose first value removed
- * it).
+ * `<link>` elements whose CURRENT `href` was chosen at runtime — by a runtime
+ * writer or a reactive binding.
  *
  * THE STYLESHEET RULE. A URL can be well-formed and still not be trusted for
  * what it selects: on `<link rel="stylesheet">` an `https:` or relative `href`
@@ -314,8 +313,22 @@ function animationRefusal(name: string, value: string | null): ContextualRefusal
  * for a runtime-chosen stylesheet is `Head({ link })`, a documented trust
  * decision.
  *
- * Membership is permanent: once runtime data has chosen the `href`, no later
- * write can launder it into a stylesheet.
+ * Membership describes the `href` the element holds NOW, not its history. A
+ * runtime `href` that was refused, removed, or replaced by static source no
+ * longer marks the element, so the link can later be what that new value makes
+ * it — a static `href` may become a stylesheet. Two steps keep the record
+ * exact without ever under-reporting:
+ *
+ *   - before a runtime `href` write that passes the check, the element is
+ *     marked (`stylesheetRefusal`). During the write — including any
+ *     synchronous callback it triggers — the element is therefore already
+ *     treated as runtime-owned;
+ *   - after EVERY `href` commit, {@link settleAttributeProvenance} sets the
+ *     record from what the write actually left: a runtime `href` present →
+ *     marked; removed, refused, or written by static source → cleared.
+ *
+ * `hasAttribute("href")` is still checked at the `rel` write, so an `href`
+ * removed behind the framework's back cannot keep a stale mark relevant.
  */
 const runtimeHrefLinks = new WeakSet<Element>();
 
@@ -343,10 +356,13 @@ function stylesheetRefusal(
   if (!isHtmlNamespace(el)) return ContextualRefusal.None;
   const canonical = canonicalAttrName(name);
   if (canonical === "href") {
-    if (origin === "static") return ContextualRefusal.None;
-    if (origin === "reactive" || value !== null) runtimeHrefLinks.add(el);
-    if (value === null) return ContextualRefusal.None;
-    return relHasStylesheet(el.getAttribute("rel")) ? ContextualRefusal.StylesheetSource : ContextualRefusal.None;
+    // Static source and removals cannot put a runtime URL on the element.
+    if (origin === "static" || value === null) return ContextualRefusal.None;
+    if (relHasStylesheet(el.getAttribute("rel"))) return ContextualRefusal.StylesheetSource;
+    // Accepted: marked BEFORE the write, so the element is never unmarked while
+    // it holds this value. The writer settles the record after committing.
+    runtimeHrefLinks.add(el);
+    return ContextualRefusal.None;
   }
   if (canonical === "rel") {
     // Removing or narrowing `rel` can only stop a stylesheet, never start one.
@@ -386,6 +402,22 @@ export function contextualAttributeRefusal(
   }
   if (SVG_ANIMATION_ELEMENTS.has(local) && el.namespaceURI === SVG_NS) return animationRefusal(name, value);
   return ContextualRefusal.None;
+}
+
+/**
+ * Record the provenance of the value a write actually LEFT on the element.
+ *
+ * Called by every framework writer after it has committed (or declined) a
+ * write, never before: the verdict above sees the pending value, this sees the
+ * outcome. Today only `<link href>` carries provenance — see
+ * {@link runtimeHrefLinks}. A runtime `href` still present is recorded as
+ * runtime; an `href` that is gone, or that static source wrote, clears the
+ * record.
+ */
+export function settleAttributeProvenance(el: Element, name: string, origin: AttributeWriteOrigin): void {
+  if (el.localName !== "link" || canonicalAttrName(name) !== "href") return;
+  if (origin !== "static" && el.hasAttribute("href")) runtimeHrefLinks.add(el);
+  else runtimeHrefLinks.delete(el);
 }
 
 /**
