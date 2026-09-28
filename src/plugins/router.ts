@@ -114,10 +114,11 @@ function parseQuery(query: string): Params {
  * Canonical identity of a `Params` record: its entries sorted by key and
  * serialized as JSON. Order-independent, and collision-free because JSON
  * escapes every structural character inside a key or value. Keys are unique in
- * a record, so sorting by key alone is a total order.
+ * a record, so sorting by key alone is a total order; the comparator is still a
+ * proper three-way one, as `Array.prototype.sort()` requires.
  */
 function paramsIdentity(params: Params): string {
-  return JSON.stringify(Object.entries(params).sort(([a], [b]) => (a < b ? -1 : 1)));
+  return JSON.stringify(Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 /**
