@@ -30,28 +30,11 @@
 import { DEV } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
+import { isCodeTextElement, isForbiddenMetaSnapshot } from "../utils/elementPolicy";
+import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { isForbiddenMetaEntry } from "../utils/metaRefresh";
-import {
-  isEventHandlerAttr,
-  isHtmlContentAttribute,
-  isPolicyAttribute,
-  sanitizeAttributeString,
-  sanitizeUrl,
-} from "../utils/sanitize";
-
-/**
- * Attribute names whose SSR value carries a security policy. Anything else is
- * emitted as-is (after HTML escaping).
- *
- * Delegated to `utils/sanitize.ts`. This used to be a private set that happened
- * to differ from the canonical one — it carried `manifest` and lacked
- * `formtarget` — so "the SSR policy" and "the client policy" were two different
- * claims about the same attribute names.
- */
-function isPolicyAttr(lowerName: string): boolean {
-  return isPolicyAttribute(lowerName);
-}
+import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue, sanitizeUrl } from "../utils/sanitize";
 
 /**
  * Attributes the server must never emit at all.
@@ -71,25 +54,13 @@ function isForbiddenSsrAttr(lowerName: string): boolean {
   return isHtmlContentAttribute(lowerName);
 }
 
-/**
- * Sanitize ONE attribute value for SSR emission. Returns `""` when the
- * attribute must be dropped entirely.
- *
- * THE SINGLE POINT OF POLICY FOR SERVER-EMITTED ATTRIBUTES — and, since this
- * pass, not a separate policy at all. There are three attribute serializers
- * (`renderToString`, the `renderToStream` generator, and `buildAttrString`), and
- * each once carried its own inline rules covering URLs only, so `style` was
- * emitted verbatim by all three while the client's `tagFactory` filtered it.
- * Rendering target is not a security boundary.
- *
- * The rules themselves — `srcset` parsed as a candidate list rather than a
- * single URL, `style` filtered per declaration, single-URL sinks through the
- * protocol allowlist — now live in `sanitizeAttributeString`, the same authority
- * the client writers use, so the two cannot drift.
- */
-function sanitizeSsrAttributeValue(lowerName: string, value: string): string {
-  return sanitizeAttributeString(lowerName, value);
-}
+// Attribute VALUES are resolved by `resolveAttributeValue` (utils/sanitize),
+// the same "commit or omit" authority the client writers and `<head>` paths
+// use: `srcset` parsed as a candidate list, `style` filtered per declaration,
+// single-URL sinks through the protocol allowlist, and a refused value OMITTED.
+// There are three attribute serializers here (`serializeOpenTag`, shared by
+// `renderToString` and `renderToStream`, and `buildAttrString`), and each once
+// carried its own inline rules. Rendering target is not a security boundary.
 
 /** Strict attribute-name validation. HTML5 allows more, but this subset is sufficient for real elements and keeps attackers from smuggling `"`, `>`, `=`, or whitespace. */
 const SAFE_ATTR_NAME = /^[A-Za-z_:][-A-Za-z0-9_.:]*$/;
@@ -133,6 +104,134 @@ const VOID_ELEMENTS = new Set([
   "wbr",
 ]);
 
+// ─── Clobber-proof DOM reads ────────────────────────────────────────────────
+
+/**
+ * Resolve the NATIVE accessor for `name`, walking up from `proto`.
+ *
+ * WHY: `<form>` elements expose their controls as named properties that SHADOW
+ * the element's own API ([LegacyOverrideBuiltIns]). A rendered
+ * `<input name="attributes">` makes `form.attributes` return that input, so a
+ * serializer reading `element.attributes` emitted the form with no attributes
+ * at all — `method="post"` and `action` gone, and a login form submitting by
+ * GET before hydration. `name="childNodes"` emptied it, `name="tagName"` threw.
+ * Control names routinely come from CMS or survey data, so the serializer reads
+ * through the prototype accessors, which a named property cannot shadow.
+ *
+ * Falls back to the plain property when the DOM implementation defines none
+ * (some server DOMs use own properties), where there is nothing to clobber.
+ */
+function findNativeGetter(proto: object | null, name: string): ((this: unknown) => unknown) | null {
+  for (let p = proto; p; p = Object.getPrototypeOf(p)) {
+    const get = Object.getOwnPropertyDescriptor(p, name)?.get;
+    if (get) return get;
+  }
+  return null;
+}
+
+interface NativeDomAccessors {
+  attributes: ((this: unknown) => unknown) | null;
+  tagName: ((this: unknown) => unknown) | null;
+  childNodes: ((this: unknown) => unknown) | null;
+  getAttribute: (this: Element, name: string) => string | null;
+}
+
+/**
+ * Accessors resolved PER REALM, keyed by the realm's `Element` constructor.
+ *
+ * A server that creates a fresh DOM window per request and swaps the globals
+ * would otherwise keep calling getters taken from the FIRST window's
+ * prototypes on nodes from every later one — which a DOM implementation that
+ * brand-checks against its own realm rejects, or answers from the wrong
+ * internals. Keyed on the same global `instanceof HTMLElement` reads on every
+ * call, so the accessors always belong to the realm the node was checked
+ * against. A WeakMap, so a discarded realm is not kept alive.
+ */
+const nativeAccessorsByRealm = new WeakMap<object, NativeDomAccessors>();
+
+function nativeAccessors(): NativeDomAccessors {
+  const realm = Element;
+  let accessors = nativeAccessorsByRealm.get(realm);
+  if (!accessors) {
+    accessors = {
+      attributes: findNativeGetter(Element.prototype, "attributes"),
+      tagName: findNativeGetter(Element.prototype, "tagName"),
+      childNodes: findNativeGetter(Node.prototype, "childNodes"),
+      getAttribute: Element.prototype.getAttribute,
+    };
+    nativeAccessorsByRealm.set(realm, accessors);
+  }
+  return accessors;
+}
+
+function attributesOf(el: Element): NamedNodeMap {
+  const get = nativeAccessors().attributes;
+  return (get ? get.call(el) : el.attributes) as NamedNodeMap;
+}
+
+function tagNameOf(el: Element): string {
+  const get = nativeAccessors().tagName;
+  return (get ? get.call(el) : el.tagName) as string;
+}
+
+function childNodesOf(node: Node): NodeListOf<ChildNode> {
+  const get = nativeAccessors().childNodes;
+  return (get ? get.call(node) : node.childNodes) as NodeListOf<ChildNode>;
+}
+
+function getAttributeOf(el: Element, name: string): string | null {
+  return nativeAccessors().getAttribute.call(el, name);
+}
+
+/**
+ * Serialize an element's open tag — `<tag attr="…" …` without the closing `>`
+ * — or return `null` when the element must not be emitted at all.
+ *
+ * THE single attribute serializer for server-emitted element trees, shared by
+ * `renderToString` and `renderToStream`:
+ *
+ *   - names are validated, `on*` and `srcdoc` dropped, policy sinks sanitized
+ *     through the same `sanitizeAttributeString` the client writers use;
+ *   - a `<meta>` whose EMITTED attributes form a refresh directive the shared
+ *     policy forbids is dropped whole, exactly as `renderToDocument`'s `meta`
+ *     option and `Head()` drop such an entry. DOM built through the
+ *     framework's writers can never reach this state; DOM built any other way
+ *     (application code, a third-party library) could, and rendering target is
+ *     not a security boundary.
+ */
+function serializeOpenTag(element: HTMLElement, tag: string): string | null {
+  let html = `<${tag}`;
+  // Collected only for `<meta>`, and keyed by the emitted RAW names so the
+  // shared policy can reject duplicate case-insensitive spellings itself.
+  const meta = tag === "meta" ? new Map<string, string>() : null;
+
+  const attrs = attributesOf(element);
+  for (let i = 0; i < attrs.length; i++) {
+    const attr = attrs[i];
+    const rawName = attr.name;
+    if (!isSafeAttrName(rawName)) continue;
+    if (isEventHandlerAttr(rawName)) continue;
+    if (isForbiddenSsrAttr(rawName)) continue;
+
+    // The shared "commit or omit" authority — `null` drops the attribute.
+    const value = resolveAttributeValue(rawName.toLowerCase(), attr.value);
+    if (value === null) continue;
+
+    meta?.set(rawName, value);
+    html += ` ${rawName}="${escapeAttr(value)}"`;
+  }
+
+  if (meta && isForbiddenMetaSnapshot(meta)) return null;
+
+  // The SSR provenance marker. `dataset.sibuHydrate` was read through the
+  // clobberable `dataset` property; the attribute it reflects is read directly.
+  if (!getAttributeOf(element, "data-sibu-hydrate")) {
+    html += ` data-sibu-ssr="true"`;
+  }
+
+  return html;
+}
+
 // ─── renderToString ─────────────────────────────────────────────────────────
 
 /**
@@ -170,12 +269,12 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     return escapeHtml(element.textContent || "");
   }
 
-  const tag = element.tagName.toLowerCase();
+  const tag = tagNameOf(element).toLowerCase();
 
-  // Never serialize raw-text elements — their contents bypass HTML
+  // Never serialize code-text elements — their contents bypass HTML
   // escaping and would execute if injected data is present. Scripts and
   // styles must be added via `renderToDocument`'s dedicated options.
-  if (tag === "script" || tag === "style") {
+  if (isCodeTextElement(tag)) {
     return DEV ? `<!--ssr:${tag}-stripped-->` : "";
   }
 
@@ -184,28 +283,9 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
     return DEV ? "<!--ssr:invalid-tag-->" : "";
   }
 
-  let html = `<${tag}`;
-
-  for (const attr of Array.from(element.attributes)) {
-    const rawName = attr.name;
-    if (!isSafeAttrName(rawName)) continue;
-    if (isEventHandlerAttr(rawName)) continue;
-    if (isForbiddenSsrAttr(rawName)) continue;
-
-    const lowerName = rawName.toLowerCase();
-    let value = attr.value;
-
-    if (isPolicyAttr(lowerName)) {
-      value = sanitizeSsrAttributeValue(lowerName, value);
-      if (!value) continue; // sanitizer returned empty — drop the attribute entirely
-    }
-
-    html += ` ${rawName}="${escapeAttr(value)}"`;
-  }
-
-  if (element.dataset && !element.dataset.sibuHydrate) {
-    html += ` data-sibu-ssr="true"`;
-  }
+  const openTag = serializeOpenTag(element, tag);
+  if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
+  let html = openTag;
 
   if (VOID_ELEMENTS.has(tag)) {
     return `${html} />`;
@@ -213,7 +293,7 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
 
   html += ">";
 
-  for (const child of Array.from(element.childNodes)) {
+  for (const child of Array.from(childNodesOf(element))) {
     try {
       html += renderToString(child);
     } catch (err) {
@@ -499,12 +579,8 @@ function buildAttrString(
     if (!isSafeAttrName(rawKey)) continue;
     if (!allowEventHandlers && isEventHandlerAttr(rawKey)) continue;
     if (isForbiddenSsrAttr(rawKey)) continue;
-    const lowerKey = rawKey.toLowerCase();
-    let value = String(attrs[rawKey]);
-    if (isPolicyAttr(lowerKey)) {
-      value = sanitizeSsrAttributeValue(lowerKey, value);
-      if (!value) continue;
-    }
+    const value = resolveAttributeValue(rawKey.toLowerCase(), String(attrs[rawKey]));
+    if (value === null) continue;
     out.push(`${rawKey}="${escapeAttr(value)}"`);
   }
   return out.join(" ");
@@ -544,6 +620,12 @@ export function renderToDocument(
     title?: string;
     meta?: Record<string, string>[];
     links?: Record<string, string>[];
+    /**
+     * External script URLs appended to `<body>`. Each passes the scheme
+     * allowlist; an allowed URL is still code that runs with the page's
+     * authority, so this option is an explicit trust decision — first-party
+     * or pinned URLs only, never request-derived values.
+     */
     scripts?: string[];
     bodyAttrs?: Record<string, string>;
     /**
@@ -638,9 +720,9 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     return;
   }
 
-  const tag = element.tagName.toLowerCase();
+  const tag = tagNameOf(element).toLowerCase();
 
-  if (tag === "script" || tag === "style") {
+  if (isCodeTextElement(tag)) {
     if (DEV) yield `<!--ssr:${tag}-stripped-->`;
     return;
   }
@@ -650,29 +732,15 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     return;
   }
 
-  let openTag = `<${tag}`;
-
-  for (const attr of Array.from(element.attributes)) {
-    const rawName = attr.name;
-    if (!isSafeAttrName(rawName)) continue;
-    if (isEventHandlerAttr(rawName)) continue;
-    if (isForbiddenSsrAttr(rawName)) continue;
-
-    const lowerName = rawName.toLowerCase();
-    let value = attr.value;
-    if (isPolicyAttr(lowerName)) {
-      value = sanitizeSsrAttributeValue(lowerName, value);
-      if (!value) continue;
-    }
-    openTag += ` ${rawName}="${escapeAttr(value)}"`;
-  }
-
-  // Emit the SSR provenance marker, matching `renderToString`. Without it the
-  // two documented render paths produced different HTML for identical input —
-  // a trap for anyone who streams in production but snapshots with
-  // renderToString in tests.
-  if (element.dataset && !element.dataset.sibuHydrate) {
-    openTag += ` data-sibu-ssr="true"`;
+  // The SAME open-tag serializer `renderToString` uses — attribute policy,
+  // meta-refresh verdict and the SSR provenance marker included. The two
+  // documented render paths used to carry two copies of this loop, which is
+  // the shape that lets them drift; someone streaming in production while
+  // snapshotting with renderToString in tests would never see the difference.
+  const openTag = serializeOpenTag(element, tag);
+  if (openTag === null) {
+    if (DEV) yield `<!--ssr:${tag}-stripped-->`;
+    return;
   }
 
   if (VOID_ELEMENTS.has(tag)) {
@@ -682,7 +750,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
 
   yield `${openTag}>`;
 
-  for (const child of Array.from(element.childNodes)) {
+  for (const child of Array.from(childNodesOf(element))) {
     try {
       yield* renderToStream(child);
     } catch (err) {
@@ -1097,8 +1165,9 @@ export function deserializeState<T = Record<string, unknown>>(validate?: (data: 
       "[SibuJS SSR] deserializeState() called without a validate guard — tampered SSR payloads will not be detected.",
     );
   }
-  const w = window as unknown as Record<string, unknown>;
-  const raw = w[SSR_DATA_ATTR];
+  // Own property only: `window[SSR_DATA_ATTR]` also answers with an element
+  // whose id is that name, which user content can render. See `readOwnGlobal`.
+  const raw = readOwnGlobal(SSR_DATA_ATTR);
   if (raw === undefined) return undefined;
   if (validate && !validate(raw)) return undefined;
   return raw as T;

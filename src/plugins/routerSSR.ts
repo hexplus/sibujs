@@ -14,7 +14,7 @@
 //    supports an optional `nonce` for strict-CSP compatibility.
 
 import { escapeScriptJson, renderToString, type TrustedHTML } from "../platform/ssr";
-import { isUnsafeKey } from "../utils/guards";
+import { isUnsafeKey, readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { sanitizeUrl } from "../utils/sanitize";
 import type { RouteDef } from "./router";
@@ -476,8 +476,10 @@ export function serializeRouteState(state: SSRRouteState, nonce?: string): strin
  * Reads from window.__SIBU_ROUTE_STATE__.
  */
 export function deserializeRouteState(): SSRRouteState | undefined {
-  if (typeof window === "undefined") return undefined;
-  return (window as unknown as Record<string, unknown>)[SSR_ROUTE_STATE_KEY] as SSRRouteState | undefined;
+  // Own property only — an element with `id="__SIBU_ROUTE_STATE__"` is also
+  // reachable as `window.__SIBU_ROUTE_STATE__`, and `hydrateRouter` branches on
+  // this value's truthiness. See `readOwnGlobal`.
+  return readOwnGlobal(SSR_ROUTE_STATE_KEY) as SSRRouteState | undefined;
 }
 
 /**

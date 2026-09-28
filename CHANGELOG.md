@@ -7,6 +7,73 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Upgrade notes
+
+Behaviour that changes for existing code:
+
+- **A refused URL, `srcset` or `style` value is omitted instead of written
+  empty.** `a({ href: "javascript:…" })` now renders `<a>` rather than
+  `<a href="">`, matching `Head()` and the SSR serializers.
+- **A runtime value can no longer set a `<script>` element's `src`, `href`,
+  `type` or `language`.** `` html`<script src=${url}>` `` renders without `src`.
+  Static template source may still name a script; load a runtime-chosen one
+  with `Head({ script })`.
+- **A `<meta>` whose `http-equiv` or `content` is reactive never carries a
+  refresh directive**, on every API — not only in `Head()`. A live binding on
+  any other attribute leaves a static directive in place.
+- **A static `srcdoc` in an `html` template is refused**, as SSR always did.
+- **`preloadImage()` and `imageLoader()` apply the URL allowlist.** A refused
+  URL — including `data:` and `blob:` — requests nothing: `preloadImage()`
+  rejects with an `Error`, and `imageLoader()` reports `status() === "error"`.
+- **`svgElement()` and `DOMPool.acquire()` refuse `script`, `iframe`,
+  `object`, `embed`, `frame` and `frameset`**, as the tag factories always have.
+- **`worker()`, `workerFn()` and `createWorkerPool()` throw a `TypeError` for
+  anything but a function.**
+
+### Security
+
+- **The `<meta http-equiv="refresh">` policy applies on every rendering path.**
+  `meta()`, `tagFactory("meta")`, the `html` template tag, `bindAttrs`, reactive bindings,
+  `bindDynamic`, `enhance()` and the SSR serializers judged `content` without
+  knowing the element was a refresh directive, so
+  `meta({ "http-equiv": "refresh", content: untrusted })` published a live
+  redirect that `Head()` refused. Every attribute write is now checked against
+  the element's complete attribute snapshot *before* it is performed, whatever
+  order the attributes arrive in.
+- **`` html`<script src=${url}>` `` no longer loads a runtime-chosen program.**
+  The URL allowlist accepted any `https:` script.
+- **`svgElement("script", { href })` is refused.** It bypassed the tag
+  factories' element blocklist.
+- **SVG `<set>` / `<animate>` may not target `href` or another URL, handler or
+  document attribute.**
+- **Chromium on Windows resolved a relative `\\host\share` URL to `file:`.**
+  A leading slash pair containing a backslash is now refused.
+- **`sanitizeSrcset()` tokenizes like the browser.** A comma inside a URL no
+  longer splits the candidate, so legitimate URLs such as `?w=100,h=200`
+  survive, and the candidate judged is the one the browser loads.
+- **The object and string style forms reach the same verdict.**
+  `style: { behavior: "…" }` and `style: { "-moz-binding": "…" }` were written
+  while the string form dropped them. `image("…")` and `src("…")`, which fetch
+  a quoted URL, are blocked with `url()`.
+- **Query and resource structural sharing kept a response's `"__proto__"` key
+  as data.** It was assigned onto the rebuilt object, which made the payload's
+  value that object's prototype.
+- **`machine()` ignores events and states that are not the config's own
+  keys.** `send("toString")` used to commit an `undefined` state.
+- **`deserializeState()` and `deserializeRouteState()` ignore elements whose
+  `id` is the state key.** Named access on `window` returned them when the SSR
+  script had not run.
+- **The SSR serializer reads DOM state through native accessors.** A form
+  control named `attributes`, `childNodes` or `tagName` could empty, strip or
+  break the server-rendered form.
+- **Tag factories ignore inherited properties.** A polluted `Object.prototype`
+  added its keys as attributes to every element.
+- **`preloadCritical()`, `preloadImage()` and `imageLoader()` apply the URL
+  allowlist.** `RouterLink`'s pass-through attributes use the shared attribute
+  writer instead of their own copy of the policy.
+
 ## [4.7.0] — 2026-09-26
 
 ### Upgrade notes

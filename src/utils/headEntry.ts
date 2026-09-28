@@ -27,13 +27,7 @@
  */
 
 import { type MetaRefreshDecision, resolveMetaRefreshPolicy } from "./metaRefresh";
-import {
-  canonicalAttrName,
-  isEventHandlerAttr,
-  isHtmlContentAttribute,
-  isPolicyAttribute,
-  sanitizeAttributeString,
-} from "./sanitize";
+import { canonicalAttrName, isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue } from "./sanitize";
 
 // Re-exported so every `<head>` caller has one import site for the policy.
 export { canonicalAttrName } from "./sanitize";
@@ -92,9 +86,7 @@ export function isEmittableHeadAttrName(name: string): boolean {
  * `file:`, `about:`, unknown schemes — is refused.
  */
 export function sanitizeHeadAttrValue(canonical: string, value: string): string | null {
-  if (!isPolicyAttribute(canonical)) return value;
-  const safe = sanitizeAttributeString(canonical, value);
-  return safe === "" ? null : safe;
+  return resolveAttributeValue(canonical, value);
 }
 
 /**

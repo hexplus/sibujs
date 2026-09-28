@@ -23,6 +23,11 @@ on:
         branches: [main]
     workflow_dispatch:
 
+# Least privilege: nothing in CI writes to the repository, so the token is
+# read-only whatever the repository or organization default is.
+permissions:
+    contents: read
+
 jobs:
     fast:
         name: fast (typecheck · lint · unit)

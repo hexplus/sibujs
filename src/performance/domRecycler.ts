@@ -4,6 +4,7 @@
 
 import { DEV, devWarn } from "../core/dev";
 import { replaceChildrenSafely } from "../core/rendering/dispose";
+import { isBlockedElement } from "../utils/elementPolicy";
 import { sanitizeUrl } from "../utils/sanitize";
 
 /**
@@ -21,6 +22,12 @@ export class DOMPool {
    * Get a recycled element or create a new one.
    */
   acquire(tag: string): HTMLElement {
+    // Same element policy as the tag factories: the tag name is a runtime
+    // value here, and a pooled `<script>` / `<iframe>` is a script-execution
+    // or foreign-document sink waiting for its first `src`.
+    if (isBlockedElement(tag)) {
+      throw new Error(`DOMPool: refusing to create <${tag}> — tag is blocked for security reasons.`);
+    }
     const pool = this.pools.get(tag);
     if (pool && pool.length > 0) {
       const el = pool.pop() as HTMLElement;
@@ -168,12 +175,33 @@ export function prefetch(url: string): void {
 
 /**
  * Preloads an image and returns a promise that resolves when loaded.
+ *
+ * The URL goes through the same canonical policy (`sanitizeUrl`) as
+ * `preloadResource()`, `prefetch()` and every attribute writer, BEFORE an
+ * `Image` exists: a refused URL creates no element and starts no request. The
+ * promise then rejects with an `Error` — never stays pending — so an `await`
+ * cannot hang on it. The message does not repeat the URL.
+ *
+ * An empty (or whitespace-only) `src` names no image, which is not a policy
+ * refusal; it rejects with its own message, as the browser would have fired
+ * `error` for it anyway.
  */
 export function preloadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
+    const safe = sanitizeUrl(String(src));
+    if (!safe) {
+      reject(
+        new Error(
+          String(src).trim() === ""
+            ? "preloadImage: no image URL was given."
+            : "preloadImage: refusing an image URL outside the URL policy.",
+        ),
+      );
+      return;
+    }
     const img = new Image();
     img.onload = () => resolve(img);
     img.onerror = reject;
-    img.src = src;
+    img.src = safe;
   });
 }

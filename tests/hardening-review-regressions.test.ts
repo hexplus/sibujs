@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { match, when } from "../src/core/rendering/directives";
 import { div, input, span } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
-import { sanitizeCSSValue, sanitizeStyleAttribute } from "../src/utils/sanitize";
+import { sanitizeCSSDeclaration, sanitizeCSSValue, sanitizeStyleAttribute } from "../src/utils/sanitize";
 
 // ---------------------------------------------------------------------------
 // Regressions found reviewing the hardening work itself.
@@ -229,13 +229,20 @@ describe("style sanitizer warns exactly once per dropped declaration", () => {
     expect(drops).toHaveLength(1);
   });
 
-  it("warns once for a custom property whose joined form is blocked", () => {
-    sanitizeStyleAttribute("--behavior: red; behavior: url(#x)");
+  it("warns once for a property-qualified block, never for a name that merely contains it", () => {
+    // `--behavior`, `scroll-behavior` and `overscroll-behavior` hold ordinary
+    // values and must survive untouched. The property-qualified rule compares
+    // the EXACT name; a substring test on `property:value` used to drop all
+    // three. (jsdom's CSS parser discards `behavior` itself, so the dangerous
+    // declaration is judged through the declaration primitive directly.)
+    const out = sanitizeStyleAttribute("--behavior: red; scroll-behavior: smooth; overscroll-behavior: contain");
+    expect(out).toContain("--behavior: red");
+    expect(out).toContain("scroll-behavior: smooth");
+    expect(out).toContain("overscroll-behavior: contain");
+    expect(sanitizeCSSDeclaration("behavior", "url(#x)")).toBe("");
     const drops = warn.mock.calls
       .map((c) => String(c[0]))
       .filter((m) => m.includes("was dropped by the style sanitizer"));
-    // Only `behavior: url(#x)` is dangerous; `--behavior: red` is a custom
-    // property holding the word "red" and must survive untouched.
     expect(drops).toHaveLength(1);
   });
 

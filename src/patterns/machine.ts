@@ -6,6 +6,17 @@ import { stripUnsafeKeys } from "../utils/guards";
 // STATE MACHINE
 // ============================================================================
 
+/**
+ * `table[key]` when `key` is the table's OWN property, else `undefined`.
+ *
+ * State and event names are lookup keys into plain objects, and an inherited
+ * member (`constructor`, `toString`, `__proto__`, …) is not a state or an event
+ * the developer declared, however truthy it is.
+ */
+function ownEntry<O extends object, K extends keyof O & string>(table: O, key: K): O[K] | undefined {
+  return Object.hasOwn(table, key) ? table[key] : undefined;
+}
+
 export interface MachineConfig<S extends string, E extends string, C extends object = Record<string, unknown>> {
   initial: S;
   context?: C;
@@ -76,10 +87,14 @@ export function machine<S extends string, E extends string, C extends object = R
   }
 
   function step(event: E): void {
-    const stateDef = config.states[currentState];
+    const stateDef = ownEntry(config.states, currentState);
     if (!stateDef?.on) return;
 
-    const transition = stateDef.on[event];
+    // OWN keys only. Event names often arrive from runtime data (a socket, a
+    // postMessage, the URL hash), and `on["toString"]` / `on["constructor"]` are
+    // truthy INHERITED members: the machine ran the exit hook and committed
+    // `state = undefined`, after which it could never move again.
+    const transition = ownEntry(stateDef.on, event);
     if (!transition) return;
 
     let target: S;
@@ -125,7 +140,7 @@ export function machine<S extends string, E extends string, C extends object = R
     });
 
     // Run entry action for new state
-    const targetDef = config.states[target];
+    const targetDef = ownEntry(config.states, target);
     if (targetDef?.entry) {
       targetDef.entry(currentContext);
     }
@@ -139,7 +154,7 @@ export function machine<S extends string, E extends string, C extends object = R
 
   // Run entry action for initial state. Guarded like a transition, so an event
   // it sends is processed after the entry hook returns.
-  const initialDef = config.states[config.initial];
+  const initialDef = ownEntry(config.states, config.initial);
   if (initialDef?.entry) {
     processing = true;
     try {
@@ -159,10 +174,10 @@ export function machine<S extends string, E extends string, C extends object = R
 
   function can(event: E): boolean {
     const currentState = state();
-    const stateDef = config.states[currentState];
+    const stateDef = ownEntry(config.states, currentState);
     if (!stateDef?.on) return false;
 
-    const transition = stateDef.on[event];
+    const transition = ownEntry(stateDef.on, event);
     if (!transition) return false;
 
     if (typeof transition === "string") return true;

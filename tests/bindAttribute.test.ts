@@ -13,7 +13,7 @@ describe("bindAttribute (with sanitization)", () => {
     bindAttribute(a, "title", title);
 
     // sanitizeUrl blocks javascript: protocol — returns empty string
-    expect(a.getAttribute("href")).toBe("");
+    expect(a.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
     // setAttribute is XSS-safe — stores value as-is
     expect(a.getAttribute("title")).toBe("<img src=x>");
 

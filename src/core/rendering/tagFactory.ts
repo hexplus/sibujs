@@ -2,22 +2,13 @@ import { DEV, devWarn, devWarnLazy } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { reactiveBinding } from "../../reactivity/track";
-import { isEventHandlerAttr, sanitizeCSSValue, sanitizeStyleAttribute } from "../../utils/sanitize";
+import { isBlockedElement } from "../../utils/elementPolicy";
+import { isEventHandlerAttr, sanitizeCSSDeclaration, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
-
-// Tag names that must never be created via tagFactory — they enable script
-// execution or arbitrary plugin loading regardless of attributes. The check
-// is case-insensitive and applies to HTML, SVG, and MathML namespaces since
-// e.g. <script> exists in both HTML and SVG.
-const BLOCKED_TAGS = new Set(["script", "iframe", "object", "embed", "frame", "frameset"]);
-
-function isBlockedTag(tag: string): boolean {
-  return BLOCKED_TAGS.has(tag.toLowerCase());
-}
 
 // IDs matching well-known window/document properties are risky due to DOM
 // clobbering (a named element can shadow a global). Warn in dev only.
@@ -165,11 +156,13 @@ function applyStyle(el: Element, style: TagProps["style"]) {
       }
       const next: string[] = [];
       for (const prop in value) {
+        // Own keys only — see the attribute loop in `tagFactory`.
+        if (!Object.hasOwn(value, prop)) continue;
         const val = value[prop];
         if (val == null) continue;
         const name = toKebab(prop);
         next.push(name);
-        decl.setProperty(name, sanitizeCSSValue(String(val), { property: name, element: el }));
+        decl.setProperty(name, sanitizeCSSDeclaration(name, String(val), { element: el }));
       }
       for (let i = 0; i < written.length; i++) {
         if (next.indexOf(written[i]) === -1) decl.removeProperty(written[i]);
@@ -187,16 +180,17 @@ function applyStyle(el: Element, style: TagProps["style"]) {
 
   const htmlEl = el as HTMLElement;
   for (const prop in style as StyleMap) {
+    if (!Object.hasOwn(style as StyleMap, prop)) continue;
     const val = (style as StyleMap)[prop];
     const name = toKebab(prop);
     if (typeof val === "function") {
       const getter = val as () => string | number;
       const teardown = reactiveBinding(() => {
-        htmlEl.style.setProperty(name, sanitizeCSSValue(String(getter()), { property: name, element: el }));
+        htmlEl.style.setProperty(name, sanitizeCSSDeclaration(name, String(getter()), { element: el }));
       }, el);
       registerDisposer(el, teardown);
     } else {
-      htmlEl.style.setProperty(name, sanitizeCSSValue(String(val), { property: name, element: el }));
+      htmlEl.style.setProperty(name, sanitizeCSSDeclaration(name, String(val), { element: el }));
     }
   }
 }
@@ -221,6 +215,7 @@ export function resolveClassValue(cls: TagProps["class"]): string {
   if (!cls) return "";
   let out = "";
   for (const name in cls) {
+    if (!Object.hasOwn(cls, name)) continue;
     const val = (cls as Record<string, boolean | (() => boolean)>)[name];
     const active = typeof val === "function" ? val() : val;
     if (active) out = out ? `${out} ${name}` : name;
@@ -252,6 +247,7 @@ function applyClass(el: Element, cls: TagProps["class"]) {
   let hasReactive = false;
   let result = "";
   for (const name in obj) {
+    if (!Object.hasOwn(obj, name)) continue;
     const val = obj[name];
     if (typeof val === "function") {
       hasReactive = true;
@@ -264,6 +260,7 @@ function applyClass(el: Element, cls: TagProps["class"]) {
     const update = () => {
       let r = "";
       for (const name in obj) {
+        if (!Object.hasOwn(obj, name)) continue;
         const val = obj[name];
         const active = typeof val === "function" ? (val as () => boolean)() : val;
         if (active) r = r ? `${r} ${name}` : name;
@@ -382,7 +379,12 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
   // Set lookup per call. Creating a factory for a blocked tag (e.g. the
   // `script` export in html.ts) is still allowed; it throws only when called,
   // preserving the existing throw-on-use semantics.
-  const blocked = isBlockedTag(tag);
+  //
+  // The list itself is the shared one in `utils/elementPolicy.ts` (script,
+  // iframe, object, embed, frame, frameset — case-insensitive, any namespace,
+  // since <script> exists in SVG too). A tag factory's name may be a runtime
+  // value (`customElement(tagName)`), so it gets the runtime verdict.
+  const blocked = isBlockedElement(tag);
   return (first?: TagProps<Element> | NodeChildren, second?: NodeChildren): Element => {
     if (blocked) {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
@@ -528,6 +530,7 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
     const pOn = props.on;
     if (pOn) {
       for (const ev in pOn) {
+        if (!Object.hasOwn(pOn, ev)) continue;
         const handler: unknown = pOn[ev];
         if (typeof handler === "function") {
           el.addEventListener(ev, handler as EventListener);
@@ -557,6 +560,13 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
         case "onElement":
           continue; // already handled above / below
         default: {
+          // OWN keys only. `for…in` also walks inherited enumerable keys, so a
+          // polluted `Object.prototype` (from some other library's unsafe
+          // merge) would otherwise stamp its keys as attributes on EVERY
+          // element the framework creates — `formaction`, `target`, ARIA
+          // text. The attribute policy still filters the values, but which
+          // attributes an element carries is not the prototype's to decide.
+          if (!Object.hasOwn(props, key)) continue;
           const value = props[key];
           if (value == null) continue;
           // Block on* event-handler attributes (shared guard). The `on` props

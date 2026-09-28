@@ -8,6 +8,13 @@
  * Ensures a `<link rel="icon">` exists — creates one if missing, updates
  * the `href` otherwise.
  *
+ * NOT routed through the canonical URL allowlist, deliberately: `data:` icons
+ * are this helper's purpose (see `svgFavicon`), and the allowlist refuses
+ * `data:`. That is safe here because an icon link only ever fetches an image —
+ * the browser never navigates to, executes or renders it as a document, so no
+ * scheme turns this sink into script. Do not copy this exception to any sink
+ * that navigates, executes or embeds.
+ *
  * @param url Favicon URL or `data:` URI
  *
  * @example

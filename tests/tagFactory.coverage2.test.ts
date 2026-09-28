@@ -226,7 +226,7 @@ describe("tagFactory coverage2 — custom attributes", () => {
 
   it("url attribute is sanitized", () => {
     const link = a({ href: "javascript:evil()" }) as HTMLAnchorElement;
-    expect(link.getAttribute("href")).not.toContain("javascript:");
+    expect(link.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("plain string attribute set directly", () => {

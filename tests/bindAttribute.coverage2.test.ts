@@ -71,7 +71,7 @@ describe("bindAttribute coverage2 — value/checked property binding", () => {
   it("sanitizes URL attributes", () => {
     const a = document.createElement("a");
     bindAttribute(a, "href", () => "javascript:alert(1)");
-    expect(a.getAttribute("href")).not.toContain("javascript:");
+    expect(a.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 });
 
@@ -141,7 +141,7 @@ describe("bindDynamic coverage2", () => {
   it("sanitizes URL attributes in dynamic binding", () => {
     const a = document.createElement("a");
     bindDynamic(a, "href", () => "javascript:evil()");
-    expect(a.getAttribute("href")).not.toContain("javascript:");
+    expect(a.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("supports static (non-function) name and value", () => {

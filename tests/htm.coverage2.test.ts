@@ -5,7 +5,7 @@ import { signal } from "../src/core/signals/signal";
 describe("htm coverage2 — attribute sanitization in expressions", () => {
   it("sanitizes a URL attribute passed as an expression", () => {
     const el = html`<a href=${"javascript:alert(1)"}>link</a>` as HTMLAnchorElement;
-    expect(el.getAttribute("href")).not.toContain("javascript:");
+    expect(el.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("sanitizes srcset passed as an expression", () => {
@@ -15,7 +15,7 @@ describe("htm coverage2 — attribute sanitization in expressions", () => {
 
   it("sanitizes a URL attribute in a mixed (static + expr) value", () => {
     const el = html`<a href="java${"script"}:alert(1)">x</a>` as HTMLAnchorElement;
-    expect(el.getAttribute("href")).not.toContain("javascript:");
+    expect(el.getAttribute("href")).toBeNull(); // refused URL is omitted, not emptied
   });
 
   it("sanitizes srcset in a mixed value", () => {

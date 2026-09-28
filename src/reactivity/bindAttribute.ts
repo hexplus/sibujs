@@ -13,7 +13,11 @@ import { reactiveBinding } from "./track";
  * Sanitization:
  *  - `on*` event-handler attributes are refused (defense-in-depth).
  *  - URL attributes (href, src, action, etc.) go through protocol
- *    validation (blocks javascript:, data:, vbscript:, blob:).
+ *    validation (blocks javascript:, data:, vbscript:, blob:); a refused
+ *    value removes the attribute.
+ *  - The contextual element policy applies before every write: a reactive
+ *    binding on a `<meta>` means it may never carry a refresh directive, and a
+ *    `<script>` source is never chosen by a getter. See `utils/elementPolicy`.
  *  - All other attributes are passed through `setAttribute`, which is
  *    XSS-safe — the browser stores the value as text, never code.
  */
@@ -43,7 +47,7 @@ export function bindAttribute(el: HTMLElement, attr: string, getter: () => unkno
     // validation, URL protocol allowlist, and the style declaration-list policy
     // all live in `setSafeAttribute`, so this path can never drift from the
     // static tag-factory path or the `bindAttrs` path.
-    setSafeAttribute(el, attr, value, { label: `bindAttribute("${attr}")` });
+    setSafeAttribute(el, attr, value, { label: `bindAttribute("${attr}")`, reactive: true });
   }
 
   // Initial run + reactive updates. Re-tracks deps every run so a signal first
@@ -97,7 +101,7 @@ export function bindDynamic(
     // Event-handler attribute names (onclick, onload, …) are refused inside the
     // shared primitive — dynamic attribute-name injection is exactly the case
     // it exists for.
-    if (!setSafeAttribute(el, name, value, { label: "bindDynamic" })) return;
+    if (!setSafeAttribute(el, name, value, { label: "bindDynamic", reactive: true })) return;
 
     prevName = name;
   }

@@ -1,14 +1,28 @@
 import { DEV, devWarn } from "../../core/dev";
 import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
-import { setSafeAttribute } from "../../utils/setSafeAttribute";
+import { isCodeTextElement } from "../../utils/elementPolicy";
+import { setSafeAttribute, setTrustedAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
 
-// Tags whose children are treated as raw text by the HTML parser and thus
-// cannot safely embed dynamic expressions.
-const RAW_TEXT_TAGS = new Set(["script", "style"]);
+// TRUST MODEL — see docs/architecture/attribute-security.md § "Trust model".
+//
+//   template literal static source   developer-authored markup: tag names,
+//                                    static attribute values and static text
+//                                    mean what they say, as in an HTML file
+//   `${…}` interpolations            runtime data, untrusted by default:
+//                                    attribute values commit through
+//                                    `setSafeAttribute`, children become text
+//                                    nodes (or are appended as the Node the
+//                                    application built), and never code
+//
+// Rules that hold REGARDLESS of source — the contextual element policy in
+// `utils/elementPolicy.ts` (meta refresh, runtime `<script>` sources, SVG
+// animation targets) — are applied to static attributes too, via
+// `setTrustedAttribute`, because a static attribute combines with runtime ones
+// on the same element.
 
 // Void elements that cannot have children (self-closing by spec)
 const VOID_ELEMENTS = new Set([
@@ -338,10 +352,11 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
         } else {
           const inner = parseChildren();
 
-          // Raw-text contexts (<script>, <style>) cannot safely interpolate
-          // dynamic values — the HTML parser treats their contents as raw
-          // text, so escaping doesn't apply. Refuse at parse time.
-          if (RAW_TEXT_TAGS.has(tag.toLowerCase())) {
+          // Code-text contexts (<script>, <style>) cannot safely interpolate
+          // dynamic values — their text is a program, the HTML parser treats
+          // it as raw text, and escaping doesn't apply. Refuse at parse time.
+          // The predicate is the shared one SSR also uses to strip them.
+          if (isCodeTextElement(tag)) {
             for (let i = 0; i < inner.length; i++) {
               if (inner[i].t === 2) {
                 throw new Error(
@@ -382,8 +397,8 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
   for (let i = 0; i < tmpl.attrs.length; i++) {
     const attr = tmpl.attrs[i];
     switch (attr.t) {
-      case 0: // static
-        el.setAttribute(attr.name, attr.value);
+      case 0: // static — developer-authored, but still subject to the contextual policy
+        setTrustedAttribute(el, attr.name, attr.value);
         break;
       case 1: {
         // expr — runtime data, so it goes through the SHARED commit primitive.
@@ -433,8 +448,8 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
         }
         break;
       }
-      case 4: // boolean
-        el.setAttribute(attr.name, "");
+      case 4: // boolean — static source, as above
+        setTrustedAttribute(el, attr.name, "");
         break;
     }
   }

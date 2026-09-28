@@ -59,6 +59,10 @@ const CORE_MARKERS = {
   // or helper the callback names. These two markers are the regression guard.
   "blocked-construct explanation": "exfiltration channel",
   "blocked-construct explanation (2)": "legacy scriptable filters",
+  // The contextual element policy returns a numeric code; its explanation must
+  // exist only inside the warning callback.
+  "contextual attribute refusal": "in this element's context",
+  "contextual refusal explanation": "nothing can withdraw it when the state changes back",
 } as const;
 
 // NOTE: `[SibuJS]` is deliberately NOT a marker. `reportError` uses the same

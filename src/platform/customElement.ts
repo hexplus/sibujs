@@ -4,6 +4,7 @@
 
 import { reportError } from "../core/errors";
 import { dispose, disposeNodeOwn, replaceChildrenSafely, withDisposerRollback } from "../core/rendering/dispose";
+import { isBlockedElement } from "../utils/elementPolicy";
 import { isEventHandlerAttr } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
 
@@ -252,12 +253,20 @@ export function defineElement(
  *
  * Function-valued `on*` props keep their existing meaning — `addEventListener`,
  * never an attribute.
+ *
+ * The TAG is policed like a tag factory's, through the shared element policy:
+ * `svgElement("script", { href })` is refused. SVG has its own `<script>`, which
+ * the browser fetches and runs when it is inserted, so an unrestricted tag name
+ * here was a way around the tag factories' block on script elements.
  */
 export function svgElement(
   tag: string,
   props: Record<string, unknown> = {},
   ...nodes: (SVGElement | string)[]
 ): SVGElement {
+  if (isBlockedElement(tag)) {
+    throw new Error(`svgElement: refusing to create <${tag}> — tag is blocked for security reasons.`);
+  }
   const el = document.createElementNS(SVG_NS, tag);
 
   for (const [key, value] of Object.entries(props)) {
