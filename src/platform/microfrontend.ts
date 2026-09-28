@@ -3,6 +3,7 @@ import { registerDisposer, replaceChildrenSafely } from "../core/rendering/dispo
 import { div, span } from "../core/rendering/html";
 import type { Component } from "../core/rendering/types";
 import { signal } from "../core/signals/signal";
+import { bindOwnerScope } from "../reactivity/track";
 import { globalSingleton } from "../utils/globalSingleton";
 
 // ============================================================================
@@ -257,14 +258,18 @@ export function defineRemoteComponent<R extends Element = HTMLElement>(
     });
 
     loader()
-      .then((mod) => {
-        // The MODULE is shared, immutable, and expensive to fetch, so caching
-        // it after disposal is correct and deliberate — the next instance
-        // renders instantly. Only the INSTANTIATION is owner-scoped.
-        cached = mod.default;
-        if (disposed) return;
-        replaceChildrenSafely(container, cached());
-      })
+      .then(
+        // Instantiated after the module resolves, in the owner scope of the
+        // render that asked for it — as `lazy()` does.
+        bindOwnerScope((mod: { default: Component<void, R> }) => {
+          // The MODULE is shared, immutable, and expensive to fetch, so caching
+          // it after disposal is correct and deliberate — the next instance
+          // renders instantly. Only the INSTANTIATION is owner-scoped.
+          cached = mod.default;
+          if (disposed) return;
+          replaceChildrenSafely(container, cached());
+        }),
+      )
       .catch((err) => {
         if (disposed) return;
         const message = err instanceof Error ? err.message : String(err);

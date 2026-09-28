@@ -1,5 +1,5 @@
 import { batch } from "../../reactivity/batch";
-import { resumeTracking, suspendTracking, track } from "../../reactivity/track";
+import { bindOwnerScope, resumeTracking, suspendTracking, track } from "../../reactivity/track";
 import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
@@ -458,11 +458,15 @@ export function each<T>(
   // (common when each() is called inside tagFactory nodes), schedule
   // a one-time retry so the initial items render before first paint.
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!initialized && !rangeDisposed && anchor.parentNode) {
-        update();
-      }
-    });
+    // Rows built by the deferred first render carry the owner scope `each()`
+    // was created in (see `bindOwnerScope`).
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!initialized && !rangeDisposed && anchor.parentNode) {
+          update();
+        }
+      }),
+    );
   }
 
   return anchor;

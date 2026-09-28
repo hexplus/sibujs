@@ -20,10 +20,25 @@
  * ```
  */
 
+import { getOwnerScope, runWithOwnerScope } from "../../reactivity/track";
 import { type RuntimeErrorPhase, reportError } from "../errors";
 import { registerDisposer } from "./dispose";
 
 type CleanupFn = () => void;
+
+/**
+ * `fn`, pinned to the owner scope `scope`: it runs in that scope wherever it is
+ * eventually called from — a dispose walk, the mutation observer, another
+ * owner's teardown — and `null` ("no scope") is pinned like any other value.
+ *
+ * Lifecycle callbacks are stored and invoked later by someone else, so the scope
+ * current at invocation time says nothing about who they belong to. A callback
+ * belongs to the render that registered it. (`bindOwnerScope` is not enough
+ * here: it leaves an unscoped callback to inherit its caller's scope.)
+ */
+function pinScope<R>(scope: unknown, fn: () => R): () => R {
+  return () => (getOwnerScope() === scope ? fn() : runWithOwnerScope(scope, fn));
+}
 
 /** Safely invoke a lifecycle callback, containing and REPORTING any failure.
  *  Returns the callback's return value (used to capture onMount cleanup functions).
@@ -48,26 +63,32 @@ function safeCall(cb: () => unknown, hookName: string): unknown {
  * Run onMount callback and tie the cleanup it returns (if any) to the element's
  * unmount. `isDisposed` reports whether the element was disposed — possibly by
  * the callback itself.
+ *
+ * `scope` is the owner scope `onMount()` was registered in. The callback is
+ * already pinned to it; the cleanup it RETURNS must be pinned explicitly, since
+ * by the time it is returned the callback's scope has been restored away.
  */
 function runMountCallback(
   callback: () => undefined | CleanupFn,
   hookName: string,
   element: Element,
   isDisposed: () => boolean,
+  scope: unknown,
 ): void {
-  const cleanup = safeCall(callback, hookName);
-  if (typeof cleanup !== "function") return;
+  const returned = safeCall(callback, hookName);
+  if (typeof returned !== "function") return;
+  const cleanup = pinScope(scope, returned as CleanupFn);
   if (isDisposed() || !element.isConnected) {
     // The callback removed or disposed its own element: the unmount already
     // happened. `dispose()` leaves the element connected, so connectivity alone
     // misses that case, and a cleanup registered after the disposer queue has
     // drained would never run.
-    safeCall(cleanup as CleanupFn, "onUnmount");
+    safeCall(cleanup, "onUnmount");
   } else {
     // Same once-only path as onUnmount(): dispose() AND a native .remove()
     // both run it. Registering it only as a disposer skipped it whenever the
     // element left the DOM without being disposed.
-    onUnmount(cleanup as CleanupFn, element);
+    watchUnmount(cleanup, element);
   }
 }
 
@@ -284,6 +305,11 @@ function registerUnmountWatcher(element: Element, cb: DisconnectCb): () => void 
 export function onMount(callback: () => undefined | CleanupFn, element?: Element): void {
   // No-op during SSR — lifecycle hooks are client-only
   if (typeof document === "undefined") return;
+  // The callback runs after the render that registered it, so it runs in that
+  // render's owner scope: an effect it creates belongs where the component
+  // does. The cleanup it returns is pinned to the same scope.
+  const scope = getOwnerScope();
+  callback = pinScope(scope, callback);
 
   if (element) {
     // Disposed flag — if the element is disposed before it ever connects,
@@ -297,7 +323,7 @@ export function onMount(callback: () => undefined | CleanupFn, element?: Element
     if (element.isConnected) {
       queueMicrotask(() => {
         if (disposed) return;
-        runMountCallback(callback, "onMount", element, isDisposed);
+        runMountCallback(callback, "onMount", element, isDisposed, scope);
       });
       return;
     }
@@ -305,12 +331,12 @@ export function onMount(callback: () => undefined | CleanupFn, element?: Element
     queueMicrotask(() => {
       if (disposed) return;
       if (element.isConnected) {
-        runMountCallback(callback, "onMount", element, isDisposed);
+        runMountCallback(callback, "onMount", element, isDisposed, scope);
         return;
       }
       const unregister = registerMountWatcher(element, () => {
         if (disposed) return;
-        runMountCallback(callback, "onMount", element, isDisposed);
+        runMountCallback(callback, "onMount", element, isDisposed, scope);
       });
       // Ensure watcher is removed on dispose
       registerDisposer(element, unregister);
@@ -333,7 +359,14 @@ export function onMount(callback: () => undefined | CleanupFn, element?: Element
  */
 export function onUnmount(callback: CleanupFn, element: Element): void {
   if (typeof document === "undefined") return;
+  // Teardown runs in the owner scope of the render that registered it, however
+  // the element leaves (dispose, or a native removal seen by the observer) and
+  // whoever triggers it.
+  watchUnmount(pinScope(getOwnerScope(), callback), element);
+}
 
+/** `onUnmount()` for a callback already pinned to its owner scope. */
+function watchUnmount(callback: CleanupFn, element: Element): void {
   let fired = false;
   const fireOnce = () => {
     if (fired) return;

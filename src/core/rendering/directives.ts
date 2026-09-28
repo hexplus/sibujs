@@ -1,4 +1,4 @@
-import { reactiveBinding, untracked } from "../../reactivity/track";
+import { bindOwnerScope, reactiveBinding, untracked } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
@@ -255,9 +255,13 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   });
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!disposed && !initialized && anchor.parentNode) update();
-    });
+    // The deferred first render builds the branch outside any reactive run, so
+    // it carries the owner scope the directive was created in.
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!disposed && !initialized && anchor.parentNode) update();
+      }),
+    );
   }
 
   return anchor;
@@ -370,9 +374,13 @@ export function match<T extends string | number>(
   });
 
   if (!initialized) {
-    queueMicrotask(() => {
-      if (!disposed && !initialized && anchor.parentNode) update();
-    });
+    // The deferred first render builds the branch outside any reactive run, so
+    // it carries the owner scope the directive was created in.
+    queueMicrotask(
+      bindOwnerScope(() => {
+        if (!disposed && !initialized && anchor.parentNode) update();
+      }),
+    );
   }
 
   return anchor;

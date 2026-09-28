@@ -251,6 +251,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // is the same policy entry the tag factory calls, so it cannot be split
     // out without giving the no-DOM path a second, weaker policy.
     //
+    // Raw cap raised to 88,500 B (gzip baseline unchanged) when the reactive
+    // core gained the owner scope: every subscriber stamps the scope it was
+    // created in and reinstates it on each run, effect cleanups run in it, and
+    // the deferred first renders of `when`/`match`/`each`/`KeepAlive`, `lazy()`,
+    // `Suspense`, `Portal` and `onMount`/`onUnmount` carry it — the mechanism
+    // that keeps an outgoing route page on its own route. Raw ~87,990 B, gzip
+    // ~30,060 B, still inside the 2% tolerance of the gzip baseline.
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -258,7 +266,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(87_500);
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(88_500);
     expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(29_650 * 1.02));
   });
 });

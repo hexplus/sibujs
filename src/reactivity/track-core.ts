@@ -290,6 +290,9 @@ type SubWithList = Subscriber & {
   // allocation in hot paths (Wide Graph sink: 10k+ calls, Memory benchmark:
   // 25k+ effect creations).
   _dispose?: () => void;
+  // The owner scope this subscriber was created in (see "Owner scope" below).
+  // Absent for an effect or binding created outside any scope.
+  _scope?: unknown;
 };
 
 // ---------- Safe invoke ---------------------------------------------------
@@ -451,6 +454,58 @@ export function untracked<T>(fn: () => T): T {
   }
 }
 
+// ---------- Owner scope -----------------------------------------------------
+//
+// An opaque value that follows reactive OWNERSHIP rather than the call stack.
+// Every subscriber stamps the scope that is current when it first runs, and
+// every later run — whenever and from wherever the scheduler invokes it —
+// reinstates that scope for its own body. A subscriber created during another
+// subscriber's run therefore inherits the creator's scope, so a scope set
+// around a component factory reaches every effect, derived and binding the
+// component creates, including those created later by its directives.
+//
+// The core never interprets the value. The router uses it to give each route
+// instance its own committed route (see `route()` in plugins/router.ts): an
+// outgoing page keeps reading the route it was created for until it is
+// disposed, instead of observing the next page's params.
+//
+// Work scheduled outside any subscriber run (a microtask, a timer, an awaited
+// continuation) does not carry the scope by itself; framework code that defers
+// rendering captures it with `bindOwnerScope`.
+// ---------------------------------------------------------------------------
+
+let currentOwnerScope: unknown = null;
+
+/** The owner scope in effect right now (`null` when there is none). @internal */
+export function getOwnerScope(): unknown {
+  return currentOwnerScope;
+}
+
+/**
+ * Run `fn` with `scope` as the current owner scope, restoring the previous
+ * scope afterwards (even if `fn` throws). @internal
+ */
+export function runWithOwnerScope<T>(scope: unknown, fn: () => T): T {
+  const prev = currentOwnerScope;
+  currentOwnerScope = scope;
+  try {
+    return fn();
+  } finally {
+    currentOwnerScope = prev;
+  }
+}
+
+/**
+ * Capture the current owner scope into `fn`, for work that runs later (a
+ * deferred first render, a lifecycle callback). Returns `fn` itself when there
+ * is no scope to carry. @internal
+ */
+export function bindOwnerScope<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const scope = currentOwnerScope;
+  if (scope === null) return fn;
+  return (...args: A) => runWithOwnerScope(scope, () => fn(...args));
+}
+
 // ---------- Epoch counter for retrack-based pruning -----------------------
 
 let subscriberEpochCounter = 0;
@@ -480,6 +535,16 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   // Stamped on the first tracking run, which happens where the subscriber is
   // created.
   if (sub._cap === undefined) sub._cap = currentDisposerCapture();
+  // Owner scope: stamped on the subscriber's first run, then reinstated for
+  // every run. Only a scoped subscriber stores one — `_scope` stays absent
+  // (meaning "none") on the common unscoped path, which keeps that path to a
+  // compare. A zero/absent `_epoch` identifies the first run of an effect or
+  // binding; a derived's first run goes through `track()`, which always
+  // stamps, so this never re-stamps it.
+  const prevScope = currentOwnerScope;
+  if (prevScope !== null && !sub._epoch && sub._scope === undefined) sub._scope = prevScope;
+  const scope = sub._scope === undefined ? null : sub._scope;
+  if (scope !== prevScope) currentOwnerScope = scope;
   const epoch = ++subscriberEpochCounter;
   sub._epoch = epoch;
   sub._structDirty = false;
@@ -504,6 +569,7 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
     effectFn();
   } finally {
     currentSubscriber = prev;
+    currentOwnerScope = prevScope;
     if (savedDepth !== 0) {
       suspendDepth = savedDepth;
       suspendSavedSub = savedSuspendSub;
@@ -563,11 +629,19 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
     trackingSuspended = false;
   }
   currentSubscriber = subscriber;
+  const sub = subscriber as SubWithList;
+  // Owner scope (see "Owner scope" above). An explicit subscriber — a
+  // derived — has its creation run here: stamp it, `null` included, so a
+  // later `retrack()` never mistakes a recompute for a first run.
+  if (sub._scope === undefined) sub._scope = currentOwnerScope;
+  const prevScope = currentOwnerScope;
+  currentOwnerScope = sub._scope;
 
   try {
     effectFn();
   } finally {
     currentSubscriber = prev;
+    currentOwnerScope = prevScope;
     if (savedDepth !== 0) {
       suspendDepth = savedDepth;
       suspendSavedSub = savedSuspendSub;
@@ -577,7 +651,6 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
     // Post-walk: restore each signal's `__activeNode` to what outer
     // tracking contexts had before this track() started. We never do a
     // pre-walk here because cleanup() emptied the dep list up-front.
-    const sub = subscriber as SubWithList;
     for (let n: SubNode | null = sub.depsHead ?? null; n !== null; n = n.subNext) {
       const sig = n.sig as SignalWithList;
       sig.__activeNode = n.prevActive;
@@ -588,7 +661,6 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
   // Cache the disposer on the subscriber so repeated track() calls (effects
   // re-running, derived re-setup) don't each allocate a fresh `() => cleanup`
   // closure. For a 10k-subscriber workload this eliminates 10k allocations.
-  const sub = subscriber as SubWithList;
   return sub._dispose ?? (sub._dispose = () => cleanup(subscriber));
 }
 

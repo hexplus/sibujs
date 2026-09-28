@@ -50,7 +50,15 @@ import { applyStructuralSharing, type StructuralSharingOption } from "./structur
  * mutation rather than a notification — see `MutationOptions.onMutate`.
  */
 export interface QueryOptions<T> {
-  /** Time in ms before cached data is considered stale. Default: 0 (always stale) */
+  /**
+   * Time in ms before cached data is considered stale. Default: 0 (always stale)
+   *
+   * Staleness is acted on when the query mounts, when its resolved key
+   * changes, when `enabled` turns on, and by the explicit triggers (`refetch()`,
+   * `invalidateQueries`, the interval, focus, reconnect). A key getter that
+   * re-runs and resolves to the SAME key is not a key change and never
+   * refetches, whatever the data's age — no `derived()` wrapper needed.
+   */
   staleTime?: number;
   /** Time in ms to keep unused cache entries. Default: 300000 (5 min) */
   cacheTime?: number;
@@ -310,7 +318,7 @@ export function query<T>(
   // changes without changing the answer must not re-run the staleness check
   // (and, for stale data, refetch).
   const enabledGate = typeof enabled === "function" ? derived(() => Boolean(enabled())) : null;
-  const isEnabled = enabledGate ?? (() => enabled);
+  const isEnabled = enabledGate ?? (() => Boolean(enabled));
 
   // Bind this query instance to one cache map for its whole lifetime. Resolving
   // at creation (inside the request's SSR scope) keeps later async resolutions
@@ -360,6 +368,9 @@ export function query<T>(
   // (QRY-005). `same key !== same CacheEntry`.
   let attachedEntry: CacheEntry | null = null;
   let attachedKey: string | null = null;
+  // `enabled` as seen by the previous key-effect run (`null` before the first),
+  // so a run can tell an `enabled` rise from an unrelated re-run.
+  let lastEnabled: boolean | null = null;
   let intervalTimer: ReturnType<typeof setInterval> | null = null;
 
   const loading = derived(() => isFetching() && data() === undefined);
@@ -711,7 +722,9 @@ export function query<T>(
     // `enabled` flips.
     const on = isEnabled();
     const keyChanged = currentKey !== key;
+    const enabledRose = on && lastEnabled === false;
     currentKey = key;
+    lastEnabled = on;
 
     // An empty key holds the query idle. It used to attach to a real cache
     // entry under "", shared by every idle query — so the first one's
@@ -728,6 +741,7 @@ export function query<T>(
     // whose entry object was replaced. Detaching from the previous entry,
     // refcounting, and GC scheduling all live in the helpers.
     const entry = getOrCreateEntry(cache, key, initialData);
+    const reattached = attachedEntry !== entry;
     attachToEntry(entry, key);
 
     // `fetching` described the previous key's request, whose settle no longer
@@ -747,10 +761,20 @@ export function query<T>(
       });
     }
 
+    // The effect re-runs whenever anything it read changed — including a
+    // dependency of the key getter that left the resolved key as it was
+    // (`user:${id() % 10}` with `id` 1 → 11). That is not a new query, so it
+    // is not a reason to fetch, however stale the data is: staleness is acted
+    // on by explicit triggers (refetch, invalidation, interval, focus,
+    // reconnect), not by unrelated signal writes. A same-key run fetches only
+    // when `enabled` just rose, or when this observer had to re-attach because
+    // its entry was replaced (e.g. the cache was reset without restarting it).
+    if (!keyChanged && !reattached && !enabledRose) return;
+
     // Only fetch when the key actually changed (or on first mount). Fresh
     // data in-cache should not trigger a refetch storm when multiple
     // subscribers mount with the same key.
-    if (!keyChanged && currentKey === key && entry.data !== undefined) {
+    if (!keyChanged && entry.data !== undefined) {
       const isDataStale = entry.dataUpdatedAt === 0 || Date.now() - entry.dataUpdatedAt >= staleTime;
       if (on && isDataStale && !entry.promise) doFetch();
       return;

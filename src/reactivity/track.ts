@@ -60,6 +60,11 @@ interface ReactiveApi {
   getSubscriberCount: typeof core.getSubscriberCount;
   getSubscriberDeps: typeof core.getSubscriberDeps;
   forEachSubscriber: typeof core.forEachSubscriber;
+  // Added after the first `.v1` release. A page whose first-loaded copy
+  // predates them has no such entries; see the fallback on the exports below.
+  getOwnerScope?: typeof core.getOwnerScope;
+  runWithOwnerScope?: typeof core.runWithOwnerScope;
+  bindOwnerScope?: typeof core.bindOwnerScope;
   version: string;
   __dupWarned?: boolean;
 }
@@ -108,6 +113,9 @@ function resolveReactiveApi(): ReactiveApi {
     getSubscriberCount: core.getSubscriberCount,
     getSubscriberDeps: core.getSubscriberDeps,
     forEachSubscriber: core.forEachSubscriber,
+    getOwnerScope: core.getOwnerScope,
+    runWithOwnerScope: core.runWithOwnerScope,
+    bindOwnerScope: core.bindOwnerScope,
     version: _runtimeVersion,
   };
   g[REGISTRY_KEY] = local;
@@ -135,3 +143,11 @@ export const notifySubscribers: ReactiveApi["notifySubscribers"] = API.notifySub
 export const getSubscriberCount: ReactiveApi["getSubscriberCount"] = API.getSubscriberCount;
 export const getSubscriberDeps: ReactiveApi["getSubscriberDeps"] = API.getSubscriberDeps;
 export const forEachSubscriber: ReactiveApi["forEachSubscriber"] = API.forEachSubscriber;
+
+// Owner scope. Additive to the `.v1` layout: when the active copy predates it,
+// this copy's own implementation is used. That copy's `retrack` never
+// reinstates a scope, so scoped reads degrade to "no scope" — the behaviour
+// before owner scopes existed — rather than failing.
+export const getOwnerScope: typeof core.getOwnerScope = API.getOwnerScope ?? core.getOwnerScope;
+export const runWithOwnerScope: typeof core.runWithOwnerScope = API.runWithOwnerScope ?? core.runWithOwnerScope;
+export const bindOwnerScope: typeof core.bindOwnerScope = API.bindOwnerScope ?? core.bindOwnerScope;

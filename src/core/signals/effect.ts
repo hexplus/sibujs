@@ -1,4 +1,4 @@
-import { cleanup as coreCleanup, retrack, untracked } from "../../reactivity/track";
+import { cleanup as coreCleanup, getOwnerScope, retrack, runWithOwnerScope, untracked } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import { emitDevtools } from "../devtoolsHook";
 import { type RuntimeErrorPhase, reportError } from "../errors";
@@ -97,6 +97,15 @@ function flushUserCleanups(ctx: EffectCtx): void {
   const list = ctx.userCleanups;
   if (list.length === 0) return;
   ctx.userCleanups = [];
+  // A cleanup belongs to the run that registered it, so it runs in the
+  // effect's owner scope — not in whatever scope disposed or re-ran it. A
+  // route page's cleanup reading `route()` sees its own route.
+  const scope = (ctx.subscriber as { _scope?: unknown })._scope ?? null;
+  if (scope === getOwnerScope()) runCleanups(list);
+  else runWithOwnerScope(scope, () => runCleanups(list));
+}
+
+function runCleanups(list: Array<() => void>): void {
   for (let i = list.length - 1; i >= 0; i--) {
     try {
       list[i]();

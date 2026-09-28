@@ -1,3 +1,4 @@
+import { bindOwnerScope } from "../../reactivity/track";
 import { reportError } from "../errors";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
@@ -101,12 +102,16 @@ export function lazy<R extends Node = HTMLElement>(
     let disposed = false;
 
     importFn()
-      .then((mod) => {
-        if (disposed) return;
-        cached = mod.default;
-        const rendered = cached();
-        replaceChildrenSafely(container, rendered);
-      })
+      .then(
+        // The component renders after the import resolves, in the owner scope
+        // of whoever rendered the placeholder.
+        bindOwnerScope((mod: { default: Component<void, R> }) => {
+          if (disposed) return;
+          cached = mod.default;
+          const rendered = cached();
+          replaceChildrenSafely(container, rendered);
+        }),
+      )
       .catch((err) => {
         if (disposed) return;
         const errorObj = err instanceof Error ? err : new Error(String(err));
@@ -188,7 +193,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
     if (childEl && !container.contains(childEl)) dispose(childEl);
   });
 
-  queueMicrotask(() => {
+  const renderContent = bindOwnerScope(() => {
     if (suspenseDisposed) return;
     try {
       const el = nodes();
@@ -223,6 +228,9 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       dispatchPropagate(container, errorObj);
     }
   });
+  // The content is built in a microtask, in the owner scope Suspense was
+  // created in.
+  queueMicrotask(renderContent);
 
   return container;
 }

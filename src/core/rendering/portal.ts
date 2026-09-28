@@ -1,3 +1,4 @@
+import { bindOwnerScope } from "../../reactivity/track";
 import { reportError } from "../errors";
 import { dispose, registerDisposer } from "./dispose";
 
@@ -30,7 +31,9 @@ export function Portal(nodes: () => Element, target?: Element): Comment {
   let portalContent: Element | null = null;
   let disposed = false;
 
-  queueMicrotask(() => {
+  // Portal content is built in a microtask; it keeps the owner scope of the
+  // component that created the portal.
+  const renderContent = bindOwnerScope(() => {
     // If the anchor was disposed before this microtask ran, skip append
     // entirely — otherwise portalContent leaks into the target DOM.
     if (disposed) return;
@@ -54,6 +57,7 @@ export function Portal(nodes: () => Element, target?: Element): Comment {
       });
     }
   });
+  queueMicrotask(renderContent);
 
   // Primary cleanup: registerDisposer on the anchor so `dispose()`,
   // `when()`, `match()`, and `each()` all clean up portal content.
