@@ -16,10 +16,12 @@ was typed `() => undefined | CleanupFn`, and TypeScript infers a block body
 with no `return` as `() => void`, which `undefined` does not accept — so the
 most common way to write the hook needed an explicit `return undefined;`.
 
-The callback is now typed `() => void | (() => void)`. Nothing changes at
-runtime: a returned function is still the cleanup (honoured when `element` is
-passed), and any other return value — nothing, or the promise an `async`
-callback returns — is still ignored. Code that compiled before still compiles.
+The callback is now typed `() => void | (() => void)`. Runtime behaviour is
+unchanged: a returned function is still the cleanup (honoured when `element` is
+passed), and returning nothing is valid. Other non-function return values are
+not part of the typed API and are ignored defensively if encountered; async
+callbacks are not part of the supported `onMount()` contract. Code that
+compiled before still compiles.
 
 ## [4.10.0] — 2026-09-28
 

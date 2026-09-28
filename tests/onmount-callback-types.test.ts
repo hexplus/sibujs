@@ -4,8 +4,11 @@
  * The callback was typed `() => undefined | CleanupFn`. TypeScript infers a
  * block body with no `return` as `void`, not `undefined`, so the most common
  * form — `onMount(() => { el.focus(); })` — failed to compile (TS2345) even
- * though the runtime handles it: only a returned FUNCTION is treated as a
- * cleanup, anything else is ignored.
+ * though the runtime handles it.
+ *
+ * The supported contract: the callback returns nothing, or a cleanup function.
+ * Async callbacks are NOT part of it. The runtime ignores any other return value
+ * only defensively, for callers that bypass the type system.
  *
  * The compile half of this file is enforced by `npm run typecheck:tests`; the
  * runtime half pins that the widened type describes what already happens.
@@ -45,6 +48,20 @@ describe("onMount() callback typing", () => {
     // A callback declared elsewhere with an explicit `void` return.
     const setup = (): void => {};
     onMount(setup, el);
+    // Optional cleanup — inferred as `() => (() => void) | undefined`.
+    const enabled = el.isConnected;
+    onMount(() => {
+      if (enabled) {
+        return () => {};
+      }
+    });
+    onMount(() => {
+      if (enabled) {
+        return () => {
+          el.textContent = "";
+        };
+      }
+    }, el);
 
     // biome-ignore lint/suspicious/noConfusingVoidType: the exact public callback type under test.
     expectTypeOf(onMount).parameter(0).toEqualTypeOf<() => void | (() => void)>();
@@ -57,6 +74,10 @@ describe("onMount() callback typing", () => {
     onMount((node: Element) => node, el);
     // @ts-expect-error — a number is neither nothing nor a cleanup function
     onMount(() => 42, el);
+    // @ts-expect-error — async callbacks are not part of the supported onMount contract
+    onMount(async () => {
+      await Promise.resolve();
+    }, el);
   });
 
   it("a block-body callback with no return runs, and registers nothing to clean up", async () => {
@@ -85,10 +106,12 @@ describe("onMount() callback typing", () => {
     expect(calls).toEqual(["mount", "cleanup"]);
   });
 
-  it("a non-function return value is ignored, not called", async () => {
+  it("defensively ignores unsupported non-function return values when the type system is bypassed", async () => {
     const el = document.createElement("div");
     document.body.appendChild(el);
-    // An async callback returns a promise, which is not a cleanup.
+    // Async callbacks are not part of the public `onMount()` type. These casts
+    // intentionally bypass TypeScript to pin the defensive runtime behaviour:
+    // a returned value that is not a function is never called as a cleanup.
     const asyncSetup = async (): Promise<void> => {};
     onMount(asyncSetup as unknown as () => void, el);
     onMount(() => 42 as unknown as undefined, el);
