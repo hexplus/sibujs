@@ -7,6 +7,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [4.10.1] — 2026-09-28
+
+### Fixed — `onMount()` rejected a callback that returns nothing
+
+`onMount(() => { el.focus(); }, el)` failed to compile (TS2345). The callback
+was typed `() => undefined | CleanupFn`, and TypeScript infers a block body
+with no `return` as `() => void`, which `undefined` does not accept — so the
+most common way to write the hook needed an explicit `return undefined;`.
+
+The callback is now typed `() => void | (() => void)`. Nothing changes at
+runtime: a returned function is still the cleanup (honoured when `element` is
+passed), and any other return value — nothing, or the promise an `async`
+callback returns — is still ignored. Code that compiled before still compiles.
+
 ## [4.10.0] — 2026-09-28
 
 ### Upgrade notes
