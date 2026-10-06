@@ -2731,15 +2731,46 @@ export function Route(): Node {
           if (routeTorn || seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
-          showError(error instanceof Error ? error : new Error(String(error)), routeDef);
+          fail(seq, error, routeDef);
         }
       }
     } catch (error) {
       if (seq !== navSeq) return;
       if (routeTorn) return;
       console.error("[Route] Update failed:", error);
-      showError(error instanceof Error ? error : new Error(String(error)));
+      fail(seq, error);
     }
+  };
+
+  // A failure that `showError()` had nowhere to render, because the anchor was
+  // detached when the pass failed. Shown once the anchor is attached.
+  let unshownFailure: { seq: number; error: Error; routeDef?: RouteDef } | null = null;
+
+  /**
+   * Show the latest pass's failure, or hold it while the anchor is detached.
+   * Without the hold, a pass that failed detached left an outlet attached
+   * later empty instead of showing the error an attached outlet shows.
+   */
+  const fail = (seq: number, error: unknown, routeDef?: RouteDef) => {
+    const err = error instanceof Error ? error : new Error(String(error));
+    if (anchor.parentNode) {
+      showError(err, routeDef);
+      return;
+    }
+    unshownFailure = { seq, error: err, routeDef };
+    attachWait.request();
+  };
+
+  /**
+   * Once attached: show the held failure if no pass has started since, rather
+   * than loading again — a reload inside `errorRetryDelay` would only report
+   * "failed recently" in place of the real error. Otherwise re-run the pass.
+   */
+  const onAttached = () => {
+    const failure = unshownFailure;
+    unshownFailure = null;
+    if (failure && failure.seq === navSeq) showError(failure.error, failure.routeDef);
+    else update();
   };
 
   // Set up reactive tracking — track synchronously to register deps,
@@ -2751,7 +2782,7 @@ export function Route(): Node {
     routeInitialized = true;
   };
   // Before the first tracked pass, so no pass can reach it uninitialized.
-  const attachWait = attachRetry(anchor, update);
+  const attachWait = attachRetry(anchor, onAttached);
   const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
     queueMicrotask(
@@ -2770,6 +2801,7 @@ export function Route(): Node {
     navSeq++;
     routeTeardown();
     attachWait.cancel();
+    unshownFailure = null;
     cleanupNodes();
     currentTopRoute = null;
     currentKey = null;

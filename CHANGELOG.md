@@ -43,6 +43,8 @@ had no parent when its first pass resolved, and nothing re-ran the pass when
 `when()` attached it: the page stayed empty until the next navigation. A pass
 blocked only by a detached anchor now re-runs once the anchor is attached,
 including when it is attached inside a subtree that joins the document later.
+A `Route()` pass that fails while detached keeps its error and shows it, with
+its Retry button, once the anchor is attached.
 
 A `Route()` created before `createRouter()` also rendered nothing, because its
 pass read no signal and never re-ran. Outlets now follow `createRouter()`, so
