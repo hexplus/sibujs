@@ -6,10 +6,10 @@
  *  - It is collision-free: a structural character that arrived *encoded*
  *    (`%26`, `%3D`, `%25`) never reads as a delimiter, so `?a=x%26b%3Dy` is
  *    not `?a=x&b=y`.
- *  - It follows `RouteContext.query`'s decoding and repeated-key policy
- *    (`URLSearchParams` decoding, last value wins), so a URL is always the same
- *    target as the route it produces — `?tag=a&tag=b` is exact-active against
- *    itself.
+ *  - It follows `RouteContext.queryAll`'s decoding (`URLSearchParams`) and
+ *    counts every value of a repeated key, in order, so a URL is always the
+ *    same target as the route it produces — `?tag=a&tag=b` is exact-active
+ *    against itself and is not `?tag=b`.
  *  - Duplicate-navigation detection and `RouterLink` exact-active agree on
  *    every case. Each case is checked through BOTH paths.
  *  - `KeepAliveRoute` serves a reordered query from the same cached view.
@@ -58,8 +58,10 @@ const CASES: [string, string, boolean, string][] = [
   ["/search?=x", "/search?=x", true, "empty key against itself"],
   ["/search?=x", "/search", false, "an empty key is still a parameter"],
   ["/search?tag=a&tag=b", "/search?tag=a&tag=b", true, "repeated key against itself"],
-  ["/search?tag=a&tag=b", "/search?tag=b", true, "repeated key: last value wins"],
-  ["/search?tag=a&tag=b", "/search?tag=a", false, "repeated key: an earlier value is not kept"],
+  ["/search?tag=a&tag=b", "/search?tag=b", false, "repeated key: every value counts, not only the last"],
+  ["/search?tag=a&tag=b", "/search?tag=a", false, "repeated key: the first value alone is not it"],
+  ["/search?tag=a&tag=b", "/search?tag=b&tag=a", false, "repeated key: value order counts"],
+  ["/search?tag=a&x=1&tag=b", "/search?x=1&tag=a&tag=b", true, "repeated key: order across keys does not"],
   ["/search?q=%C3%A9", "/search?q=é", true, "encoded and literal Unicode"],
   ["/search?q=%F0%9F%98%80", "/search?q=%F0%9F%98%81", false, "distinct astral characters"],
   ["/search?a=%23b", "/search?a=#b", false, "encoded # is query data, a bare # starts the hash"],

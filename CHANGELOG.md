@@ -7,6 +7,50 @@ This project follows [Semantic Versioning](https://semver.org/).
 ---
 ---
 
+## [Unreleased]
+
+### Upgrade notes
+
+- **Query identity counts every value of a repeated key.** `?tag=a&tag=b` is no
+  longer the same route as `?tag=b` for duplicate detection, `RouterLink`
+  exact-active, or the `KeepAliveRoute` cache key. Parameter order across keys
+  still does not matter. `route().query` is unchanged (last value wins).
+
+### Added — `RouteContext.queryAll` and array query values
+
+`route().queryAll` (and `routerState().queryAll()`) holds every value of every
+query key, in URL order: `?status=a&status=b` is `{ status: ["a", "b"] }`. A
+navigation object accepts an array value, which repeats the key:
+`navigate({ path: "/queue", query: { status: ["a", "b"] } })` goes to
+`/queue?status=a&status=b`. New types: `QueryValues`, `NavigationQuery`.
+
+### Fixed — `navigate()` dropped repeated query keys
+
+The URL written to history was rebuilt from the last-value-wins `query`
+record, so `navigate("/queue?status=a&status=b")` — and the initial resolution
+of a page loaded with that URL — left `?status=b` in the address bar. The URL
+now keeps every value. Adding a value to a multi-value filter (`?status=b` →
+`?status=a&status=b`) was also refused as a duplicate navigation, because
+identity compared only the last value.
+
+### Fixed — an outlet attached after creation rendered nothing
+
+`Route()`, `Outlet()` and `KeepAliveRoute()` render their content next to a
+comment anchor, so they can only commit while the anchor has a parent. An
+outlet built ahead of time and attached later —
+`const page = Route(); when(() => ready(), () => page, () => Spinner())` —
+had no parent when its first pass resolved, and nothing re-ran the pass when
+`when()` attached it: the page stayed empty until the next navigation. A pass
+blocked only by a detached anchor now re-runs once the anchor is attached,
+including when it is attached inside a subtree that joins the document later.
+A `Route()` pass that fails while detached keeps its error and shows it, with
+its Retry button, once the anchor is attached.
+
+A `Route()` created before `createRouter()` also rendered nothing, because its
+pass read no signal and never re-ran. Outlets now follow `createRouter()`, so
+they render once the router exists, and follow a replacement router instead of
+staying subscribed to the destroyed one.
+
 ## [4.10.1] — 2026-09-28
 
 ### Fixed — `onMount()` rejected a callback that returns nothing

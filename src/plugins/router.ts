@@ -111,13 +111,43 @@ function parseQuery(query: string): Params {
 }
 
 /**
- * Canonical identity of a `Params` record: its entries sorted by key and
- * serialized as JSON. Order-independent, and collision-free because JSON
- * escapes every structural character inside a key or value. Keys are unique in
- * a record, so sorting by key alone is a total order; the comparator is still a
- * proper three-way one, as `Array.prototype.sort()` requires.
+ * Parse a raw query string into EVERY value of every key, in URL order —
+ * `?tag=a&tag=b` is `{ tag: ["a", "b"] }`. Same decoding as {@link parseQuery}.
+ * Collected in a `Map` and converted with `Object.fromEntries`, so a
+ * `__proto__` key is an own property rather than a prototype write.
  */
-function paramsIdentity(params: Params): string {
+function parseQueryAll(query: string): QueryValues {
+  const all = new Map<string, string[]>();
+  for (const [key, value] of new URLSearchParams(query)) {
+    const values = all.get(key);
+    if (values) values.push(value);
+    else all.set(key, [value]);
+  }
+  return Object.fromEntries(all);
+}
+
+/**
+ * Serialize a query for a URL. An array value repeats its key once per value,
+ * in order, so `{ tag: ["a", "b"] }` is `tag=a&tag=b` and an empty array emits
+ * nothing. The one serializer behind `resolvePath()` and the history write.
+ */
+function serializeQuery(query: NavigationQuery): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (Array.isArray(value)) for (const v of value) search.append(key, String(v));
+    else search.append(key, String(value));
+  }
+  return search.toString();
+}
+
+/**
+ * Canonical identity of a record: its entries sorted by key and serialized as
+ * JSON. Order-independent, and collision-free because JSON escapes every
+ * structural character inside a key or value. Keys are unique in a record, so
+ * sorting by key alone is a total order; the comparator is still a proper
+ * three-way one, as `Array.prototype.sort()` requires.
+ */
+function paramsIdentity(params: Readonly<Record<string, unknown>>): string {
   return JSON.stringify(Object.entries(params).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
@@ -125,15 +155,20 @@ function paramsIdentity(params: Params): string {
  * Canonical identity of a query — the ONE definition of "same query" the router
  * uses: duplicate-navigation detection, `RouterLink` exact-active matching, and
  * the `KeepAliveRoute` cache key. A raw string is parsed exactly as
- * `RouteContext.query` is, so a URL and the route it produces always agree.
+ * `RouteContext.queryAll` is, so a URL and the route it produces always agree.
+ *
+ * Every value of a repeated key counts, in order: `?tag=a&tag=b` is not
+ * `?tag=b`. Comparing the last value only made adding a value to a multi-value
+ * filter (`?s=b` → `?s=a&s=b`) a "duplicate" navigation that was refused.
+ * Parameter order across keys still does not matter.
  *
  * It replaced a `k=v` join of *decoded* entries (`?a=x%26b%3Dy` and `?a=x&b=y`
  * collapsed onto `a=x&b=y`) and an insertion-ordered `JSON.stringify` in
  * `isSameRoute()` (`?b=2&a=1` differed from `?a=1&b=2` there, but not for
  * `RouterLink`).
  */
-function queryIdentity(query: string | Params): string {
-  return paramsIdentity(typeof query === "string" ? parseQuery(query) : query);
+function queryIdentity(query: string | QueryValues): string {
+  return paramsIdentity(typeof query === "string" ? parseQueryAll(query) : query);
 }
 
 /**
@@ -163,17 +198,30 @@ export type Component = PublicComponent<void, Element>;
 export type AsyncComponent = () => Promise<Element>;
 export type LazyComponent = () => Promise<{ default: Component }>;
 export type Params = Record<string, string>;
+/** Every value of every query key, in URL order: `?tag=a&tag=b` is `{ tag: ["a", "b"] }`. */
+export type QueryValues = Readonly<Record<string, readonly string[]>>;
+/**
+ * The query of a navigation object. An array value repeats its key once per
+ * value, in order: `{ tag: ["a", "b"] }` is `?tag=a&tag=b`.
+ */
+export type NavigationQuery = Readonly<Record<string, string | readonly string[]>>;
 
 export interface RouteContext {
   readonly path: string;
   readonly params: Params;
   /**
    * The decoded query (`+` is a space, `%XX` is decoded). A repeated key keeps
-   * its last value: `?tag=a&tag=b` is `{ tag: "b" }`. Two locations are the
-   * same route — for duplicate detection and `RouterLink` exact-active — when
-   * their queries have the same entries in any order.
+   * its last value here: `?tag=a&tag=b` is `{ tag: "b" }`. Read
+   * {@link RouteContext.queryAll} for every value.
    */
   readonly query: Params;
+  /**
+   * Every value of every query key, in URL order, with the same decoding as
+   * `query`: `?tag=a&tag=b` is `{ tag: ["a", "b"] }`. Two locations are the
+   * same route — for duplicate detection and `RouterLink` exact-active — when
+   * these match, key order aside.
+   */
+  readonly queryAll: QueryValues;
   readonly hash: string;
   readonly meta: RouteMeta;
   readonly matched: RouteDef[];
@@ -361,7 +409,7 @@ const ABORT_ROUTER_DESTROYED = "sibu:router-destroyed";
 
 export type NavigationTarget =
   | string
-  | { path?: string; name?: string; params?: Params; query?: Params; hash?: string };
+  | { path?: string; name?: string; params?: Params; query?: NavigationQuery; hash?: string };
 
 // ============================================================================
 // UTILITY CLASSES
@@ -1283,6 +1331,7 @@ export class SibuRouter {
       path: "/",
       params: {},
       query: {},
+      queryAll: {},
       hash: "",
       meta: {},
       matched: [],
@@ -1325,6 +1374,7 @@ export class SibuRouter {
   private createRouteContext(fullPath: string): RouteContext {
     const { path, query: queryString, hash } = splitRouteUrl(fullPath);
     const query = parseQuery(queryString);
+    const queryAll = parseQueryAll(queryString);
 
     const match = this.matcher.match(path || "/");
     const params = match?.params || {};
@@ -1335,6 +1385,7 @@ export class SibuRouter {
       path: path || "/",
       params,
       query,
+      queryAll,
       hash,
       meta,
       matched,
@@ -1580,9 +1631,10 @@ export class SibuRouter {
       }
     }
 
-    // Add query parameters
-    if (to.query && Object.keys(to.query).length > 0) {
-      path += `?${new URLSearchParams(to.query).toString()}`;
+    // Add query parameters. An array value repeats its key.
+    const search = to.query ? serializeQuery(to.query) : "";
+    if (search) {
+      path += `?${search}`;
     }
 
     // Add hash
@@ -1609,17 +1661,17 @@ export class SibuRouter {
     return (
       from.path === to.path &&
       paramsIdentity(from.params) === paramsIdentity(to.params) &&
-      queryIdentity(from.query) === queryIdentity(to.query) &&
+      queryIdentity(from.queryAll) === queryIdentity(to.queryAll) &&
       from.hash === to.hash
     );
   }
 
   private updateHistory(to: RouteContext, options: { replace?: boolean; state?: unknown }): void {
-    const fullPath =
-      this.options.base +
-      to.path +
-      (Object.keys(to.query).length ? `?${new URLSearchParams(to.query).toString()}` : "") +
-      (to.hash ? `#${to.hash}` : "");
+    // Written from `queryAll`, not `query`: rebuilding the URL from the
+    // last-value-wins record dropped every earlier value of a repeated key, so
+    // `?status=a&status=b` reached the address bar as `?status=b`.
+    const search = serializeQuery(to.queryAll);
+    const fullPath = this.options.base + to.path + (search ? `?${search}` : "") + (to.hash ? `#${to.hash}` : "");
 
     // No browser history to write to. Reached whenever the router runs outside
     // a browser: bare Node, an SSR request, a hand-wired jsdom test harness, or
@@ -1906,6 +1958,101 @@ const _routerRef: { current: SibuRouter | null } = ((
   }
 )[ROUTER_KEY] ??= { current: null });
 
+// Bumped by every `createRouter()`. Outlets read it in their tracked pass, so
+// one built before the router existed renders once it does, and one built
+// against a router that has since been replaced follows the new router instead
+// of staying subscribed to the destroyed one. `_routerRef` is a plain record,
+// so without this the outlet's pass read no signal and never re-ran.
+const [routerRevision, setRouterRevision] = signal(0);
+
+// ─── Waiting for an outlet anchor to be attached ────────────────────────────
+//
+// An outlet renders its content as SIBLINGS of its comment anchor, so it can
+// only commit while the anchor has a parent. Built in place (`div([Route()])`)
+// the anchor gets one synchronously. Built ahead of time and attached later —
+// `const page = Route()` handed to `when(() => ready(), () => page)` — it has
+// none when its pass resolves, and nothing used to re-run the pass once
+// something attached it: the outlet stayed empty until the next navigation.
+
+// Anchors still detached after the first check, each with the pass to re-run.
+const awaitingParent = new Map<Node, () => void>();
+let parentObserver: MutationObserver | null = null;
+
+function stopParentObserverIfIdle(): void {
+  if (parentObserver && awaitingParent.size === 0) {
+    parentObserver.disconnect();
+    parentObserver = null;
+  }
+}
+
+/**
+ * Run `run` once `anchor` has a parent, checked first a microtask from now —
+ * the common case, an anchor its caller attaches right after creating it —
+ * and then on every document mutation, through one shared observer that exists
+ * only while some anchor is waiting. An anchor attached inside a detached
+ * subtree is picked up when that subtree joins the document.
+ *
+ * @returns A cancel function.
+ */
+function whenAnchorAttached(anchor: Node, run: () => void): () => void {
+  let cancelled = false;
+  queueMicrotask(() => {
+    if (cancelled) return;
+    if (anchor.parentNode) {
+      cancelled = true;
+      run();
+      return;
+    }
+    if (typeof MutationObserver === "undefined" || typeof document === "undefined") return;
+    awaitingParent.set(anchor, () => {
+      cancelled = true;
+      run();
+    });
+    if (!parentObserver) {
+      parentObserver = new MutationObserver(() => {
+        for (const [node, cb] of awaitingParent) {
+          if (!node.parentNode) continue;
+          awaitingParent.delete(node);
+          cb();
+        }
+        stopParentObserverIfIdle();
+      });
+      parentObserver.observe(document, { childList: true, subtree: true });
+    }
+  });
+  return () => {
+    if (cancelled) return;
+    cancelled = true;
+    awaitingParent.delete(anchor);
+    stopParentObserverIfIdle();
+  };
+}
+
+/**
+ * Per-outlet handle onto {@link whenAnchorAttached}. `request()` is called by a
+ * pass that could not commit only because the anchor was detached, and is
+ * idempotent while a wait is pending; `cancel()` belongs in the outlet's
+ * teardown. Must be created synchronously in the outlet factory, so the re-run
+ * carries the owner scope the outlet was created in.
+ */
+function attachRetry(anchor: Node, rerun: () => void): { request: () => void; cancel: () => void } {
+  const run = bindOwnerScope(rerun);
+  let cancelWait: (() => void) | null = null;
+  return {
+    request: () => {
+      if (cancelWait) return;
+      cancelWait = whenAnchorAttached(anchor, () => {
+        cancelWait = null;
+        run();
+      });
+    },
+    cancel: () => {
+      cancelWait?.();
+      cancelWait = null;
+    },
+  };
+}
+
 /**
  * Normalize a route tree so that any `{ lazy: () => import(...) }`
  * shorthand is converted to the canonical `{ component: lazy(...) }`
@@ -1961,6 +2108,7 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
 
   _routerRef.current = new SibuRouter(routes, options);
   ensureRouterPagehide();
+  setRouterRevision((n) => n + 1);
   return _routerRef.current;
 }
 
@@ -2350,6 +2498,14 @@ export function Route(): Node {
   const commitTarget = (seq: number): (Node & ParentNode) | null =>
     routeTorn || seq !== navSeq ? null : anchor.parentNode;
 
+  /**
+   * A pass that lost its commit target ONLY because the anchor is detached —
+   * still the latest, outlet still alive — re-runs once the anchor is attached.
+   */
+  const retryIfDetached = (seq: number) => {
+    if (!routeTorn && seq === navSeq && !anchor.parentNode) attachWait.request();
+  };
+
   /** Lifecycle-safe discard of a node this pass built but may not commit. */
   const release = (node: Node | null) => {
     if (!node) return;
@@ -2468,6 +2624,8 @@ export function Route(): Node {
   };
 
   const update = async () => {
+    // Tracked, so an outlet built before `createRouter()` renders once it runs.
+    routerRevision();
     if (routeTorn || !_routerRef.current) return;
 
     // Claim the latest navigation slot. Any update still in flight for an
@@ -2540,7 +2698,10 @@ export function Route(): Node {
           // disposed — drop this result. The newer update() owns the DOM and
           // will (or already did) render. Checked *before* instantiation so
           // stale work never invokes user code at all. (OUT-003)
-          if (!commitTarget(seq)) return;
+          if (!commitTarget(seq)) {
+            retryIfDetached(seq);
+            return;
+          }
 
           // Create exactly one instance. This runs arbitrary user code, which
           // may synchronously navigate, dispose this outlet's owner, or
@@ -2555,6 +2716,7 @@ export function Route(): Node {
           const parent = commitTarget(seq);
           if (!parent) {
             release(node);
+            retryIfDetached(seq);
             return;
           }
           if (node) {
@@ -2569,15 +2731,46 @@ export function Route(): Node {
           if (routeTorn || seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
-          showError(error instanceof Error ? error : new Error(String(error)), routeDef);
+          fail(seq, error, routeDef);
         }
       }
     } catch (error) {
       if (seq !== navSeq) return;
       if (routeTorn) return;
       console.error("[Route] Update failed:", error);
-      showError(error instanceof Error ? error : new Error(String(error)));
+      fail(seq, error);
     }
+  };
+
+  // A failure that `showError()` had nowhere to render, because the anchor was
+  // detached when the pass failed. Shown once the anchor is attached.
+  let unshownFailure: { seq: number; error: Error; routeDef?: RouteDef } | null = null;
+
+  /**
+   * Show the latest pass's failure, or hold it while the anchor is detached.
+   * Without the hold, a pass that failed detached left an outlet attached
+   * later empty instead of showing the error an attached outlet shows.
+   */
+  const fail = (seq: number, error: unknown, routeDef?: RouteDef) => {
+    const err = error instanceof Error ? error : new Error(String(error));
+    if (anchor.parentNode) {
+      showError(err, routeDef);
+      return;
+    }
+    unshownFailure = { seq, error: err, routeDef };
+    attachWait.request();
+  };
+
+  /**
+   * Once attached: show the held failure if no pass has started since, rather
+   * than loading again — a reload inside `errorRetryDelay` would only report
+   * "failed recently" in place of the real error. Otherwise re-run the pass.
+   */
+  const onAttached = () => {
+    const failure = unshownFailure;
+    unshownFailure = null;
+    if (failure && failure.seq === navSeq) showError(failure.error, failure.routeDef);
+    else update();
   };
 
   // Set up reactive tracking — track synchronously to register deps,
@@ -2588,6 +2781,8 @@ export function Route(): Node {
     await originalUpdate();
     routeInitialized = true;
   };
+  // Before the first tracked pass, so no pass can reach it uninitialized.
+  const attachWait = attachRetry(anchor, onAttached);
   const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
     queueMicrotask(
@@ -2605,6 +2800,8 @@ export function Route(): Node {
     routeTorn = true;
     navSeq++;
     routeTeardown();
+    attachWait.cancel();
+    unshownFailure = null;
     cleanupNodes();
     currentTopRoute = null;
     currentKey = null;
@@ -2706,6 +2903,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   let kaTorn = false;
 
   const update = async () => {
+    routerRevision();
     if (kaTorn || !_routerRef.current) return;
 
     // Claim the latest update slot. Any update still in flight for an earlier
@@ -2735,7 +2933,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // would collide and KeepAlive would serve one query's cached DOM/state
     // for the other. The query part is `queryIdentity()`, so a reordered query
     // is the same cached view, as it is the same route everywhere else.
-    const cacheKey = JSON.stringify([route.path, queryIdentity(route.query), route.hash]);
+    const cacheKey = JSON.stringify([route.path, queryIdentity(route.queryAll), route.hash]);
 
     // Check if this route should be cached
     const shouldCache = !includeNames || (routeDef.name != null && includeNames.includes(routeDef.name));
@@ -2747,11 +2945,14 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     }
 
     // Not mounted yet — `track()` runs this once at creation, before the caller
-    // has appended the anchor. Short-circuit before loading anything; the
-    // queueMicrotask fallback below re-runs once the anchor is attached.
-    // (The post-await check further down is the one that matters for
-    // ownership; this one only avoids pointless work.)
-    if (!anchor.parentNode) return;
+    // has appended the anchor. Short-circuit before loading anything and
+    // re-run once the anchor is attached, whenever that is. (The post-await
+    // check further down is the one that matters for ownership; this one only
+    // avoids pointless work.)
+    if (!anchor.parentNode) {
+      attachWait.request();
+      return;
+    }
 
     // ── Resolve the view, without touching the live DOM ────────────────────
     // The currently mounted view stays put until a replacement is in hand.
@@ -2795,6 +2996,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     const parent = anchor.parentNode;
     if (!parent) {
       if (!fromCache) disposeOwned(node);
+      attachWait.request();
       return;
     }
 
@@ -2848,6 +3050,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     await update();
     initialized = true;
   };
+  const attachWait = attachRetry(anchor, update);
   const kaTeardown = track(wrappedUpdate);
   if (!initialized) {
     queueMicrotask(
@@ -2866,6 +3069,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // repopulate the cache we are about to clear, and cannot resurrect a view.
     updateSeq++;
     kaTeardown();
+    attachWait.cancel();
     for (const node of cache.values()) {
       disposeOwned(node);
       if (node.parentNode) node.parentNode.removeChild(node);
@@ -2973,7 +3177,7 @@ export function RouterLink(
     const isExactActive =
       kind === "internal" &&
       currentPath === targetPath &&
-      queryIdentity(route.query) === targetQuery &&
+      queryIdentity(route.queryAll) === targetQuery &&
       route.hash === hrefHash;
 
     const classes: string[] = [];
@@ -3422,6 +3626,11 @@ export function Outlet(): Node {
   const commitTarget = (seq: number): (Node & ParentNode) | null =>
     outletTorn || seq !== navSeq ? null : anchor.parentNode;
 
+  /** As in `Route()`: a pass blocked only by a detached anchor re-runs on attach. */
+  const retryIfDetached = (seq: number) => {
+    if (!outletTorn && seq === navSeq && !anchor.parentNode) attachWait.request();
+  };
+
   /** Lifecycle-safe discard of a node this pass built but may not commit. */
   const release = (node: Node | null) => {
     if (!node) return;
@@ -3430,6 +3639,7 @@ export function Outlet(): Node {
   };
 
   const update = async () => {
+    routerRevision();
     if (outletTorn || !_routerRef.current) return;
     const seq = ++navSeq;
     // The enclosing layout instance's route. It changes only when the layout's
@@ -3475,7 +3685,10 @@ export function Outlet(): Node {
       // First ownership check: a newer navigation superseded us while loading,
       // or the outlet was disposed. Deliberately *before* instantiation so
       // stale work never invokes user code at all. (OUT-002)
-      if (!commitTarget(seq)) return;
+      if (!commitTarget(seq)) {
+        retryIfDetached(seq);
+        return;
+      }
 
       // Create exactly one instance. Arbitrary user code: it may synchronously
       // navigate, dispose this outlet's owner, or otherwise invalidate the
@@ -3489,6 +3702,7 @@ export function Outlet(): Node {
       const parent = commitTarget(seq);
       if (!parent) {
         release(node);
+        retryIfDetached(seq);
         return;
       }
       if (!node) return;
@@ -3504,6 +3718,7 @@ export function Outlet(): Node {
     }
   };
 
+  const attachWait = attachRetry(anchor, update);
   const outletTeardown = track(update);
   if (!anchor.parentNode) {
     // The deferred first pass must read the same route the binding does: the
@@ -3522,6 +3737,7 @@ export function Outlet(): Node {
     outletTorn = true;
     navSeq++;
     outletTeardown();
+    attachWait.cancel();
     if (currentNode) {
       disposeOwned(currentNode);
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
@@ -3566,6 +3782,7 @@ export function routerState(): {
   currentPath: () => string;
   params: () => Params;
   query: () => Params;
+  queryAll: () => QueryValues;
   hash: () => string;
   meta: () => RouteMeta;
   isNavigating: () => boolean;
@@ -3580,6 +3797,7 @@ export function routerState(): {
     currentPath: () => scopedRoute(router).path,
     params: () => scopedRoute(router).params,
     query: () => scopedRoute(router).query,
+    queryAll: () => scopedRoute(router).queryAll,
     hash: () => scopedRoute(router).hash,
     meta: () => scopedRoute(router).meta,
     isNavigating: () => router.isNavigating,
