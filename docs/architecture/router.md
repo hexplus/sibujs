@@ -186,6 +186,42 @@ Compiled path patterns are cached in a 50-entry LRU.
 | pattern match | O(p) over pattern routes, p = routes containing `:` or `*` |
 | pattern order rebuild | O(p log p), amortised — only after route mutation |
 
+### Query values
+
+A route carries its query twice, both decoded the same way (`+` is a space,
+`%XX` is decoded):
+
+| Field | `?status=a&status=b&page=2` |
+|---|---|
+| `query` | `{ status: "b", page: "2" }` — a repeated key keeps its last value |
+| `queryAll` | `{ status: ["a", "b"], page: ["2"] }` — every value, in URL order |
+
+`queryAll` is the source of truth. The URL written to history is serialized
+from it, so every value of a repeated key survives `navigate()` and the initial
+resolution of a page. Rebuilding the URL from `query` used to drop all but the
+last value.
+
+A navigation object accepts an array value, which repeats the key once per
+value, in order; an empty array emits nothing:
+
+```ts
+navigate({ path: "/queue", query: { status: ["a", "b"] } }); // /queue?status=a&status=b
+```
+
+**Query identity** — the one definition of "same query" behind duplicate
+detection, `RouterLink` exact-active and the `KeepAliveRoute` cache key — is
+built from `queryAll`: every value counts, in order, while the order of keys
+does not.
+
+```text
+?b=2&a=1        vs  ?a=1&b=2        same query   (key order ignored)
+?tag=a&tag=b    vs  ?tag=b          different    (every value counts)
+?tag=a&tag=b    vs  ?tag=b&tag=a    different    (value order counts)
+```
+
+So adding a value to a multi-value filter (`?status=b` → `?status=a&status=b`)
+is a real navigation, not a `duplicate`.
+
 ## Guard pipeline
 
 Order, which is fixed and tested:
@@ -242,6 +278,34 @@ first, and the outlet resolves the component afterwards.
 
 On replacement the outgoing subtree is `dispose()`d before detaching, so route
 components are disposed exactly once per replacement.
+
+### An outlet attached after creation
+
+Because the content goes next to the anchor, an outlet can only commit while
+its anchor has a parent. `div([Route()])` attaches it synchronously; an outlet
+built ahead of time does not:
+
+```ts
+const page = Route();
+when(() => ready(), () => page, () => Spinner());
+```
+
+A pass of `Route()`, `Outlet()` or `KeepAliveRoute()` that is still current but
+finds its anchor detached waits for it to be attached and then runs again. The
+wait checks once a microtask later — the common case of an anchor appended
+right after creation — and otherwise through one shared `MutationObserver` on
+the document that exists only while some anchor is waiting, so an anchor
+attached inside a subtree that joins the document later is picked up too. The
+re-run carries the owner scope the outlet was created in; teardown cancels the
+wait.
+
+A `Route()` pass that fails while detached holds its error and shows it — with
+the Retry button — once the anchor is attached, instead of loading again; a
+navigation that starts in the meantime wins over the held error.
+
+Outlets also track a router revision that `createRouter()` bumps, so an outlet
+created before the router renders once it exists, and an outlet built against
+a router that has been replaced follows the new one.
 
 ### Instance identity
 
@@ -791,7 +855,8 @@ deliberate contract, pinned by tests — not a side effect of the prefix rule.
 
 `/search?q=a` and `/search?q=b` are distinct navigation targets, so a link to
 one is not "exactly" the other. Query parameter **order is not significant**:
-`?b=2&a=1` and `?a=1&b=2` are the same target.
+`?b=2&a=1` and `?a=1&b=2` are the same target. Every value of a repeated key
+counts: `?tag=a&tag=b` is not `?tag=b` — see [Query values](#query-values).
 
 Note that this is `RouterLink`'s decision alone. The `KeepAlive` cache keys on
 `path + query + hash` too, but the two are independent choices that happen to
