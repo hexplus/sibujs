@@ -656,6 +656,40 @@ describe("Hash mode", () => {
     window.location.hash = "";
   });
 
+  it("regression: navigate() in hash mode writes the route into the hash, not the pathname", async () => {
+    window.history.replaceState({}, "", "/index.html");
+    createRouter(
+      [
+        { path: "/", component: makeComp("Home") },
+        { path: "/editor/:id", component: makeComp("Editor") },
+      ],
+      { mode: "hash" },
+    );
+    await wait();
+    expect(RouterLink({ to: "/editor/9" }, "Edit").getAttribute("href")).toBe("#/editor/9");
+    await navigate("/editor/123?tab=a&tab=b#clip");
+    await wait();
+    expect(window.location.pathname).toBe("/index.html");
+    expect(window.location.hash).toBe("#/editor/123?tab=a&tab=b#clip");
+    expect(route().path).toBe("/editor/123");
+    expect(route().queryAll.tab).toEqual(["a", "b"]);
+    expect(route().hash).toBe("clip");
+
+    // A reload re-reads the same route from the hash.
+    destroyRouter();
+    createRouter(
+      [
+        { path: "/", component: makeComp("Home") },
+        { path: "/editor/:id", component: makeComp("Editor") },
+      ],
+      { mode: "hash" },
+    );
+    await wait();
+    expect(route().path).toBe("/editor/123");
+    expect(route().params.id).toBe("123");
+    window.history.replaceState({}, "", "/");
+  });
+
   it("createMemoryRouter uses hash mode and supports push", async () => {
     const mem = createMemoryRouter(
       [
