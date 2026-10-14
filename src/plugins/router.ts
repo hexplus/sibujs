@@ -1671,7 +1671,18 @@ export class SibuRouter {
     // last-value-wins record dropped every earlier value of a repeated key, so
     // `?status=a&status=b` reached the address bar as `?status=b`.
     const search = serializeQuery(to.queryAll);
-    const fullPath = this.options.base + to.path + (search ? `?${search}` : "") + (to.hash ? `#${to.hash}` : "");
+    const routeUrl = to.path + (search ? `?${search}` : "") + (to.hash ? `#${to.hash}` : "");
+    // Hash mode keeps the document URL and carries the whole route in the
+    // fragment, mirroring `getCurrentPath()`, which reads it back from
+    // `location.hash`. Writing `base + path` here put the route in the pathname,
+    // so after the first navigation the address bar and the router disagreed and
+    // a reload resolved the wrong path. `pushState` does not fire `hashchange`,
+    // so this cannot re-enter `handleLocationChange()`.
+    const loc = (globalThis as { location?: Location }).location;
+    const fullPath =
+      this.options.mode === "hash"
+        ? `${loc ? loc.pathname + loc.search : ""}#${routeUrl}`
+        : this.options.base + routeUrl;
 
     // No browser history to write to. Reached whenever the router runs outside
     // a browser: bare Node, an SSR request, a hand-wired jsdom test harness, or
@@ -3144,7 +3155,10 @@ export function RouterLink(
   const targetQuery = queryIdentity(hrefQueryRaw);
 
   const link = document.createElement("a");
-  link.href = href;
+  // In hash mode the route lives in the fragment, so the rendered href must too:
+  // otherwise open-in-new-tab, copy-link and middle-click land on a pathname the
+  // hash router never reads.
+  link.href = kind === "internal" && _routerRef.current["options"].mode === "hash" ? `#${href}` : href;
 
   // Set target and rel for security
   if (target) {

@@ -5,6 +5,19 @@ All notable changes to SibuJS will be documented in this file.
 This project follows [Semantic Versioning](https://semver.org/).
 
 ---
+
+## [Unreleased]
+
+### Fixed — hash-mode navigation wrote the route into the pathname
+
+With `createRouter(routes, { mode: "hash" })`, `navigate("/editor/123")` set the
+address bar to `/editor/123` instead of `/#/editor/123`: the router read the
+route from `location.hash` but wrote it to the pathname. After the first
+navigation the URL and the router disagreed, and a reload resolved the wrong
+path. Hash mode now keeps the document URL and writes the route, query and
+fragment into the hash. `RouterLink` renders `href="#/…"` in hash mode, so
+open-in-new-tab and copied links resolve to the same route.
+
 ---
 
 ## [4.11.0] — 2026-10-06
