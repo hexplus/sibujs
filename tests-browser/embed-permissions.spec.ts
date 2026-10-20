@@ -33,6 +33,11 @@ const CASES: Array<[allow: string, narrowed: string | null]> = [
   ["camera; fullscreen", "fullscreen"],
   ["fullscreen 'none'; fullscreen", null],
   ["fullscreen; fullscreen 'none'", null],
+  // Feature names are case-sensitive; allowlist keywords are not.
+  ["FullScreen", null],
+  ["Autoplay *", null],
+  ["fullscreen 'SRC'", "fullscreen"],
+  ["fullscreen 'NONE'", null],
   ["autoplay; encrypted-media; picture-in-picture; microphone", "autoplay; encrypted-media; picture-in-picture"],
 ];
 

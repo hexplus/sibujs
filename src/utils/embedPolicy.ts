@@ -226,18 +226,20 @@ export function narrowEmbedSandbox(value: string): string {
  * of other origins — those features are left out instead. The browser honours
  * only the first declaration of a repeated feature; requiring all of them to
  * grant makes that rule irrelevant.
+ *
+ * Feature names are matched exactly: the browser treats them case-sensitively,
+ * so `FullScreen` grants nothing and must not be folded into `fullscreen`.
+ * Allowlist keywords (`'src'`, `'none'`) are case-insensitive, as they are to
+ * the browser.
  */
 export function narrowEmbedAllow(value: string): string {
   const granted: string[] = [];
   const denied: string[] = [];
   for (const directive of value.split(";")) {
-    const tokens = directive
-      .trim()
-      .toLowerCase()
-      .split(/[\t\n\f\r ]+/);
+    const tokens = directive.trim().split(/[\t\n\f\r ]+/);
     const feature = tokens[0];
     if (!feature) continue;
-    const list = tokens.slice(1);
+    const list = tokens.slice(1).map((token) => token.toLowerCase());
     const grantsSrc = (list.length === 0 || list.includes("'src'") || list.includes("*")) && !list.includes("'none'");
     if (!grantsSrc) denied.push(feature);
     else if (EMBED_FEATURES.has(feature) && !granted.includes(feature)) granted.push(feature);

@@ -201,7 +201,14 @@ describe("narrowEmbedAllow never turns a restriction into a grant", () => {
     ["camera; fullscreen", "fullscreen"],
     ["fullscreen 'none'; fullscreen", ""],
     ["fullscreen; fullscreen 'none'", ""],
-    ["FullScreen; Autoplay *", "fullscreen; autoplay"],
+    // Feature names are case-sensitive in the browser: `FullScreen` grants nothing.
+    ["FullScreen; Autoplay *", ""],
+    ["FULLSCREEN *; fullscreen", "fullscreen"],
+    // Allowlist keywords are not: `'SRC'` grants and `'NONE'` denies.
+    ["fullscreen 'SRC'", "fullscreen"],
+    ["fullscreen 'NONE'", ""],
+    ["fullscreen\t'src'", "fullscreen"],
+    ["fullscreen,autoplay", ""],
     ["fullscreen 'src' 'none'", ""],
     ["", ""],
   ])("%j → %j", (input, expected) => {

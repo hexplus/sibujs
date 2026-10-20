@@ -675,7 +675,10 @@ nothing in the core imports it:
   'self'` (the embedding page's origin, not the frame's) or `fullscreen
   https://other.example` as `fullscreen` would be a grant, so those features
   are dropped. Chromium honours only the first declaration of a repeated
-  feature; requiring all of them to grant makes that irrelevant.
+  feature; requiring all of them to grant makes that irrelevant. Feature
+  names are matched exactly — Chromium treats them case-sensitively, so
+  `FullScreen` grants nothing and is not folded into `fullscreen` — while the
+  `'src'` / `'none'` keywords are case-insensitive.
   `tests-browser/embed-permissions.spec.ts` checks the narrowed frame against
   the caller's exact `allow` through Chromium's container policy.
   `allowfullscreen` is written only when the narrowed `allow` grants
@@ -762,7 +765,9 @@ is present.
   An animation whose target is refused keeps its `to` / `values` text: without
   `attributeName` it animates nothing, exactly as the client leaves it.
   `tests/security-svg-ssr.test.ts`, `tests/ssr-svg-serialization.test.ts` and
-  `tests/ssr-foreign-context.test.ts` pin this.
+  `tests/ssr-foreign-context.test.ts` pin this, and
+  `tests-browser/ssr-foreign.spec.ts` checks the round trip and the hostile
+  cases with each engine's own HTML parser.
 - **The no-DOM style parser is stricter than CSSOM about malformed input.**
   Without a DOM, a style attribute is split by a structural declaration parser
   and each declaration receives the DOM path's verdict. Input it cannot read

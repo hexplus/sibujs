@@ -94,8 +94,9 @@ embed({ src: `https://www.youtube-nocookie.com/embed/${id}`, title: "Product tou
   be narrowed. A feature is kept in `allow` only when every declaration of it
   grants the frame's own origin (no allowlist, `'src'` or `*`):
   `fullscreen 'none'`, `fullscreen 'self'` and `fullscreen https://other.example`
-  drop the feature rather than granting it. `allowfullscreen` is written only
-  when the narrowed `allow` grants `fullscreen`.
+  drop the feature rather than granting it. Feature names are matched
+  case-sensitively, as browsers do (`FullScreen` grants nothing). `allowfullscreen`
+  is written only when the narrowed `allow` grants `fullscreen`.
 - `setEmbedPolicy()` inside `runInSSRContext()` configures that request only;
   outside a request it sets the process-wide policy. A frame is judged by the
   policy in force when `embed()` built it, for its whole life.
