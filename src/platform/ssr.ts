@@ -32,10 +32,10 @@ import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
 import { isCodeTextElement, isForbiddenMetaSnapshot, isRefusedAnimationAttribute } from "../utils/elementPolicy";
 import {
-  DEFAULT_EMBED_REFERRER_POLICY,
-  DEFAULT_EMBED_SANDBOX,
-  embedAttributeValue,
-  isEmbedFrame,
+  type EmbedSerialization,
+  embedSerializationTail,
+  embedSerializedAttribute,
+  getEmbedRecord,
 } from "../utils/embedPolicy";
 import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
@@ -198,6 +198,129 @@ const XML_NS = "http://www.w3.org/XML/1998/namespace";
 const XMLNS_NS = "http://www.w3.org/2000/xmlns/";
 
 /**
+ * Where the HTML parser will be when it reads a serialized node: in HTML, or
+ * inside SVG / MathML foreign content. The parser — not the DOM being
+ * serialized — decides the namespace of every element it rebuilds, so the
+ * serializer tracks the parser's state and emits only what the parser will
+ * rebuild as the same element.
+ */
+enum ParseContext {
+  /** HTML content: the document, an HTML element, or an integration point. */
+  Html,
+  /** Inside an SVG element that is not an HTML integration point. */
+  Svg,
+  /** Inside a MathML element that is not an integration point. */
+  Math,
+  /** Inside MathML `annotation-xml` without an HTML encoding: MathML, or an `<svg>` root. */
+  Annotation,
+}
+
+/**
+ * Start tags the HTML parser refuses to read as foreign content: inside SVG or
+ * MathML they close every foreign element and continue as HTML, taking every
+ * following sibling with them. `font` breaks out only with `color`, `face` or
+ * `size`.
+ */
+const BREAKOUT_TAGS = new Set([
+  "b",
+  "big",
+  "blockquote",
+  "body",
+  "br",
+  "center",
+  "code",
+  "dd",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "embed",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "head",
+  "hr",
+  "i",
+  "img",
+  "li",
+  "listing",
+  "menu",
+  "meta",
+  "nobr",
+  "ol",
+  "p",
+  "pre",
+  "ruby",
+  "s",
+  "small",
+  "span",
+  "strong",
+  "strike",
+  "sub",
+  "sup",
+  "table",
+  "tt",
+  "u",
+  "ul",
+  "var",
+]);
+
+function isBreakout(lowerName: string, element: Element): boolean {
+  if (BREAKOUT_TAGS.has(lowerName)) return true;
+  return (
+    lowerName === "font" &&
+    (element.hasAttribute("color") || element.hasAttribute("face") || element.hasAttribute("size"))
+  );
+}
+
+/**
+ * Will the HTML parser, in `context`, rebuild this element in the namespace it
+ * has in the DOM? A foreign element outside foreign content, an HTML-named
+ * foreign element inside it, or an HTML element directly inside foreign content
+ * would come back as something else — an SVG-namespace `<meta>` or `<link>`,
+ * inert in the client DOM and so never judged by the HTML contextual rules,
+ * would become a live HTML one.
+ */
+function fitsParseContext(ns: string | null, lowerName: string, element: Element, context: ParseContext): boolean {
+  if (ns === SVG_NS) {
+    if (context === ParseContext.Svg) return !isBreakout(lowerName, element);
+    return lowerName === "svg" && (context === ParseContext.Html || context === ParseContext.Annotation);
+  }
+  if (ns === MATHML_NS) {
+    if (context === ParseContext.Math || context === ParseContext.Annotation) return !isBreakout(lowerName, element);
+    return lowerName === "math" && context === ParseContext.Html;
+  }
+  return context === ParseContext.Html;
+}
+
+/** The parser's context for the children of an element it rebuilt. */
+function childParseContext(ns: string | null, lowerName: string, element: Element): ParseContext {
+  if (ns === SVG_NS) {
+    // HTML integration points.
+    return lowerName === "foreignobject" || lowerName === "desc" || lowerName === "title"
+      ? ParseContext.Html
+      : ParseContext.Svg;
+  }
+  if (ns === MATHML_NS) {
+    // MathML text integration points read HTML start tags as HTML.
+    if (lowerName === "mi" || lowerName === "mo" || lowerName === "mn" || lowerName === "ms" || lowerName === "mtext") {
+      return ParseContext.Html;
+    }
+    if (lowerName === "annotation-xml") {
+      const encoding = (element.getAttribute("encoding") ?? "").toLowerCase();
+      return encoding === "text/html" || encoding === "application/xhtml+xml"
+        ? ParseContext.Html
+        : ParseContext.Annotation;
+    }
+    return ParseContext.Math;
+  }
+  return ParseContext.Html;
+}
+
+/**
  * The name a foreign element's attribute must be written with for the HTML
  * parser to rebuild it in the same namespace.
  *
@@ -233,21 +356,24 @@ function foreignAttrName(attr: Attr): string {
  *   - on a `foreign` (SVG / MathML) element, names keep their case and their
  *     namespace prefix, and an SVG animation may not target a URL or handler
  *     attribute — its `attributeName` is omitted, as the client writers omit it.
- *   - an `<iframe>` built by `embed()` is re-judged by the embed policy: its
- *     `src` must still be allowlisted, `sandbox` / `allow` /
- *     `referrerpolicy` can only be narrower than the defaults, and a missing
- *     `sandbox` or `referrerpolicy` is written with the default — so a frame
- *     changed behind the framework's back is not served wider than `embed()`
- *     built it.
+ *   - an `<iframe>` built by `embed()` is re-judged against what `embed()`
+ *     wrote (`embedSerializedAttribute`): only the attributes it writes (plus
+ *     `id`, `class`, `style`, `width`, `height`, `data-*`, `aria-*`) are
+ *     served, `src` must match the allowlist the frame was built under,
+ *     `sandbox` / `allow` can only be narrower than what it wrote,
+ *     `allowfullscreen` follows the served `allow`, and a frame without a
+ *     non-blank `title` is not served — so a frame changed behind the
+ *     framework's back is never served wider than `embed()` built it.
  */
 function serializeOpenTag(element: Element, tag: string, foreign: boolean): string | null {
   let html = `<${tag}`;
   // Collected only for `<meta>`, and keyed by the emitted RAW names so the
   // shared policy can reject duplicate case-insensitive spellings itself.
   const meta = tag === "meta" && !foreign ? new Map<string, string>() : null;
-  const embedFrame = tag === "iframe" && !foreign && isEmbedFrame(element);
-  let sandboxed = false;
-  let referrer = false;
+  const embed = tag === "iframe" && !foreign ? getEmbedRecord(element) : undefined;
+  const embedSeen: EmbedSerialization | null = embed
+    ? { sandbox: false, referrer: false, title: false, fullscreen: false }
+    : null;
 
   const attrs = attributesOf(element);
   for (let i = 0; i < attrs.length; i++) {
@@ -262,11 +388,9 @@ function serializeOpenTag(element: Element, tag: string, foreign: boolean): stri
     let value = resolveAttributeValue(lowerName, attr.value);
     if (value === null) continue;
     if (foreign && isRefusedAnimationAttribute(element, rawName, value)) continue;
-    if (embedFrame) {
-      value = embedAttributeValue(lowerName, value);
+    if (embed && embedSeen) {
+      value = embedSerializedAttribute(embed, embedSeen, lowerName, value);
       if (value === null) continue;
-      if (lowerName === "sandbox") sandboxed = true;
-      else if (lowerName === "referrerpolicy") referrer = true;
     }
 
     meta?.set(rawName, value);
@@ -275,9 +399,10 @@ function serializeOpenTag(element: Element, tag: string, foreign: boolean): stri
 
   if (meta && isForbiddenMetaSnapshot(meta)) return null;
 
-  if (embedFrame) {
-    if (!sandboxed) html += ` sandbox="${DEFAULT_EMBED_SANDBOX.join(" ")}"`;
-    if (!referrer) html += ` referrerpolicy="${DEFAULT_EMBED_REFERRER_POLICY}"`;
+  if (embed && embedSeen) {
+    const tail = embedSerializationTail(embed, embedSeen);
+    if (tail === null) return null;
+    html += tail;
   }
 
   // The SSR provenance marker. `dataset.sibuHydrate` was read through the
@@ -289,11 +414,12 @@ function serializeOpenTag(element: Element, tag: string, foreign: boolean): stri
   return html;
 }
 
-/** An element that is emitted with children: its open tag, close tag and the children to walk. */
+/** An element that is emitted with children: its open tag, close tag, the children to walk and their context. */
 interface ElementFrame {
   open: string;
   close: string;
   children: ChildNode[];
+  context: ParseContext;
 }
 
 /**
@@ -309,8 +435,11 @@ interface ElementFrame {
  * (`linearGradient`, `foreignObject`), and an empty one self-closes
  * (`<path … />`), which the HTML parser honours in foreign content. Any other
  * node is emitted as its escaped text.
+ *
+ * An element the parser would rebuild in another namespace in `context` is
+ * stripped with its subtree (see {@link fitsParseContext}).
  */
-function serializeNode(node: Node): string | ElementFrame {
+function serializeNode(node: Node, context: ParseContext): string | ElementFrame {
   if (node.nodeType === 3) return escapeHtml(node.textContent || "");
   // Comment node — escape every comment-terminator form.
   if (node.nodeType === 8) return `<!--${safeCommentText(node.textContent || "")}-->`;
@@ -336,12 +465,21 @@ function serializeNode(node: Node): string | ElementFrame {
   // Defense-in-depth: reject tags with unexpected characters.
   if (!/^[a-z][a-z0-9-]*$/i.test(tag)) return DEV ? "<!--ssr:invalid-tag-->" : "";
 
+  const ns = foreign ? element.namespaceURI : null;
+  const lowerName = tag.toLowerCase();
+  if (!fitsParseContext(ns, lowerName, element, context)) return DEV ? `<!--ssr:${tag}-misplaced-->` : "";
+
   const openTag = serializeOpenTag(element, tag, foreign);
   if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
 
   const children = childNodesOf(element);
   if (foreign ? children.length === 0 : VOID_ELEMENTS.has(tag)) return `${openTag} />`;
-  return { open: `${openTag}>`, close: `</${tag}>`, children: Array.from(children) };
+  return {
+    open: `${openTag}>`,
+    close: `</${tag}>`,
+    children: Array.from(children),
+    context: childParseContext(ns, lowerName, element),
+  };
 }
 
 // ─── renderToString ─────────────────────────────────────────────────────────
@@ -358,11 +496,15 @@ function serializeNode(node: Node): string | ElementFrame {
  * stripped from the serialized output.
  */
 export function renderToString(element: HTMLElement | DocumentFragment | Node): string {
+  return renderNodeToString(element, ParseContext.Html);
+}
+
+function renderNodeToString(element: Node, context: ParseContext): string {
   if (element instanceof DocumentFragment) {
     return Array.from(element.childNodes)
       .map((child) => {
         try {
-          return renderToString(child);
+          return renderNodeToString(child, context);
         } catch (err) {
           return ssrErrorComment(err);
         }
@@ -370,13 +512,13 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
       .join("");
   }
 
-  const frame = serializeNode(element);
+  const frame = serializeNode(element, context);
   if (typeof frame === "string") return frame;
 
   let html = frame.open;
   for (const child of frame.children) {
     try {
-      html += renderToString(child);
+      html += renderNodeToString(child, frame.context);
     } catch (err) {
       html += ssrErrorComment(err);
     }
@@ -772,11 +914,15 @@ export function renderToDocument(
  *
  * Same security posture as `renderToString`.
  */
-export async function* renderToStream(element: HTMLElement | DocumentFragment | Node): AsyncGenerator<string> {
+export function renderToStream(element: HTMLElement | DocumentFragment | Node): AsyncGenerator<string> {
+  return streamNode(element, ParseContext.Html);
+}
+
+async function* streamNode(element: Node, context: ParseContext): AsyncGenerator<string> {
   if (element instanceof DocumentFragment) {
     for (const child of Array.from(element.childNodes)) {
       try {
-        yield* renderToStream(child);
+        yield* streamNode(child, context);
       } catch (err) {
         yield ssrErrorComment(err);
       }
@@ -790,7 +936,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
   // logic, which is the shape that lets them drift; someone streaming in
   // production while snapshotting with renderToString in tests would never see
   // the difference.
-  const frame = serializeNode(element);
+  const frame = serializeNode(element, context);
   if (typeof frame === "string") {
     if (frame) yield frame;
     return;
@@ -800,7 +946,7 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
 
   for (const child of frame.children) {
     try {
-      yield* renderToStream(child);
+      yield* streamNode(child, frame.context);
     } catch (err) {
       yield ssrErrorComment(err);
     }

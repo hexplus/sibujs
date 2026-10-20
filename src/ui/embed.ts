@@ -3,12 +3,13 @@ import { registerDisposer } from "../core/rendering/dispose";
 import { noDocument } from "../core/rendering/requireDocument";
 import { reactiveBinding } from "../reactivity/track";
 import {
+  currentEmbedAllowlist,
   DEFAULT_EMBED_REFERRER_POLICY,
   DEFAULT_EMBED_SANDBOX,
-  markEmbedFrame,
   narrowEmbedAllow,
   narrowEmbedReferrerPolicy,
   narrowEmbedSandbox,
+  recordEmbedFrame,
   resolveEmbedSrc,
 } from "../utils/embedPolicy";
 
@@ -29,6 +30,9 @@ export interface EmbedProps {
    * player features (`accelerometer`, `autoplay`, `clipboard-write`,
    * `encrypted-media`, `fullscreen`, `gyroscope`, `picture-in-picture`,
    * `web-share`). Default: `"encrypted-media; picture-in-picture; fullscreen"`.
+   * A feature is kept only when every declaration of it grants the frame's own
+   * origin (no allowlist, `'src'` or `*`); `fullscreen 'none'`, `'self'` or a
+   * list of other origins drops it instead of granting it.
    */
   allow?: string;
   /**
@@ -100,7 +104,10 @@ export function embed(props: EmbedProps): HTMLIFrameElement {
   }
 
   const el = document.createElement("iframe");
-  markEmbedFrame(el);
+  // The frame is judged by the policy in force NOW, for its whole life: a later
+  // setEmbedPolicy() (or another request's) changes neither its getter checks
+  // nor how SSR serializes it.
+  const allowed = currentEmbedAllowlist();
 
   // Policy attributes first: the sandbox in particular is read when the frame
   // navigates, so it must be in place before `src` is.
@@ -138,6 +145,7 @@ export function embed(props: EmbedProps): HTMLIFrameElement {
     );
   }
   el.setAttribute("referrerpolicy", referrer);
+  recordEmbedFrame(el, { allowed, sandbox, allow, referrer });
   el.setAttribute("loading", props.loading === "eager" ? "eager" : "lazy");
 
   if (props.aspectRatio !== undefined) {
@@ -157,16 +165,23 @@ export function embed(props: EmbedProps): HTMLIFrameElement {
   if (typeof props.id === "string") el.id = props.id;
 
   if (typeof title === "function") {
+    // A blank value keeps the last good title: the frame never loses its
+    // accessible name. Before the first non-blank value it has none, and SSR
+    // does not serve it.
     registerDisposer(
       el,
-      reactiveBinding(() => el.setAttribute("title", String(title() ?? "")), el),
+      reactiveBinding(() => {
+        const value = String(title() ?? "");
+        if (value.trim()) el.setAttribute("title", value);
+        else warnEmbed("title", "embed: a `title` getter returned a blank value; the previous title is kept.");
+      }, el),
     );
   } else {
     el.setAttribute("title", title);
   }
 
   const commitSrc = (value: unknown) => {
-    const safe = resolveEmbedSrc(value);
+    const safe = resolveEmbedSrc(value, allowed);
     if (safe === null) {
       el.removeAttribute("src");
       if (value != null) {

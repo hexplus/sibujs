@@ -48,7 +48,7 @@ Object.assign(globalThis, {
 
 `jsdom`, `happy-dom`, and `linkedom` all work; `tests/ssr-dom-setup.test.ts` runs
 the jsdom recipe in a bare Node environment. Without a DOM, the first tree
-builder (`div()`, `svg()`, `html`, `Fragment`, `when`, `match`, `each`) throws
+builder (`div()`, `svg()`, `html`, `Fragment`, `when`, `match`, `each`, `KeepAlive`, `Portal`) throws
 `renderToString needs a DOM: register happy-dom or jsdom globals first` (since
 4.12; it used to be `ReferenceError: document is not defined`).
 

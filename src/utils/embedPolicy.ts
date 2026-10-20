@@ -9,6 +9,7 @@
  * module, so it costs a client bundle nothing unless `embed()` is used.
  */
 
+import { getRequestStore } from "../core/ssr-context";
 import { globalSingleton } from "./globalSingleton";
 import { sanitizeUrl } from "./sanitize";
 
@@ -19,18 +20,45 @@ interface AllowedEmbed {
   path: string;
 }
 
+/** A parsed allowlist. Treated as immutable: `setEmbedPolicy()` replaces it whole. */
+export type EmbedAllowlist = readonly AllowedEmbed[];
+
+/**
+ * What `embed()` wrote on a frame: the allowlist in force when it was built and
+ * the narrowed policy attributes. The SSR serializer judges the frame against
+ * this record, never against attributes changed after construction.
+ */
+export interface EmbedRecord {
+  allowed: EmbedAllowlist;
+  sandbox: string;
+  allow: string;
+  referrer: string;
+}
+
 interface EmbedState {
-  allowed: AllowedEmbed[];
+  allowed: EmbedAllowlist;
   /** Frames built by `embed()`, so the SSR serializer can recognise them. */
-  frames: WeakSet<Element>;
+  frames: WeakMap<Element, EmbedRecord>;
 }
 
 // Shared across duplicate copies of this module, like the other singletons:
 // a policy set through one copy must hold for frames built by another.
-const state = globalSingleton<EmbedState>(Symbol.for("sibujs.embed.v1"), () => ({
+const state = globalSingleton<EmbedState>(Symbol.for("sibujs.embed.v2"), () => ({
   allowed: [],
-  frames: new WeakSet(),
+  frames: new WeakMap(),
 }));
+
+/** Key of the request-scoped allowlist in the SSR store's caches. */
+const REQUEST_CACHE = "embed";
+
+/**
+ * The allowlist in force here: the current SSR request's own, when
+ * `setEmbedPolicy()` was called inside it, otherwise the process-wide one.
+ */
+export function currentEmbedAllowlist(): EmbedAllowlist {
+  const scoped = getRequestStore()?.caches?.get(REQUEST_CACHE)?.get("allowed");
+  return (scoped as EmbedAllowlist | undefined) ?? state.allowed;
+}
 
 /**
  * The policy `embed()` enforces.
@@ -46,8 +74,17 @@ export interface EmbedPolicy {
 
 /**
  * Set the origins `embed()` may frame. Replaces the previous policy; the
- * default allows nothing. Configuration, not data: call it once at startup —
- * on the server too, before rendering.
+ * default allows nothing. Call it once at startup — on the server too, before
+ * rendering.
+ *
+ * Inside `runInSSRContext()` it sets the policy of THAT request only, so a
+ * multi-tenant server can configure each render without one request's
+ * allowlist reaching another's. Outside a request it sets the process-wide
+ * policy every request without its own falls back to.
+ *
+ * A frame is judged by the policy in force when `embed()` built it: a later
+ * `setEmbedPolicy()` changes neither its getter `src` checks nor how SSR
+ * serializes it.
  *
  * @throws TypeError for an entry that is not an absolute `https:` URL, or
  * that carries credentials, a query or a fragment.
@@ -69,7 +106,18 @@ export function setEmbedPolicy(policy: EmbedPolicy): void {
     }
     allowed.push({ origin: url.origin, path: url.pathname === "/" ? "" : url.pathname });
   }
-  state.allowed = allowed;
+  const store = getRequestStore();
+  if (store) {
+    const caches = (store.caches ??= new Map<string, Map<string, unknown>>());
+    let scoped = caches.get(REQUEST_CACHE);
+    if (!scoped) {
+      scoped = new Map<string, unknown>();
+      caches.set(REQUEST_CACHE, scoped);
+    }
+    scoped.set("allowed", allowed);
+  } else {
+    state.allowed = allowed;
+  }
 }
 
 /**
@@ -80,8 +128,10 @@ export function setEmbedPolicy(policy: EmbedPolicy): void {
  *
  * The returned string is the parsed URL's `href`, so the frame loads exactly
  * the URL that was checked — `/embed/../watch` is judged as `/watch`.
+ *
+ * @param allowed The allowlist to judge by; the one in force here by default.
  */
-export function resolveEmbedSrc(value: unknown): string | null {
+export function resolveEmbedSrc(value: unknown, allowed: EmbedAllowlist = currentEmbedAllowlist()): string | null {
   if (typeof value !== "string" || sanitizeUrl(value) === "") return null;
   let url: URL;
   try {
@@ -93,7 +143,7 @@ export function resolveEmbedSrc(value: unknown): string | null {
   // A frame on the page's own origin with `allow-scripts allow-same-origin`
   // can remove its own sandbox; a player is always cross-origin.
   if (typeof location !== "undefined" && url.origin === location.origin) return null;
-  for (const entry of state.allowed) {
+  for (const entry of allowed) {
     if (url.origin !== entry.origin) continue;
     const path = entry.path;
     if (path === "" || url.pathname === path || url.pathname.startsWith(path.endsWith("/") ? path : `${path}/`)) {
@@ -166,19 +216,33 @@ export function narrowEmbedSandbox(value: string): string {
 
 /**
  * Narrow an `allow` value to the player features, written as bare feature
- * names (each then defaults to the frame's own origin). Origin lists in the
- * input are dropped with the rest of the directive's syntax.
+ * names — each then grants the feature to the frame's own origin (`'src'`).
+ *
+ * A feature is kept only when EVERY declaration of it grants the frame's
+ * origin: its allowlist is empty, or holds `'src'` or `*`, and never `'none'`.
+ * Rewriting a declaration as a bare name drops its allowlist, which is a
+ * narrowing for `*` and `'src' https://other`, but would be a GRANT for
+ * `'none'`, `'self'` (the embedding page's origin, not the frame's) or a list
+ * of other origins — those features are left out instead. The browser honours
+ * only the first declaration of a repeated feature; requiring all of them to
+ * grant makes that rule irrelevant.
  */
 export function narrowEmbedAllow(value: string): string {
-  const out: string[] = [];
+  const granted: string[] = [];
+  const denied: string[] = [];
   for (const directive of value.split(";")) {
-    const feature = directive
+    const tokens = directive
       .trim()
-      .split(/[\t\n\f\r ]+/)[0]
-      ?.toLowerCase();
-    if (feature && EMBED_FEATURES.has(feature) && !out.includes(feature)) out.push(feature);
+      .toLowerCase()
+      .split(/[\t\n\f\r ]+/);
+    const feature = tokens[0];
+    if (!feature) continue;
+    const list = tokens.slice(1);
+    const grantsSrc = (list.length === 0 || list.includes("'src'") || list.includes("*")) && !list.includes("'none'");
+    if (!grantsSrc) denied.push(feature);
+    else if (EMBED_FEATURES.has(feature) && !granted.includes(feature)) granted.push(feature);
   }
-  return out.join("; ");
+  return granted.filter((feature) => !denied.includes(feature)).join("; ");
 }
 
 /** A referrer policy at least as strict as the default, or the default. */
@@ -187,32 +251,102 @@ export function narrowEmbedReferrerPolicy(value: string): string {
   return EMBED_REFERRER_POLICIES.has(lower) ? lower : DEFAULT_EMBED_REFERRER_POLICY;
 }
 
-/** Record `frame` as built by `embed()`. */
-export function markEmbedFrame(frame: Element): void {
-  state.frames.add(frame);
+/** Record `frame` as built by `embed()`, with what it wrote. */
+export function recordEmbedFrame(frame: Element, record: EmbedRecord): void {
+  state.frames.set(frame, record);
 }
 
-/** Was `frame` built by `embed()`? */
-export function isEmbedFrame(frame: Element): boolean {
-  return state.frames.has(frame);
+/** What `embed()` wrote on `frame`, or `undefined` for any other element. */
+export function getEmbedRecord(frame: Element): EmbedRecord | undefined {
+  return state.frames.get(frame);
+}
+
+/** The tokens of `current` that `permitted` also holds, in `current`'s order. */
+function intersect(current: string, permitted: string, separator: string): string {
+  const allowed = permitted.split(separator);
+  return current
+    .split(separator)
+    .filter((token) => token && allowed.includes(token))
+    .join(separator);
+}
+
+/** What the SSR serializer has emitted for an `embed()` frame so far. */
+export interface EmbedSerialization {
+  sandbox: boolean;
+  referrer: boolean;
+  title: boolean;
+  fullscreen: boolean;
 }
 
 /**
- * The value an embed frame may carry for attribute `name` (lower-case), or
- * `null` to omit it. Attributes the policy does not govern pass through.
- * For the SSR serializer.
+ * The value an `embed()` frame may be served with for attribute `name`
+ * (lower-case), or `null` to omit it. For the SSR serializer, after the
+ * generic attribute policy (`on*`, `srcdoc`, URL and style rules) has run.
+ *
+ * Fail-closed: only the attributes `embed()` writes, plus `id`, `class`,
+ * `style`, `width`, `height`, `data-*` and `aria-*`, are served — a
+ * capability attribute added later (`allowpaymentrequest`, `allowusermedia`,
+ * …) is not. The policy attributes are re-judged against the frame's record:
+ *
+ *   - `src` against the allowlist the frame was built under;
+ *   - `sandbox` and `allow` as the intersection of the current value and the
+ *     one `embed()` wrote, so a mutation can only narrow them;
+ *   - `referrerpolicy` is what `embed()` wrote, unless it is now `no-referrer`;
+ *   - `loading` is `lazy` unless `eager`;
+ *   - `allowfullscreen` follows the served `allow` (see
+ *     {@link embedSerializationTail});
+ *   - `title` must be non-blank.
  */
-export function embedAttributeValue(name: string, value: string): string | null {
+export function embedSerializedAttribute(
+  record: EmbedRecord,
+  seen: EmbedSerialization,
+  name: string,
+  value: string,
+): string | null {
   switch (name) {
     case "src":
-      return resolveEmbedSrc(value);
-    case "sandbox":
-      return narrowEmbedSandbox(value);
-    case "allow":
-      return narrowEmbedAllow(value);
-    case "referrerpolicy":
-      return narrowEmbedReferrerPolicy(value);
-    default:
+      return resolveEmbedSrc(value, record.allowed);
+    case "title":
+      if (!value.trim()) return null;
+      seen.title = true;
       return value;
+    case "sandbox":
+      seen.sandbox = true;
+      return intersect(narrowEmbedSandbox(value), record.sandbox, " ");
+    case "allow": {
+      const allow = intersect(narrowEmbedAllow(value), record.allow, "; ");
+      if (allow.split("; ").includes("fullscreen")) seen.fullscreen = true;
+      return allow || null;
+    }
+    case "referrerpolicy":
+      seen.referrer = true;
+      return value.trim().toLowerCase() === "no-referrer" ? "no-referrer" : record.referrer;
+    case "loading":
+      return value === "eager" ? "eager" : "lazy";
+    case "id":
+    case "class":
+    case "style":
+    case "width":
+    case "height":
+      return value;
+    default:
+      return name.startsWith("data-") || name.startsWith("aria-") ? value : null;
   }
+}
+
+/**
+ * The attributes to append once every attribute of an `embed()` frame has
+ * been through {@link embedSerializedAttribute}: the recorded `sandbox` and
+ * `referrerpolicy` when the DOM no longer carries them, and `allowfullscreen`
+ * exactly when the served `allow` grants `fullscreen`. Returns `null` when the
+ * frame must not be served at all: it has no non-blank `title`, a state
+ * `embed()` never produces.
+ */
+export function embedSerializationTail(record: EmbedRecord, seen: EmbedSerialization): string | null {
+  if (!seen.title) return null;
+  let tail = "";
+  if (!seen.sandbox) tail += ` sandbox="${record.sandbox}"`;
+  if (!seen.referrer) tail += ` referrerpolicy="${record.referrer}"`;
+  if (seen.fullscreen) tail += ' allowfullscreen=""';
+  return tail;
 }

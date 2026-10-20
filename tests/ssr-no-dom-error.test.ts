@@ -60,4 +60,11 @@ describe("tree builders without a global document", () => {
     ).toThrow(NEEDS_DOM);
     expect(() => html`<p>x</p>`).toThrow(NEEDS_DOM);
   });
+
+  it("KeepAlive and Portal throw it too", async () => {
+    const { KeepAlive } = await import("../src/core/rendering/keepAlive");
+    const { Portal } = await import("../src/core/rendering/portal");
+    expect(() => KeepAlive(() => "a", { a: () => ({}) as never })).toThrow(NEEDS_DOM);
+    expect(() => Portal(() => ({}) as never)).toThrow(NEEDS_DOM);
+  });
 });

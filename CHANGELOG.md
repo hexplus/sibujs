@@ -41,7 +41,17 @@ foreign subtrees:
   attribute (its `attributeName` is omitted), SVG `<script>` / `<style>` are
   stripped like HTML ones, and `<foreignObject>` content follows the HTML
   rules;
-- every element carries the `data-sibu-ssr` marker.
+- every element carries the `data-sibu-ssr` marker;
+- an element is emitted only where the HTML parser rebuilds it in the same
+  namespace. A foreign element other than an `<svg>` / `<math>` root outside
+  foreign content, a foreign element named like an HTML "breakout" tag (`p`,
+  `div`, `meta`, `img`, …), an HTML element placed directly in SVG or MathML
+  (outside `foreignObject`, `desc`, `title` and the MathML integration points),
+  and an SVG element under an integration point are stripped with their
+  subtree. Otherwise an SVG-namespace `<link rel="stylesheet">` or
+  `<meta http-equiv="refresh">` — inert in the client DOM — would be parsed as
+  a live HTML element, and a breakout would turn every following sibling into
+  HTML.
 
 An element in any other namespace is still emitted as its escaped text. SSR
 code that serialized SVG with `element.outerHTML` to work around this can
@@ -53,7 +63,7 @@ SibuJS builds live DOM nodes, on the server too, so `renderToString(App())` in
 plain Node needs a DOM implementation's globals. Without them the first tag
 factory died with `ReferenceError: document is not defined` from inside the
 framework. The tree builders — tag factories, `html`, `Fragment`, `when`,
-`match` and `each` — now throw `renderToString needs a DOM: register happy-dom
+`match`, `each`, `KeepAlive` and `Portal` — now throw `renderToString needs a DOM: register happy-dom
 or jsdom globals first`, with a setup example in development. The SSR
 documentation states the requirement and shows the happy-dom and jsdom setup,
 and that `when` / `match` / `each` render their first branch in a microtask,
@@ -75,13 +85,27 @@ embed({ src: `https://www.youtube-nocookie.com/embed/${id}`, title: "Product tou
   prefix; anything else — including a getter's value — is omitted with a
   development warning. `javascript:`, `data:`, `blob:`, relative URLs and the
   page's own origin never match. The default policy allows nothing.
-- `title` is required; `srcdoc` is never written.
+- `title` is required; a getter that turns blank keeps the previous title.
+  `srcdoc` is never written.
 - Defaults: `loading="lazy"`, `referrerpolicy="strict-origin-when-cross-origin"`,
   `sandbox` = `DEFAULT_EMBED_SANDBOX` (`allow-scripts allow-same-origin
   allow-presentation allow-popups allow-popups-to-escape-sandbox`), and `allow`
   limited to player features. `sandbox`, `referrerpolicy` and `allow` can only
-  be narrowed.
-- `renderToString()` serializes an `embed()` frame under the same policy.
+  be narrowed. A feature is kept in `allow` only when every declaration of it
+  grants the frame's own origin (no allowlist, `'src'` or `*`):
+  `fullscreen 'none'`, `fullscreen 'self'` and `fullscreen https://other.example`
+  drop the feature rather than granting it. `allowfullscreen` is written only
+  when the narrowed `allow` grants `fullscreen`.
+- `setEmbedPolicy()` inside `runInSSRContext()` configures that request only;
+  outside a request it sets the process-wide policy. A frame is judged by the
+  policy in force when `embed()` built it, for its whole life.
+- `renderToString()` serializes an `embed()` frame against what `embed()`
+  wrote: only the attributes it writes (plus `id`, `class`, `style`, `width`,
+  `height`, `data-*`, `aria-*`) are served, `src` is re-checked against the
+  frame's allowlist, `sandbox` / `allow` are intersected with the values
+  `embed()` wrote, a removed `sandbox` / `referrerpolicy` is restored, and a
+  frame without a non-blank `title` is not served. Changing the DOM after
+  construction can only narrow what the server sends.
 
 Plain `iframe` stays refused by every runtime element factory.
 

@@ -1,6 +1,7 @@
 import { bindOwnerScope, track } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
+import { requireDocument } from "./requireDocument";
 
 /**
  * Options for KeepAlive.
@@ -44,6 +45,7 @@ export function KeepAlive(
   cases: Record<string, () => Node>,
   options?: KeepAliveOptions,
 ): Comment {
+  requireDocument();
   const anchor = document.createComment("keep-alive");
   const cache = new Map<string, Node>();
   const lruOrder: string[] = [];
