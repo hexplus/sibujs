@@ -8,6 +8,32 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed — `renderToString()` dropped SVG and MathML
+
+`renderToString()` and `renderToStream()` serialized only HTML elements; an
+SVG or MathML element was emitted as its escaped text content, so
+`div([svg({ viewBox: "0 0 24 24" }, [path({ d: "M4 12h16" })])])` rendered as
+an empty `<div>` until hydration rebuilt it. Both renderers now serialize
+foreign subtrees:
+
+- tag and attribute names keep their case (`linearGradient`, `viewBox`,
+  `preserveAspectRatio`), and `xlink:` / `xml:` attributes keep their prefix —
+  also when `setAttributeNS` created them without one — so the HTML parser
+  rebuilds the same tree in the same namespaces;
+- an empty SVG or MathML element self-closes (`<path d="…" />`); HTML void
+  rules are unchanged;
+- the runtime policy applies: `on*` attributes are dropped, `href` /
+  `xlink:href` pass the URL allowlist (a `javascript:` link on an SVG `<a>` is
+  omitted), an SVG `<set>` / `<animate>` may not target a URL or handler
+  attribute (its `attributeName` is omitted), SVG `<script>` / `<style>` are
+  stripped like HTML ones, and `<foreignObject>` content follows the HTML
+  rules;
+- every element carries the `data-sibu-ssr` marker.
+
+An element in any other namespace is still emitted as its escaped text. SSR
+code that serialized SVG with `element.outerHTML` to work around this can
+drop the workaround — `outerHTML` applied none of the policy above.
+
 ### Fixed — hash-mode navigation wrote the route into the pathname
 
 With `createRouter(routes, { mode: "hash" })`, `navigate("/editor/123")` set the

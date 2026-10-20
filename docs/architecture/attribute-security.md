@@ -687,14 +687,17 @@ is present.
 
 ## Implementation limitations (not security gaps)
 
-- **SVG and MathML are not serialized by SSR.** A non-HTML element is emitted as
-  its escaped text content: no tag, no attribute, no namespace. The graphic is
-  missing from the server HTML — and text inside it (an SVG `<text>`, even the
-  body of an SVG `<script>`) appears as plain text — until hydration replaces the
-  tree with the client's, which builds real SVG in the SVG namespace under the
-  client policy. Security-wise the server output is strictly weaker than the
-  client: no SVG attribute, `href`, `attributeName`, `on*` or element can reach
-  it, and the text is escaped. `tests/security-svg-ssr.test.ts` pins this.
+- **SSR serializes SVG and MathML under the runtime policy (4.12).** Before
+  4.12 a non-HTML element was emitted as its escaped text content, so the
+  graphic was missing from the server HTML until hydration. Foreign elements are
+  now serialized with their tag and attribute case and their `xlink:` / `xml:`
+  prefixes intact, and with the same policy as the client writers: `on*`
+  dropped, `href` / `xlink:href` through the URL allowlist, an SVG animation
+  never targeting a URL or handler attribute (its `attributeName` is omitted),
+  SVG `<script>` / `<style>` stripped, `<foreignObject>` content under the
+  HTML rules. An element in any other namespace is still emitted as escaped
+  text. `tests/security-svg-ssr.test.ts` and
+  `tests/ssr-svg-serialization.test.ts` pin this.
 - **The no-DOM style parser is stricter than CSSOM about malformed input.**
   Without a DOM, a style attribute is split by a structural declaration parser
   and each declaration receives the DOM path's verdict. Input it cannot read
