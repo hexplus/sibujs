@@ -6,7 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [4.12.0] — 2026-10-20
+
+### Upgrade notes
+
+- **SSR output now contains SVG and MathML.** Server HTML snapshots that
+  contain icons or charts change: the elements appear where their escaped text
+  used to be. Remove `element.outerHTML` workarounds for SVG.
+- **Building a tree without a DOM throws a new error.** Code that caught
+  `ReferenceError: document is not defined` to detect a missing server DOM sees
+  an `Error` whose message starts with `[SibuJS] renderToString needs a DOM`.
+- **Hash-mode routes live in the fragment.** `navigate()` writes `/#/path`
+  instead of `/path`, and `RouterLink` renders `href="#/path"`.
+- Everything else is additive: `embed()` / `setEmbedPolicy()` are new, and the
+  typed props accept nullable attribute getters. `hydrate()` is unchanged.
 
 ### Fixed — `renderToString()` dropped SVG and MathML
 

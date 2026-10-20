@@ -176,7 +176,7 @@ dispose(); // remove the matchMedia listener
 ```
 
 ### `sibujs/ui` — UI utilities
-`form` & `formAction` (validation/binding), `virtualList`, `intersection`, `inputMask`, `a11y` / `a11yPrimitives`, `scopedStyle`, `reactiveAttr`, `dialog`, `toast`, `infiniteScroll`, `pagination`, `eventBus`, `timers`, `hover`, `scrollLock`, `lazyEffect`, plus composable/HOC patterns.
+`form` & `formAction` (validation/binding), `virtualList`, `intersection`, `inputMask`, `a11y` / `a11yPrimitives`, `scopedStyle`, `reactiveAttr`, `dialog`, `toast`, `embed` (allowlisted third-party players), `infiniteScroll`, `pagination`, `eventBus`, `timers`, `hover`, `scrollLock`, `lazyEffect`, plus composable/HOC patterns.
 
 ### `sibujs/widgets` — Pre-built components
 Accessible `Combobox`, `Tabs`, `Accordion`, `Popover`, `Select`, `Tooltip`, `FileUpload`, `contentEditable`, and `datePicker`.
@@ -191,7 +191,7 @@ Accessible `Combobox`, `Tabs`, `Accordion`, `Popover`, `Select`, `Tooltip`, `Fil
 **Router** — `createRouter`, `Route`/`Outlet`/`RouterLink`, nested routes, guards (`beforeEach`, `beforeResolve`, `afterEach`), programmatic navigation, `preloadRoute`, memory router, and per-route transitions. **i18n** — `setLocale`, `t`, `translated`, `Trans`, `registerTranslations`, live locale switching for text and attributes. Plus the plugin system (`modular`, `ecosystem`, `versioning`, `startup`).
 
 ### `sibujs/ssr` — Server rendering
-`renderToString`, `renderToReadableStream`, `renderToDocument`, `hydrate`, streaming `Suspense`, `head` management, static site generation, incremental regeneration, route actions/middleware, scroll restoration, service worker & web/wasm workers, and microfrontend helpers.
+`renderToString` (HTML, SVG and MathML; needs a server DOM such as happy-dom or jsdom), `renderToReadableStream`, `renderToDocument`, `hydrate`, streaming `Suspense`, `head` management, static site generation, incremental regeneration, route actions/middleware, scroll restoration, service worker & web/wasm workers, and microfrontend helpers.
 
 ### `sibujs/performance` — Scheduling & optimization
 Concurrent rendering (`startTransition`, `scheduleUpdate`), cooperative `scheduler`, `domRecycler`, `compiled` templates, `chunkLoader`, `bundleOptimize`, and `normalize`.
