@@ -4,6 +4,7 @@ import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
 import { dispose, registerDisposer } from "./dispose";
+import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
 /**
@@ -143,6 +144,7 @@ export function each<T>(
     "each: options.key must be a function that returns a unique key per item.",
   );
 
+  requireDocument();
   const anchor = document.createComment("each:anchor");
   // Sentinel end marker — stable boundary reference, eliminates
   // the O(n) managed-nodes Set + sibling walk on every update.

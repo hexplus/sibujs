@@ -34,6 +34,18 @@ An element in any other namespace is still emitted as its escaped text. SSR
 code that serialized SVG with `element.outerHTML` to work around this can
 drop the workaround — `outerHTML` applied none of the policy above.
 
+### Fixed — building a tree without a DOM failed with `document is not defined`
+
+SibuJS builds live DOM nodes, on the server too, so `renderToString(App())` in
+plain Node needs a DOM implementation's globals. Without them the first tag
+factory died with `ReferenceError: document is not defined` from inside the
+framework. The tree builders — tag factories, `html`, `Fragment`, `when`,
+`match` and `each` — now throw `renderToString needs a DOM: register happy-dom
+or jsdom globals first`, with a setup example in development. The SSR
+documentation states the requirement and shows the happy-dom and jsdom setup,
+and that `when` / `match` / `each` render their first branch in a microtask,
+so a server awaits one before serializing.
+
 ### Fixed — hash-mode navigation wrote the route into the pathname
 
 With `createRouter(routes, { mode: "hash" })`, `navigate("/editor/123")` set the

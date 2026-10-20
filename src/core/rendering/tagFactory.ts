@@ -6,6 +6,7 @@ import { isBlockedElement } from "../../utils/elementPolicy";
 import { isEventHandlerAttr, sanitizeCSSDeclaration, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
+import { noDocument } from "./requireDocument";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
@@ -389,6 +390,7 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
     if (blocked) {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
     }
+    if (typeof document === "undefined") noDocument();
     const el = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
 
     // Fast path: tag() — no arguments

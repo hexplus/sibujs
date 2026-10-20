@@ -2,6 +2,7 @@ import { bindOwnerScope, reactiveBinding, untracked } from "../../reactivity/tra
 import { devWarnLazy } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
+import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
 /**
@@ -170,6 +171,7 @@ function releaseBranchNode(node: Node, owned: boolean): void {
 }
 
 export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: NodeChild): Comment {
+  requireDocument();
   const anchor = document.createComment("when");
   let currentNode: Node | null = null;
   let lastCondition: T | undefined;
@@ -315,6 +317,7 @@ export function match<T extends string | number>(
   cases: Record<string, NodeChild>,
   fallback?: NodeChild,
 ): Comment {
+  requireDocument();
   const anchor = document.createComment("match");
   let currentNode: Node | null = null;
   let lastKey: string | undefined;
