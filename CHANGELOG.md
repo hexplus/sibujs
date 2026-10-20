@@ -72,6 +72,17 @@ embed({ src: `https://www.youtube-nocookie.com/embed/${id}`, title: "Product tou
 
 Plain `iframe` stays refused by every runtime element factory.
 
+### Fixed — typed props rejected attribute getters that return `null`
+
+A getter resolving to `null` or `undefined` removes its attribute, as
+documented, but the typed factory props declared `T | (() => T)`, so
+`img({ width: () => (cur() ? String(cur()!.width) : null) })` failed with
+TS2345. Every typed attribute prop (`a`, `input`, `img`, `button`, `form`,
+`select`, `textarea`, `label`, `option`, `video`, `audio`) and the `id` of
+every factory now accepts a getter returning `null | undefined`. The IDL
+properties `value`, `checked`, `selected` and `disabled` keep their types.
+Types only; nothing changes at runtime.
+
 ### Fixed — hash-mode navigation wrote the route into the pathname
 
 With `createRouter(routes, { mode: "hash" })`, `navigate("/editor/123")` set the

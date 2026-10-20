@@ -67,7 +67,7 @@ export type TagEventHandlers = {
  * it types `onElement`.
  */
 export interface TagProps<El extends Element = HTMLElement> {
-  id?: string | (() => string);
+  id?: string | (() => string | null | undefined);
   class?: string | (() => string | null | undefined | false) | Record<string, boolean | (() => boolean)>;
   style?: StyleMap | string | (() => string | StyleObject);
   /**

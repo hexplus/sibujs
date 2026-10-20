@@ -18,20 +18,27 @@
 
 import type { TagFunction, TagProps } from "./tagFactory";
 
-// ─── Reactive-or-literal helper ──────────────────────────────────────────
+// ─── Reactive-or-literal helpers ─────────────────────────────────────────
 // Most props accept either a static value or a reactive getter. Helpers
-// like `reactive<string>` keep the individual prop definitions readable.
+// like `attr<string>` keep the individual prop definitions readable.
+//
+// `attr<T>` is an ATTRIBUTE: its getter may resolve to `null` / `undefined`,
+// which removes the attribute (the runtime has done so since 4.5; the types
+// caught up in 4.12). `attr<T>` is kept for the IDL properties — `value`,
+// `checked`, `selected`, `disabled` — which are DOM state written as
+// properties, not optional attributes.
 type reactive<T> = T | (() => T);
+type attr<T> = T | (() => T | null | undefined);
 
 // ─── Anchor ──────────────────────────────────────────────────────────────
 
 export interface AnchorProps extends TagProps<HTMLAnchorElement> {
-  href?: reactive<string>;
-  target?: reactive<"_self" | "_blank" | "_parent" | "_top" | (string & {})>;
-  rel?: reactive<string>;
-  download?: reactive<string | boolean>;
-  hreflang?: reactive<string>;
-  referrerpolicy?: reactive<
+  href?: attr<string>;
+  target?: attr<"_self" | "_blank" | "_parent" | "_top" | (string & {})>;
+  rel?: attr<string>;
+  download?: attr<string | boolean>;
+  hreflang?: attr<string>;
+  referrerpolicy?: attr<
     | ""
     | "no-referrer"
     | "no-referrer-when-downgrade"
@@ -42,7 +49,7 @@ export interface AnchorProps extends TagProps<HTMLAnchorElement> {
     | "strict-origin-when-cross-origin"
     | "unsafe-url"
   >;
-  ping?: reactive<string>;
+  ping?: attr<string>;
 }
 
 // ─── Input ───────────────────────────────────────────────────────────────
@@ -72,113 +79,113 @@ export type InputType =
   | "week";
 
 export interface InputProps extends TagProps<HTMLInputElement> {
-  type?: reactive<InputType | (string & {})>;
-  name?: reactive<string>;
+  type?: attr<InputType | (string & {})>;
+  name?: attr<string>;
   value?: reactive<string | number>;
-  placeholder?: reactive<string>;
-  required?: reactive<boolean>;
+  placeholder?: attr<string>;
+  required?: attr<boolean>;
   disabled?: reactive<boolean>;
-  readonly?: reactive<boolean>;
+  readonly?: attr<boolean>;
   checked?: reactive<boolean>;
-  min?: reactive<string | number>;
-  max?: reactive<string | number>;
-  step?: reactive<string | number>;
-  minlength?: reactive<number>;
-  maxlength?: reactive<number>;
-  pattern?: reactive<string>;
-  autocomplete?: reactive<string>;
-  autofocus?: reactive<boolean>;
-  multiple?: reactive<boolean>;
-  accept?: reactive<string>;
-  size?: reactive<number>;
-  form?: reactive<string>;
-  list?: reactive<string>;
-  inputmode?: reactive<"none" | "text" | "decimal" | "numeric" | "tel" | "search" | "email" | "url">;
+  min?: attr<string | number>;
+  max?: attr<string | number>;
+  step?: attr<string | number>;
+  minlength?: attr<number>;
+  maxlength?: attr<number>;
+  pattern?: attr<string>;
+  autocomplete?: attr<string>;
+  autofocus?: attr<boolean>;
+  multiple?: attr<boolean>;
+  accept?: attr<string>;
+  size?: attr<number>;
+  form?: attr<string>;
+  list?: attr<string>;
+  inputmode?: attr<"none" | "text" | "decimal" | "numeric" | "tel" | "search" | "email" | "url">;
 }
 
 // ─── Image ───────────────────────────────────────────────────────────────
 
 export interface ImgProps extends TagProps<HTMLImageElement> {
-  src?: reactive<string>;
-  alt?: reactive<string>;
-  width?: reactive<number | string>;
-  height?: reactive<number | string>;
-  loading?: reactive<"lazy" | "eager">;
-  decoding?: reactive<"sync" | "async" | "auto">;
-  srcset?: reactive<string>;
-  sizes?: reactive<string>;
-  crossorigin?: reactive<"anonymous" | "use-credentials">;
-  referrerpolicy?: reactive<string>;
+  src?: attr<string>;
+  alt?: attr<string>;
+  width?: attr<number | string>;
+  height?: attr<number | string>;
+  loading?: attr<"lazy" | "eager">;
+  decoding?: attr<"sync" | "async" | "auto">;
+  srcset?: attr<string>;
+  sizes?: attr<string>;
+  crossorigin?: attr<"anonymous" | "use-credentials">;
+  referrerpolicy?: attr<string>;
 }
 
 // ─── Button ──────────────────────────────────────────────────────────────
 
 export interface ButtonProps extends TagProps<HTMLButtonElement> {
-  type?: reactive<"button" | "submit" | "reset">;
-  name?: reactive<string>;
+  type?: attr<"button" | "submit" | "reset">;
+  name?: attr<string>;
   value?: reactive<string>;
   disabled?: reactive<boolean>;
-  form?: reactive<string>;
-  formaction?: reactive<string>;
-  formenctype?: reactive<string>;
-  formmethod?: reactive<"get" | "post" | "dialog">;
-  formnovalidate?: reactive<boolean>;
-  formtarget?: reactive<string>;
-  autofocus?: reactive<boolean>;
+  form?: attr<string>;
+  formaction?: attr<string>;
+  formenctype?: attr<string>;
+  formmethod?: attr<"get" | "post" | "dialog">;
+  formnovalidate?: attr<boolean>;
+  formtarget?: attr<string>;
+  autofocus?: attr<boolean>;
 }
 
 // ─── Form ────────────────────────────────────────────────────────────────
 
 export interface FormProps extends TagProps<HTMLFormElement> {
-  action?: reactive<string>;
-  method?: reactive<"get" | "post" | "dialog">;
-  enctype?: reactive<"application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain">;
-  name?: reactive<string>;
-  novalidate?: reactive<boolean>;
-  target?: reactive<string>;
-  autocomplete?: reactive<"on" | "off">;
-  acceptcharset?: reactive<string>;
+  action?: attr<string>;
+  method?: attr<"get" | "post" | "dialog">;
+  enctype?: attr<"application/x-www-form-urlencoded" | "multipart/form-data" | "text/plain">;
+  name?: attr<string>;
+  novalidate?: attr<boolean>;
+  target?: attr<string>;
+  autocomplete?: attr<"on" | "off">;
+  acceptcharset?: attr<string>;
 }
 
 // ─── Select ──────────────────────────────────────────────────────────────
 
 export interface SelectProps extends TagProps<HTMLSelectElement> {
-  name?: reactive<string>;
+  name?: attr<string>;
   value?: reactive<string>;
   disabled?: reactive<boolean>;
-  multiple?: reactive<boolean>;
-  required?: reactive<boolean>;
-  size?: reactive<number>;
-  autocomplete?: reactive<string>;
-  autofocus?: reactive<boolean>;
-  form?: reactive<string>;
+  multiple?: attr<boolean>;
+  required?: attr<boolean>;
+  size?: attr<number>;
+  autocomplete?: attr<string>;
+  autofocus?: attr<boolean>;
+  form?: attr<string>;
 }
 
 // ─── Textarea ────────────────────────────────────────────────────────────
 
 export interface TextareaProps extends TagProps<HTMLTextAreaElement> {
-  name?: reactive<string>;
+  name?: attr<string>;
   value?: reactive<string>;
-  placeholder?: reactive<string>;
+  placeholder?: attr<string>;
   disabled?: reactive<boolean>;
-  readonly?: reactive<boolean>;
-  required?: reactive<boolean>;
-  rows?: reactive<number>;
-  cols?: reactive<number>;
-  minlength?: reactive<number>;
-  maxlength?: reactive<number>;
-  wrap?: reactive<"hard" | "soft" | "off">;
-  autocomplete?: reactive<string>;
-  autofocus?: reactive<boolean>;
-  form?: reactive<string>;
-  spellcheck?: reactive<boolean>;
+  readonly?: attr<boolean>;
+  required?: attr<boolean>;
+  rows?: attr<number>;
+  cols?: attr<number>;
+  minlength?: attr<number>;
+  maxlength?: attr<number>;
+  wrap?: attr<"hard" | "soft" | "off">;
+  autocomplete?: attr<string>;
+  autofocus?: attr<boolean>;
+  form?: attr<string>;
+  spellcheck?: attr<boolean>;
 }
 
 // ─── Label ───────────────────────────────────────────────────────────────
 
 export interface LabelProps extends TagProps<HTMLLabelElement> {
-  for?: reactive<string>;
-  form?: reactive<string>;
+  for?: attr<string>;
+  form?: attr<string>;
 }
 
 // ─── Option / Optgroup ───────────────────────────────────────────────────
@@ -187,26 +194,26 @@ export interface OptionProps extends TagProps<HTMLOptionElement> {
   value?: reactive<string | number>;
   selected?: reactive<boolean>;
   disabled?: reactive<boolean>;
-  label?: reactive<string>;
+  label?: attr<string>;
 }
 
 // ─── Video / Audio ───────────────────────────────────────────────────────
 
 export interface MediaProps<El extends HTMLMediaElement = HTMLMediaElement> extends TagProps<El> {
-  src?: reactive<string>;
-  autoplay?: reactive<boolean>;
-  controls?: reactive<boolean>;
-  loop?: reactive<boolean>;
-  muted?: reactive<boolean>;
-  preload?: reactive<"none" | "metadata" | "auto">;
-  crossorigin?: reactive<"anonymous" | "use-credentials">;
+  src?: attr<string>;
+  autoplay?: attr<boolean>;
+  controls?: attr<boolean>;
+  loop?: attr<boolean>;
+  muted?: attr<boolean>;
+  preload?: attr<"none" | "metadata" | "auto">;
+  crossorigin?: attr<"anonymous" | "use-credentials">;
 }
 
 export interface VideoProps extends MediaProps<HTMLVideoElement> {
-  poster?: reactive<string>;
-  width?: reactive<number | string>;
-  height?: reactive<number | string>;
-  playsinline?: reactive<boolean>;
+  poster?: attr<string>;
+  width?: attr<number | string>;
+  height?: attr<number | string>;
+  playsinline?: attr<boolean>;
 }
 
 export type AudioProps = MediaProps<HTMLAudioElement>;
