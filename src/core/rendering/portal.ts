@@ -1,6 +1,7 @@
 import { bindOwnerScope } from "../../reactivity/track";
 import { reportError } from "../errors";
 import { dispose, registerDisposer } from "./dispose";
+import { requireDocument } from "./requireDocument";
 
 /**
  * Portal renders nodes into a DOM node outside the parent component hierarchy.
@@ -26,6 +27,7 @@ import { dispose, registerDisposer } from "./dispose";
  * ```
  */
 export function Portal(nodes: () => Element, target?: Element): Comment {
+  requireDocument();
   const anchor = document.createComment("portal");
   const container = target || document.body;
   let portalContent: Element | null = null;

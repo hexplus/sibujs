@@ -4,6 +4,7 @@ import { bindChildNode } from "../../reactivity/bindChildNode";
 import { isCodeTextElement } from "../../utils/elementPolicy";
 import { setSafeAttribute, setTrustedAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
+import { requireDocument } from "./requireDocument";
 import { SVG_NS } from "./tagFactory";
 import type { NodeChild } from "./types";
 
@@ -538,6 +539,7 @@ export function __renderParsedTemplate(tree: readonly unknown[], values: unknown
 }
 
 function renderTemplate(tmpl: TmplChild[], values: unknown[]): Element {
+  requireDocument();
   // Fast path: single root element (most common case)
   if (tmpl.length === 1 && tmpl[0].t === 0) {
     return executeElement(tmpl[0].el, values);

@@ -14,6 +14,7 @@ export * from "./src/ui/a11yPrimitives";
 export * from "./src/ui/scopedStyle";
 export * from "./src/ui/reactiveAttr";
 export * from "./src/ui/dialog";
+export * from "./src/ui/embed";
 export * from "./src/ui/toast";
 export * from "./src/ui/infiniteScroll";
 export * from "./src/ui/pagination";

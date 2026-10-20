@@ -650,6 +650,55 @@ elements whose contents are a program (`<script>`, `<style>`) are likewise one
 predicate, `isCodeTextElement()`, shared by `html\`\``'s interpolation refusal
 and the SSR serializer's stripping.
 
+### `embed()`: the one runtime door to an iframe (4.12)
+
+`embed()` in `sibujs/ui` builds a third-party player frame without lifting the
+`iframe` block anywhere else. Its policy lives in `utils/embedPolicy.ts`, and
+nothing in the core imports it:
+
+- `src` must be absolute `https:`, carry no credentials, differ from the page's
+  own origin, and match an entry of `setEmbedPolicy({ allowedOrigins })` — an
+  origin, optionally with a path prefix. The check runs on the parsed URL and
+  the frame gets that URL's `href`, so `/embed/../watch` is judged as `/watch`.
+  A getter `src` is re-checked on every change; a refused value removes `src`.
+  The default policy allows nothing.
+- `sandbox` defaults to `allow-scripts allow-same-origin allow-presentation
+  allow-popups allow-popups-to-escape-sandbox` and is written before `src`.
+  `allow-scripts` with `allow-same-origin` would let a same-origin document
+  remove its own sandbox, which is why the page's own origin is refused. A
+  caller may only drop tokens. `referrerpolicy` is narrowed to values at least
+  as strict as `strict-origin-when-cross-origin`. `srcdoc` is never written.
+- `allow` is narrowed to player features and rewritten as bare feature names,
+  which grant the frame's own origin (`'src'`). A feature is kept only when
+  EVERY declaration of it already grants that origin — no allowlist, `'src'`
+  or `*` — and never `'none'`. Rewriting `fullscreen 'none'`, `fullscreen
+  'self'` (the embedding page's origin, not the frame's) or `fullscreen
+  https://other.example` as `fullscreen` would be a grant, so those features
+  are dropped. Chromium honours only the first declaration of a repeated
+  feature; requiring all of them to grant makes that irrelevant. Feature
+  names are matched exactly — Chromium treats them case-sensitively, so
+  `FullScreen` grants nothing and is not folded into `fullscreen` — while the
+  `'src'` / `'none'` keywords are case-insensitive.
+  `tests-browser/embed-permissions.spec.ts` checks the narrowed frame against
+  the caller's exact `allow` through Chromium's container policy.
+  `allowfullscreen` is written only when the narrowed `allow` grants
+  `fullscreen`.
+- `setEmbedPolicy()` inside `runInSSRContext()` stores the allowlist in that
+  request's SSR store; outside a request it sets the process-wide one. A frame
+  records the allowlist in force when it was built and is judged by it for its
+  whole life — getter `src` re-checks and SSR alike — so concurrent requests
+  with different policies cannot see each other's origins.
+- The SSR serializer judges a frame `embed()` built against what `embed()`
+  wrote, never against the live attributes alone: only the attributes it
+  writes (plus `id`, `class`, `style`, `width`, `height`, `data-*`, `aria-*`)
+  are served; `src` is re-checked against the frame's allowlist; `sandbox` and
+  `allow` are intersected with the recorded values; a removed `sandbox` or
+  `referrerpolicy` is restored; `referrerpolicy` keeps the recorded value
+  unless the DOM now says `no-referrer`; `allowfullscreen` follows the served
+  `allow`; a frame with no non-blank `title` is not served. A mutation can only
+  narrow what the server sends. Other iframes (static `html` source, raw DOM)
+  are serialized by the generic rules.
+
 ## Explicit design decisions
 
 ### Static inline event handlers stay trusted
@@ -687,14 +736,38 @@ is present.
 
 ## Implementation limitations (not security gaps)
 
-- **SVG and MathML are not serialized by SSR.** A non-HTML element is emitted as
-  its escaped text content: no tag, no attribute, no namespace. The graphic is
-  missing from the server HTML — and text inside it (an SVG `<text>`, even the
-  body of an SVG `<script>`) appears as plain text — until hydration replaces the
-  tree with the client's, which builds real SVG in the SVG namespace under the
-  client policy. Security-wise the server output is strictly weaker than the
-  client: no SVG attribute, `href`, `attributeName`, `on*` or element can reach
-  it, and the text is escaped. `tests/security-svg-ssr.test.ts` pins this.
+- **SSR serializes SVG and MathML under the runtime policy (4.12).** Before
+  4.12 a non-HTML element was emitted as its escaped text content, so the
+  graphic was missing from the server HTML until hydration. Foreign elements are
+  now serialized with their tag and attribute case and their `xlink:` / `xml:`
+  prefixes intact, and with the same policy as the client writers: `on*`
+  dropped, `href` / `xlink:href` through the URL allowlist, an SVG animation
+  never targeting a URL or handler attribute (its `attributeName` is omitted),
+  SVG `<script>` / `<style>` stripped, `<foreignObject>` content under the
+  HTML rules. An element in any other namespace is still emitted as escaped
+  text.
+
+  The HTML parser, not the DOM, decides which namespace an element is rebuilt
+  in, so the serializer tracks the parser's context and emits an element only
+  where it comes back as the same element. Stripped with their subtree: a
+  foreign element other than an `<svg>` / `<math>` root outside foreign
+  content; a foreign element named like an HTML breakout tag (`p`, `div`,
+  `meta`, `img`, `font` with `color` / `face` / `size`, …), which would end
+  foreign content and turn every following sibling into HTML; an HTML element
+  placed directly in SVG or MathML outside `foreignObject`, `desc`, `title`,
+  the MathML text integration points and an HTML-encoded `annotation-xml`;
+  and an SVG element under one of those integration points. The client
+  contextual rules (meta refresh, runtime stylesheet `href`, runtime script
+  source) apply to HTML-namespace elements only; without this tracking an
+  inert SVG-namespace `<meta http-equiv="refresh">` or `<link
+  rel="stylesheet">` would have been served as a live HTML one.
+
+  An animation whose target is refused keeps its `to` / `values` text: without
+  `attributeName` it animates nothing, exactly as the client leaves it.
+  `tests/security-svg-ssr.test.ts`, `tests/ssr-svg-serialization.test.ts` and
+  `tests/ssr-foreign-context.test.ts` pin this, and
+  `tests-browser/ssr-foreign.spec.ts` checks the round trip and the hostile
+  cases with each engine's own HTML parser.
 - **The no-DOM style parser is stricter than CSSOM about malformed input.**
   Without a DOM, a style attribute is split by a structural declaration parser
   and each declaration receives the DOM path's verdict. Input it cannot read

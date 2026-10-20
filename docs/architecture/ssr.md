@@ -24,17 +24,49 @@ response
 ## SSR requires a DOM implementation
 
 `renderToString(element: HTMLElement | DocumentFragment | Node)` takes a **real
-DOM node** and serialises it. Building that tree calls `document.createElement`,
-so a DOM implementation must exist on the server:
+DOM node** and serialises it. Building that tree calls `document.createElement`
+and checks nodes with `instanceof Node` / `HTMLElement`, so the DOM
+implementation's globals must exist on the server before the first builder runs:
 
 ```js
-// Node has no document — install one before rendering.
+// happy-dom: one call registers every global.
+import { GlobalRegistrator } from "@happy-dom/global-registrator";
+GlobalRegistrator.register();
+
+// jsdom: register the globals SibuJS reads.
 import { JSDOM } from "jsdom";
-const dom = new JSDOM("<!doctype html><html><body></body></html>");
-globalThis.document = dom.window.document;
+const { window } = new JSDOM("");
+Object.assign(globalThis, {
+  window,
+  document: window.document,
+  Node: window.Node,
+  Element: window.Element,
+  HTMLElement: window.HTMLElement,
+  DocumentFragment: window.DocumentFragment,
+});
 ```
 
-`jsdom`, `happy-dom`, and `linkedom` all work. This differs from frameworks that
+`jsdom`, `happy-dom`, and `linkedom` all work; `tests/ssr-dom-setup.test.ts` runs
+the jsdom recipe in a bare Node environment. Without a DOM, the first tree
+builder (`div()`, `svg()`, `html`, `Fragment`, `when`, `match`, `each`, `KeepAlive`, `Portal`) throws
+`renderToString needs a DOM: register happy-dom or jsdom globals first` (since
+4.12; it used to be `ReferenceError: document is not defined`).
+
+`when`, `match` and `each` render their first branch in a microtask, once their
+anchor is attached, so let one run before serializing:
+
+```js
+const html = await runInSSRContext(async () => {
+  const tree = App();
+  await Promise.resolve();
+  return renderToString(tree);
+});
+```
+
+A DOM-free rendering path (a minimal internal node implementation used only
+during SSR) was considered for 4.12 and not built: it would route every DOM
+access in the core through an indirection that every client bundle pays for,
+and give the attribute policy a second, non-browser DOM to be right about. This differs from frameworks that
 render straight to a string, and it is a real deployment consideration: it costs
 memory per process and rules out DOM-less edge runtimes.
 
@@ -48,7 +80,7 @@ memory per process and rules out DOM-less edge runtimes.
 | `deserializeState` (returns `undefined`) | yes |
 | SSR context / `runInSSRContext` / `isSSR` | yes |
 | `resolveServerRoute` — matching, params, query, hash, redirects | yes |
-| Building elements (`div(...)`) and `renderToString` | **no** |
+| Building elements (`div(...)`) and `renderToString` | **no** — the builder throws the setup error above |
 
 So server-side *routing* is DOM-free; server-side *rendering* is not.
 

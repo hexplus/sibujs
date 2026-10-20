@@ -6,7 +6,120 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [Unreleased]
+## [4.12.0] — 2026-10-20
+
+### Upgrade notes
+
+- **SSR output now contains SVG and MathML.** Server HTML snapshots that
+  contain icons or charts change: the elements appear where their escaped text
+  used to be. Remove `element.outerHTML` workarounds for SVG.
+- **Building a tree without a DOM throws a new error.** Code that caught
+  `ReferenceError: document is not defined` to detect a missing server DOM sees
+  an `Error` whose message starts with `[SibuJS] renderToString needs a DOM`.
+- **Hash-mode routes live in the fragment.** `navigate()` writes `/#/path`
+  instead of `/path`, and `RouterLink` renders `href="#/path"`.
+- Everything else is additive: `embed()` / `setEmbedPolicy()` are new, and the
+  typed props accept nullable attribute getters. `hydrate()` is unchanged.
+
+### Fixed — `renderToString()` dropped SVG and MathML
+
+`renderToString()` and `renderToStream()` serialized only HTML elements; an
+SVG or MathML element was emitted as its escaped text content, so
+`div([svg({ viewBox: "0 0 24 24" }, [path({ d: "M4 12h16" })])])` rendered as
+an empty `<div>` until hydration rebuilt it. Both renderers now serialize
+foreign subtrees:
+
+- tag and attribute names keep their case (`linearGradient`, `viewBox`,
+  `preserveAspectRatio`), and `xlink:` / `xml:` attributes keep their prefix —
+  also when `setAttributeNS` created them without one — so the HTML parser
+  rebuilds the same tree in the same namespaces;
+- an empty SVG or MathML element self-closes (`<path d="…" />`); HTML void
+  rules are unchanged;
+- the runtime policy applies: `on*` attributes are dropped, `href` /
+  `xlink:href` pass the URL allowlist (a `javascript:` link on an SVG `<a>` is
+  omitted), an SVG `<set>` / `<animate>` may not target a URL or handler
+  attribute (its `attributeName` is omitted), SVG `<script>` / `<style>` are
+  stripped like HTML ones, and `<foreignObject>` content follows the HTML
+  rules;
+- every element carries the `data-sibu-ssr` marker;
+- an element is emitted only where the HTML parser rebuilds it in the same
+  namespace. A foreign element other than an `<svg>` / `<math>` root outside
+  foreign content, a foreign element named like an HTML "breakout" tag (`p`,
+  `div`, `meta`, `img`, …), an HTML element placed directly in SVG or MathML
+  (outside `foreignObject`, `desc`, `title` and the MathML integration points),
+  and an SVG element under an integration point are stripped with their
+  subtree. Otherwise an SVG-namespace `<link rel="stylesheet">` or
+  `<meta http-equiv="refresh">` — inert in the client DOM — would be parsed as
+  a live HTML element, and a breakout would turn every following sibling into
+  HTML.
+
+An element in any other namespace is still emitted as its escaped text. SSR
+code that serialized SVG with `element.outerHTML` to work around this can
+drop the workaround — `outerHTML` applied none of the policy above.
+
+### Fixed — building a tree without a DOM failed with `document is not defined`
+
+SibuJS builds live DOM nodes, on the server too, so `renderToString(App())` in
+plain Node needs a DOM implementation's globals. Without them the first tag
+factory died with `ReferenceError: document is not defined` from inside the
+framework. The tree builders — tag factories, `html`, `Fragment`, `when`,
+`match`, `each`, `KeepAlive` and `Portal` — now throw `renderToString needs a DOM: register happy-dom
+or jsdom globals first`, with a setup example in development. The SSR
+documentation states the requirement and shows the happy-dom and jsdom setup,
+and that `when` / `match` / `each` render their first branch in a microtask,
+so a server awaits one before serializing.
+
+### Added — `embed()` and `setEmbedPolicy()` for third-party players
+
+The tag factories, `svgElement()` and `DOMPool` refuse `iframe`, so a page
+could not embed a YouTube or Vimeo player without bypassing the framework.
+`embed()` (from `sibujs/ui`) is a narrow, opt-in door:
+
+```ts
+import { embed, setEmbedPolicy } from "sibujs/ui";
+setEmbedPolicy({ allowedOrigins: ["https://www.youtube-nocookie.com/embed/"] });
+embed({ src: `https://www.youtube-nocookie.com/embed/${id}`, title: "Product tour", aspectRatio: "16 / 9" });
+```
+
+- `src` must be absolute `https:` and match an allowlisted origin and path
+  prefix; anything else — including a getter's value — is omitted with a
+  development warning. `javascript:`, `data:`, `blob:`, relative URLs and the
+  page's own origin never match. The default policy allows nothing.
+- `title` is required; a getter that turns blank keeps the previous title.
+  `srcdoc` is never written.
+- Defaults: `loading="lazy"`, `referrerpolicy="strict-origin-when-cross-origin"`,
+  `sandbox` = `DEFAULT_EMBED_SANDBOX` (`allow-scripts allow-same-origin
+  allow-presentation allow-popups allow-popups-to-escape-sandbox`), and `allow`
+  limited to player features. `sandbox`, `referrerpolicy` and `allow` can only
+  be narrowed. A feature is kept in `allow` only when every declaration of it
+  grants the frame's own origin (no allowlist, `'src'` or `*`):
+  `fullscreen 'none'`, `fullscreen 'self'` and `fullscreen https://other.example`
+  drop the feature rather than granting it. Feature names are matched
+  case-sensitively, as browsers do (`FullScreen` grants nothing). `allowfullscreen`
+  is written only when the narrowed `allow` grants `fullscreen`.
+- `setEmbedPolicy()` inside `runInSSRContext()` configures that request only;
+  outside a request it sets the process-wide policy. A frame is judged by the
+  policy in force when `embed()` built it, for its whole life.
+- `renderToString()` serializes an `embed()` frame against what `embed()`
+  wrote: only the attributes it writes (plus `id`, `class`, `style`, `width`,
+  `height`, `data-*`, `aria-*`) are served, `src` is re-checked against the
+  frame's allowlist, `sandbox` / `allow` are intersected with the values
+  `embed()` wrote, a removed `sandbox` / `referrerpolicy` is restored, and a
+  frame without a non-blank `title` is not served. Changing the DOM after
+  construction can only narrow what the server sends.
+
+Plain `iframe` stays refused by every runtime element factory.
+
+### Fixed — typed props rejected attribute getters that return `null`
+
+A getter resolving to `null` or `undefined` removes its attribute, as
+documented, but the typed factory props declared `T | (() => T)`, so
+`img({ width: () => (cur() ? String(cur()!.width) : null) })` failed with
+TS2345. Every typed attribute prop (`a`, `input`, `img`, `button`, `form`,
+`select`, `textarea`, `label`, `option`, `video`, `audio`) and the `id` of
+every factory now accepts a getter returning `null | undefined`. The IDL
+properties `value`, `checked`, `selected` and `disabled` keep their types.
+Types only; nothing changes at runtime.
 
 ### Fixed — hash-mode navigation wrote the route into the pathname
 

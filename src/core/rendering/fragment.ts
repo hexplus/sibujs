@@ -1,5 +1,6 @@
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { registerDisposer } from "./dispose";
+import { requireDocument } from "./requireDocument";
 import type { NodeChild, NodeChildren } from "./types";
 
 /**
@@ -25,6 +26,7 @@ import type { NodeChild, NodeChildren } from "./types";
  * @returns A DocumentFragment containing all nodes
  */
 export function Fragment(nodes: NodeChildren[]): DocumentFragment {
+  requireDocument();
   const frag = document.createDocumentFragment();
 
   for (const child of nodes) {

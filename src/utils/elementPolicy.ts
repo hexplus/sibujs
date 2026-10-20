@@ -405,6 +405,23 @@ export function contextualAttributeRefusal(
 }
 
 /**
+ * Would `name="value"` on `el` aim an SVG animation at a URL, handler or
+ * document attribute?
+ *
+ * The animation rule of {@link contextualAttributeRefusal}, for the SSR
+ * serializer, which judges DOM it did not necessarily build. Pure: unlike the
+ * writer-facing verdict it records no provenance, so serializing a tree never
+ * changes how a later write to it is judged.
+ */
+export function isRefusedAnimationAttribute(el: Element, name: string, value: string): boolean {
+  return (
+    SVG_ANIMATION_ELEMENTS.has(el.localName) &&
+    el.namespaceURI === SVG_NS &&
+    animationRefusal(name, value) !== ContextualRefusal.None
+  );
+}
+
+/**
  * Record the provenance of the value a write actually LEFT on the element.
  *
  * Called by every framework writer after it has committed (or declined) a

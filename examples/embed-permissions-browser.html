@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS embed() permissions — browser fixture</title>
+  </head>
+  <body>
+    <section id="frames"></section>
+
+    <script type="module">
+      import { embed, setEmbedPolicy } from "../dist/ui.js";
+
+      const ORIGIN = "https://player.example";
+      const SRC = `${ORIGIN}/embed/x`;
+      const FEATURES = ["fullscreen", "autoplay", "picture-in-picture", "encrypted-media", "camera", "microphone"];
+      const frames = document.getElementById("frames");
+
+      setEmbedPolicy({ allowedOrigins: [`${ORIGIN}/embed/`] });
+
+      function grants(frame) {
+        const out = {};
+        if (!frame.featurePolicy) return out;
+        for (const feature of FEATURES) out[feature] = frame.featurePolicy.allowsFeature(feature, ORIGIN);
+        return out;
+      }
+
+      window.__t = {
+        hasFeaturePolicy() {
+          const probe = document.createElement("iframe");
+          return typeof probe.featurePolicy === "object" && probe.featurePolicy !== null;
+        },
+        compare(allow) {
+          const raw = document.createElement("iframe");
+          raw.setAttribute("allow", allow);
+          raw.src = SRC;
+          const built = embed({ src: SRC, title: "probe", allow });
+          frames.replaceChildren(raw, built);
+          const result = {
+            narrowed: built.getAttribute("allow"),
+            allowfullscreen: built.hasAttribute("allowfullscreen"),
+            requested: grants(raw),
+            effective: grants(built),
+          };
+          frames.replaceChildren();
+          return result;
+        },
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

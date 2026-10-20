@@ -6,6 +6,7 @@ import { isBlockedElement } from "../../utils/elementPolicy";
 import { isEventHandlerAttr, sanitizeCSSDeclaration, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
 import { registerDisposer } from "./dispose";
+import { noDocument } from "./requireDocument";
 import type { NodeChild, NodeChildren } from "./types";
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
@@ -66,7 +67,7 @@ export type TagEventHandlers = {
  * it types `onElement`.
  */
 export interface TagProps<El extends Element = HTMLElement> {
-  id?: string | (() => string);
+  id?: string | (() => string | null | undefined);
   class?: string | (() => string | null | undefined | false) | Record<string, boolean | (() => boolean)>;
   style?: StyleMap | string | (() => string | StyleObject);
   /**
@@ -389,6 +390,7 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
     if (blocked) {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
     }
+    if (typeof document === "undefined") noDocument();
     const el = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
 
     // Fast path: tag() — no arguments

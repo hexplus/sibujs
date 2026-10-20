@@ -128,11 +128,13 @@ describe("SSR in a bare Node environment", () => {
    * implementation on the server (jsdom, happy-dom, linkedom) — unlike
    * frameworks that render straight to a string. This test pins that contract
    * so a future change either preserves it or updates the docs deliberately.
+   * Since 4.12 the failure names the missing setup instead of surfacing as
+   * `ReferenceError: document is not defined` (see ssr-no-dom-error).
    */
   it("requires a DOM implementation to build a renderable tree", async () => {
     const { div } = await import("../src/core/rendering/html");
 
     // Constructing an element is what needs `document`, not renderToString.
-    expect(() => div("hello")).toThrow();
+    expect(() => div("hello")).toThrow(/renderToString needs a DOM/);
   });
 });

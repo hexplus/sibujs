@@ -30,7 +30,13 @@
 import { DEV } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
-import { isCodeTextElement, isForbiddenMetaSnapshot } from "../utils/elementPolicy";
+import { isCodeTextElement, isForbiddenMetaSnapshot, isRefusedAnimationAttribute } from "../utils/elementPolicy";
+import {
+  type EmbedSerialization,
+  embedSerializationTail,
+  embedSerializedAttribute,
+  getEmbedRecord,
+} from "../utils/embedPolicy";
 import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { isForbiddenMetaEntry } from "../utils/metaRefresh";
@@ -183,6 +189,155 @@ function getAttributeOf(el: Element, name: string): string | null {
   return nativeAccessors().getAttribute.call(el, name);
 }
 
+// ─── Foreign content (SVG, MathML) ──────────────────────────────────────────
+
+const SVG_NS = "http://www.w3.org/2000/svg";
+const MATHML_NS = "http://www.w3.org/1998/Math/MathML";
+const XLINK_NS = "http://www.w3.org/1999/xlink";
+const XML_NS = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NS = "http://www.w3.org/2000/xmlns/";
+
+/**
+ * Where the HTML parser will be when it reads a serialized node: in HTML, or
+ * inside SVG / MathML foreign content. The parser — not the DOM being
+ * serialized — decides the namespace of every element it rebuilds, so the
+ * serializer tracks the parser's state and emits only what the parser will
+ * rebuild as the same element.
+ */
+enum ParseContext {
+  /** HTML content: the document, an HTML element, or an integration point. */
+  Html,
+  /** Inside an SVG element that is not an HTML integration point. */
+  Svg,
+  /** Inside a MathML element that is not an integration point. */
+  Math,
+  /** Inside MathML `annotation-xml` without an HTML encoding: MathML, or an `<svg>` root. */
+  Annotation,
+}
+
+/**
+ * Start tags the HTML parser refuses to read as foreign content: inside SVG or
+ * MathML they close every foreign element and continue as HTML, taking every
+ * following sibling with them. `font` breaks out only with `color`, `face` or
+ * `size`.
+ */
+const BREAKOUT_TAGS = new Set([
+  "b",
+  "big",
+  "blockquote",
+  "body",
+  "br",
+  "center",
+  "code",
+  "dd",
+  "div",
+  "dl",
+  "dt",
+  "em",
+  "embed",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "head",
+  "hr",
+  "i",
+  "img",
+  "li",
+  "listing",
+  "menu",
+  "meta",
+  "nobr",
+  "ol",
+  "p",
+  "pre",
+  "ruby",
+  "s",
+  "small",
+  "span",
+  "strong",
+  "strike",
+  "sub",
+  "sup",
+  "table",
+  "tt",
+  "u",
+  "ul",
+  "var",
+]);
+
+function isBreakout(lowerName: string, element: Element): boolean {
+  if (BREAKOUT_TAGS.has(lowerName)) return true;
+  return (
+    lowerName === "font" &&
+    (element.hasAttribute("color") || element.hasAttribute("face") || element.hasAttribute("size"))
+  );
+}
+
+/**
+ * Will the HTML parser, in `context`, rebuild this element in the namespace it
+ * has in the DOM? A foreign element outside foreign content, an HTML-named
+ * foreign element inside it, or an HTML element directly inside foreign content
+ * would come back as something else — an SVG-namespace `<meta>` or `<link>`,
+ * inert in the client DOM and so never judged by the HTML contextual rules,
+ * would become a live HTML one.
+ */
+function fitsParseContext(ns: string | null, lowerName: string, element: Element, context: ParseContext): boolean {
+  if (ns === SVG_NS) {
+    if (context === ParseContext.Svg) return !isBreakout(lowerName, element);
+    return lowerName === "svg" && (context === ParseContext.Html || context === ParseContext.Annotation);
+  }
+  if (ns === MATHML_NS) {
+    if (context === ParseContext.Math || context === ParseContext.Annotation) return !isBreakout(lowerName, element);
+    return lowerName === "math" && context === ParseContext.Html;
+  }
+  return context === ParseContext.Html;
+}
+
+/** The parser's context for the children of an element it rebuilt. */
+function childParseContext(ns: string | null, lowerName: string, element: Element): ParseContext {
+  if (ns === SVG_NS) {
+    // HTML integration points.
+    return lowerName === "foreignobject" || lowerName === "desc" || lowerName === "title"
+      ? ParseContext.Html
+      : ParseContext.Svg;
+  }
+  if (ns === MATHML_NS) {
+    // MathML text integration points read HTML start tags as HTML.
+    if (lowerName === "mi" || lowerName === "mo" || lowerName === "mn" || lowerName === "ms" || lowerName === "mtext") {
+      return ParseContext.Html;
+    }
+    if (lowerName === "annotation-xml") {
+      const encoding = (element.getAttribute("encoding") ?? "").toLowerCase();
+      return encoding === "text/html" || encoding === "application/xhtml+xml"
+        ? ParseContext.Html
+        : ParseContext.Annotation;
+    }
+    return ParseContext.Math;
+  }
+  return ParseContext.Html;
+}
+
+/**
+ * The name a foreign element's attribute must be written with for the HTML
+ * parser to rebuild it in the same namespace.
+ *
+ * In foreign content the parser maps exactly three prefixes back to their
+ * namespaces (`xlink:`, `xml:`, `xmlns:`) and adjusts the case of the known
+ * camelCase names (`viewBox`), so the qualified name is written as is — except
+ * when `setAttributeNS` created the attribute without a prefix, where the
+ * qualified name is just `href` and would come back in no namespace at all.
+ */
+function foreignAttrName(attr: Attr): string {
+  const ns = attr.namespaceURI;
+  if (ns === XLINK_NS) return `xlink:${attr.localName}`;
+  if (ns === XML_NS) return `xml:${attr.localName}`;
+  if (ns === XMLNS_NS) return attr.localName === "xmlns" ? "xmlns" : `xmlns:${attr.localName}`;
+  return attr.name;
+}
+
 /**
  * Serialize an element's open tag — `<tag attr="…" …` without the closing `>`
  * — or return `null` when the element must not be emitted at all.
@@ -198,30 +353,57 @@ function getAttributeOf(el: Element, name: string): string | null {
  *     framework's writers can never reach this state; DOM built any other way
  *     (application code, a third-party library) could, and rendering target is
  *     not a security boundary.
+ *   - on a `foreign` (SVG / MathML) element, names keep their case and their
+ *     namespace prefix, and an SVG animation may not target a URL or handler
+ *     attribute — its `attributeName` is omitted, as the client writers omit it.
+ *   - an `<iframe>` built by `embed()` is re-judged against what `embed()`
+ *     wrote (`embedSerializedAttribute`): only the attributes it writes (plus
+ *     `id`, `class`, `style`, `width`, `height`, `data-*`, `aria-*`) are
+ *     served, `src` must match the allowlist the frame was built under,
+ *     `sandbox` / `allow` can only be narrower than what it wrote,
+ *     `allowfullscreen` follows the served `allow`, and a frame without a
+ *     non-blank `title` is not served — so a frame changed behind the
+ *     framework's back is never served wider than `embed()` built it.
  */
-function serializeOpenTag(element: HTMLElement, tag: string): string | null {
+function serializeOpenTag(element: Element, tag: string, foreign: boolean): string | null {
   let html = `<${tag}`;
   // Collected only for `<meta>`, and keyed by the emitted RAW names so the
   // shared policy can reject duplicate case-insensitive spellings itself.
-  const meta = tag === "meta" ? new Map<string, string>() : null;
+  const meta = tag === "meta" && !foreign ? new Map<string, string>() : null;
+  const embed = tag === "iframe" && !foreign ? getEmbedRecord(element) : undefined;
+  const embedSeen: EmbedSerialization | null = embed
+    ? { sandbox: false, referrer: false, title: false, fullscreen: false }
+    : null;
 
   const attrs = attributesOf(element);
   for (let i = 0; i < attrs.length; i++) {
     const attr = attrs[i];
-    const rawName = attr.name;
+    const rawName = foreign ? foreignAttrName(attr) : attr.name;
     if (!isSafeAttrName(rawName)) continue;
     if (isEventHandlerAttr(rawName)) continue;
     if (isForbiddenSsrAttr(rawName)) continue;
 
     // The shared "commit or omit" authority — `null` drops the attribute.
-    const value = resolveAttributeValue(rawName.toLowerCase(), attr.value);
+    const lowerName = rawName.toLowerCase();
+    let value = resolveAttributeValue(lowerName, attr.value);
     if (value === null) continue;
+    if (foreign && isRefusedAnimationAttribute(element, rawName, value)) continue;
+    if (embed && embedSeen) {
+      value = embedSerializedAttribute(embed, embedSeen, lowerName, value);
+      if (value === null) continue;
+    }
 
     meta?.set(rawName, value);
     html += ` ${rawName}="${escapeAttr(value)}"`;
   }
 
   if (meta && isForbiddenMetaSnapshot(meta)) return null;
+
+  if (embed && embedSeen) {
+    const tail = embedSerializationTail(embed, embedSeen);
+    if (tail === null) return null;
+    html += tail;
+  }
 
   // The SSR provenance marker. `dataset.sibuHydrate` was read through the
   // clobberable `dataset` property; the attribute it reflects is read directly.
@@ -232,22 +414,97 @@ function serializeOpenTag(element: HTMLElement, tag: string): string | null {
   return html;
 }
 
+/** An element that is emitted with children: its open tag, close tag, the children to walk and their context. */
+interface ElementFrame {
+  open: string;
+  close: string;
+  children: ChildNode[];
+  context: ParseContext;
+}
+
+/**
+ * Serialize one node's own markup, shared by `renderToString` and
+ * `renderToStream` so the two documented render paths cannot drift.
+ *
+ * Returns the complete markup for anything with nothing beneath it to walk
+ * (text, a comment, a void or empty foreign element, a stripped element), or
+ * the frame of an element whose children the caller serializes.
+ *
+ * HTML elements are emitted with lower-cased tag names and the HTML void rules.
+ * SVG and MathML elements are emitted by local name with their case intact
+ * (`linearGradient`, `foreignObject`), and an empty one self-closes
+ * (`<path … />`), which the HTML parser honours in foreign content. Any other
+ * node is emitted as its escaped text.
+ *
+ * An element the parser would rebuild in another namespace in `context` is
+ * stripped with its subtree (see {@link fitsParseContext}).
+ */
+function serializeNode(node: Node, context: ParseContext): string | ElementFrame {
+  if (node.nodeType === 3) return escapeHtml(node.textContent || "");
+  // Comment node — escape every comment-terminator form.
+  if (node.nodeType === 8) return `<!--${safeCommentText(node.textContent || "")}-->`;
+
+  let foreign = false;
+  if (!(node instanceof HTMLElement)) {
+    const ns = node.nodeType === 1 ? (node as Element).namespaceURI : null;
+    if (ns !== SVG_NS && ns !== MATHML_NS) return escapeHtml(node.textContent || "");
+    foreign = true;
+  }
+  const element = node as Element;
+  // A foreign element's `localName` drops any prefix (`svg:path`) the HTML
+  // parser would not understand, and SVG / MathML elements have no named
+  // properties that could shadow it.
+  const tag = foreign ? element.localName : tagNameOf(element).toLowerCase();
+
+  // Never serialize code-text elements — their contents bypass HTML
+  // escaping and would execute if injected data is present. Scripts and
+  // styles must be added via `renderToDocument`'s dedicated options. SVG has
+  // both elements too; the check is case-insensitive.
+  if (isCodeTextElement(tag)) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
+
+  // Defense-in-depth: reject tags with unexpected characters.
+  if (!/^[a-z][a-z0-9-]*$/i.test(tag)) return DEV ? "<!--ssr:invalid-tag-->" : "";
+
+  const ns = foreign ? element.namespaceURI : null;
+  const lowerName = tag.toLowerCase();
+  if (!fitsParseContext(ns, lowerName, element, context)) return DEV ? `<!--ssr:${tag}-misplaced-->` : "";
+
+  const openTag = serializeOpenTag(element, tag, foreign);
+  if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
+
+  const children = childNodesOf(element);
+  if (foreign ? children.length === 0 : VOID_ELEMENTS.has(tag)) return `${openTag} />`;
+  return {
+    open: `${openTag}>`,
+    close: `</${tag}>`,
+    children: Array.from(children),
+    context: childParseContext(ns, lowerName, element),
+  };
+}
+
 // ─── renderToString ─────────────────────────────────────────────────────────
 
 /**
- * Converts an HTMLElement tree to an HTML string for server-side rendering.
+ * Converts an element tree to an HTML string for server-side rendering.
+ * HTML, SVG and MathML elements are serialized; SVG and MathML keep the case
+ * of their tag and attribute names and their `xlink:` / `xml:` prefixes.
  *
  * Security: attribute names are validated, `on*` handlers are dropped,
- * URL-bearing attributes are routed through `sanitizeUrl`, and attribute
- * values are escaped against both `"` and `'`. `<script>` and `<style>`
- * tags are stripped from the serialized output.
+ * URL-bearing attributes are routed through `sanitizeUrl`, attribute
+ * values are escaped against both `"` and `'`, and an SVG animation may not
+ * target a URL or handler attribute. `<script>` and `<style>` tags are
+ * stripped from the serialized output.
  */
 export function renderToString(element: HTMLElement | DocumentFragment | Node): string {
+  return renderNodeToString(element, ParseContext.Html);
+}
+
+function renderNodeToString(element: Node, context: ParseContext): string {
   if (element instanceof DocumentFragment) {
     return Array.from(element.childNodes)
       .map((child) => {
         try {
-          return renderToString(child);
+          return renderNodeToString(child, context);
         } catch (err) {
           return ssrErrorComment(err);
         }
@@ -255,54 +512,18 @@ export function renderToString(element: HTMLElement | DocumentFragment | Node): 
       .join("");
   }
 
-  if (element.nodeType === 3) {
-    // Text node
-    return escapeHtml(element.textContent || "");
-  }
+  const frame = serializeNode(element, context);
+  if (typeof frame === "string") return frame;
 
-  if (element.nodeType === 8) {
-    // Comment node — escape every comment-terminator form.
-    return `<!--${safeCommentText(element.textContent || "")}-->`;
-  }
-
-  if (!(element instanceof HTMLElement)) {
-    return escapeHtml(element.textContent || "");
-  }
-
-  const tag = tagNameOf(element).toLowerCase();
-
-  // Never serialize code-text elements — their contents bypass HTML
-  // escaping and would execute if injected data is present. Scripts and
-  // styles must be added via `renderToDocument`'s dedicated options.
-  if (isCodeTextElement(tag)) {
-    return DEV ? `<!--ssr:${tag}-stripped-->` : "";
-  }
-
-  // Defense-in-depth: reject tags with unexpected characters.
-  if (!/^[a-z][a-z0-9-]*$/i.test(tag)) {
-    return DEV ? "<!--ssr:invalid-tag-->" : "";
-  }
-
-  const openTag = serializeOpenTag(element, tag);
-  if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
-  let html = openTag;
-
-  if (VOID_ELEMENTS.has(tag)) {
-    return `${html} />`;
-  }
-
-  html += ">";
-
-  for (const child of Array.from(childNodesOf(element))) {
+  let html = frame.open;
+  for (const child of frame.children) {
     try {
-      html += renderToString(child);
+      html += renderNodeToString(child, frame.context);
     } catch (err) {
       html += ssrErrorComment(err);
     }
   }
-
-  html += `</${tag}>`;
-  return html;
+  return html + frame.close;
 }
 
 // ─── hydrate ────────────────────────────────────────────────────────────────
@@ -693,11 +914,15 @@ export function renderToDocument(
  *
  * Same security posture as `renderToString`.
  */
-export async function* renderToStream(element: HTMLElement | DocumentFragment | Node): AsyncGenerator<string> {
+export function renderToStream(element: HTMLElement | DocumentFragment | Node): AsyncGenerator<string> {
+  return streamNode(element, ParseContext.Html);
+}
+
+async function* streamNode(element: Node, context: ParseContext): AsyncGenerator<string> {
   if (element instanceof DocumentFragment) {
     for (const child of Array.from(element.childNodes)) {
       try {
-        yield* renderToStream(child);
+        yield* streamNode(child, context);
       } catch (err) {
         yield ssrErrorComment(err);
       }
@@ -705,60 +930,29 @@ export async function* renderToStream(element: HTMLElement | DocumentFragment | 
     return;
   }
 
-  if (element.nodeType === 3) {
-    yield escapeHtml(element.textContent || "");
+  // The SAME node serializer `renderToString` uses — attribute policy,
+  // meta-refresh verdict, foreign-content rules and the SSR provenance marker
+  // included. The two documented render paths used to carry two copies of this
+  // logic, which is the shape that lets them drift; someone streaming in
+  // production while snapshotting with renderToString in tests would never see
+  // the difference.
+  const frame = serializeNode(element, context);
+  if (typeof frame === "string") {
+    if (frame) yield frame;
     return;
   }
 
-  if (element.nodeType === 8) {
-    yield `<!--${safeCommentText(element.textContent || "")}-->`;
-    return;
-  }
+  yield frame.open;
 
-  if (!(element instanceof HTMLElement)) {
-    yield escapeHtml(element.textContent || "");
-    return;
-  }
-
-  const tag = tagNameOf(element).toLowerCase();
-
-  if (isCodeTextElement(tag)) {
-    if (DEV) yield `<!--ssr:${tag}-stripped-->`;
-    return;
-  }
-
-  if (!/^[a-z][a-z0-9-]*$/i.test(tag)) {
-    if (DEV) yield "<!--ssr:invalid-tag-->";
-    return;
-  }
-
-  // The SAME open-tag serializer `renderToString` uses — attribute policy,
-  // meta-refresh verdict and the SSR provenance marker included. The two
-  // documented render paths used to carry two copies of this loop, which is
-  // the shape that lets them drift; someone streaming in production while
-  // snapshotting with renderToString in tests would never see the difference.
-  const openTag = serializeOpenTag(element, tag);
-  if (openTag === null) {
-    if (DEV) yield `<!--ssr:${tag}-stripped-->`;
-    return;
-  }
-
-  if (VOID_ELEMENTS.has(tag)) {
-    yield `${openTag} />`;
-    return;
-  }
-
-  yield `${openTag}>`;
-
-  for (const child of Array.from(childNodesOf(element))) {
+  for (const child of frame.children) {
     try {
-      yield* renderToStream(child);
+      yield* streamNode(child, frame.context);
     } catch (err) {
       yield ssrErrorComment(err);
     }
   }
 
-  yield `</${tag}>`;
+  yield frame.close;
 }
 
 /**

@@ -42,6 +42,9 @@ render, not as work-sharing between server and client.** If your reason for
 adopting SSR is SEO, first-contentful-paint, or link previews, this delivers it.
 If your reason is to avoid re-rendering on the client, it does not.
 
+An opt-in adopting strategy that binds to the server nodes instead is designed
+but not implemented; see [hydration-adopt.md](./hydration-adopt.md).
+
 ## Mismatch policy
 
 Because the client tree always wins, every mismatch has the same deterministic

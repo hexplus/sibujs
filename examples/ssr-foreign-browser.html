@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS SSR foreign content — browser fixture</title>
+  </head>
+  <body>
+    <script type="module">
+      import { div, svg, path, g, linearGradient, stop, use } from "../dist/index.js";
+      import { renderToString } from "../dist/ssr.js";
+
+      const SVG = "http://www.w3.org/2000/svg";
+      const MATH = "http://www.w3.org/1998/Math/MathML";
+      const HTML = "http://www.w3.org/1999/xhtml";
+      const XLINK = "http://www.w3.org/1999/xlink";
+      const XMLNS = "http://www.w3.org/2000/xmlns/";
+      const XML = "http://www.w3.org/XML/1998/namespace";
+
+      const el = (ns, name, attrs = {}, children = []) => {
+        const node = document.createElementNS(ns, name);
+        for (const [k, v] of Object.entries(attrs)) {
+          if (k === "xlink:href") node.setAttributeNS(XLINK, k, v);
+          else if (k.startsWith("xml:")) node.setAttributeNS(XML, k, v);
+          else if (k.startsWith("xmlns:")) node.setAttributeNS(XMLNS, k, v);
+          else node.setAttribute(k, v);
+        }
+        for (const c of children) node.append(c);
+        return node;
+      };
+
+      const shape = (node) => {
+        if (node.nodeType === 3) return node.nodeValue;
+        if (node.nodeType !== 1) return null;
+        return {
+          ns: node.namespaceURI,
+          name: node.localName,
+          attrs: Array.from(node.attributes)
+            .filter((a) => a.name !== "data-sibu-ssr")
+            .map((a) => `${a.namespaceURI ?? ""}|${a.localName}=${a.value}`)
+            .sort(),
+          children: Array.from(node.childNodes).map(shape).filter((c) => c !== null),
+        };
+      };
+
+      const parseBody = (markup) => new DOMParser().parseFromString(`<!doctype html><body>${markup}`, "text/html").body;
+
+      const valid = {
+        icon: () =>
+          div({ class: "icon" }, [
+            svg({ viewBox: "0 0 24 24", preserveAspectRatio: "xMidYMid meet" }, [
+              linearGradient({ id: "g1", gradientUnits: "userSpaceOnUse" }, [stop({ offset: "0" })]),
+              g({ "stroke-linecap": "round" }, [g([path({ d: "M4 12h16" })])]),
+              use({ href: "#g1" }),
+            ]),
+          ]),
+        xlinkAndXmlns: () =>
+          div([
+            el(SVG, "svg", { "xmlns:xlink": XLINK }, [
+              el(SVG, "use", { "xlink:href": "#a" }),
+              el(SVG, "text", { "xml:space": "preserve" }, ["a < b & c"]),
+            ]),
+          ]),
+        foreignObject: () =>
+          div([
+            el(SVG, "svg", {}, [
+              el(SVG, "foreignObject", { width: "10", height: "10" }, [
+                el(HTML, "div", {}, [
+                  el(HTML, "p", {}, ["html in svg"]),
+                  el(SVG, "svg", {}, [el(SVG, "circle", { r: "1" })]),
+                  el(MATH, "math", {}, [el(MATH, "mi", {}, ["x"])]),
+                ]),
+              ]),
+              el(SVG, "desc", {}, [el(HTML, "b", {}, ["bold desc"])]),
+              el(SVG, "title", {}, ["t"]),
+            ]),
+          ]),
+        mathml: () =>
+          div([
+            el(MATH, "math", { display: "block" }, [
+              el(MATH, "mrow", {}, [
+                el(MATH, "mi", {}, [el(HTML, "span", {}, ["in mi"])]),
+                el(MATH, "mo", {}, ["+"]),
+                el(MATH, "mtext", {}, [el(HTML, "em", {}, ["text"])]),
+                el(MATH, "mspace", { width: "1em" }),
+              ]),
+              el(MATH, "semantics", {}, [
+                el(MATH, "mn", {}, ["1"]),
+                el(MATH, "annotation-xml", { encoding: "text/html" }, [el(HTML, "div", {}, ["html annotation"])]),
+                el(MATH, "annotation-xml", { encoding: "SVG1.1" }, [el(SVG, "svg", {}, [el(SVG, "rect", { width: "1" })])]),
+              ]),
+            ]),
+          ]),
+      };
+
+      const hostile = () => {
+        const root = el(SVG, "svg", {}, [
+          el(SVG, "p"),
+          el(SVG, "meta", { "http-equiv": "refresh", content: "0;url=https://evil.example/" }),
+          el(SVG, "link", { rel: "stylesheet", href: "https://evil.example/x.css" }),
+          el(HTML, "div", {}, ["html directly in svg"]),
+          el(SVG, "circle", { r: "2" }),
+        ]);
+        return div([
+          root,
+          el(SVG, "link", { rel: "stylesheet", href: "https://evil.example/top.css" }),
+          el(SVG, "base", { href: "https://evil.example/" }),
+        ]);
+      };
+
+      window.__t = {
+        roundTrip(name) {
+          const tree = valid[name]();
+          const parsed = parseBody(renderToString(tree)).firstElementChild;
+          return { source: shape(tree), parsed: shape(parsed) };
+        },
+        hostile() {
+          const body = parseBody(renderToString(hostile()));
+          const htmlNamed = Array.from(body.querySelectorAll("*"))
+            .filter((e) => e.namespaceURI === HTML && ["meta", "link", "base", "p"].includes(e.localName))
+            .map((e) => e.localName);
+          const circle = body.querySelector("circle");
+          return {
+            htmlNamed,
+            evil: body.innerHTML.includes("evil.example") && Array.from(body.querySelectorAll("[href]")).some((e) => e.namespaceURI === HTML),
+            circleNs: circle ? circle.namespaceURI : null,
+            svgLinkNs: body.querySelector("svg > link")?.namespaceURI ?? null,
+          };
+        },
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>
