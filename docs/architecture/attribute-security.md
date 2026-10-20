@@ -650,6 +650,30 @@ elements whose contents are a program (`<script>`, `<style>`) are likewise one
 predicate, `isCodeTextElement()`, shared by `html\`\``'s interpolation refusal
 and the SSR serializer's stripping.
 
+### `embed()`: the one runtime door to an iframe (4.12)
+
+`embed()` in `sibujs/ui` builds a third-party player frame without lifting the
+`iframe` block anywhere else. Its policy lives in `utils/embedPolicy.ts`, and
+nothing in the core imports it:
+
+- `src` must be absolute `https:`, carry no credentials, differ from the page's
+  own origin, and match an entry of `setEmbedPolicy({ allowedOrigins })` — an
+  origin, optionally with a path prefix. The check runs on the parsed URL and
+  the frame gets that URL's `href`, so `/embed/../watch` is judged as `/watch`.
+  A getter `src` is re-checked on every change; a refused value removes `src`.
+  The default policy allows nothing.
+- `sandbox` defaults to `allow-scripts allow-same-origin allow-presentation
+  allow-popups allow-popups-to-escape-sandbox` and is written before `src`.
+  `allow-scripts` with `allow-same-origin` would let a same-origin document
+  remove its own sandbox, which is why the page's own origin is refused. A
+  caller may only drop tokens. `allow` is narrowed to player features,
+  `referrerpolicy` to values at least as strict as
+  `strict-origin-when-cross-origin`. `srcdoc` is never written.
+- The SSR serializer recognises a frame `embed()` built and re-applies the
+  same rules to it, so a frame changed after construction is not served with
+  a wider policy than `embed()` gave it. Other iframes (static `html` source,
+  raw DOM) are serialized as before.
+
 ## Explicit design decisions
 
 ### Static inline event handlers stay trusted

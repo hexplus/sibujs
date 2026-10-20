@@ -31,6 +31,12 @@ import { DEV } from "../core/dev";
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
 import { getSSRStore } from "../core/ssr-context";
 import { isCodeTextElement, isForbiddenMetaSnapshot, isRefusedAnimationAttribute } from "../utils/elementPolicy";
+import {
+  DEFAULT_EMBED_REFERRER_POLICY,
+  DEFAULT_EMBED_SANDBOX,
+  embedAttributeValue,
+  isEmbedFrame,
+} from "../utils/embedPolicy";
 import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { isForbiddenMetaEntry } from "../utils/metaRefresh";
@@ -227,12 +233,21 @@ function foreignAttrName(attr: Attr): string {
  *   - on a `foreign` (SVG / MathML) element, names keep their case and their
  *     namespace prefix, and an SVG animation may not target a URL or handler
  *     attribute — its `attributeName` is omitted, as the client writers omit it.
+ *   - an `<iframe>` built by `embed()` is re-judged by the embed policy: its
+ *     `src` must still be allowlisted, `sandbox` / `allow` /
+ *     `referrerpolicy` can only be narrower than the defaults, and a missing
+ *     `sandbox` or `referrerpolicy` is written with the default — so a frame
+ *     changed behind the framework's back is not served wider than `embed()`
+ *     built it.
  */
 function serializeOpenTag(element: Element, tag: string, foreign: boolean): string | null {
   let html = `<${tag}`;
   // Collected only for `<meta>`, and keyed by the emitted RAW names so the
   // shared policy can reject duplicate case-insensitive spellings itself.
   const meta = tag === "meta" && !foreign ? new Map<string, string>() : null;
+  const embedFrame = tag === "iframe" && !foreign && isEmbedFrame(element);
+  let sandboxed = false;
+  let referrer = false;
 
   const attrs = attributesOf(element);
   for (let i = 0; i < attrs.length; i++) {
@@ -243,15 +258,27 @@ function serializeOpenTag(element: Element, tag: string, foreign: boolean): stri
     if (isForbiddenSsrAttr(rawName)) continue;
 
     // The shared "commit or omit" authority — `null` drops the attribute.
-    const value = resolveAttributeValue(rawName.toLowerCase(), attr.value);
+    const lowerName = rawName.toLowerCase();
+    let value = resolveAttributeValue(lowerName, attr.value);
     if (value === null) continue;
     if (foreign && isRefusedAnimationAttribute(element, rawName, value)) continue;
+    if (embedFrame) {
+      value = embedAttributeValue(lowerName, value);
+      if (value === null) continue;
+      if (lowerName === "sandbox") sandboxed = true;
+      else if (lowerName === "referrerpolicy") referrer = true;
+    }
 
     meta?.set(rawName, value);
     html += ` ${rawName}="${escapeAttr(value)}"`;
   }
 
   if (meta && isForbiddenMetaSnapshot(meta)) return null;
+
+  if (embedFrame) {
+    if (!sandboxed) html += ` sandbox="${DEFAULT_EMBED_SANDBOX.join(" ")}"`;
+    if (!referrer) html += ` referrerpolicy="${DEFAULT_EMBED_REFERRER_POLICY}"`;
+  }
 
   // The SSR provenance marker. `dataset.sibuHydrate` was read through the
   // clobberable `dataset` property; the attribute it reflects is read directly.

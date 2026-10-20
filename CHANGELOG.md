@@ -46,6 +46,32 @@ documentation states the requirement and shows the happy-dom and jsdom setup,
 and that `when` / `match` / `each` render their first branch in a microtask,
 so a server awaits one before serializing.
 
+### Added — `embed()` and `setEmbedPolicy()` for third-party players
+
+The tag factories, `svgElement()` and `DOMPool` refuse `iframe`, so a page
+could not embed a YouTube or Vimeo player without bypassing the framework.
+`embed()` (from `sibujs/ui`) is a narrow, opt-in door:
+
+```ts
+import { embed, setEmbedPolicy } from "sibujs/ui";
+setEmbedPolicy({ allowedOrigins: ["https://www.youtube-nocookie.com/embed/"] });
+embed({ src: `https://www.youtube-nocookie.com/embed/${id}`, title: "Product tour", aspectRatio: "16 / 9" });
+```
+
+- `src` must be absolute `https:` and match an allowlisted origin and path
+  prefix; anything else — including a getter's value — is omitted with a
+  development warning. `javascript:`, `data:`, `blob:`, relative URLs and the
+  page's own origin never match. The default policy allows nothing.
+- `title` is required; `srcdoc` is never written.
+- Defaults: `loading="lazy"`, `referrerpolicy="strict-origin-when-cross-origin"`,
+  `sandbox` = `DEFAULT_EMBED_SANDBOX` (`allow-scripts allow-same-origin
+  allow-presentation allow-popups allow-popups-to-escape-sandbox`), and `allow`
+  limited to player features. `sandbox`, `referrerpolicy` and `allow` can only
+  be narrowed.
+- `renderToString()` serializes an `embed()` frame under the same policy.
+
+Plain `iframe` stays refused by every runtime element factory.
+
 ### Fixed — hash-mode navigation wrote the route into the pathname
 
 With `createRouter(routes, { mode: "hash" })`, `navigate("/editor/123")` set the
