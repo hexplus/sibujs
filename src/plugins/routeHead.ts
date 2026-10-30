@@ -283,7 +283,11 @@ export function resolveRouteHead(route: RouteContext, defaults?: RouterHeadOptio
     const plan =
       tag === "meta" ? planMetaEntry(attrs, STATIC_VALUE_RESOLVER) : planHeadElementEntry(attrs, STATIC_VALUE_RESOLVER);
     if (plan.kind === "drop") return;
-    tags.push({ key, tag, attrs: Object.fromEntries(plan.attributes) });
+    const planned = Object.fromEntries(plan.attributes);
+    // A link whose URL the policy refused describes nothing; drop it rather
+    // than publish `<link rel="canonical">` with no href.
+    if (tag === "link" && !planned.href) return;
+    tags.push({ key, tag, attrs: planned });
   };
 
   if (description !== null) push("meta:name:description", "meta", { name: "description", content: description });

@@ -1,13 +1,16 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { getRequestStore } from "../core/ssr-context";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
 import {
   type HeadValueResolver,
   planHeadElementEntry,
   planMetaEntry,
   STATIC_VALUE_RESOLVER as STATIC_HEAD_RESOLVER,
+  serializeHeadEntry,
 } from "../utils/headEntry";
 import { sanitizeUrl } from "../utils/sanitize";
+import { recordServerHead, type ServerHeadLayer } from "./serverHead";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
@@ -239,8 +242,48 @@ interface HeadProps {
  * Supports dynamic title, meta tags, link tags, and structured data.
  * Each instance tracks its own elements and effects for independent cleanup.
  */
+/** Dedup key of a head entry, shared with the router's route head (`meta:name:description`). */
+function headEntryKey(tag: "meta" | "link", attrs: Record<string, string>): string {
+  const lower = (v: string | undefined) => (v ?? "").toLowerCase();
+  if (tag === "meta") {
+    if (attrs.name) return `meta:name:${lower(attrs.name)}`;
+    if (attrs.property) return `meta:property:${lower(attrs.property)}`;
+    if (attrs["http-equiv"]) return `meta:http-equiv:${lower(attrs["http-equiv"])}`;
+    return `meta:${JSON.stringify(attrs)}`;
+  }
+  const rel = lower(attrs.rel);
+  if (rel === "canonical") return "link:rel:canonical";
+  if (rel === "alternate" && attrs.hreflang) return `link:hreflang:${lower(attrs.hreflang)}`;
+  return `link:${rel}:${attrs.href ?? ""}`;
+}
+
+/**
+ * During a server render, `Head()` records its title, meta and link entries in
+ * the request (returned as `result.head`) instead of writing into a document
+ * every concurrent request shares. Getters are read once. External `script`
+ * and `base` entries are browser-side trust decisions and are not emitted on
+ * the server; they apply when the component renders in the browser.
+ */
+function recordHeadForServer(props: HeadProps): boolean {
+  const read = (v: string | (() => string)): string => (typeof v === "function" ? v() : v);
+  const layer: ServerHeadLayer = { tags: [] };
+  if (props.title != null) layer.title = read(props.title);
+  for (const entry of props.meta ?? []) {
+    const attrs: Record<string, string> = {};
+    for (const [name, v] of Object.entries(entry)) attrs[name] = read(v);
+    const html = serializeHeadEntry("meta", attrs);
+    if (html) layer.tags.push({ key: headEntryKey("meta", attrs), html });
+  }
+  for (const attrs of props.link ?? []) {
+    const html = serializeHeadEntry("link", attrs);
+    if (html) layer.tags.push({ key: headEntryKey("link", attrs), html });
+  }
+  return recordServerHead(layer);
+}
+
 export function Head(props: HeadProps): Comment {
   const anchor = document.createComment("sibu-head");
+  if (getRequestStore()?.ssr && recordHeadForServer(props)) return anchor;
   const managedElements: HTMLElement[] = [];
   const effectCleanups: Array<() => void> = [];
 
