@@ -515,7 +515,22 @@ function findDescriptor(proto: object | null, key: string): PropertyDescriptor |
   return undefined;
 }
 
-const macrotask = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+/**
+ * One macrotask turn (every microtask queued before it has run). A
+ * `MessageChannel` message where there is one: `setTimeout(0)` is clamped to
+ * 1–4 ms, which would dominate a fast adoption.
+ */
+const macrotask = (): Promise<void> =>
+  new Promise((resolve) => {
+    if (typeof MessageChannel === "function") {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    } else setTimeout(resolve, 0);
+  });
 
 /**
  * Adopt server markup: build `component()` on the existing nodes of

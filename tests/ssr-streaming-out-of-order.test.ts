@@ -41,8 +41,8 @@ function Page() {
       const q = query("/api/title", () => delay(1, "Shop"));
       return q.data() ?? "";
     }),
-    Slow("slow", 150),
-    Slow("fast", 50),
+    Slow("slow", 600),
+    Slow("fast", 250),
   ]);
 }
 
@@ -93,7 +93,8 @@ describe("renderToReadableStream(() => App()) — out-of-order Suspense", () => 
   });
 
   it("streams a lazy() component inside a boundary when its chunk arrives", async () => {
-    const Chart = lazy(() => delay(20, { default: () => div({ class: "chart" }, "chart drawn") }));
+    // Long enough that a loaded machine still flushes the shell first.
+    const Chart = lazy(() => delay(250, { default: () => div({ class: "chart" }, "chart drawn") }));
     const chunks = await readAll(
       renderToReadableStream(
         () => section([p("intro"), Suspense({ nodes: () => Chart(), fallback: () => p("loading chart") })]),

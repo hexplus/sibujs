@@ -47,6 +47,7 @@
     "bench": "node bench.mjs",
     "bench:islands-dx": "node bench/islands-dx.mjs",
     "bench:islands-size": "node bench/islands-size.mjs",
+    "bench:ssr": "node --expose-gc bench/ssr-dom.mjs 1000 && node bench/ssr-takeover.mjs 200",
     "bench:save": "node bench.mjs --save",
     "bench:check": "node bench.mjs --compare",
     "publish:npm": "node publish.mjs",
