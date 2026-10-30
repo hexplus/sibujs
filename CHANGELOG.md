@@ -6,6 +6,26 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.13.1] — 2026-10-30
+
+### Upgrade notes
+
+- No runtime or API changes. The published code is the same as 4.13.0 apart
+  from the version it reports, so upgrading is optional.
+
+### Tests — the pre-renderer's unread-body check no longer depends on machine speed
+
+The test proving that a response body nobody reads (here, one that never ends)
+does not hold a pre-rendered route asserted a wall-clock bound on the route's
+render time. That time includes starting the render worker and loading jsdom,
+so on a loaded machine it exceeded the bound while the pre-renderer behaved
+correctly. The test now relies on the worker's settle timeout, which is
+counted from when the app has loaded. A control route that does read the
+endless body must fail the run with `did not settle`, which shows that the
+passing case really means the body was not waited on.
+
+---
+
 ## [4.13.0] — 2026-10-29
 
 ### Upgrade notes
