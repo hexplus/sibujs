@@ -467,6 +467,9 @@ interface WorkerInput {
   settle: number;
 }
 
+/** How long a render worker may take to start and load the app before the route fails. */
+const STARTUP_TIMEOUT = 60_000;
+
 async function renderInWorker(workerFile: string, input: WorkerInput): Promise<string> {
   const { Worker } = await import("node:worker_threads");
   return new Promise<string>((resolve, reject) => {
@@ -479,13 +482,19 @@ async function renderInWorker(workerFile: string, input: WorkerInput): Promise<s
       // The app may leave timers or sockets running; the page is captured.
       void worker.terminate();
     };
-    // Backstop in case the worker cannot even report its own timeout.
-    const timer = setTimeout(
-      () => finish(() => reject(new Error(`[sibu prerender] ${input.route}: worker did not respond`))),
-      input.timeout + 5_000,
-    );
-    worker.once("message", (msg: { html?: string; error?: string }) => {
+    // Backstops in case the worker cannot even report its own timeout. The
+    // worker counts `timeout` from when the app has loaded, so the backstop
+    // does too: starting a thread, jsdom and the app can take seconds on a
+    // loaded machine, and that must not fail a route that renders in time.
+    const backstop = (ms: number, what: string) =>
+      setTimeout(() => finish(() => reject(new Error(`[sibu prerender] ${input.route}: ${what}`))), ms);
+    let timer = backstop(Math.max(STARTUP_TIMEOUT, input.timeout + 5_000), "worker did not load the app");
+    worker.on("message", (msg: { loaded?: boolean; html?: string; error?: string }) => {
       clearTimeout(timer);
+      if (msg.loaded) {
+        timer = backstop(input.timeout + 5_000, "worker did not respond");
+        return;
+      }
       if (typeof msg.html === "string") finish(() => resolve(msg.html as string));
       else finish(() => reject(new Error(`[sibu prerender] ${input.route}: ${msg.error}`)));
     });
@@ -603,6 +612,8 @@ try {
   process.on("unhandledRejection", (reason) => errors.push(reason));
 
   await import(entryUrl);
+  // The route's timeout starts now; the parent's backstop restarts with it.
+  parentPort.postMessage({ loaded: true });
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const started = Date.now();
