@@ -57,6 +57,7 @@ const scenarios = {
     fetch("/broken").then((r) => r.text()).then(() => show("unexpected"), () => show("failed-handled")),
   "/unused-body": () => fetch("/endless").then((r) => show("headers:" + r.status)),
   "/unhandled-failure": () => fetch("/broken").then((r) => r.text()).then(show),
+  "/read-endless": () => fetch("/endless").then((r) => r.text()).then(show),
 };
 scenarios[location.pathname]?.();
 `;
@@ -110,7 +111,7 @@ afterAll(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
-async function run(routes: string[], outName: string) {
+async function run(routes: string[], outName: string, timeout = 4_000) {
   const outDir = join(root, outName);
   await mkdir(outDir, { recursive: true });
   await writeFile(
@@ -119,7 +120,7 @@ async function run(routes: string[], outName: string) {
   );
   const results = await prerender(
     // Default settle (50 ms) on purpose; the timeout only bounds a hang.
-    { routes, origin, entry: "main.js", timeout: 4_000, shell: false },
+    { routes, origin, entry: "main.js", timeout, shell: false },
     { root, outDir, configFile: false, mode: "production" },
   );
   const page = async (route: string) => {
@@ -163,15 +164,23 @@ describe("prerender waits for consumed response bodies", () => {
   });
 
   it("an unread body (here, one that never ends) does not hold the page", async () => {
+    // Had the endless body been waited for, the worker's settle timeout would
+    // have failed the whole run in beforeAll (the control below shows that
+    // READING it does). No wall-clock assertion: render time includes worker
+    // start-up, which a loaded machine can stretch past any fixed bound.
     expect(await out.page("/unused-body")).toBe("headers:200");
-    // Had the body been waited for, the route would have hit the 4 s timeout
-    // and failed the run; its own render time shows it was not even close.
-    const route = out.results.find((r) => r.route === "/unused-body");
-    expect(route?.ms).toBeLessThan(4_000);
   });
 });
 
 describe("prerender error handling for body reads", () => {
+  it("control: a body read that never completes holds the route until the settle timeout", async () => {
+    // The worker's timeout is counted from when the app has loaded, so this is
+    // independent of how long the worker took to start.
+    await expect(run(["/read-endless"], "out-endless", 1_500)).rejects.toThrow(
+      /read-endless: .*did not settle within 1500 ms \(1 pending/,
+    );
+  }, 60_000);
+
   it("a body read that rejects with no handler fails the route", async () => {
     const error = await run(["/unhandled-failure"], "out-unhandled").then(
       () => null,
