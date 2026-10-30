@@ -40,7 +40,9 @@ describe("async server rendering without AsyncLocalStorage", () => {
       g[SSR_KEY] = saved;
       vi.resetModules();
     }
-  });
+    // A fresh module graph for the renderers: a cold import of most of the
+    // source tree, which can pass 15 s under a parallel full-suite run.
+  }, 60_000);
 
   it("renders as usual where AsyncLocalStorage exists", async () => {
     const r = await renderToStringAsync(() => div("ok"));
