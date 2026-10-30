@@ -6,6 +6,31 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.14.1] — 2026-10-30
+
+### Fixed — writing form-control defaults on the server DOM
+
+The built-in server DOM (`sibujs/ssr/dom`) had getters but no setters for
+`input.defaultChecked`, `option.defaultSelected`, `option.label` and an
+attribute node's `nodeValue` / `textContent`, so code writing them during a
+server render threw `Cannot set property … which has only a getter`; and
+`select.multiple` did not reflect to the attribute. They now behave as in a
+browser and in jsdom:
+
+- `defaultChecked` and `defaultSelected` set or remove the `checked` /
+  `selected` attribute; `checked` / `selected` follow it until they are
+  written themselves.
+- In a `<select>` without `multiple`, writing `selected = true` deselects the
+  other options, and a `defaultSelected` write leaves only the last selected
+  option in tree order selected, as the HTML selectedness algorithm does.
+- `option.label`, `select.multiple`, `attr.nodeValue` and `attr.textContent`
+  write through to the attribute.
+
+The server-DOM suite runs the same writes on jsdom and compares every read and
+the serialized markup.
+
+---
+
 ## [4.14.0] — 2026-10-30
 
 ### Upgrade notes
