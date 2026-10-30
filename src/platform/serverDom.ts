@@ -754,8 +754,14 @@ export class ServerAttr {
   get nodeValue(): string {
     return this._value;
   }
+  set nodeValue(v: string) {
+    this.value = v;
+  }
   get textContent(): string {
     return this._value;
+  }
+  set textContent(v: string) {
+    this.value = v;
   }
 }
 
@@ -1345,6 +1351,10 @@ export class ServerInputElement extends ServerHTMLElement {
   get defaultChecked(): boolean {
     return this.hasAttribute("checked");
   }
+  /** Reflects to the `checked` attribute; `checked` follows it until written (dirty checkedness). */
+  set defaultChecked(v: boolean) {
+    this.toggleAttribute("checked", !!v);
+  }
   get type(): string {
     return (this.getAttribute("type") ?? "text").toLowerCase();
   }
@@ -1393,8 +1403,16 @@ export class ServerTextAreaElement extends ServerHTMLElement {
 }
 reflectDisabled(ServerTextAreaElement.prototype);
 
+/**
+ * `<option>`. Its selectedness follows the `selected` attribute until
+ * `selected` is written (dirtiness), as in a browser. In a select without
+ * `multiple`, selecting one option deselects the others: a `selected` write
+ * keeps only that option, a `defaultSelected` write keeps only the last
+ * selected option in tree order, as the HTML selectedness algorithm does.
+ */
 export class ServerOptionElement extends ServerHTMLElement {
-  /** @internal */ _selected: boolean | null = null;
+  /** Selectedness; `null` while it follows the `selected` attribute. @internal */ _selected: boolean | null = null;
+  /** Set by a `selected` write: the attribute no longer decides selectedness. @internal */ _dirty = false;
   get value(): string {
     return this.getAttribute("value") ?? this.text;
   }
@@ -1410,19 +1428,49 @@ export class ServerOptionElement extends ServerHTMLElement {
   get label(): string {
     return this.getAttribute("label") ?? this.text;
   }
+  set label(v: string) {
+    this.setAttribute("label", v);
+  }
   get selected(): boolean {
     return this._selected ?? this.hasAttribute("selected");
   }
   set selected(v: boolean) {
     this._selected = !!v;
+    this._dirty = true;
+    const select = singleSelectOf(this);
+    if (select && v) for (const o of select.options) if (o !== this) o._selected = false;
   }
   get defaultSelected(): boolean {
     return this.hasAttribute("selected");
   }
+  /** Reflects to the `selected` attribute; `selected` follows it unless written. */
+  set defaultSelected(v: boolean) {
+    this.toggleAttribute("selected", !!v);
+    if (this._dirty) return;
+    this._selected = null;
+    const select = singleSelectOf(this);
+    if (!select) return;
+    let last: ServerOptionElement | null = null;
+    for (const o of select.options) if (o.selected) last = o;
+    for (const o of select.options) if (o !== last && o.selected) o._selected = false;
+  }
+}
+
+/** The `<select>` without `multiple` that lists `option` (directly or in an `<optgroup>`), if any. */
+function singleSelectOf(option: ServerOptionElement): ServerSelectElement | null {
+  let parent = option.parentNode;
+  if (parent instanceof ServerElement && parent.localName === "optgroup") parent = parent.parentNode;
+  return parent instanceof ServerSelectElement && !parent.hasAttribute("multiple") ? parent : null;
 }
 reflectDisabled(ServerOptionElement.prototype);
 
 export class ServerSelectElement extends ServerHTMLElement {
+  get multiple(): boolean {
+    return this.hasAttribute("multiple");
+  }
+  set multiple(v: boolean) {
+    this.toggleAttribute("multiple", !!v);
+  }
   get options(): ServerNodeList<ServerOptionElement> {
     return this.querySelectorAll("option") as unknown as ServerNodeList<ServerOptionElement>;
   }
