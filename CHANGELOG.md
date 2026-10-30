@@ -11,7 +11,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 ### Upgrade notes
 
 Everything below is opt-in. A browser app sees no change. Inside a server
-render (`runInSSRContext`) four things behave differently, each the documented
+render (`runInSSRContext`) five things behave differently, each the documented
 intent that the code did not meet:
 
 - `query()` now fetches during a server render. It used to start its request
@@ -22,7 +22,13 @@ intent that the code did not meet:
 - `onMount()` / `onUnmount()` no longer run inside an SSR scope when happy-dom
   or jsdom is registered (they were skipped only when `document` was missing).
 - `Head()` inside a request scope records its entries for the render result
-  instead of writing into the `document.head` every request shares.
+  instead of writing into the `document.head` every request shares. The entry
+  belongs to the component (disposing it withdraws the entry) and its getters
+  are read when the head is collected, after the render settled.
+- An async server render (`renderToStringAsync`, `renderRoute`, the streaming
+  form) refuses to run on a server runtime without AsyncLocalStorage, where
+  concurrent requests would share one store; the synchronous renderers are
+  unaffected.
 - A route `head` whose `canonical` (or new `alternates` entry) the URL policy
   refuses is left out entirely instead of rendering `<link rel="canonical">`
   without an `href`.
@@ -90,12 +96,17 @@ concurrent renders each have their own router and the process-wide one is
 untouched. `renderRoute` renders a URL through it — guards, `beforeEnter`,
 redirects, lazy routes, nested `Outlet()` — and answers with a status: 200,
 404 for the `*` route or a record's `status`, 301/302 plus `location` for a
-redirect (no body), 403 (configurable) when a guard rejects. `redirectBy` tells
-a `redirect` record from a guard redirect. Routes gain `status`, `render:
+redirect (no body, the `location` percent-encoded), 403 (configurable) when a
+guard rejects, 503 `failure: "timeout"` when the route could not render in time.
+`timeout` is one deadline for the whole request: the navigation (guards
+included), the matched components' loads, then building and settling the page
+with what is left. `redirectBy` tells a `redirect` record from a guard redirect. Routes gain `status`, `render:
 "ssr" | "prerender" | "client"` and `getStaticPaths()`, and the router gains
 `trailingSlash: "ignore"`. `createRenderHandler(routes, options)` wraps
 `renderRoute` as a `Request → Response` handler for a Node sidecar, with
-`Cache-Control` and a page cache keyed by URL and a data version.
+`Cache-Control` and a page cache keyed by URL and a data version, bounded by
+entries and by bytes (`cache.maxBytes`, default 32 MB). A page that timed out is
+never cached (`no-store`); a render that throws answers a bare 500.
 
 ### Added — one head API for the server and the browser
 
@@ -103,15 +114,21 @@ Route `head` gains `robots`, `twitter` (falling back to the Open Graph values),
 `alternates` (hreflang) and `jsonLd` (serialized with `serializeJsonLd()`, which
 escapes `<`, `>`, `&` and U+2028 / U+2029). During a server render the route
 head and every `Head()` in the tree are collected into `result.head`; the
-innermost entry wins its key and each key is emitted once. In the browser the
-router applies the same fields on every navigation.
+innermost entry wins its key and each key is emitted once. Only live entries
+count: a `Head()` in a branch the render switched away from is withdrawn, which
+reveals the entry it overrode, and a getter (`title: () => q.data()?.name`)
+contributes its value once the render has settled. The values pass the same
+escaping, URL and meta-refresh policy as in the browser (a reactive entry never
+publishes a refresh). In the browser the router applies the same fields on
+every navigation.
 
 ### Added — adopting hydration: `hydrate(App, root, { strategy: "adopt" })`
 
 On output rendered with `{ hydration: "adopt" }`, the client tree is built on
 the server nodes: on matching markup no element is created, added, removed or
 moved, images do not reload, and text typed before the bundle loaded, checkbox
-state, focus and scroll survive (the app's handlers receive replayed `input` /
+and radio state, `<select>` choices (single and multiple, matched by option
+value), focus and scroll survive (the app's handlers receive replayed `input` /
 `change` events). Elements carry a creation-scope id (`data-sibu-h`) per
 directive scope, so content the server rebuilt after its data arrived still
 pairs. A divergent subtree is rebuilt on its own and reported — kind, DOM path,
@@ -143,7 +160,9 @@ route, `200.html`, `sitemap.xml` (not `noindex`, not `render: "client"`),
 `robots.txt` and `redirects.json`; `render: "client"` / `"ssr"` routes get the
 shell plus their head; guarded routes and guard redirects are left to the
 browser. `fetch` (a base URL or a function) supplies data at build time, and an
-unreachable API fails the build naming the route. New options: `outDir`,
+unreachable API — or a route that does not render within `timeout` — fails the
+build naming the route. Head markup and state are inserted literally (`$&` in a
+title is text). New options: `outDir`,
 `trailingSlash`, `notFound`, `sitemap`, `robots`, `hydration`, `nonce`,
 `maxStateBytes`, `container`. In the jsdom mode the new outputs are opt-in. A
 re-run renders into the kept `200.html` shell. The plugin exposes its options
@@ -163,13 +182,28 @@ server HTML.
 (each `Suspense` boundary on its fallback) once everything outside the
 boundaries has settled, then streams each boundary as soon as its own content
 and work are ready, with a nonce-aware swap script, then the state and the
-scripts. Chunks are produced on demand; `cancel()` stops the render.
+scripts. Chunks are produced on demand; `cancel()` stops the render at once.
+An error no `ErrorBoundary` claims errors the stream wherever it occurs — the
+status is long sent by then — with the failing node's DOM path. A head entry
+added after the head was flushed cannot change it.
 
 ### Added — `renderOnServer()` and `hydrateInTest()` in `sibujs/testing`
 
 Render a route table (with `url`) or a component and query the HTML and head
 (`text`, `getByText`, `meta`, `title`, …); take server HTML over in a test and
 get the created-element count and the adoption mismatches.
+
+### Security
+
+- `serializeState()` emits a payload holding a `"__proto__"` key through
+  `JSON.parse`, so the browser reads it as data, as the server did; in an
+  object literal the key set the prototype instead.
+- The serializer escapes comment text beginning with `>` or `->`, which closed
+  the comment at its start.
+- A route head `titleTemplate` and the pre-renderer insert titles with a
+  replacement callback: `$&` / `$'` in a title no longer splice in text.
+- `trailingSlash: "ignore"` and the server DOM's `!important` parsing no longer
+  backtrack quadratically on a long run of `/` or spaces from the request.
 
 ### Benchmarks
 

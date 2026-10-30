@@ -45,7 +45,17 @@ createServer(async (req, res) => {
     res.writeHead(204).end();
     return;
   }
-  const response = await handle(new Request(`http://${req.headers.host}${req.url}`, { method: req.method }));
-  res.writeHead(response.status, Object.fromEntries(response.headers));
-  res.end(Buffer.from(await response.arrayBuffer()));
+  try {
+    // A fixed origin: the Host header is the client's to choose, and only the
+    // path and query matter to the router.
+    const url = new URL(req.url ?? "/", "http://sidecar.local");
+    const response = await handle(new Request(url, { method: req.method }));
+    res.writeHead(response.status, Object.fromEntries(response.headers));
+    res.end(Buffer.from(await response.arrayBuffer()));
+  } catch (err) {
+    // A malformed request-target; never let one take the process down.
+    console.error("[sidecar]", err);
+    if (!res.headersSent) res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Bad Request");
+  }
 }).listen(3001, "127.0.0.1", () => console.log("sibu sidecar on http://127.0.0.1:3001"));

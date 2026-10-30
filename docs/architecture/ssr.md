@@ -18,7 +18,8 @@ settled()                          ← directive commits, lazy chunks, fetches,
 renderToString(element)            ← serialise DOM → HTML string
    │
    ▼
-collected head + transfer script   ← escaped, nonce-aware
+collected head + transfer script   ← escaped, nonce-aware; the head is
+   │                                 resolved here, before the tree is disposed
    │
    ▼
 response
@@ -96,6 +97,20 @@ request: work is registered with `trackPending()` (which `lazy()`, `query()`,
 `resource()`, `prerenderWait()` and the router call) on the request's
 `SSRStore.pending`, and the loop runs macrotask turns until that set is empty
 twice in a row, or the timeout. A timed-out render serializes what is ready.
+
+`renderRoute()` sets ONE deadline (`timeout`) when the request starts. The
+initial navigation (guards — `beforeEnter` is not covered by `guardTimeout`) and
+the matched components' loads must finish before it, or the result is a 503
+with `failure: "timeout"` and `diagnostics.pending` naming the phase
+(`route:navigation`, `route:components`) and the registered work. The page is
+then built and settled with what is left. The router is destroyed either way,
+so a navigation that finishes later commits nothing; a dynamic import cannot be
+cancelled, and its late result is ignored.
+
+**Request isolation is required.** The async renderers leave the synchronous
+`runInSSRContext` call at their first `await`; without AsyncLocalStorage the
+branches and fetches that finish later would run on the process-wide store, so
+on a server runtime that has none (`window` undefined) they throw instead.
 
 **What does work without a DOM** (verified in a bare Node environment,
 `tests/ssr-hardening-node-env.test.ts`):
@@ -258,7 +273,26 @@ soon as its own work has settled — `<div hidden id="sibu-resolved-…">` plus
 `suspenseSwapScript()` — in finishing order; a ready boundary nested in a
 streamed one travels with it. Chunks are produced on demand (a one-slot channel:
 the renderer waits until the consumer read the previous chunk), and `cancel()`
-stops the render. The node form below is unchanged.
+stops the render at once (it wakes a renderer waiting for a boundary). An error
+no `ErrorBoundary` claims errors the stream wherever it is recorded — while a
+boundary is awaited, between chunks, before the state — with the failing
+node's DOM path and the original as `cause`; the status and headers are already
+sent, so it cannot change them. The head is collected when the shell flushes: a
+`Head()` that appears later, inside a streamed boundary, cannot change the head
+already sent. The node form below is unchanged.
+
+### The collected head (4.14)
+
+`Head()` and the request router each record ONE layer in the request
+(`platform/serverHead.ts`). A layer is owned: `Head()` ties it to its anchor's
+disposal, so a component removed before serialization (a `when()` branch the
+render switched away from) takes its title, `robots` and description with it,
+and the entry it overrode shows again; the router replaces the route its layer
+describes when the request navigates again and withdraws it when destroyed.
+Layers are resolvers: their getters run when the head is collected — after the
+render settled, before the tree is disposed — and the result goes through the
+same entry plan as the browser's (`utils/headEntry.ts`), escaping, URL policy
+and meta-refresh rule included; a getter that throws rejects the render.
 
 ### Streaming is shell-then-batch, not per-boundary progressive (the node form)
 

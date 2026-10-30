@@ -149,6 +149,10 @@ function detectSSRShared(): SSRShared {
       }
       if (mod) detected = new mod.AsyncLocalStorage();
     }
+    // Runtimes that expose it as a global (Vercel Edge, Cloudflare Workers
+    // with `nodejs_compat`) and do not look like Node.
+    const globalAls = (globalThis as { AsyncLocalStorage?: new () => ALSLike<SSRStore> }).AsyncLocalStorage;
+    if (!detected && typeof globalAls === "function") detected = new globalAls();
   } catch {
     detected = null;
   }
@@ -193,6 +197,28 @@ function warnMissingAsyncLocalStorage(): void {
       "SSR store: request state and the query cache can bleed between them. " +
       "Node >= 22.3 is required for isolated SSR under ESM; the CommonJS build " +
       "works on older versions. A fully synchronous render is unaffected.",
+  );
+}
+
+/**
+ * Refuse an ASYNC server render on a server runtime without AsyncLocalStorage.
+ *
+ * The fallback store is correct only for a synchronous render: an async render
+ * leaves its scope at the first `await`, so the branches, lazy chunks and
+ * queries that complete later run outside it — on the process-wide query
+ * cache and router, where one visitor's data reaches the next one's page.
+ * Failing is the only safe answer there. A browser (one visitor; `window` is
+ * defined) keeps the fallback.
+ *
+ * @param api The renderer, for the message.
+ * @internal
+ */
+export function assertRequestIsolation(api: string): void {
+  if (als || typeof window !== "undefined") return;
+  throw new Error(
+    `[SibuJS SSR] ${api} needs AsyncLocalStorage to keep concurrent requests apart, and this runtime has none. ` +
+      "Use Node >= 22.3 (or the CommonJS build on older Node), Deno or Bun, or enable AsyncLocalStorage on your " +
+      "edge runtime (Cloudflare Workers: the nodejs_compat flag).",
   );
 }
 

@@ -104,10 +104,21 @@ function isRouterNavigable(path: string): boolean {
   return classifyNavigationTarget(path) === "internal";
 }
 
+/**
+ * `path` without its trailing slashes. A loop, not `/\/+$/`: that regex
+ * backtracks quadratically on a long run of slashes not at the end (a request
+ * path like `/a//////…//x`).
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end--;
+  return end === path.length ? path : path.slice(0, end);
+}
+
 /** Strip a trailing slash so `/users/` and `/users` compare equal; root stays `/`. */
 function normalizePathname(path: string): string {
   if (!path) return "/";
-  const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  const trimmed = path.length > 1 ? trimTrailingSlashes(path) : path;
   return trimmed || "/";
 }
 
@@ -1340,6 +1351,11 @@ export class SibuRouter {
   // Created the first time a committed route needs a managed <head>.
   private headController: RouteHeadController | null = null;
 
+  // A memory router in a server request: the route its head layer describes,
+  // and the layer's withdraw function (see `updateHead`).
+  private serverHeadRoute: RouteContext | null = null;
+  private withdrawServerHead: (() => void) | null = null;
+
   // The location of a "memory" router (it has no browser location).
   private memoryLocation = "/";
 
@@ -1455,6 +1471,11 @@ export class SibuRouter {
     }
   }
 
+  /** Settles once the initial navigation committed or failed (before component loads). @internal */
+  whenNavigated(): Promise<void> {
+    return this.readyPromise;
+  }
+
   /** Settles after the initial navigation and its component loads; see `routerReady()`. */
   whenReady(): Promise<void> {
     this.loadedPromise ??= this.readyPromise.then(() => (this.destroyed ? undefined : this.preloadMatched()));
@@ -1512,7 +1533,7 @@ export class SibuRouter {
     const { query: queryString, hash } = split;
     const path =
       this.options.trailingSlash === "ignore" && split.path.length > 1
-        ? split.path.replace(/\/+$/, "") || "/"
+        ? trimTrailingSlashes(split.path) || "/"
         : split.path;
     const query = parseQuery(queryString);
     const queryAll = parseQueryAll(queryString);
@@ -1779,8 +1800,18 @@ export class SibuRouter {
     if (this.destroyed) return;
     // A memory router inside a server request records the head for the render
     // result instead of writing into a document shared by every request.
+    // ONE layer per router, resolved when the request collects its head: a
+    // later navigation in the same request replaces the route it describes
+    // (keeping its position), and its getters see the settled data.
     if (this.options.mode === "memory" && getRequestStore()) {
-      if (routeHasHead(to.matched, this.options.head)) recordServerHead(serverHeadLayer(to, this.options.head));
+      this.serverHeadRoute = to;
+      if (this.withdrawServerHead === null && routeHasHead(to.matched, this.options.head)) {
+        this.withdrawServerHead = recordServerHead(() => {
+          const route = this.serverHeadRoute;
+          if (route === null || !routeHasHead(route.matched, this.options.head)) return null;
+          return serverHeadLayer(route, this.options.head);
+        });
+      }
       return;
     }
     if (typeof document === "undefined") return;
@@ -2051,6 +2082,9 @@ export class SibuRouter {
     this.isReadySetter(false);
     this.headController?.dispose();
     this.headController = null;
+    this.withdrawServerHead?.();
+    this.withdrawServerHead = null;
+    this.serverHeadRoute = null;
     // Nothing is left to wait for.
     this.resolveReady();
   }

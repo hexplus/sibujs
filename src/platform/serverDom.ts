@@ -831,10 +831,13 @@ export class ServerStyle {
       let value = decl.slice(colon + 1).trim();
       if (!name || !value) continue;
       let priority = "";
-      const imp = /\s*!\s*important\s*$/i.exec(value);
-      if (imp) {
+      // `value` is trimmed, so `!important` can only END it. Found from the
+      // last `!` rather than with a leading `\s*` regex, whose backtracking is
+      // quadratic in a long run of spaces (a style value from user input).
+      const bang = value.lastIndexOf("!");
+      if (bang !== -1 && /^!\s*important$/i.test(value.slice(bang))) {
         priority = "important";
-        value = value.slice(0, imp.index).trim();
+        value = value.slice(0, bang).trim();
       }
       this._decls.set(name.startsWith("--") ? name : name.toLowerCase(), { value, priority });
     }

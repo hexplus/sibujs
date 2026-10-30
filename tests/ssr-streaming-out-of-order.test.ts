@@ -107,10 +107,30 @@ describe("renderToReadableStream(() => App()) — out-of-order Suspense", () => 
   });
 
   it("produces the next chunk only when the previous one has been read, and stops on cancel", async () => {
-    const stream = renderToReadableStream(() => section([Slow("a", 5), Slow("b", 10)]), { document: false });
+    // The boundaries' data is held until the shell has been read, so the shell
+    // always carries both fallbacks however loaded the machine is.
+    let release!: () => void;
+    const held = new Promise<void>((r) => {
+      release = r;
+    });
+    const Held = (label: string) =>
+      Suspense({
+        nodes: () => {
+          const q = query(`/api/${label}`, () => held.then(() => `${label} data`));
+          return div({ class: label }, [span(() => q.data() ?? "")]);
+        },
+        fallback: () => p({ class: "skeleton" }, `loading ${label}`),
+      });
+    const stream = renderToReadableStream(() => section([Held("a"), Held("b")]), { document: false });
     const reader = stream.getReader();
     const first = await reader.read();
     expect(first.value).toContain("loading a");
+    expect(first.value).toContain("loading b");
+    release();
+    // One boundary per chunk: the second waits until this one has been read.
+    const second = await reader.read();
+    const streamed = ["a data", "b data"].filter((d) => second.value?.includes(d));
+    expect(streamed).toHaveLength(1);
     await reader.cancel();
     const after = await reader.read().catch(() => ({ done: true }));
     expect(after.done).toBe(true);

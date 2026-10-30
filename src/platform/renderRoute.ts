@@ -15,18 +15,33 @@
 //   301/302 + `location`  a redirect (no body is rendered)
 //   403 (configurable)    a guard rejected the navigation (no body)
 //   500  the navigation failed for another reason (no body)
+//   503  the deadline passed before the route could render (no body,
+//        `failure: "timeout"`, `diagnostics.timedOut`)
+//
+// `timeout` is ONE deadline for the whole request: the initial navigation
+// (guards included), loading the matched components, then building and
+// settling the page, which gets whatever budget is left.
 
-import { runInSSRContext } from "../core/ssr-context";
+import { DEV } from "../core/dev";
+import { assertRequestIsolation, getRequestStore, runInSSRContext } from "../core/ssr-context";
 import { createRouter, route as currentRoute, Route, type RouteDef, type RouterOptions } from "../plugins/router";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions } from "./ssr";
-import { type AsyncRenderOptions, type RenderResult, renderToStringAsync } from "./ssrAsync";
+import { type AsyncRenderOptions, DEFAULT_SETTLE_TIMEOUT, type RenderResult, renderToStringAsync } from "./ssrAsync";
 
 /** How a route is treated by server renders (see `RouteBase.render`); `"default"` when no record declares one. */
 export type RouteRenderMode = "ssr" | "prerender" | "client" | "default";
 
 /** Options of {@link renderRoute}. */
 export interface RenderRouteOptions extends AsyncRenderOptions {
+  /**
+   * Milliseconds for the whole request (default 5000): the initial navigation,
+   * the matched components' loads, then building and settling the page. Past
+   * it before the route rendered, the result is a 503 with `failure:
+   * "timeout"`; past it while the page settles, what is ready is serialized
+   * with fallbacks (`diagnostics.timedOut`), as `renderToStringAsync` does.
+   */
+  timeout?: number;
   /**
    * Builds the page around the routed content. Default: `() => Route()`.
    * Use your app shell (`() => App()`) when it contains the outlet.
@@ -81,6 +96,38 @@ function deepest<K extends "status" | "render">(matched: readonly RouteDef[], ke
   return undefined;
 }
 
+/**
+ * Percent-encode what may not appear raw in a URL path or fragment — control
+ * characters, spaces, non-ASCII, a `%` that starts no escape — and keep what
+ * may (existing `%XX` escapes included), so an already encoded path is
+ * unchanged. A lone surrogate becomes U+FFFD.
+ */
+function encodeUrlPart(part: string): string {
+  return part.replace(/%(?![0-9A-Fa-f]{2})|[^A-Za-z0-9\-._~!$&'()*+,;=:@/?%]/gu, (c) => {
+    try {
+      return encodeURIComponent(c);
+    } catch {
+      return "%EF%BF%BD";
+    }
+  });
+}
+
+/**
+ * Wait for `work` until `deadline`: `true` when it settled first (fulfilled or
+ * rejected), `false` when the deadline came first. A late settlement is
+ * observed and ignored, never left as an unhandled rejection.
+ */
+function before(work: Promise<unknown>, deadline: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+    const done = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    work.then(done, done);
+  });
+}
+
 function emptyDiagnostics(): RenderResult["diagnostics"] {
   return {
     timedOut: false,
@@ -113,18 +160,59 @@ export function renderRoute(
   url: string,
   options: RenderRouteOptions = {},
 ): Promise<RouteRenderResult> {
+  try {
+    assertRequestIsolation("renderRoute()");
+  } catch (err) {
+    return Promise.reject(err);
+  }
   return runInSSRContext(async (): Promise<RouteRenderResult> => {
     const started = Date.now();
+    // One deadline for the whole request, set before the navigation starts.
+    const deadline = started + (options.timeout ?? DEFAULT_SETTLE_TIMEOUT);
     const router = createRouter(routes, { ...options.router, mode: "memory", url });
+    const wrap = (body: string, headHtml: string, state: string) =>
+      options.document ? assembleDocument(body, options.document, headHtml, state) : body;
+
+    // The deadline passed before the route could render: answer 503 with what
+    // was still running. The router is destroyed in `finally`, so a navigation
+    // or component load finishing later commits nothing; a dynamic import
+    // cannot be cancelled, its late result is ignored.
+    const timedOut = (phase: string): RouteRenderResult => {
+      const now = Date.now();
+      const pending = [
+        `${phase} (${now - started} ms)`,
+        ...Array.from(getRequestStore()?.pending ?? [], (work) => `${work.label} (${now - work.since} ms)`),
+      ];
+      const diagnostics = { ...emptyDiagnostics(), timedOut: true, pending, durationMs: now - started };
+      if (DEV) {
+        console.warn(
+          `[SibuJS SSR] ${url}: the route did not render within ${options.timeout ?? DEFAULT_SETTLE_TIMEOUT} ms; pending: ${pending.join(", ")}`,
+        );
+      }
+      return {
+        html: wrap("", "", ""),
+        head: "",
+        state: "",
+        stateData: null,
+        status: 503,
+        location: null,
+        route: null,
+        render: "default",
+        noindex: false,
+        failure: "timeout",
+        redirectBy: null,
+        diagnostics,
+      };
+    };
+
     try {
-      await router.whenReady();
+      if (!(await before(router.whenNavigated(), deadline))) return timedOut("route:navigation");
+      if (!(await before(router.whenReady(), deadline))) return timedOut("route:components");
       const { result, redirectStatus, redirectBy } = router.initialOutcome;
       const committed = currentRoute();
       const matched = committed.matched;
       const base = options.router?.base ?? "";
       const head = () => collectServerHead();
-      const wrap = (body: string, headHtml: string, state: string) =>
-        options.document ? assembleDocument(body, options.document, headHtml, state) : body;
 
       if (result && !result.success) {
         const reason = result.reason ?? "error";
@@ -148,8 +236,13 @@ export function renderRoute(
 
       const search = new URLSearchParams();
       for (const [key, values] of Object.entries(committed.queryAll)) for (const v of values) search.append(key, v);
-      const fullPath =
-        committed.path + (search.size > 0 ? `?${search}` : "") + (committed.hash ? `#${committed.hash}` : "");
+      // The Location header value: a redirect target built from decoded params
+      // can hold CR/LF or non-Latin-1 text, which a `Headers` object refuses
+      // (and an HTTP server would have to reject).
+      const locationPath =
+        encodeUrlPart(committed.path) +
+        (search.size > 0 ? `?${search}` : "") +
+        (committed.hash ? `#${encodeUrlPart(committed.hash)}` : "");
       const routeInfo: RenderedRoute = {
         path: committed.path,
         params: { ...committed.params },
@@ -167,7 +260,7 @@ export function renderRoute(
           state: "",
           stateData: null,
           status: redirectStatus,
-          location: base + fullPath,
+          location: encodeUrlPart(base) + locationPath,
           route: routeInfo,
           render: "default",
           noindex,
@@ -198,8 +291,10 @@ export function renderRoute(
         };
       }
 
+      // Building and settling the page get what is left of the deadline.
       const rendered = await renderToStringAsync(options.app ?? (() => Route()), {
         ...options,
+        timeout: Math.max(0, deadline - Date.now()),
         log: options.log === true ? url : options.log,
       });
       return {

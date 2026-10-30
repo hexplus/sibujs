@@ -19,7 +19,7 @@
 import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
 import { dispose } from "../core/rendering/dispose";
-import { getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
+import { assertRequestIsolation, getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
 import { createServerAdoptScope } from "./hydrateAdopt";
 import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
@@ -214,6 +214,20 @@ export function describeNodePath(node: unknown): string {
   return parts.length > 0 ? parts.join(" > ") : "(detached)";
 }
 
+/**
+ * The error an async server render rejects with for an error no
+ * `ErrorBoundary` claimed: the original as `cause`, the component name and DOM
+ * path of the failing node in the message.
+ * @internal
+ */
+export function renderFailure(entry: { error: unknown; context: { name?: string; node?: unknown } }): Error {
+  const error = explainServerError(entry.error);
+  const message = error instanceof Error ? error.message : String(error);
+  const where = entry.context.node ? describeNodePath(entry.context.node) : "(unknown position)";
+  const label = entry.context.name ? ` in ${entry.context.name}` : "";
+  return new Error(`[SibuJS SSR] render failed${label} at ${where}: ${message}`, { cause: error });
+}
+
 function byteLength(text: string): number {
   return typeof TextEncoder !== "undefined" ? new TextEncoder().encode(text).byteLength : text.length;
 }
@@ -321,11 +335,7 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
 
   if (errors.length > 0) {
     releaseTree();
-    const { context } = errors[0];
-    const error = explainServerError(errors[0].error) as Error;
-    const where = context.node ? describeNodePath(context.node) : "(unknown position)";
-    const label = context.name ? ` in ${context.name}` : "";
-    throw new Error(`[SibuJS SSR] render failed${label} at ${where}: ${error.message}`, { cause: error });
+    throw renderFailure(errors[0]);
   }
 
   if (settle.timedOut && DEV) {
@@ -335,7 +345,16 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   }
 
   const content = renderToStringWith(holder, { marker: options.marker ?? "root", ids });
-  const head = collectServerHead();
+  // The head resolves its getters against the settled tree, so it is
+  // collected before the tree is released — and a getter that throws still
+  // releases it.
+  let head: string;
+  try {
+    head = collectServerHead();
+  } catch (err) {
+    releaseTree();
+    throw err;
+  }
 
   let state = "";
   let stateData: Record<string, unknown> | null = null;
@@ -373,7 +392,12 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
 }
 
 /** Run `fn` in the current request scope, or in a fresh one when there is none. */
-function inRequest<T>(fn: () => Promise<T>): Promise<T> {
+function inRequest<T>(api: string, fn: () => Promise<T>): Promise<T> {
+  try {
+    assertRequestIsolation(api);
+  } catch (err) {
+    return Promise.reject(err);
+  }
   return getRequestStore() ? fn() : runInSSRContext(fn);
 }
 
@@ -403,7 +427,7 @@ export function renderToStringAsync(
   input: Node | (() => Node),
   options: AsyncRenderOptions = {},
 ): Promise<RenderResult> {
-  return inRequest(async () => {
+  return inRequest("renderToStringAsync()", async () => {
     const { content, result } = await renderCore(input, options);
     return { html: content, ...result };
   });
@@ -422,7 +446,7 @@ export function renderToDocumentAsync(
   input: Node | (() => Node),
   options: DocumentOptions & AsyncRenderOptions = {},
 ): Promise<RenderResult> {
-  return inRequest(async () => {
+  return inRequest("renderToDocumentAsync()", async () => {
     const { content, result } = await renderCore(input, options);
     return { html: assembleDocument(content, options, result.head, result.state), ...result };
   });

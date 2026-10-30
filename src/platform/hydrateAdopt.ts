@@ -130,6 +130,21 @@ function sameKind(a: Node, b: Node): boolean {
   return a.nodeType === b.nodeType && (a.nodeType === 3 || a.nodeType === 8);
 }
 
+/**
+ * The options a `<select>` selects from its markup alone — what the parser
+ * chose before anyone touched it: the `selected` options of a multiple select;
+ * otherwise the last `selected` option, or (a drop-down) the first enabled one.
+ */
+function defaultSelection(select: HTMLSelectElement): Set<HTMLOptionElement> {
+  const options = Array.from(select.options);
+  const marked = options.filter((o) => o.hasAttribute("selected"));
+  if (select.multiple) return new Set(marked);
+  if (marked.length > 0) return new Set([marked[marked.length - 1]]);
+  if (select.size > 1) return new Set();
+  const first = options.find((o) => !o.disabled);
+  return new Set(first ? [first] : []);
+}
+
 function isDirty(el: Element): boolean {
   const tag = el.localName;
   if (tag === "input") {
@@ -139,8 +154,11 @@ function isDirty(el: Element): boolean {
   }
   if (tag === "textarea") return (el as HTMLTextAreaElement).value !== (el.textContent ?? "");
   if (tag === "select") {
+    // Compared with the markup's own default, not with `selected` attributes:
+    // a drop-down with none still selects its first option, untouched.
     const select = el as HTMLSelectElement;
-    return Array.from(select.options).some((o) => o.selected !== o.hasAttribute("selected"));
+    const initial = defaultSelection(select);
+    return Array.from(select.options).some((o) => o.selected !== initial.has(o));
   }
   return false;
 }
@@ -153,10 +171,24 @@ class AdoptSession implements AdoptSink {
   readonly patched: Node[] = [];
   readonly touched = new Set<Element>();
   readonly mismatches: AdoptMismatch[] = [];
+  /**
+   * The values a user selected in a `<select>` before takeover. Taken before
+   * any client code runs: the client builds a select's options BEFORE the
+   * select, and an option's `selected` write changes the selection long
+   * before the select itself is claimed.
+   */
+  readonly selections = new Map<HTMLSelectElement, string[]>();
+  /**
+   * Checkboxes and radios the user changed before takeover, and their state —
+   * for the same reason: checking a radio unchecks its group, so the client
+   * writing a sibling (or a sibling joining the group) changes this one first.
+   */
+  readonly checks = new Map<HTMLInputElement, boolean>();
   created = 0;
   removed = 0;
   /** AdoptSink: numbering and claiming are on for the length of the session. */
   on = true;
+  private restored = false;
 
   constructor(
     readonly root: Element,
@@ -168,6 +200,19 @@ class AdoptSession implements AdoptSink {
         if (child.nodeType === 1) {
           const id = (child as Element).getAttribute(ADOPT_ID_ATTR);
           if (id !== null && !this.byId.has(id)) this.byId.set(id, child as Element);
+          const tag = (child as Element).localName;
+          if (tag === "select" && isDirty(child as Element)) {
+            const select = child as HTMLSelectElement;
+            this.selections.set(
+              select,
+              Array.from(select.options)
+                .filter((o) => o.selected)
+                .map((o) => o.value),
+            );
+          } else if (tag === "input" && isDirty(child as Element)) {
+            const input = child as HTMLInputElement;
+            if (input.type === "checkbox" || input.type === "radio") this.checks.set(input, input.checked);
+          }
           walk(child);
         }
       }
@@ -255,7 +300,9 @@ class AdoptSession implements AdoptSink {
       } else el.removeAttribute(attr.name);
     }
     this.claimed.set(el, { sticky });
-    if (isDirty(el)) this.touched.add(el);
+    if (isDirty(el) || this.selections.has(el as HTMLSelectElement) || this.checks.has(el as HTMLInputElement)) {
+      this.touched.add(el);
+    }
     this.patchParent(el);
   }
 
@@ -324,7 +371,9 @@ class AdoptSession implements AdoptSink {
         note(name);
         return removeAttribute.call(this, name);
       };
-      if (this.touched.has(parent)) {
+      // A select is not overridden: its options' writes reach its selection
+      // anyway, so the session puts the snapshot back when it ends (`reselect`).
+      if (this.touched.has(parent) && parent.localName !== "select") {
         // What the user typed before the bundle loaded wins over the first
         // client write; the app's handlers learn it from the events replayed
         // when the session ends.
@@ -450,9 +499,11 @@ class AdoptSession implements AdoptSink {
     return nativeInsert(parent, child, ref);
   }
 
-  /** End of the session: release unclaimed server nodes, restore the instances, replay input. */
-  finish(): void {
+  /** Remove every instance override; idempotent, and also run when the build throws. */
+  restore(): void {
     this.on = false;
+    if (this.restored) return;
+    this.restored = true;
     for (const node of this.patched) {
       const own = node as unknown as Record<string, unknown>;
       for (const key of [
@@ -469,6 +520,11 @@ class AdoptSession implements AdoptSink {
         if (Object.hasOwn(own, key)) delete own[key];
       }
     }
+  }
+
+  /** End of the session: restore the instances, release unclaimed server nodes, replay input. */
+  finish(): void {
+    this.restore();
     // Unclaimed server nodes: what the client did not build.
     const sweep = (node: Node) => {
       for (let child = node.firstChild; child; ) {
@@ -499,12 +555,41 @@ class AdoptSession implements AdoptSink {
     for (const [el, record] of this.claimed) {
       for (const name of record.sticky) el.removeAttribute(name);
     }
+    reselect(this);
     // Input made before takeover: tell the app's handlers about it.
     for (const el of this.touched) {
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     }
   }
+}
+
+/**
+ * Put the user's pre-takeover selections back, by option VALUE (the client may
+ * have rebuilt or reordered the options). Selected values the client tree no
+ * longer offers are dropped; when none is left, the client's own
+ * initialization stands and nothing is replayed. Then the checkboxes and
+ * radios the user changed get their state back.
+ */
+function reselect(session: AdoptSession): void {
+  for (const [select, values] of session.selections) {
+    if (!session.claimed.has(select) || !session.root.contains(select)) {
+      session.touched.delete(select);
+      continue;
+    }
+    const options = Array.from(select.options);
+    const offered = options.filter((o) => values.includes(o.value));
+    if (offered.length === 0) {
+      session.touched.delete(select);
+      continue;
+    }
+    if (select.multiple) for (const o of options) o.selected = values.includes(o.value);
+    else offered[0].selected = true;
+  }
+  // Unchecked first: checking a radio last unchecks the rest of its group.
+  const live = Array.from(session.checks).filter(([el]) => session.claimed.has(el) && session.root.contains(el));
+  for (const [el, checked] of live) if (!checked) el.checked = false;
+  for (const [el, checked] of live) if (checked) el.checked = true;
 }
 
 function findDescriptor(proto: object | null, key: string): PropertyDescriptor | undefined {
@@ -589,6 +674,8 @@ export async function hydrateAdopt(
     }
     session.finish();
   } finally {
+    // A build that threw must not leave instance overrides behind.
+    session.restore();
     end();
   }
   container.setAttribute("data-sibu-hydrated", "adopt");

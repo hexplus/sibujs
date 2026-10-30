@@ -123,6 +123,34 @@ test("typing in the quote form before takeover survives it", async ({ page }) =>
   await expect(page.locator("#quote-name")).toBeFocused();
 });
 
+test("a service chosen before takeover survives it, though the server pre-selected another", async ({ page }) => {
+  // The server marks the first option `selected`; the client re-applies that
+  // option-level write while it adopts the form.
+  let release!: () => void;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  await page.route(/\/assets\/.*\.js$/, async (route) => {
+    await held;
+    await route.continue();
+  });
+  await page.goto(`${base}/cotizar/`, { waitUntil: "commit" });
+  await page.locator("#quote-service").waitFor();
+  await expect(page.locator("#quote-service")).toHaveValue("dtf");
+  await page.selectOption("#quote-service", "bordado");
+  await page.fill("#quote-notes", "Logo en el pecho");
+  release();
+  await expect(page.locator("#app")).toHaveAttribute("data-sibu-hydrated", "adopt");
+  await expect(page.locator("#quote-service")).toHaveValue("bordado");
+  await expect(page.locator("#quote-notes")).toHaveValue("Logo en el pecho");
+  // The native select works after takeover, with no override left on it.
+  expect(await page.evaluate(() => Object.hasOwn(document.querySelector("#quote-service") as object, "value"))).toBe(
+    false,
+  );
+  await page.selectOption("#quote-service", "vinil");
+  await expect(page.locator("#quote-service")).toHaveValue("vinil");
+});
+
 test("a browser-only route renders from the shell", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (err) => errors.push(err.message));

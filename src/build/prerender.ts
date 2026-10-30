@@ -78,7 +78,15 @@ export interface PrerenderOptions {
   robots?: boolean | string;
   /** `"adopt"`: mark the output for `hydrate(App, root, { strategy: "adopt" })`. Server-entry mode only. */
   hydration?: "adopt" | "replace";
-  /** CSP nonce for the transfer script. Server-entry mode only. */
+  /**
+   * CSP nonce attribute for the transfer script. Server-entry mode only.
+   *
+   * A static file carries the SAME value on every response, and a nonce that
+   * never changes protects nothing: injected markup can reuse it. Use it only
+   * as a PLACEHOLDER your server replaces with a fresh nonce per response
+   * (nginx `sub_filter`, a middleware), the same value its CSP header sends.
+   * Without such a server, allow the script by hash (`'sha256-…'`) instead.
+   */
   nonce?: string;
   /** Cap on each page's transferred state in bytes. Server-entry mode only. */
   maxStateBytes?: number;

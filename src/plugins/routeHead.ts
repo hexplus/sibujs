@@ -252,7 +252,8 @@ function metaIdentity(entry: Record<string, RouteHeadValue>): string | null {
 
 function applyTemplate(title: string, template: RouterHeadOptions["titleTemplate"]): string {
   if (!template) return title;
-  return typeof template === "function" ? template(title) : template.replace("%s", title);
+  // A callback: a title is text, and `$&` / `$'` in it are not replacement patterns.
+  return typeof template === "function" ? template(title) : template.replace("%s", () => title);
 }
 
 /**

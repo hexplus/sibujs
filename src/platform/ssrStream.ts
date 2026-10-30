@@ -22,13 +22,19 @@ import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
 import { dispose } from "../core/rendering/dispose";
 import { runInBoundary, type StreamBoundary, setBoundaryHook } from "../core/rendering/streamBoundary";
-import { getRequestStore, type PendingWork, requestSlot, runInSSRContext } from "../core/ssr-context";
+import {
+  assertRequestIsolation,
+  getRequestStore,
+  type PendingWork,
+  requestSlot,
+  runInSSRContext,
+} from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
 import { createServerAdoptScope } from "./hydrateAdopt";
 import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState, suspenseSwapScript } from "./ssr";
-import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, describeNodePath } from "./ssrAsync";
+import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, renderFailure } from "./ssrAsync";
 
 /** Options of the streaming `renderToReadableStream(() => App(), options)`. */
 export interface StreamRenderOptions extends AsyncRenderOptions {
@@ -126,9 +132,12 @@ function createChannel() {
       ended = true;
       arrived?.();
     },
+    /** Called on cancel, so a renderer waiting for a boundary stops at once. */
+    onCancel: null as (() => void) | null,
     cancel(): void {
       cancelled = true;
       taken?.();
+      this.onCancel?.();
     },
     async take(): Promise<{ value?: string; done: boolean }> {
       for (;;) {
@@ -155,11 +164,16 @@ const macrotask = (): Promise<void> =>
     else setTimeout(resolve, 0);
   });
 
-/** Wait until `ready()` holds across a macrotask turn, or the deadline passes. */
-async function waitFor(ready: () => boolean, deadline: number): Promise<boolean> {
+/**
+ * Wait until `ready()` holds across a macrotask turn, or the deadline passes,
+ * or `stop()` holds (an unclaimed error, a cancelled reader) — checked on every
+ * wake, so the renderer does not sit out the deadline after either.
+ */
+async function waitFor(ready: () => boolean, deadline: number, stop: () => boolean): Promise<boolean> {
   const store = getRequestStore();
   for (;;) {
     await macrotask();
+    if (stop()) return false;
     if (ready()) {
       await macrotask();
       if (ready()) return true;
@@ -191,12 +205,16 @@ function pendingFor(pending: Set<PendingWork> | undefined, boundary: StreamBound
  * @internal
  */
 export function streamPage(input: () => Node, options: StreamRenderOptions = {}): ReadableStream<string> {
+  assertRequestIsolation("renderToReadableStream()");
   installHook();
   const channel = createChannel();
   const nonce = options.nonce;
   const doc = options.document === false ? null : (options.document ?? {});
-  const MARK_BODY = "\u0000sibu-body\u0000";
-  const MARK_END = "\u0000sibu-end\u0000";
+  // Placeholders for the body and the state in the assembled document. They
+  // hold a raw `<`, which escaped head text and attribute values never do, so
+  // request data cannot forge one; the document is cut at the FIRST of each.
+  const MARK_BODY = "<sibu-stream-body>";
+  const MARK_END = "<sibu-stream-end>";
 
   void runInSSRContext(async () => {
     const store = getRequestStore();
@@ -205,6 +223,16 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
     const errors: NonNullable<NonNullable<typeof store>["errors"]> = [];
     if (store) store.errors = errors;
     let holder: DocumentFragment | null = null;
+    channel.onCancel = () => store?.wake?.();
+    // An error no `ErrorBoundary` claimed fails the stream wherever it shows
+    // up — before the shell, while a boundary is awaited, between chunks,
+    // before the state — with the original as `cause`. Thrown once: the catch
+    // below fails the channel and the render stops. Headers are long sent by
+    // then, so the stream errors; it cannot change the status.
+    const failIfErrored = () => {
+      if (errors.length > 0) throw renderFailure(errors[0]);
+    };
+    const stopWaiting = () => errors.length > 0 || channel.cancelled;
     try {
       ensureServerDom();
       watchBrowserApis();
@@ -238,21 +266,18 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
         for (const { b, nodes, mark } of held) {
           b.container.removeChild(mark);
           for (const n of nodes) b.container.appendChild(n);
-          html = html.replace(`<!--sibu-fallback:${b.id}-->`, b.fallbackHtml ?? "");
+          // A callback: the fallback is markup, and `$&` / `$'` in it are text.
+          const fallback = b.fallbackHtml ?? "";
+          html = html.replace(`<!--sibu-fallback:${b.id}-->`, () => fallback);
         }
         return html;
       };
 
       // 1 — the shell: everything outside the boundaries.
       const shellDeadline = Date.now() + (options.shellTimeout ?? 5000);
-      await waitFor(() => !pendingFor(store?.pending, undefined), shellDeadline);
-      if (errors.length > 0) {
-        const { error, context } = errors[0];
-        throw new Error(
-          `[SibuJS SSR] render failed at ${context.node ? describeNodePath(context.node) : "(unknown position)"}: ${explainServerError(error) instanceof Error ? (explainServerError(error) as Error).message : String(error)}`,
-          { cause: error },
-        );
-      }
+      await waitFor(() => !pendingFor(store?.pending, undefined), shellDeadline, stopWaiting);
+      failIfErrored();
+      if (channel.cancelled) return;
       // Boundaries already done are part of the shell.
       for (const b of state.boundaries) if (b.done && !pendingFor(store?.pending, b.api)) b.emitted = true;
       const shell = serializeWithFallbacks(holder);
@@ -261,13 +286,18 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       let between = "";
       if (doc) {
         const page = assembleDocument(MARK_BODY, doc, head, MARK_END);
-        const [start, rest] = page.split(MARK_BODY);
-        [between, after] = rest.split(MARK_END);
+        const bodyAt = page.indexOf(MARK_BODY);
+        const endAt = page.indexOf(MARK_END, bodyAt + MARK_BODY.length);
+        const start = page.slice(0, bodyAt);
+        between = page.slice(bodyAt + MARK_BODY.length, endAt);
+        after = page.slice(endAt + MARK_END.length);
         await channel.push(start + shell);
       } else {
         await channel.push(shell);
       }
       if (channel.cancelled) return;
+      // The consumer may have paused on the shell while a boundary failed.
+      failIfErrored();
 
       // 2 — boundaries, in the order they finish.
       const deadline = Date.now() + (options.timeout ?? 10_000);
@@ -277,13 +307,23 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
         if (outstanding().length === 0) break;
         const next = outstanding().find(ready);
         if (!next) {
-          const progressed = await waitFor(() => outstanding().some(ready) || outstanding().length === 0, deadline);
+          const progressed = await waitFor(
+            () => outstanding().some(ready) || outstanding().length === 0,
+            deadline,
+            stopWaiting,
+          );
+          if (channel.cancelled) return;
+          failIfErrored();
           if (!progressed) break;
           continue;
         }
+        // A boundary whose content failed is not streamed as if it succeeded.
+        failIfErrored();
         if (!bodyClosed && doc) {
           await channel.push(between);
           bodyClosed = true;
+          if (channel.cancelled) return;
+          failIfErrored();
         }
         // Done boundaries nested inside this one travel with it.
         for (const b of state.boundaries)
@@ -296,6 +336,7 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
           `<div hidden id="sibu-resolved-${next.id}">${html}</div>${suspenseSwapScript(next.id, nonce)}`,
         );
         if (channel.cancelled) return;
+        failIfErrored();
       }
       if (DEV && outstanding().length > 0) {
         console.warn(
@@ -303,7 +344,8 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
         );
       }
 
-      // 3 — state and the end of the document.
+      // 3 — state and the end of the document, only for a render that did not fail.
+      failIfErrored();
       let stateScript = "";
       if (options.transfer !== false) {
         const data = collectTransfer();

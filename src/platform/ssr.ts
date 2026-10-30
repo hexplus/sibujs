@@ -87,12 +87,18 @@ function ssrErrorComment(err: unknown): string {
   return "<!--SSR error-->";
 }
 
-/** Strip every HTML comment terminator form so that embedded content cannot break out of `<!-- -->`. */
+/**
+ * Strip every HTML comment terminator form so that embedded content cannot break out of `<!-- -->`.
+ * Including the two that close a comment at its START: `<!-->` and `<!--->` are
+ * complete comments, so data beginning with `>` or `->` would end up as markup.
+ */
 function safeCommentText(text: string): string {
   return text
     .replace(/-->/g, "--&gt;")
     .replace(/--!>/g, "--!&gt;")
     .replace(/<!--/g, "&lt;!--")
+    .replace(/^(-?)>/, "$1&gt;")
+    .replace(/<!-$/, "&lt;!-")
     .replace(/--$/g, "--&#45;");
 }
 
@@ -1477,7 +1483,12 @@ export function serializeState(
   if (byteLen > maxBytes) {
     throw new Error(`[SibuJS SSR] serializeState: payload (${byteLen} bytes) exceeds maxBytes (${maxBytes})`);
   }
-  const json = escapeScriptJson(rawJson);
+  // In an object LITERAL a `"__proto__": …` member sets the prototype instead
+  // of creating a key, so data holding one (an API echoing user JSON) would
+  // read differently in the browser than on the server. Such a payload goes
+  // through `JSON.parse`, which creates an own property, as on the server.
+  const value = rawJson.includes('"__proto__":') ? `JSON.parse(${JSON.stringify(rawJson)})` : rawJson;
+  const json = escapeScriptJson(value);
   const nonceAttr = nonce ? ` nonce="${escapeAttr(nonce)}"` : "";
   return `<script${nonceAttr}>window.${globalName}=${json}</script>`;
 }

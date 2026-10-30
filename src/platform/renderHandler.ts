@@ -23,13 +23,17 @@ export interface RenderHandlerOptions extends RenderRouteOptions {
    * Keep rendered pages in memory. `max` entries (default 500), each for `ttl`
    * ms (default 60 000); `version()` is part of the key, so changing what it
    * returns makes every cached page stale at once. Only 200 and 404 pages are
-   * cached; redirects and errors always render.
+   * cached; redirects, errors and pages that timed out always render. The
+   * cache also holds at most `maxBytes` of HTML (default 32 MB): any query
+   * string is a distinct key, so a client inventing them evicts the oldest
+   * pages but cannot grow the process without bound.
    */
-  cache?: { max?: number; ttl?: number; version?: () => string | number };
+  cache?: { max?: number; ttl?: number; maxBytes?: number; version?: () => string | number };
   /**
    * The `Cache-Control` value for a result. Default: 200 →
    * `public, max-age=0, s-maxage=60, stale-while-revalidate=600`; 301/308 →
-   * `public, max-age=3600`; anything else → `no-store`. Return `null` to send none.
+   * `public, max-age=3600`; a timed-out render and anything else → `no-store`.
+   * Return `null` to send none.
    */
   cacheControl?: (result: RouteRenderResult) => string | null;
 }
@@ -40,9 +44,15 @@ interface Entry {
   html: string;
   control: string | null;
   expires: number;
+  bytes: number;
 }
 
+const encoder = new TextEncoder();
+
 function defaultCacheControl(result: RouteRenderResult): string {
+  // A page serialized with fallbacks because its data did not arrive in time
+  // is this request's answer only, never one for a shared cache.
+  if (result.diagnostics.timedOut) return "no-store";
   if (result.status === 200) return "public, max-age=0, s-maxage=60, stale-while-revalidate=600";
   if (result.status === 301 || result.status === 308) return "public, max-age=3600";
   return "no-store";
@@ -54,7 +64,9 @@ function defaultCacheControl(result: RouteRenderResult): string {
  * @param routes The app's route table.
  * @param options `renderRoute` options (a `document` is used by default, so the
  * response is a full page), plus `cache` and `cacheControl`.
- * @returns A `Request → Response` handler. GET and HEAD only (others: 405).
+ * @returns A `Request → Response` handler. GET and HEAD only (others: 405). A
+ * render that throws answers a bare 500 (`no-store`, no error details) and is
+ * logged with `console.error`; the handler itself never rejects.
  *
  * @example
  * ```ts
@@ -74,6 +86,14 @@ export function createRenderHandler(
   const store = cache ? new Map<string, Entry>() : null;
   const max = cache?.max ?? 500;
   const ttl = cache?.ttl ?? 60_000;
+  const maxBytes = cache?.maxBytes ?? 32 * 1024 * 1024;
+  let cachedBytes = 0;
+  const evict = (key: string) => {
+    const entry = store?.get(key);
+    if (!entry) return;
+    store?.delete(key);
+    cachedBytes -= entry.bytes;
+  };
 
   const respond = (status: number, html: string, head: boolean, headers: Record<string, string>) =>
     new Response(head || status === 204 || (status >= 300 && status < 400) ? null : html, {
@@ -101,19 +121,34 @@ export function createRenderHandler(
         if (hit.control) hitHeaders["cache-control"] = hit.control;
         return respond(hit.status, hit.html, head, hitHeaders);
       }
-      if (hit) store.delete(key);
+      if (hit) evict(key);
     }
 
-    const result = await renderRoute(routes, path, { ...renderOptions, document });
+    let result: RouteRenderResult;
+    try {
+      result = await renderRoute(routes, path, { ...renderOptions, document });
+    } catch (err) {
+      // The error stays in the server log; the visitor gets no stack or message.
+      console.error(`[SibuJS SSR] render of ${path} failed:`, err);
+      return new Response(head ? null : "Internal Server Error", {
+        status: 500,
+        headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+      });
+    }
     const headers: Record<string, string> = {};
     const control = cacheControl(result);
     if (control) headers["cache-control"] = control;
     if (result.location) headers.location = result.location;
 
-    if (store && (result.status === 200 || result.status === 404)) {
-      store.set(key, { status: result.status, html: result.html, control, expires: Date.now() + ttl });
-      while (store.size > max) store.delete(store.keys().next().value as string);
-      headers["x-sibu-cache"] = "miss";
+    if (store && (result.status === 200 || result.status === 404) && !result.diagnostics.timedOut) {
+      const bytes = encoder.encode(result.html).byteLength;
+      if (bytes <= maxBytes) {
+        evict(key);
+        store.set(key, { status: result.status, html: result.html, control, expires: Date.now() + ttl, bytes });
+        cachedBytes += bytes;
+        while (store.size > max || cachedBytes > maxBytes) evict(store.keys().next().value as string);
+        headers["x-sibu-cache"] = "miss";
+      }
     }
     return respond(result.status, result.html, head, headers);
   };

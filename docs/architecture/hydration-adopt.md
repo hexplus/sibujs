@@ -96,6 +96,20 @@ writes to it, and when it ends it dispatches `input` and `change` on the control
 so the app's handlers bring their state in line. Focus and scroll stay because
 the nodes stay.
 
+Selects, checkboxes and radios are snapshotted when the session STARTS, before
+any client code runs. The client builds a select's options before the select
+(an option's `selected` write changes the selection before the select is
+claimed), and checking one radio unchecks its group (a sibling's write, or a
+sibling joining the group, changes this one first) — so judging them at claim
+time would see the client's writes, not the user's. "Changed" is measured
+against the markup's own default: a drop-down with no `selected` option selects
+its first one untouched, and the client's `value` applies to it. When the
+session ends the snapshot is put back — selections by option VALUE, since the
+client may have rebuilt or reordered the options; values the client no longer
+offers are dropped, and when none is left the client's selection stands and no
+event is replayed. A select gets no property override for this. Every instance
+override is removed when the session ends, and also when the build throws.
+
 ## Deferred and async content
 
 `when` / `match` / `each` first renders run in microtasks, `lazy()` chunks and
@@ -141,5 +155,7 @@ bindings on matching markup; the fixture landing page through the router
 (creates no element, keeps the hero `<img>` node, no `/api/catalog` request);
 injected attributes stripped; a deliberate mismatch replacing only its
 subtree; typed input and focus surviving; `ClientOnly` swap; `createId()`;
-`lazy()` content adopted; transferred query data. The replace strategy's own
-suite is unchanged.
+`lazy()` content adopted; transferred query data. `tests/ssr-adopt-select.test.ts`:
+single and multiple selects, option- and select-level writes, an untouched
+select, reordered and removed options, replayed events, radios, and no override
+left behind. The replace strategy's own suite is unchanged.

@@ -143,12 +143,26 @@ function escapeXml(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
+/** The text of a `<title>` (RCDATA): its character references decoded. */
+function decodeTitleText(text: string): string {
+  const named: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+  return text.replace(/&(#x[0-9a-f]+|#[0-9]+|[a-z]+);/gi, (ref: string, body: string) => {
+    if (body[0] !== "#") return named[body.toLowerCase()] ?? ref;
+    const code = body[1] === "x" || body[1] === "X" ? Number.parseInt(body.slice(2), 16) : Number(body.slice(1));
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ref;
+  });
+}
+
 /**
  * Put a rendered route into the built shell: the body inside the element with
  * id `container`, the head tags before `</head>` (replacing the shell's
  * `<title>` when the route has one, which keeps the shell's title in
  * `data-sibu-base-title` for the client router), the transfer script before
  * `</body>`.
+ *
+ * Every insertion is a replacement CALLBACK: a string replacement would read
+ * `$&`, `$'`, `` $` ``, `$$` and `$1` in a page title or in transferred JSON as
+ * replacement patterns and splice parts of the shell into the page.
  * @internal
  */
 export function injectIntoShell(
@@ -161,10 +175,14 @@ export function injectIntoShell(
   if (parts.head) {
     let head = parts.head;
     if (/<title>/i.test(head)) {
-      html = html.replace(/\s*<title>[\s\S]*?<\/title>/i, "");
-      head = head.replace(/<title>/i, `<title data-sibu-base-title="${escapeAttr(shellTitle)}">`);
+      html = html.replace(/\s*<title>[\s\S]*?<\/title>/i, () => "");
+      // The attribute carries the title TEXT (what `document.title` reads), so
+      // the shell's character references are decoded before it is escaped.
+      const baseTitle = `<title data-sibu-base-title="${escapeAttr(decodeTitleText(shellTitle))}">`;
+      head = head.replace(/<title>/i, () => baseTitle);
     }
-    html = html.replace(/<\/head>/i, `    ${head}\n  </head>`);
+    const headHtml = head;
+    html = html.replace(/<\/head>/i, () => `    ${headHtml}\n  </head>`);
   }
   if (parts.body) {
     const id = container.replace(/[^A-Za-z0-9_-]/g, "");
@@ -176,8 +194,42 @@ export function injectIntoShell(
       (_m, openTag: string, _tag: string, _inner: string, close: string) => `${openTag}${parts.body}${close}`,
     );
   }
-  if (parts.state) html = html.replace(/<\/body>/i, `  ${parts.state}\n  </body>`);
+  if (parts.state) html = html.replace(/<\/body>/i, () => `  ${parts.state}\n  </body>`);
   return html;
+}
+
+/**
+ * Fail the build, naming the route, when a page cannot be written as rendered:
+ * an API request that never reached the API, a route that did not render
+ * before the deadline (a lazy import, a guard or a route load that never
+ * finished), or a page that did not settle.
+ * @internal
+ */
+export function assertPrerendered(
+  url: string,
+  result: {
+    failure: string | null;
+    diagnostics: { timedOut: boolean; pending: string[] };
+  },
+  failures: readonly string[],
+  timeout: number,
+): void {
+  if (failures.length > 0) {
+    throw new Error(
+      `[sibu prerender] ${url}: ${failures[0]}. The page needs data from an API that is not reachable ` +
+        "at build time — start it and point `prerender.fetch` at it, or skip the request with isPrerendering().",
+    );
+  }
+  const pending = result.diagnostics.pending.join(", ");
+  if (result.failure === "timeout") {
+    throw new Error(
+      `[sibu prerender] ${url}: the route did not render within ${timeout} ms (pending: ${pending}). ` +
+        "A lazy import, a guard or a route load did not finish in time; fix it or raise `prerender.timeout`.",
+    );
+  }
+  if (result.diagnostics.timedOut) {
+    throw new Error(`[sibu prerender] ${url}: did not settle within ${timeout} ms (pending: ${pending})`);
+  }
 }
 
 /** `sitemap.xml` for the indexable pages. @internal */
@@ -330,17 +382,7 @@ export async function prerenderFromServerEntry(
     const render = async (url: string) => {
       const store = { route: url, failures: [] as string[] };
       const result = await currentRoute.run(store, () => driver.renderRoute(entry.routes, url, renderOptions));
-      if (store.failures.length > 0) {
-        throw new Error(
-          `[sibu prerender] ${url}: ${store.failures[0]}. The page needs data from an API that is not reachable ` +
-            "at build time — start it and point `prerender.fetch` at it, or skip the request with isPrerendering().",
-        );
-      }
-      if (result.diagnostics.timedOut) {
-        throw new Error(
-          `[sibu prerender] ${url}: did not settle within ${renderOptions.timeout} ms (pending: ${result.diagnostics.pending.join(", ")})`,
-        );
-      }
+      assertPrerendered(url, result, store.failures, renderOptions.timeout);
       return result;
     };
 

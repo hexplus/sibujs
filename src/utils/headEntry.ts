@@ -255,6 +255,15 @@ export function serializeHeadEntry(tag: "meta" | "link", attrs: Record<string, s
   const plan =
     tag === "meta" ? planMetaEntry(attrs, STATIC_VALUE_RESOLVER) : planHeadElementEntry(attrs, STATIC_VALUE_RESOLVER);
   if (plan.kind === "drop") return "";
-  const pairs = Array.from(plan.attributes, ([name, value]) => `${name}="${escapeHeadAttrValue(value)}"`).join(" ");
+  return serializePlannedHeadEntry(tag, plan.attributes);
+}
+
+/**
+ * Serialize the attributes of an entry a plan ACCEPTED — for a caller that ran
+ * the plan itself with its own resolver (the server `Head()`, whose getters
+ * make an entry reactive for the meta-refresh rule).
+ */
+export function serializePlannedHeadEntry(tag: "meta" | "link", attributes: ReadonlyMap<string, string>): string {
+  const pairs = Array.from(attributes, ([name, value]) => `${name}="${escapeHeadAttrValue(value)}"`).join(" ");
   return `<${tag} ${pairs} />`;
 }

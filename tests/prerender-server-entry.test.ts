@@ -164,22 +164,47 @@ describe("served by a plain Python static server", () => {
   let proc: ChildProcess | undefined;
   let base = "";
 
+  /** A port the OS reports free right now. */
+  const freePort = (): Promise<number> =>
+    new Promise((resolve, reject) => {
+      const probe = createServer();
+      probe.once("error", reject);
+      probe.listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as AddressInfo;
+        probe.close(() => resolve(port));
+      });
+    });
+
   beforeAll(async () => {
     if (!python) return;
-    const port = 18000 + Math.floor(Math.random() * 2000);
-    proc = spawn(python, ["-m", "http.server", String(port), "--bind", "127.0.0.1", "--directory", outDir], {
-      stdio: "ignore",
-    });
-    base = `http://127.0.0.1:${port}`;
-    for (let i = 0; i < 50; i++) {
-      try {
-        await fetch(base);
-        return;
-      } catch {
-        await new Promise((r) => setTimeout(r, 100));
+    // Python can take seconds to start on a loaded machine, and a port can be
+    // taken between choosing and binding it: wait until it answers, start again
+    // on another port if it exited, and fail loudly rather than let the tests
+    // run against nothing.
+    const deadline = Date.now() + 50_000;
+    while (Date.now() < deadline) {
+      const port = await freePort();
+      const child = spawn(python, ["-m", "http.server", String(port), "--bind", "127.0.0.1", "--directory", outDir], {
+        stdio: "ignore",
+      });
+      let exited = false;
+      child.once("exit", () => {
+        exited = true;
+      });
+      proc = child;
+      base = `http://127.0.0.1:${port}`;
+      while (!exited && Date.now() < deadline) {
+        try {
+          await fetch(base);
+          return;
+        } catch {
+          await new Promise((r) => setTimeout(r, 100));
+        }
       }
+      child.kill();
     }
-  }, 20_000);
+    throw new Error("the Python static server did not start");
+  }, 60_000);
 
   afterAll(() => {
     proc?.kill();
