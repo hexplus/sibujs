@@ -8,6 +8,8 @@ node_modules/
 
 # Build output
 dist/
+# Server bundle of the fixture app (examples/static-backends/sidecar)
+fixtures/ssr-app/dist-server/
 *.log
 
 # Editor/IDE

@@ -59,6 +59,14 @@ const scenarios = {
   "/unhandled-failure": () => fetch("/broken").then((r) => r.text()).then(show),
   "/read-endless": () => fetch("/endless").then((r) => r.text()).then(show),
 };
+// Loading the app takes longer than the route's timeout plus the backstop's
+// 5 s margin. The thread is blocked with Atomics.wait: the build target has no
+// top-level await, and a busy loop on Date.now() did not block it in the
+// worker. The route must still render, timed from when the app loaded.
+if (location.pathname === "/slow-start") {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5_500);
+  show("started");
+}
 scenarios[location.pathname]?.();
 `;
 
@@ -179,6 +187,11 @@ describe("prerender error handling for body reads", () => {
     await expect(run(["/read-endless"], "out-endless", 1_500)).rejects.toThrow(
       /read-endless: .*did not settle within 1500 ms \(1 pending/,
     );
+  }, 60_000);
+
+  it("an app that takes long to load still renders: the timeout runs from when it loaded", async () => {
+    const out = await run(["/slow-start"], "out-slow-start", 100);
+    expect(await out.page("/slow-start")).toBe("started");
   }, 60_000);
 
   it("a body read that rejects with no handler fails the route", async () => {

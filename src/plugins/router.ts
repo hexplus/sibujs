@@ -1,9 +1,13 @@
 import { devWarn, isDev } from "../core/dev";
+import { type AdoptScope, captureScope, inScope, keyedScope } from "../core/rendering/adoptScope";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
+import { isHydrating } from "../core/rendering/hydrationHooks";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { getRequestStore } from "../core/ssr-context";
+import { recordServerHead } from "../platform/serverHead";
 import { bindOwnerScope, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
 import { prerenderWait } from "../utils/prerenderHook";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
@@ -14,6 +18,7 @@ import {
   type RouteHeadController,
   type RouterHeadOptions,
   routeHasHead,
+  serverHeadLayer,
 } from "./routeHead";
 
 /**
@@ -99,10 +104,37 @@ function isRouterNavigable(path: string): boolean {
   return classifyNavigationTarget(path) === "internal";
 }
 
+/**
+ * `path` without its trailing slashes. A loop, not `/\/+$/`: that regex
+ * backtracks quadratically on a long run of slashes not at the end (a request
+ * path like `/a//////…//x`).
+ */
+function trimTrailingSlashes(path: string): string {
+  let end = path.length;
+  while (end > 0 && path.charCodeAt(end - 1) === 47) end--;
+  return end === path.length ? path : path.slice(0, end);
+}
+
+/**
+ * A request URL relative to the router's `base`: the base is removed when the
+ * path is the base itself or continues it at a segment boundary (`/app`,
+ * `/app/`, `/app/x` under `/app`; never `/application`). Query and hash are
+ * kept. Applied once, to an incoming URL — never to a navigation target.
+ */
+function stripBase(url: string, base: string | undefined): string {
+  const prefix = base ? trimTrailingSlashes(base) : "";
+  if (!prefix) return url;
+  const cut = url.search(/[?#]/);
+  const path = cut === -1 ? url : url.slice(0, cut);
+  const rest = cut === -1 ? "" : url.slice(cut);
+  if (path !== prefix && !path.startsWith(`${prefix}/`)) return url;
+  return (path.slice(prefix.length) || "/") + rest;
+}
+
 /** Strip a trailing slash so `/users/` and `/users` compare equal; root stays `/`. */
 function normalizePathname(path: string): string {
   if (!path) return "/";
-  const trimmed = path.length > 1 ? path.replace(/\/+$/, "") : path;
+  const trimmed = path.length > 1 ? trimTrailingSlashes(path) : path;
   return trimmed || "/";
 }
 
@@ -296,6 +328,31 @@ export interface RouteBase {
    * ```
    */
   readonly key?: (route: RouteContext) => string;
+  /**
+   * HTTP status a server render of this route answers with. A `*` record
+   * answers 404 without it; a `redirect` record answers 302 (set `301` for a
+   * permanent move). The deepest matched record that declares one wins.
+   */
+  readonly status?: number;
+  /**
+   * How a server render treats this route (the deepest record that declares
+   * it wins; the default is to render it):
+   *
+   * - `"prerender"` — rendered at build time and on a per-request server.
+   * - `"ssr"` — rendered per request only; the build-time pre-renderer emits
+   *   the app shell plus the route's `head` for it, because its content is
+   *   per-request (a status page).
+   * - `"client"` — never rendered on a server: the shell plus the route's
+   *   `head` (a canvas designer, an admin panel). Excluded from the sitemap.
+   */
+  readonly render?: "ssr" | "prerender" | "client";
+  /**
+   * The concrete paths of a dynamic route, for the build-time pre-renderer:
+   * each entry is a params object for this record's path (`{ id: "taza" }`
+   * for `/producto/:id`) or a ready path string. May be async (read the
+   * catalog from the API at build time).
+   */
+  readonly getStaticPaths?: () => Iterable<Params | string> | Promise<Iterable<Params | string>>;
 }
 
 export interface ComponentRoute extends RouteBase {
@@ -324,7 +381,30 @@ export interface LazyRoute extends RouteBase {
 export type RouteDef = ComponentRoute | AsyncRoute | RedirectRoute | LazyRoute;
 
 export interface RouterOptions {
-  readonly mode?: "history" | "hash";
+  /**
+   * `"history"` (default) and `"hash"` read and write the browser location.
+   * `"memory"` keeps the location in the router itself: it starts at `url`
+   * and never touches `window`, `history` or `location`. Created inside a
+   * server request scope (`runInSSRContext`, `renderRoute`), a memory router
+   * belongs to that request only, so concurrent renders each have their own.
+   */
+  readonly mode?: "history" | "hash" | "memory";
+  /**
+   * Initial location of a `"memory"` router (`"/cotizar?servicio=dtf"`).
+   * Default `"/"`. It is the REQUEST URL, like the browser's location: with a
+   * `base`, a path under it (`/app/cotizar`, `/app`, `/app/`) has the base
+   * stripped at a segment boundary, the query and hash kept; a path not under
+   * it (`/application`) is taken as it is. Navigation targets (`navigate()`,
+   * links, redirects) are application paths, without the base, in every mode.
+   */
+  readonly url?: string;
+  /**
+   * `"strict"` (default): `/cotizar/` and `/cotizar` are different paths.
+   * `"ignore"`: a trailing slash is dropped before matching, so `/cotizar/` is
+   * the `/cotizar` route — what a static server serving `cotizar/index.html`
+   * at `/cotizar/` (FastAPI `StaticFiles`, nginx, S3) needs.
+   */
+  readonly trailingSlash?: "strict" | "ignore";
   readonly base?: string;
   readonly linkActiveClass?: string;
   readonly linkExactActiveClass?: string;
@@ -1130,7 +1210,8 @@ class ComponentLoader {
   ): Promise<Element> {
     // The factory runs in the instance's route scope, so everything it creates
     // reads the route this instance was committed with (see `RouteScope`).
-    const result = scope ? runWithOwnerScope(scope, component) : component();
+    const build = () => (scope ? runWithOwnerScope(scope, component) : component());
+    const result = scope?.adopt ? inScope(scope.adopt, build) : build();
 
     // Runtime thenable detection on the *real* invocation — never a second,
     // speculative call made only to classify. (RC-003)
@@ -1293,6 +1374,31 @@ export class SibuRouter {
   // Created the first time a committed route needs a managed <head>.
   private headController: RouteHeadController | null = null;
 
+  // A memory router in a server request: the route its head layer describes,
+  // and the layer's withdraw function (see `updateHead`).
+  private serverHeadRoute: RouteContext | null = null;
+  private withdrawServerHead: (() => void) | null = null;
+
+  // The location of a "memory" router (it has no browser location).
+  private memoryLocation = "/";
+
+  /**
+   * What the initial navigation did, for a server render's HTTP status: the
+   * result, and the status of the first redirect hop it took (a `redirect`
+   * record's `status`, 302 by default; 302 for a guard redirect).
+   * @internal
+   */
+  initialOutcome: {
+    result: NavigationResult | null;
+    redirectStatus: number | null;
+    /** Who redirected: a `redirect` record (the same for every visitor) or a guard (visitor-dependent). */
+    redirectBy: "route" | "guard" | null;
+  } = {
+    result: null,
+    redirectStatus: null,
+    redirectBy: null,
+  };
+
   // Settles once the initial location has been resolved (committed or failed).
   private readonly readyPromise: Promise<void>;
   private resolveReady!: () => void;
@@ -1327,6 +1433,7 @@ export class SibuRouter {
     this.isReadyGetter = isReadyState;
     this.isReadySetter = setIsReadyState;
 
+    if (this.options.mode === "memory") this.memoryLocation = stripBase(this.options.url || "/", this.options.base);
     this.matcher = new RouteMatcher(routes);
     this.guards = new GuardManager(this.options.guardTimeout);
     this.loader = new ComponentLoader(this.options.cacheSize, this.options.errorRetryDelay);
@@ -1338,7 +1445,7 @@ export class SibuRouter {
   private initialize(): void {
     // Set up event listeners. Guarded so constructing a router under SSR (e.g.
     // createMemoryRouter, advertised for testing/SSR) doesn't throw on `window`.
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && this.options.mode !== "memory") {
       if (this.options.mode === "history") {
         const popstateHandler = () => this.handleLocationChange(true);
         window.addEventListener("popstate", popstateHandler);
@@ -1359,13 +1466,15 @@ export class SibuRouter {
       if (!this.navigator.isNavigating) {
         // Initial resolution: establishes the bootstrap route, so it must not
         // advance the generation and invalidate the bootstrap it is serving.
-        initial = this.handleLocationChange(true, true);
+        initial = this.handleLocationChange(true, true).then((result) => {
+          this.initialOutcome.result = (result as NavigationResult | undefined) ?? null;
+        });
       }
       this.isReadySetter(true);
       // A pre-renderer serializes only once the initial route has committed (the
       // outlets register their own component loads); in a browser this
       // registration is a no-op.
-      prerenderWait(initial.then(this.resolveReady, this.resolveReady));
+      prerenderWait(initial.then(this.resolveReady, this.resolveReady), "router:navigation");
     });
   }
 
@@ -1383,6 +1492,11 @@ export class SibuRouter {
         this.loader.clearErrors();
       }
     }
+  }
+
+  /** Settles once the initial navigation committed or failed (before component loads). @internal */
+  whenNavigated(): Promise<void> {
+    return this.readyPromise;
   }
 
   /** Settles after the initial navigation and its component loads; see `routerReady()`. */
@@ -1412,6 +1526,7 @@ export class SibuRouter {
 
   private getCurrentPath(): string {
     const { mode, base } = this.options;
+    if (mode === "memory") return this.memoryLocation;
 
     // No DOM: there is no live location to read. `initialize()` already guards
     // listener registration for this case, but its `queueMicrotask` bootstrap
@@ -1437,7 +1552,12 @@ export class SibuRouter {
   }
 
   private createRouteContext(fullPath: string): RouteContext {
-    const { path, query: queryString, hash } = splitRouteUrl(fullPath);
+    const split = splitRouteUrl(fullPath);
+    const { query: queryString, hash } = split;
+    const path =
+      this.options.trailingSlash === "ignore" && split.path.length > 1
+        ? trimTrailingSlashes(split.path) || "/"
+        : split.path;
     const query = parseQuery(queryString);
     const queryAll = parseQueryAll(queryString);
 
@@ -1524,7 +1644,14 @@ export class SibuRouter {
   private async performNavigation(
     to: RouteContext,
     from: RouteContext,
-    options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean },
+    options: {
+      replace?: boolean;
+      state?: unknown;
+      skipHistory?: boolean;
+      initialResolution?: boolean;
+      redirectStatus?: number;
+      redirectBy?: "route" | "guard";
+    },
     signal: AbortSignal,
     depth = 0,
     redirectChain: string[] = [],
@@ -1551,6 +1678,8 @@ export class SibuRouter {
         if (!isRouterNavigable(beforeEachResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= 302;
+        options.redirectBy ??= "guard";
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
           ...chain,
           beforeEachResult,
@@ -1587,6 +1716,8 @@ export class SibuRouter {
                 if (!isRouterNavigable(result)) {
                   throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
+                options.redirectStatus ??= 302;
+                options.redirectBy ??= "guard";
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
                   ...chain,
                   result,
@@ -1614,6 +1745,8 @@ export class SibuRouter {
           }
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= typeof route.status === "number" ? route.status : 302;
+        options.redirectBy ??= "route";
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
           ...chain,
           redirectPath,
@@ -1629,6 +1762,8 @@ export class SibuRouter {
         if (!isRouterNavigable(beforeResolveResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= 302;
+        options.redirectBy ??= "guard";
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
           ...chain,
           beforeResolveResult,
@@ -1654,9 +1789,16 @@ export class SibuRouter {
       throw new NavigationFailureError("aborted", from, to, undefined, abortReasonOf(signal));
     }
 
-    // Update browser history
-    if (!options.skipHistory) {
+    // Update browser history (a memory router keeps its own location)
+    if (this.options.mode === "memory") {
+      const search = serializeQuery(to.queryAll);
+      this.memoryLocation = to.path + (search ? `?${search}` : "") + (to.hash ? `#${to.hash}` : "");
+    } else if (!options.skipHistory) {
       this.updateHistory(to, options);
+    }
+    if (options.initialResolution) {
+      this.initialOutcome.redirectStatus = options.redirectStatus ?? null;
+      this.initialOutcome.redirectBy = options.redirectBy ?? null;
     }
 
     // Advance the navigation generation. Anything asynchronous that captured
@@ -1678,7 +1820,24 @@ export class SibuRouter {
   }
 
   private updateHead(to: RouteContext): void {
-    if (typeof document === "undefined" || this.destroyed) return;
+    if (this.destroyed) return;
+    // A memory router inside a server request records the head for the render
+    // result instead of writing into a document shared by every request.
+    // ONE layer per router, resolved when the request collects its head: a
+    // later navigation in the same request replaces the route it describes
+    // (keeping its position), and its getters see the settled data.
+    if (this.options.mode === "memory" && getRequestStore()) {
+      this.serverHeadRoute = to;
+      if (this.withdrawServerHead === null && routeHasHead(to.matched, this.options.head)) {
+        this.withdrawServerHead = recordServerHead(() => {
+          const route = this.serverHeadRoute;
+          if (route === null || !routeHasHead(route.matched, this.options.head)) return null;
+          return serverHeadLayer(route, this.options.head);
+        });
+      }
+      return;
+    }
+    if (typeof document === "undefined") return;
     if (this.headController === null) {
       // Lazily, so an app that never declares a head keeps full control of it.
       if (!routeHasHead(to.matched, this.options.head)) return;
@@ -1860,7 +2019,7 @@ export class SibuRouter {
    * anything. Pair with {@link instantiateComponent} at the commit boundary.
    */
   async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
-    return prerenderWait(this.loader.loadPlan(route, routePath));
+    return prerenderWait(this.loader.loadPlan(route, routePath), `router:load ${route.path}`);
   }
 
   /**
@@ -1873,7 +2032,7 @@ export class SibuRouter {
     routePath: string,
     scope?: RouteScope,
   ): Promise<Element> {
-    return prerenderWait(this.loader.instantiate(plan, route, routePath, scope));
+    return prerenderWait(this.loader.instantiate(plan, route, routePath, scope), `router:render ${route.path}`);
   }
 
   /** Resolve a route's module/factory without creating any component instance. */
@@ -1946,6 +2105,9 @@ export class SibuRouter {
     this.isReadySetter(false);
     this.headController?.dispose();
     this.headController = null;
+    this.withdrawServerHead?.();
+    this.withdrawServerHead = null;
+    this.serverHeadRoute = null;
     // Nothing is left to wait for.
     this.resolveReady();
   }
@@ -2045,11 +2207,30 @@ function abortReasonOf(signal: AbortSignal): NavigationFailureReason {
 // a null router ("Router not initialized"), even though `createRouter()` ran in
 // the first copy. `_routerRef.current` is the single source of truth.
 const ROUTER_KEY = Symbol.for("sibujs.router.v1");
-const _routerRef: { current: SibuRouter | null } = ((
+const _globalRouterRef: { current: SibuRouter | null } = ((
   globalThis as typeof globalThis & {
     [ROUTER_KEY]?: { current: SibuRouter | null };
   }
 )[ROUTER_KEY] ??= { current: null });
+
+/**
+ * The router `route()`, `navigate()`, `Route()` and `RouterLink` talk to: the
+ * current server request's memory router when one exists (see `createRouter`),
+ * the process-wide router otherwise. A request without its own router sees the
+ * global one, exactly as before request routers existed.
+ */
+const REQUEST_ROUTER = "router";
+const _routerRef = {
+  get current(): SibuRouter | null {
+    const own = getRequestStore()?.slots?.get(REQUEST_ROUTER) as SibuRouter | null | undefined;
+    return own ?? _globalRouterRef.current;
+  },
+  set current(router: SibuRouter | null) {
+    const slots = getRequestStore()?.slots;
+    if (slots?.get(REQUEST_ROUTER)) slots.set(REQUEST_ROUTER, router);
+    else _globalRouterRef.current = router;
+  },
+};
 
 // Bumped by every `createRouter()`. Outlets read it in their tracked pass, so
 // one built before the router existed renders once it does, and one built
@@ -2186,10 +2367,6 @@ function normalizeRoutes(routes: RouteDef[]): RouteDef[] {
  * @returns The created router instance.
  */
 export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, options: RouterOptions = {}): SibuRouter {
-  if (_routerRef.current) {
-    _routerRef.current.destroy();
-  }
-
   // Handle overload: createRouter(options) without routes array
   let routes: RouteDef[];
   if (Array.isArray(routesOrOptions)) {
@@ -2197,6 +2374,22 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
   } else {
     options = routesOrOptions;
     routes = [];
+  }
+
+  // A memory router created inside a server request is that request's alone:
+  // it neither replaces nor destroys the process-wide router, and concurrent
+  // requests each see their own.
+  const store = getRequestStore();
+  if (options.mode === "memory" && store) {
+    const slots = (store.slots ??= new Map());
+    (slots.get(REQUEST_ROUTER) as SibuRouter | null | undefined)?.destroy();
+    const router = new SibuRouter(routes, options);
+    slots.set(REQUEST_ROUTER, router);
+    return router;
+  }
+
+  if (_routerRef.current) {
+    _routerRef.current.destroy();
   }
 
   _routerRef.current = new SibuRouter(routes, options);
@@ -2244,6 +2437,8 @@ export function setRoutes(routes: RouteDef[]): void {
  * page rendered) is not the page's, and falls back to the router-global route.
  */
 class RouteScope {
+  /** Creation scope the instance is built in (adopting hydration); see `adoptScope`. */
+  adopt: AdoptScope | null = null;
   private readonly get: () => RouteContext | null;
   private readonly set: (route: RouteContext | null) => void;
   private released = false;
@@ -2312,8 +2507,10 @@ async function instantiateScoped(
   routeDef: RouteDef,
   routePath: string,
   route: RouteContext,
+  adopt: AdoptScope | null = null,
 ): Promise<Element> {
   const scope = new RouteScope(route);
+  scope.adopt = adopt;
   const node = await router.instantiateComponent(plan, routeDef, routePath, scope);
   if (node) {
     instanceScopes.set(node, scope);
@@ -2586,6 +2783,7 @@ function instanceKey(owner: RouteDef, records: readonly RouteDef[], route: Route
  */
 export function Route(): Node {
   const anchor = document.createComment("route-outlet");
+  const adoptScope = captureScope();
   let currentNode: Node | null = null;
   let loadingNode: Node | null = null;
   let errorNode: Node | null = null;
@@ -2647,7 +2845,9 @@ export function Route(): Node {
   };
 
   const showLoading = () => {
-    if (!loadingNode && anchor.parentNode) {
+    // Adopting server markup: the server's rendered route stays on screen
+    // while its chunk loads, instead of a spinner beside it.
+    if (!loadingNode && anchor.parentNode && !isHydrating()) {
       loadingNode = document.createElement("div");
       (loadingNode as HTMLElement).className = "route-loading";
       (loadingNode as HTMLElement).setAttribute("role", "status");
@@ -2824,7 +3024,14 @@ export function Route(): Node {
           // may synchronously navigate, dispose this outlet's owner, or
           // otherwise invalidate the generation — and for a direct
           // AsyncComponent it also awaits, so ownership can move either way.
-          const node = await instantiateScoped(_routerRef.current, plan, routeDef, route.path, route);
+          const node = await instantiateScoped(
+            _routerRef.current,
+            plan,
+            routeDef,
+            route.path,
+            route,
+            keyedScope(adoptScope, routeDef.path),
+          );
 
           // Second ownership check, immediately before the synchronous commit,
           // re-reading the parent rather than trusting one captured earlier.
@@ -3713,6 +3920,7 @@ export function __removeRouterPagehideHandler(): void {
  */
 export function Outlet(): Node {
   const anchor = document.createComment("route-outlet-nested");
+  const adoptScope = captureScope();
   let currentNode: Node | null = null;
   let currentChild: RouteDef | null = null;
   // Instance key (see `RouteBase.key`) of the mounted child.
@@ -3813,7 +4021,14 @@ export function Outlet(): Node {
       // Create exactly one instance. Arbitrary user code: it may synchronously
       // navigate, dispose this outlet's owner, or otherwise invalidate the
       // generation — an `await` is not the only way ownership moves.
-      const node = await instantiateScoped(_routerRef.current, plan, childRoute, cacheKey, route);
+      const node = await instantiateScoped(
+        _routerRef.current,
+        plan,
+        childRoute,
+        cacheKey,
+        route,
+        keyedScope(adoptScope, childRoute.path),
+      );
 
       // Second ownership check, immediately before the synchronous commit, and
       // re-reading the parent rather than trusting one captured earlier. The

@@ -3,6 +3,7 @@ import { bindAttribute } from "../../reactivity/bindAttribute";
 import { bindChildNode } from "../../reactivity/bindChildNode";
 import { isCodeTextElement } from "../../utils/elementPolicy";
 import { setSafeAttribute, setTrustedAttribute } from "../../utils/setSafeAttribute";
+import { createScopedElement } from "./adoptScope";
 import { registerDisposer } from "./dispose";
 import { requireDocument } from "./requireDocument";
 import { SVG_NS } from "./tagFactory";
@@ -392,7 +393,7 @@ function parseTemplate(strings: TemplateStringsArray): TmplChild[] {
 
 function executeElement(tmpl: TmplElement, values: unknown[]): Element {
   // Create element directly — avoids allocating a props object + passing through tagFactory
-  const el = tmpl.svg ? document.createElementNS(SVG_NS, tmpl.tag) : document.createElement(tmpl.tag);
+  const el = createScopedElement(tmpl.tag, tmpl.svg ? SVG_NS : undefined);
 
   // Replay attributes directly on the element
   for (let i = 0; i < tmpl.attrs.length; i++) {
@@ -546,7 +547,7 @@ function renderTemplate(tmpl: TmplChild[], values: unknown[]): Element {
   }
 
   // Multiple roots or non-element root — build wrapper inline (no intermediate array)
-  const wrapper = document.createElement("div");
+  const wrapper = createScopedElement("div");
   for (let i = 0; i < tmpl.length; i++) {
     const child = tmpl[i];
     switch (child.t) {

@@ -1,5 +1,6 @@
 import { DEV, devWarn } from "../dev";
 import { reportError } from "../errors";
+import { isHydrating } from "./hydrationHooks";
 
 const elementDisposers = new WeakMap<Node, Array<() => void>>();
 
@@ -324,6 +325,23 @@ export function disposeNodeOwn(node: Node): void {
  * not leak its former siblings or ancestors.
  */
 export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void {
+  // Adopting hydration: the incoming nodes may already be the parent's first
+  // children (claimed server nodes). Detaching them would drop focus and
+  // restart media; keep them and release only what follows.
+  if (isHydrating() && next.length > 0 && next[0] === parent.firstChild) {
+    let ok = true;
+    for (let i = 1; i < next.length && ok; i++) ok = next[i - 1].nextSibling === next[i];
+    if (ok) {
+      let rest = next[next.length - 1].nextSibling;
+      while (rest) {
+        const following: ChildNode | null = rest.nextSibling;
+        dispose(rest);
+        parent.removeChild(rest);
+        rest = following;
+      }
+      return;
+    }
+  }
   // Detach incoming nodes first. This is what keeps a node that is currently a
   // *descendant of an outgoing child* alive: once it is out of the tree, the
   // dispose() walk below cannot reach it. Doing this before the childNodes

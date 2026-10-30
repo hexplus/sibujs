@@ -128,11 +128,35 @@ describe("island / enhancement entry points stay tree-shakeable", () => {
 
   it("the published entry points still exist and export the new API", async () => {
     // Guards against an export being added to `src/` but never surfaced.
-    const index = await import("../index");
-    expect(typeof index.external).toBe("function");
-    expect(typeof index.enhance).toBe("function");
-    expect(typeof index.registerIsland).toBe("function");
-    expect(typeof index.mountIslands).toBe("function");
+    // Bundled like the cases above, not `import()`ed: transforming the whole
+    // source graph through the test runner took over 15 s on a loaded machine.
+    // esbuild silently drops a re-exported name the entry point does not
+    // have, so the check reads the bundle's final export list.
+    const result = await build({
+      stdin: {
+        contents: 'export { enhance, external, mountIslands, registerIsland } from "./index";',
+        resolveDir: ROOT,
+        loader: "ts",
+      },
+      bundle: true,
+      format: "esm",
+      target: "es2020",
+      write: false,
+      define: { __SIBU_DEV__: "false", __SIBU_VERSION__: '"test"' },
+    });
+    const list = /export\s*\{([^}]*)\}\s*;?\s*$/.exec(result.outputFiles[0].text)?.[1] ?? "";
+    const exported = list
+      .split(",")
+      .map(
+        (name) =>
+          name
+            .trim()
+            .split(/\s+as\s+/)
+            .pop() ?? "",
+      )
+      .filter(Boolean)
+      .sort();
+    expect(exported).toEqual(["enhance", "external", "mountIslands", "registerIsland"]);
   });
 
   it("the built package re-exports external() and the each types", () => {

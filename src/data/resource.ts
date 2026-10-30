@@ -1,12 +1,49 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { isSSR, requestSlot, trackPending } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import { untracked } from "../reactivity/track";
+import { registerTransferCollector, takeTransferred } from "../utils/transfer";
 import { isAbortError } from "./abort";
 import { runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
 import { withRetry } from "./retry";
 import { applyStructuralSharing, type StructuralSharingOption } from "./structuralSharing";
+
+/** This request's keyed resource values, transferred to the browser as section `r`. */
+function transferSlot(): Map<string, unknown> | undefined {
+  return requestSlot("resource:transfer", () => new Map<string, unknown>());
+}
+
+/** This request's transfer keys that must not cross (see {@link withholdTransfer}). */
+function withheldSlot(): Set<string> | undefined {
+  return requestSlot("resource:transfer:withheld", () => new Set<string>());
+}
+
+registerTransferCollector("r", () => {
+  const slot = transferSlot();
+  if (!slot || slot.size === 0) return undefined;
+  const withheld = withheldSlot();
+  const out: Record<string, unknown> = {};
+  let any = false;
+  for (const [key, value] of slot) {
+    if (withheld?.has(key)) continue;
+    out[key] = value;
+    any = true;
+  }
+  return any ? out : undefined;
+});
+
+/**
+ * Keep `key` out of this request's transferred state, whatever is or will be
+ * stored under it: the browser then fetches it itself. For a key whose owner
+ * is ambiguous (two loaders resolved to it). Server only; a no-op outside a
+ * request.
+ * @internal
+ */
+export function withholdTransfer(key: string): void {
+  withheldSlot()?.add(key);
+}
 
 /**
  * Lifecycle callbacks follow the shared data-layer contract: an exception
@@ -53,6 +90,13 @@ export interface ResourceOptions<T> {
    *   unshared.
    */
   structuralSharing?: StructuralSharingOption<T>;
+  /**
+   * Transfer key. With a key, the value a server render fetched is embedded in
+   * the document, and the browser starts from it instead of fetching again
+   * (its initial fetch is skipped; `refetch()` and source changes still
+   * fetch). Must be unique per page; the data must be JSON-serializable.
+   */
+  key?: string;
 }
 
 export interface Resource<T> {
@@ -115,12 +159,19 @@ export function resource<T, S = void>(
     options = (fetcherOrOptions as ResourceOptions<T>) ?? {};
   }
 
-  const [data, setData] = signal<T | undefined>(options.initialValue);
+  // A value a server render transferred for this key replaces the initial
+  // value and the initial fetch.
+  const transferred = options.key !== undefined ? takeTransferred("r", options.key) : undefined;
+  const hydrated = transferred !== undefined;
+  const initialValue = hydrated ? (transferred as T) : options.initialValue;
+  const onServer = isSSR();
+
+  const [data, setData] = signal<T | undefined>(initialValue);
   const [loading, setLoading] = signal(false);
   const [error, setError] = signal<Error | undefined>(undefined);
 
   // Non-reactive data tracker to avoid registering deps inside effects
-  let currentData: T | undefined = options.initialValue;
+  let currentData: T | undefined = initialValue;
 
   /**
    * The only writer of `data`. A refetch used to commit a fresh reference even
@@ -139,6 +190,7 @@ export function resource<T, S = void>(
     );
     currentData = shared.ok ? shared.value : next;
     setData(currentData);
+    if (onServer && options.key !== undefined) transferSlot()?.set(options.key, currentData);
     return currentData;
   }
 
@@ -205,22 +257,35 @@ export function resource<T, S = void>(
     }
   }
 
+  // Each fetch is registered with a server render, which waits for it.
+  const run = (sourceValue: S) => trackPending(doFetch(sourceValue), "resource", false);
+
   if (source) {
-    // Auto-refetch when source changes
-    effectCleanup = effect(() => {
-      const sourceValue = (source as () => S)();
-      doFetch(sourceValue);
-    });
-  } else if (options.immediate !== false) {
+    // Auto-refetch when source changes. Runs on the server too (`server`), so
+    // a server render fetches and awaits the first value. A transferred value
+    // stands in for the first fetch.
+    let skipFirst = hydrated;
+    effectCleanup = effect(
+      () => {
+        const sourceValue = (source as () => S)();
+        if (skipFirst) {
+          skipFirst = false;
+          return;
+        }
+        run(sourceValue);
+      },
+      { server: true },
+    );
+  } else if (options.immediate !== false && !hydrated) {
     // No source, fetch once immediately
-    doFetch(undefined as S);
+    run(undefined as S);
   }
 
   return {
     data,
     loading,
     error,
-    refetch: () => doFetch(source ? source() : (undefined as S)),
+    refetch: () => run(source ? source() : (undefined as S)),
     mutate: (value) => {
       const newValue = typeof value === "function" ? (value as (prev: T | undefined) => T)(currentData) : value;
       commitData(newValue, true);

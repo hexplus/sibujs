@@ -1,5 +1,6 @@
 import { bindOwnerScope, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
+import { captureScope, inScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, restoreFocusWithin } from "./focusPreservation";
 import { requireDocument } from "./requireDocument";
@@ -186,7 +187,8 @@ function attachBranch(
     );
   }
 
-  parent.insertBefore(node, anchor.nextSibling);
+  // Already in place: an adopted branch the server rendered after the anchor.
+  if (anchor.nextSibling !== node) parent.insertBefore(node, anchor.nextSibling);
   return { node, owned };
 }
 
@@ -215,6 +217,7 @@ export function when<T>(
   const elseNode = elseBranch as NodeChild | undefined;
   const focusPolicy = options?.focus;
   const anchor = document.createComment("when");
+  const scope = captureScope();
   let currentNode: Node | null = null;
   let lastCondition: T | undefined;
 
@@ -270,7 +273,7 @@ export function when<T>(
     // bindings it creates, not to this directive. Tracked, every eager read in
     // the branch body became a dependency of the condition binding, so an
     // unrelated signal change re-ran the condition for nothing.
-    const attached = untracked(() => attachBranch(parent, anchor, branch, attachedOnce, "when"));
+    const attached = untracked(() => inScope(scope, () => attachBranch(parent, anchor, branch, attachedOnce, "when")));
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 
@@ -375,6 +378,7 @@ export function match<T extends string | number>(
   const fallbackNode = fallback as NodeChild | undefined;
   const focusPolicy = options?.focus;
   const anchor = document.createComment("match");
+  const scope = captureScope();
   let currentNode: Node | null = null;
   let lastKey: string | undefined;
 
@@ -411,7 +415,9 @@ export function match<T extends string | number>(
     // falsy (an empty string, 0) still wins over the fallback.
     const branch = Object.hasOwn(cases, key) ? cases[key] : fallbackNode;
     // Untracked for the same reason as in `when`.
-    const attached = untracked(() => attachBranch(parent, anchor, branch ?? null, attachedOnce, "match"));
+    const attached = untracked(() =>
+      inScope(scope, () => attachBranch(parent, anchor, branch ?? null, attachedOnce, "match")),
+    );
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 

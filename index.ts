@@ -22,6 +22,7 @@ export {
 } from "./src/core/errors";
 export * from "./src/core/rendering/action";
 export * from "./src/core/rendering/catch";
+export { ClientOnly, type ClientOnlyOptions } from "./src/core/rendering/clientOnly";
 export * from "./src/core/rendering/context";
 // Explicit, not `export *`: `idSegment` is an internal helper for widget id
 // generation and is not part of the public surface.
@@ -112,6 +113,8 @@ export {
   enableSSR,
   getRequestScopedCache,
   getSSRStore,
+  isClient,
+  isServer,
   isSSR,
   runInSSRContext,
   type SSRStore,

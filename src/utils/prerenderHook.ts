@@ -13,6 +13,8 @@
 // module instances (the app is bundled; the pre-renderer is not).
 // ---------------------------------------------------------------------------
 
+import { trackPending } from "../core/ssr-context";
+
 const HOST_KEY = Symbol.for("sibujs.prerender.v1");
 
 /**
@@ -53,13 +55,15 @@ export function prerenderRoute(): string | null {
 }
 
 /**
- * Make the pre-renderer wait for `promise` before it serializes the page.
+ * Make the pre-renderer — and an async server render (`renderToStringAsync`,
+ * `renderRoute`) — wait for `promise` before it serializes the page.
  * A no-op in the browser, so it can wrap any data load unconditionally.
  *
  * `fetch()` calls are awaited automatically; register anything else the
  * rendered content depends on (a timer, IndexedDB, a worker).
  *
  * @param promise Work the rendered page depends on.
+ * @param label Names the work in a server render's timeout diagnostics.
  * @returns `promise`, unchanged.
  *
  * @example
@@ -67,7 +71,8 @@ export function prerenderRoute(): string | null {
  * const products = prerenderWait(loadProductsFromCache());
  * ```
  */
-export function prerenderWait<T extends PromiseLike<unknown>>(promise: T): T {
+export function prerenderWait<T extends PromiseLike<unknown>>(promise: T, label = "prerenderWait"): T {
   host()?.wait(promise);
-  return promise;
+  // The same promise holds an in-process server render (`renderToStringAsync`).
+  return trackPending(promise, label);
 }

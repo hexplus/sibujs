@@ -1,10 +1,11 @@
 import { derived } from "../core/signals/derived";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-import { getRequestScopedCache } from "../core/ssr-context";
+import { getRequestScopedCache, isSSR, trackPending } from "../core/ssr-context";
 import { batch } from "../reactivity/batch";
 import { untracked } from "../reactivity/track";
 import { globalSingleton } from "../utils/globalSingleton";
+import { registerTransferCollector, takeTransferredSection } from "../utils/transfer";
 import { isAbortError } from "./abort";
 import { notifyListeners, runCallback, runSelect } from "./callbacks";
 import type { RetryOptions } from "./retry";
@@ -139,6 +140,14 @@ export interface QueryOptions<T> {
    * Also applied to this observer's `select` output.
    */
   structuralSharing?: StructuralSharingOption<T>;
+  /**
+   * Fetch during a server render (default `true`). The server render waits for
+   * the fetch and transfers the result to the browser, which then does not
+   * fetch it again while it is fresh (`staleTime`). `false` leaves the query
+   * idle on the server — it renders its loading state — and keeps its data out
+   * of the transferred state; the browser fetches it after takeover.
+   */
+  ssr?: boolean;
 }
 
 export interface QueryResult<T> {
@@ -207,6 +216,8 @@ interface CacheEntry {
   shared: unknown;
   sharedFrom: unknown;
   hasShared: boolean;
+  /** Some observer opted out of server rendering (`ssr: false`): never transferred. */
+  noTransfer?: boolean;
 }
 
 /**
@@ -246,8 +257,47 @@ function sharedView(entry: CacheEntry): unknown {
 const globalQueryCache = globalSingleton(Symbol.for("sibujs.query.cache.v1"), () => new Map<string, CacheEntry>());
 
 function getActiveQueryCache(): Map<string, CacheEntry> {
-  return getRequestScopedCache<CacheEntry>("query") ?? globalQueryCache;
+  const requestCache = getRequestScopedCache<CacheEntry>("query");
+  if (requestCache) return requestCache;
+  primeFromTransfer();
+  return globalQueryCache;
 }
+
+// Runs the query's internal effects during a server render too, so a query
+// fetches on the server and the render can await it (see `effect`'s `server`).
+const SERVER_EFFECT = { server: true } as const;
+
+/**
+ * Seed the browser cache with the entries a server render transferred (once).
+ * An entry keeps the server's `dataUpdatedAt` (clamped to now), so staleness
+ * is measured from when the server fetched it: fresh data is not refetched,
+ * stale data is refetched in the background while the transferred value shows.
+ */
+function primeFromTransfer(): void {
+  const entries = takeTransferredSection("q");
+  const now = Date.now();
+  for (const key of Object.keys(entries)) {
+    const record = entries[key] as { d?: unknown; t?: unknown } | null;
+    if (!record || typeof record !== "object" || record.d === undefined) continue;
+    if (globalQueryCache.has(key)) continue;
+    const entry = getOrCreateEntry(globalQueryCache, key, record.d);
+    const t = typeof record.t === "number" && Number.isFinite(record.t) ? record.t : now;
+    entry.dataUpdatedAt = Math.min(t, now);
+  }
+}
+
+// Server side: what this request's query cache transfers to the browser —
+// every entry holding data, except those an observer opted out of (`ssr: false`).
+registerTransferCollector("q", () => {
+  const cache = getRequestScopedCache<CacheEntry>("query");
+  if (!cache) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of cache) {
+    if (entry.noTransfer || entry.data === undefined || entry.error) continue;
+    out[key] = { d: entry.data, t: entry.dataUpdatedAt };
+  }
+  return out;
+});
 
 /**
  * Abandon an entry's in-flight work — the entry is being discarded.
@@ -310,7 +360,10 @@ export function query<T>(
     onSettled,
     select,
     structuralSharing = true,
+    ssr = true,
   } = options;
+  // Read once: a query belongs to the render it was created in.
+  const onServer = isSSR();
 
   const resolveKey = typeof key === "function" ? key : () => key;
   // A function `enabled` is read through a derived so the key effect re-runs
@@ -318,7 +371,7 @@ export function query<T>(
   // changes without changing the answer must not re-run the staleness check
   // (and, for stale data, refetch).
   const enabledGate = typeof enabled === "function" ? derived(() => Boolean(enabled())) : null;
-  const isEnabled = enabledGate ?? (() => Boolean(enabled));
+  const isEnabled = onServer && !ssr ? () => false : (enabledGate ?? (() => Boolean(enabled)));
 
   // Bind this query instance to one cache map for its whole lifetime. Resolving
   // at creation (inside the request's SSR scope) keeps later async resolutions
@@ -457,7 +510,7 @@ export function query<T>(
         selectedEntry = entry;
         selectedValue = value;
         setData(value);
-      })
+      }, SERVER_EFFECT)
     : null;
 
   /**
@@ -608,7 +661,8 @@ export function query<T>(
       runCallback("query onSettled", () => onSettled?.());
       return;
     }
-    entry.promise = promise as Promise<T>;
+    // A server render waits for this request before it serializes.
+    entry.promise = trackPending(promise, `query:${key}`, false) as Promise<T>;
 
     try {
       const result = await promise;
@@ -741,6 +795,7 @@ export function query<T>(
     // whose entry object was replaced. Detaching from the previous entry,
     // refcounting, and GC scheduling all live in the helpers.
     const entry = getOrCreateEntry(cache, key, initialData);
+    if (!ssr) entry.noTransfer = true;
     const reattached = attachedEntry !== entry;
     attachToEntry(entry, key);
 
@@ -784,9 +839,11 @@ export function query<T>(
     if (on && (entry.data === undefined || isDataStale)) {
       doFetch();
     }
-  });
+  }, SERVER_EFFECT);
 
-  if (refetchInterval && refetchInterval > 0) {
+  // No interval and no window listeners on the server: a server render must
+  // settle, and there is no window to focus.
+  if (!onServer && refetchInterval && refetchInterval > 0) {
     intervalTimer = setInterval(() => {
       if (!disposed && currentKey) doFetch();
     }, refetchInterval);
@@ -795,7 +852,7 @@ export function query<T>(
   let focusHandler: (() => void) | null = null;
   let onlineHandler: (() => void) | null = null;
 
-  if (typeof globalThis !== "undefined" && typeof globalThis.addEventListener === "function") {
+  if (!onServer && typeof globalThis !== "undefined" && typeof globalThis.addEventListener === "function") {
     if (refetchOnWindowFocus) {
       focusHandler = () => {
         if (!disposed && currentKey) doFetch();

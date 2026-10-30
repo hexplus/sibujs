@@ -236,6 +236,7 @@ const MODULE_ENTRY_POINTS: Record<string, string> = {
   ui: "./ui.ts",
   widgets: "./widgets.ts",
   ssr: "./ssr.ts",
+  "ssr/dom": "./ssr-dom.ts",
   devtools: "./devtools.ts",
   performance: "./performance.ts",
   ecosystem: "./ecosystem.ts",

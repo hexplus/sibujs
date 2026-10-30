@@ -61,6 +61,11 @@ jobs:
             - run: npm run lint
             - run: npx vitest run --reporter=dot
 
+            # Server rendering cost on the fixture app: render time and memory
+            # on three DOMs, HTML size per marker mode, takeover replace vs adopt.
+            # Reported in the job log, not gated (CI hosts vary too much).
+            - run: npm run bench:ssr
+
     # The island/hydration/router specs exercise exactly what jsdom cannot:
     # IntersectionObserver, requestIdleCallback, matchMedia, real event timing
     # and genuine ES-module `import()`. They existed but ran only when someone
