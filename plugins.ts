@@ -4,11 +4,21 @@
 //   import { createRouter, sbSetLocale } from "sibu/plugins";
 // ---------------------------------------------------------------------------
 
+export * from "./src/plugins/ecosystem";
 export * from "./src/plugins/i18n";
+export * from "./src/plugins/modular";
+export * from "./src/plugins/plugin";
+export {
+  type ResolvedHeadTag,
+  type ResolvedRouteHead,
+  type RouteHead,
+  type RouteHeadOpenGraph,
+  type RouteHeadValue,
+  type RouterHeadOptions,
+  resolveRouteHead,
+  routeHeadToHTML,
+} from "./src/plugins/routeHead";
 export * from "./src/plugins/router";
 export * from "./src/plugins/routerSSR";
-export * from "./src/plugins/plugin";
-export * from "./src/plugins/modular";
-export * from "./src/plugins/ecosystem";
-export * from "./src/plugins/versioning";
 export * from "./src/plugins/startup";
+export * from "./src/plugins/versioning";

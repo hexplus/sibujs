@@ -1,5 +1,5 @@
 import { batch } from "../../reactivity/batch";
-import { bindOwnerScope, resumeTracking, suspendTracking, track } from "../../reactivity/track";
+import { bindOwnerScope, resumeTracking, structuralBinding, suspendTracking } from "../../reactivity/track";
 import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
@@ -417,7 +417,12 @@ export function each<T>(
   // Track synchronously — dependencies are registered even if anchor
   // has no parent yet (getArray() runs before the parent check).
   // Capture teardown so disposing the anchor unsubscribes the effect.
-  const untrack = track(update);
+  //
+  // Structural: rows are owned by this binding, so a flush that removes a row
+  // reconciles first and the removed row's bindings never re-run against the
+  // list that no longer contains their item.
+  const binding = structuralBinding(update);
+  const untrack = binding.stop;
 
   /**
    * Tear down the whole logical range, not just the anchor.
@@ -465,7 +470,7 @@ export function each<T>(
     queueMicrotask(
       bindOwnerScope(() => {
         if (!initialized && !rangeDisposed && anchor.parentNode) {
-          update();
+          binding.run(update);
         }
       }),
     );

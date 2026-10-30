@@ -3,6 +3,7 @@ import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundSelects = new WeakMap<HTMLElement, () => void>();
 
@@ -183,28 +184,35 @@ export function select<T>(options: SelectOptions<T>): {
     let typeBuffer = "";
     let typeTimer: ReturnType<typeof setTimeout> | null = null;
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        claimWidgetKey(e, "select");
         highlightNext();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
+        claimWidgetKey(e, "select");
         highlightPrev();
       } else if (e.key === "Home") {
         // First / last ENABLED option, like arrows and typeahead; with every
         // option disabled the highlight is left as it is.
         e.preventDefault();
+        claimWidgetKey(e, "select");
         const first = nextEnabled(-1, 1);
         if (first !== -1) setHighlightedIndex(first);
       } else if (e.key === "End") {
         e.preventDefault();
+        claimWidgetKey(e, "select");
         const last = nextEnabled(items.length, -1);
         if (last !== -1) setHighlightedIndex(last);
       } else if (e.key === "Enter" || e.key === " ") {
         if (highlightedIndex() >= 0) {
           e.preventDefault();
+          claimWidgetKey(e, "select");
           selectHighlighted();
         }
       } else if (e.key.length === 1 && /\S/.test(e.key)) {
+        claimWidgetKey(e, "select");
         typeBuffer += e.key.toLowerCase();
         if (typeTimer !== null) clearTimeout(typeTimer);
         typeTimer = setTimeout(() => {

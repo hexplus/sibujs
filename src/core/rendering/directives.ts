@@ -1,7 +1,7 @@
-import { bindOwnerScope, reactiveBinding, untracked } from "../../reactivity/track";
+import { bindOwnerScope, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
 import { devWarnLazy } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { captureFocusWithin, restoreFocusWithin } from "./focusPreservation";
+import { captureFocusWithin, type FocusPolicy, restoreFocusWithin } from "./focusPreservation";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -55,6 +55,28 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
 }
 
 /**
+ * Options accepted by {@link when} and {@link match}.
+ */
+export interface DirectiveOptions {
+  /**
+   * What a rebuild does with focus it discarded (see `FocusPolicy`):
+   * `"preserve"` (default) restores it by identity and warns in dev when it
+   * cannot; `"discard"` drops it silently because that is intended;
+   * `{ restoreTo }` sends it to the given element (or getter) instead of
+   * `<body>` when the rebuilt branch has no counterpart.
+   */
+  focus?: FocusPolicy;
+}
+
+/**
+ * A plain object in a branch position is the options bag: no `NodeChild` is a
+ * plain object (nodes, primitives, functions, null/undefined only).
+ */
+function isDirectiveOptions(value: unknown): value is DirectiveOptions {
+  return typeof value === "object" && value !== null && !(value instanceof Node);
+}
+
+/**
  * Conditional rendering directive. Renders content only when condition is true.
  * When false, renders nothing (comment placeholder). Re-evaluates reactively.
  *
@@ -73,7 +95,9 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
  *
  * @param condition Reactive getter; its value is compared to decide the branch
  * @param thenBranch Element, value, or function returning one, used when truthy
- * @param elseBranch Optional counterpart used when falsy
+ * @param elseBranch Optional counterpart used when falsy. May be omitted in
+ * favour of `options` (`when(cond, then, { focus: "discard" })`).
+ * @param options Optional {@link DirectiveOptions}
  * @returns A Comment anchor that manages the conditional content
  *
  * @example
@@ -101,7 +125,14 @@ export function show<T extends Element>(condition: () => boolean, element: T | (
  * when the rebuilt branch contains an element with the same `id`, `name`, or
  * `data-focus-key`, and warns in dev when it cannot. For a subtree holding a
  * live edit, prefer {@link match} keyed on a shape key so the subtree is
- * rebuilt only when the shape genuinely changes.
+ * rebuilt only when the shape genuinely changes. When dropping focus is the
+ * point (Escape closes a panel), say so with `{ focus: "discard" }`, or route
+ * it with `{ focus: { restoreTo: triggerEl } }`.
+ *
+ * A branch switch disposes the outgoing branch BEFORE any binding inside it can
+ * re-run in the same flush, so a binding that is only valid while its branch is
+ * mounted (`() => selected()!.name` under `when(() => selected(), …)`) never
+ * observes the state that removed it.
  */
 /**
  * Resolve one branch of `when`/`match`, insert it after the anchor, and report
@@ -170,8 +201,19 @@ function releaseBranchNode(node: Node, owned: boolean): void {
   node.parentNode?.removeChild(node);
 }
 
-export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: NodeChild): Comment {
+export function when<T>(
+  condition: () => T,
+  thenBranch: NodeChild,
+  elseBranch?: NodeChild | DirectiveOptions,
+  options?: DirectiveOptions,
+): Comment {
   requireDocument();
+  if (isDirectiveOptions(elseBranch)) {
+    options = elseBranch;
+    elseBranch = undefined;
+  }
+  const elseNode = elseBranch as NodeChild | undefined;
+  const focusPolicy = options?.focus;
   const anchor = document.createComment("when");
   let currentNode: Node | null = null;
   let lastCondition: T | undefined;
@@ -223,7 +265,7 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
       currentNode = null;
     }
 
-    const branch = show ? thenBranch : elseBranch !== undefined ? elseBranch : null;
+    const branch = show ? thenBranch : elseNode !== undefined ? elseNode : null;
     // Untracked, like `each()` rows: the factory's own reads belong to the
     // bindings it creates, not to this directive. Tracked, every eager read in
     // the branch body became a dependency of the condition binding, so an
@@ -232,7 +274,7 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 
-    restoreFocusWithin(focused, currentNode ? [currentNode] : [], "when");
+    restoreFocusWithin(focused, currentNode ? [currentNode] : [], "when", focusPolicy);
     initialized = true;
   };
 
@@ -241,10 +283,14 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
   // closures are released instead of leaking. Owner-stamped with the anchor, as
   // in `show`, so a condition or branch factory that throws on a scheduled run
   // reaches the enclosing ErrorBoundary.
-  const stopBinding = reactiveBinding(update, anchor);
+  //
+  // Structural: the branch's own bindings are owned by this one, so a flush
+  // that switches the branch runs this first and the outgoing branch is
+  // disposed before any of its bindings can re-run against the new state.
+  const binding = structuralBinding(update, anchor);
   registerDisposer(anchor, () => {
     disposed = true;
-    stopBinding();
+    binding.stop();
     // The branch is a SIBLING of the anchor, not a child, so no ancestor
     // `dispose()` walk and no removal of the anchor alone reaches it. The
     // anchor owns the range it renders into — as `each`, `KeepAlive`, `Portal`
@@ -258,10 +304,11 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
 
   if (!initialized) {
     // The deferred first render builds the branch outside any reactive run, so
-    // it carries the owner scope the directive was created in.
+    // it carries the owner scope the directive was created in, and runs as the
+    // branch's structural owner, as every later rebuild does.
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!disposed && !initialized && anchor.parentNode) update();
+        if (!disposed && !initialized && anchor.parentNode) binding.run(update);
       }),
     );
   }
@@ -275,7 +322,9 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
  *
  * @param value Reactive getter returning the value to match
  * @param cases Object mapping values to render functions
- * @param fallback Optional default case if no match found
+ * @param fallback Optional default case if no match found. May be omitted in
+ * favour of `options`.
+ * @param options Optional {@link DirectiveOptions} (`focus` policy, as in `when`)
  * @returns A Comment anchor that manages the matched content
  *
  * @example
@@ -315,9 +364,16 @@ export function when<T>(condition: () => T, thenBranch: NodeChild, elseBranch?: 
 export function match<T extends string | number>(
   value: () => T,
   cases: Record<string, NodeChild>,
-  fallback?: NodeChild,
+  fallback?: NodeChild | DirectiveOptions,
+  options?: DirectiveOptions,
 ): Comment {
   requireDocument();
+  if (isDirectiveOptions(fallback)) {
+    options = fallback;
+    fallback = undefined;
+  }
+  const fallbackNode = fallback as NodeChild | undefined;
+  const focusPolicy = options?.focus;
   const anchor = document.createComment("match");
   let currentNode: Node | null = null;
   let lastKey: string | undefined;
@@ -353,13 +409,13 @@ export function match<T extends string | number>(
 
     // `Object.hasOwn` rather than `||` so a case whose value is legitimately
     // falsy (an empty string, 0) still wins over the fallback.
-    const branch = Object.hasOwn(cases, key) ? cases[key] : fallback;
+    const branch = Object.hasOwn(cases, key) ? cases[key] : fallbackNode;
     // Untracked for the same reason as in `when`.
     const attached = untracked(() => attachBranch(parent, anchor, branch ?? null, attachedOnce, "match"));
     currentNode = attached.node;
     currentNodeOwned = attached.owned;
 
-    restoreFocusWithin(focused, currentNode ? [currentNode] : [], "match");
+    restoreFocusWithin(focused, currentNode ? [currentNode] : [], "match", focusPolicy);
     initialized = true;
   };
 
@@ -367,21 +423,21 @@ export function match<T extends string | number>(
   // anchor releases the value subscription and the matched branch. Owner-stamped
   // with the anchor, as in `when`, so a throwing selector or case factory on a
   // scheduled run reaches the enclosing ErrorBoundary.
-  const stopBinding = reactiveBinding(update, anchor);
+  // Structural, as in `when`.
+  const binding = structuralBinding(update, anchor);
   registerDisposer(anchor, () => {
     disposed = true;
-    stopBinding();
+    binding.stop();
     // The matched case is a sibling the anchor owns; see `when`.
     if (currentNode) releaseBranchNode(currentNode, currentNodeOwned);
     currentNode = null;
   });
 
   if (!initialized) {
-    // The deferred first render builds the branch outside any reactive run, so
-    // it carries the owner scope the directive was created in.
+    // Deferred first render: owner scope and structural owner, as in `when`.
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!disposed && !initialized && anchor.parentNode) update();
+        if (!disposed && !initialized && anchor.parentNode) binding.run(update);
       }),
     );
   }

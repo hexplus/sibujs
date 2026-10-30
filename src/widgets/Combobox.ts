@@ -4,6 +4,7 @@ import { signal } from "../core/signals/signal";
 import { watch } from "../core/signals/watch";
 import { batch } from "../reactivity/batch";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundComboboxes = new WeakMap<HTMLElement, () => void>();
 
@@ -152,27 +153,34 @@ export function combobox<T>(options: ComboboxOptions<T>): {
       open();
     };
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
+        claimWidgetKey(e, "combobox");
         if (!isOpen()) open();
         highlightNext();
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
+        claimWidgetKey(e, "combobox");
         if (!isOpen()) open();
         highlightPrev();
       } else if (e.key === "Enter") {
         if (highlightedIndex() >= 0) {
           e.preventDefault();
+          claimWidgetKey(e, "combobox");
           selectHighlighted();
         }
       } else if (e.key === "Escape") {
         e.preventDefault();
+        claimWidgetKey(e, "combobox");
         close();
       } else if (e.key === "Home") {
         e.preventDefault();
+        claimWidgetKey(e, "combobox");
         if (filteredItems().length > 0) setHighlightedIndex(0);
       } else if (e.key === "End") {
         e.preventDefault();
+        claimWidgetKey(e, "combobox");
         const len = filteredItems().length;
         if (len > 0) setHighlightedIndex(len - 1);
       }

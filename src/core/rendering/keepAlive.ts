@@ -1,4 +1,4 @@
-import { bindOwnerScope, track } from "../../reactivity/track";
+import { bindOwnerScope, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
 import { requireDocument } from "./requireDocument";
@@ -128,12 +128,16 @@ export function KeepAlive(
     initialized = true;
   };
 
-  const untrack = track(update);
+  // Structural: cached branches are owned by this binding, so a branch
+  // evicted by a switch is disposed before its bindings can re-run in the same
+  // flush. (A branch that is merely detached stays live by design.)
+  const binding = structuralBinding(update);
+  const untrack = binding.stop;
 
   if (!initialized) {
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!initialized && anchor.parentNode) update();
+        if (!initialized && anchor.parentNode) binding.run(update);
       }),
     );
   }

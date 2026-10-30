@@ -1,6 +1,7 @@
 import { createId } from "../core/rendering/createId";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 // Track which trigger elements already have a bind() active so a second
 // call short-circuits rather than corrupting aria-describedby restore.
@@ -93,8 +94,10 @@ export function tooltip(options?: { delay?: number; hideDelay?: number }): {
     const onFocus = () => show();
     const onBlur = () => hide();
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "Escape" && isVisible()) {
         e.stopPropagation();
+        claimWidgetKey(e, "tooltip");
         hide();
       }
     };

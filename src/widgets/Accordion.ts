@@ -3,6 +3,7 @@ import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
 import { snapshotAttributes } from "./attributeSnapshot";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 // First trigger of an accordion identifies the binding instance for
 // idempotency — calling bind() twice on the same set returns the prior
@@ -155,8 +156,10 @@ export function accordion(options: AccordionOptions): {
       if (!trig) continue;
       const click = () => toggle(item.id);
       const key = (e: KeyboardEvent) => {
+        if (isWidgetKeyEvent(e)) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
+          claimWidgetKey(e, "accordion");
           toggle(item.id);
         }
       };

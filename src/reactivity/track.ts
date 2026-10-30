@@ -65,6 +65,7 @@ interface ReactiveApi {
   getOwnerScope?: typeof core.getOwnerScope;
   runWithOwnerScope?: typeof core.runWithOwnerScope;
   bindOwnerScope?: typeof core.bindOwnerScope;
+  structuralBinding?: typeof core.structuralBinding;
   version: string;
   __dupWarned?: boolean;
 }
@@ -116,6 +117,7 @@ function resolveReactiveApi(): ReactiveApi {
     getOwnerScope: core.getOwnerScope,
     runWithOwnerScope: core.runWithOwnerScope,
     bindOwnerScope: core.bindOwnerScope,
+    structuralBinding: core.structuralBinding,
     version: _runtimeVersion,
   };
   g[REGISTRY_KEY] = local;
@@ -151,3 +153,12 @@ export const forEachSubscriber: ReactiveApi["forEachSubscriber"] = API.forEachSu
 export const getOwnerScope: typeof core.getOwnerScope = API.getOwnerScope ?? core.getOwnerScope;
 export const runWithOwnerScope: typeof core.runWithOwnerScope = API.runWithOwnerScope ?? core.runWithOwnerScope;
 export const bindOwnerScope: typeof core.bindOwnerScope = API.bindOwnerScope ?? core.bindOwnerScope;
+
+// Structural bindings. Additive the same way, but the fallback must NOT be
+// this copy's own implementation: its subscriber would be drained by this
+// copy's queue, which nothing on the page writes to. A page whose active copy
+// predates structural ownership gets a plain binding through that copy — the
+// branch-switch ordering of earlier versions, nothing worse.
+export const structuralBinding: typeof core.structuralBinding =
+  API.structuralBinding ??
+  ((commit, ownerNode) => ({ stop: API.reactiveBinding(commit, ownerNode), run: (fn) => fn() }));

@@ -2,6 +2,7 @@ import { createId } from "../core/rendering/createId";
 import { signal } from "../core/signals/signal";
 import { batch } from "../reactivity/batch";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundFileUploads = new WeakMap<HTMLElement, () => void>();
 
@@ -214,8 +215,10 @@ export function fileUpload(options?: FileUploadOptions): {
     };
     const onDropClick = () => els.input.click();
     const onDropKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
+        claimWidgetKey(e, "fileUpload");
         els.input.click();
       }
     };

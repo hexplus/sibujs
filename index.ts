@@ -43,6 +43,7 @@ export {
 } from "./src/core/rendering/dispose";
 export * from "./src/core/rendering/dynamic";
 export * from "./src/core/rendering/each";
+export type { FocusPolicy } from "./src/core/rendering/focusPreservation";
 export * from "./src/core/rendering/fragment";
 // htm — tagged template literal for HTML-like syntax (no compiler)
 export { __renderParsedTemplate, html } from "./src/core/rendering/htm";
