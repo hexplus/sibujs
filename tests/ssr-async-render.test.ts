@@ -210,3 +210,26 @@ describe("settled()", () => {
     expect(fast.stateData).toMatchObject({ q: { "shared-key": { d: "fast" } } });
   });
 });
+
+describe("render diagnostics summary", () => {
+  it("formats pending work, browser-API reads and the state, and logs it on request", async () => {
+    const { formatRenderDiagnostics } = await import("../src/platform/ssrAsync");
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await renderToStringAsync(
+      () => {
+        query("/api/big", () => delay(1, "x".repeat(50)));
+        query("/api/never", () => delay(500, 1));
+        globalThis.localStorage?.getItem("k");
+        return p("x");
+      },
+      { timeout: 30, log: "/landing" },
+    );
+    const text = formatRenderDiagnostics(r.diagnostics, "/landing");
+    expect(text).toMatch(/^\[SibuJS SSR\] \/landing: \d+ ms, TIMED OUT/);
+    expect(text).toContain("pending at the timeout: query:/api/never");
+    expect(text).toContain("browser-only APIs read: localStorage at");
+    expect(text).toMatch(/transferred state: \d+ B; largest: q:\/api\/big \(\d+ B\)/);
+    expect(info).toHaveBeenCalledWith(expect.stringContaining("[SibuJS SSR] /landing:"));
+  });
+});

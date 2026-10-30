@@ -190,7 +190,10 @@ export function renderRoute(
         };
       }
 
-      const rendered = await renderToStringAsync(options.app ?? (() => Route()), options);
+      const rendered = await renderToStringAsync(options.app ?? (() => Route()), {
+        ...options,
+        log: options.log === true ? url : options.log,
+      });
       return {
         ...rendered,
         html: wrap(rendered.html, rendered.head, rendered.state),

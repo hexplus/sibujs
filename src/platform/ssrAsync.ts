@@ -161,6 +161,35 @@ export interface AsyncRenderOptions {
    * them. Default: no markers (the output `hydrate()`'s replace strategy uses).
    */
   hydration?: "adopt" | "replace";
+  /**
+   * Log a one-block summary of the render in development (time, settle
+   * outcome, what was pending, browser-API reads, transferred state and its
+   * largest entries). A string labels it (`renderRoute` passes the URL).
+   */
+  log?: boolean | string;
+}
+
+/**
+ * The diagnostics of one server render as readable text — what `log: true`
+ * prints, for a custom logger or a test failure message.
+ *
+ * @param d The render's `diagnostics`.
+ * @param label What was rendered (a URL).
+ * @returns A multi-line summary.
+ */
+export function formatRenderDiagnostics(d: RenderDiagnostics, label = "render"): string {
+  const lines = [
+    `[SibuJS SSR] ${label}: ${d.durationMs} ms, ${d.timedOut ? "TIMED OUT (serialized with fallbacks)" : "settled"}`,
+  ];
+  if (d.pending.length > 0) lines.push(`  pending at the timeout: ${d.pending.join(", ")}`);
+  if (d.browserApis.length > 0) lines.push(`  browser-only APIs read: ${d.browserApis.join("; ")}`);
+  if (d.stateBytes > 0) {
+    lines.push(
+      `  transferred state: ${d.stateBytes} B; largest: ${d.largestState.map((e) => `${e.key} (${e.bytes} B)`).join(", ")}`,
+    );
+  }
+  if (d.droppedState.length > 0) lines.push(`  left out of the state: ${d.droppedState.join(", ")}`);
+  return lines.join("\n");
 }
 
 /**
@@ -328,24 +357,19 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   releaseTree();
 
   const browserApis = Array.from((store?.slots?.get("browserApis") as Set<string> | undefined) ?? []);
-  return {
-    content,
-    result: {
-      head,
-      state,
-      stateData,
-      status: 200,
-      diagnostics: {
-        timedOut: settle.timedOut,
-        pending: settle.pending,
-        browserApis,
-        stateBytes,
-        largestState,
-        droppedState,
-        durationMs: Date.now() - started,
-      },
-    },
+  const diagnostics: RenderDiagnostics = {
+    timedOut: settle.timedOut,
+    pending: settle.pending,
+    browserApis,
+    stateBytes,
+    largestState,
+    droppedState,
+    durationMs: Date.now() - started,
   };
+  if (DEV && options.log) {
+    console.info(formatRenderDiagnostics(diagnostics, typeof options.log === "string" ? options.log : undefined));
+  }
+  return { content, result: { head, state, stateData, status: 200, diagnostics } };
 }
 
 /** Run `fn` in the current request scope, or in a fresh one when there is none. */
