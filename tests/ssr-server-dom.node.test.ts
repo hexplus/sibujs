@@ -179,6 +179,73 @@ describe("server DOM", () => {
     });
   });
 
+  it("writes defaultChecked, defaultSelected, option label and attribute nodes as jsdom does", async () => {
+    // Every write here used to throw on the server DOM: the properties had
+    // getters only. Each step is run on both DOMs and compared, reads and markup.
+    const script = async () => {
+      const reads: unknown[] = [];
+      const root = document.createElement("form");
+
+      const fresh = document.createElement("input");
+      fresh.type = "checkbox";
+      fresh.defaultChecked = true; // not dirty: checked follows the attribute
+      reads.push(fresh.checked, fresh.defaultChecked);
+      fresh.defaultChecked = false;
+      reads.push(fresh.checked);
+      fresh.defaultChecked = true;
+
+      const touched = document.createElement("input");
+      touched.type = "checkbox";
+      touched.checked = false; // dirty: the attribute no longer decides
+      touched.defaultChecked = true;
+      reads.push(touched.checked, touched.defaultChecked);
+
+      const single = document.createElement("select");
+      for (const v of ["a", "b", "c"]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.textContent = v.toUpperCase();
+        single.appendChild(o);
+      }
+      single.options[0].defaultSelected = true;
+      reads.push(single.value, single.selectedIndex);
+      // The last selected option in tree order wins; the earlier one is deselected.
+      single.options[2].defaultSelected = true;
+      reads.push(single.value, single.options[0].selected, single.options[0].defaultSelected);
+      // A selected write keeps only that option.
+      single.options[1].selected = true;
+      reads.push(single.value, single.options[2].selected);
+      single.options[1].label = "Bee";
+      reads.push(single.options[1].label, single.options[1].getAttribute("label"));
+
+      const multiple = document.createElement("select");
+      multiple.multiple = true;
+      for (const v of ["x", "y"]) {
+        const o = document.createElement("option");
+        o.value = v;
+        o.defaultSelected = true;
+        multiple.appendChild(o);
+      }
+      reads.push(Array.from(multiple.options).map((o) => o.selected));
+
+      const titled = document.createElement("span");
+      titled.setAttribute("title", "old");
+      const attr = titled.getAttributeNode("title") as Attr;
+      attr.nodeValue = "via nodeValue";
+      reads.push(titled.getAttribute("title"));
+      attr.textContent = "via textContent";
+      reads.push(titled.getAttribute("title"), attr.value);
+
+      root.append(fresh, touched, single, multiple, titled);
+      return { reads, html: renderToString(root) };
+    };
+    const server = await withServerDom(script);
+    const reference = await withJsdom(script);
+    expect(server).toEqual(reference);
+    expect(server.html).toContain('<option value="c" selected="" data-sibu-ssr="true">C</option>');
+    expect(server.reads.slice(0, 3)).toEqual([true, true, false]);
+  });
+
   it("implements the tree operations the runtime uses", async () => {
     await withServerDom(async () => {
       const doc = document as unknown as ServerDocument;
