@@ -1,6 +1,7 @@
 import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundDatePickers = new WeakMap<HTMLElement, () => void>();
 
@@ -261,6 +262,7 @@ export function datePicker(options?: DatePickerOptions): {
     }
 
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (
         e.key === "ArrowLeft" ||
         e.key === "ArrowRight" ||
@@ -276,42 +278,51 @@ export function datePicker(options?: DatePickerOptions): {
       switch (e.key) {
         case "ArrowLeft":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           shiftDays(-1);
           break;
         case "ArrowRight":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           shiftDays(1);
           break;
         case "ArrowUp":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           shiftDays(-7);
           break;
         case "ArrowDown":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           shiftDays(7);
           break;
         case "Home":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           setViewDate((p) => new Date(p.getFullYear(), p.getMonth(), p.getDate() - p.getDay()));
           break;
         case "End": {
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           setViewDate((p) => new Date(p.getFullYear(), p.getMonth(), p.getDate() + (6 - p.getDay())));
           break;
         }
         case "PageUp":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           if (e.shiftKey) prevYear();
           else prevMonth();
           break;
         case "PageDown":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           if (e.shiftKey) nextYear();
           else nextMonth();
           break;
         case "Enter":
         case " ":
           e.preventDefault();
+          claimWidgetKey(e, "datePicker");
           select(viewDate());
           break;
       }

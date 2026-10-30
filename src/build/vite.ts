@@ -3,6 +3,7 @@
  * Provides optimized builds, automatic component detection, and development enhancements.
  */
 
+import { PRERENDER_CHILD_ENV, type PrerenderOptions, prerender } from "./prerender";
 import {
   applyEdits,
   editsSourceMap,
@@ -58,6 +59,19 @@ export interface SibuVitePluginOptions {
    * exception is a template consisting of one invalid escape sequence).
    */
   compileTemplates?: boolean;
+  /**
+   * Pre-render routes to static HTML after `vite build`, for an SPA served by
+   * a backend that cannot render it (SEO, link previews). Each route is run in
+   * a registered DOM (jsdom, which the app must install) and written to
+   * `dist/<route>/index.html` with its rendered body and its route head; the
+   * client then takes over with `hydrate()`. See `PrerenderOptions`.
+   *
+   * @example
+   * ```ts
+   * sibuVitePlugin({ prerender: { routes: ["/", "/cotizar", "/galeria"] } })
+   * ```
+   */
+  prerender?: PrerenderOptions;
 }
 
 const DEFAULT_INCLUDE = ["**/*.ts", "**/*.tsx", "**/*.js", "**/*.jsx"];
@@ -144,6 +158,9 @@ function staticOptimizationEdits(code: string): { edits: SourceEdit[]; append: s
 interface ViteModeInfo {
   command?: string;
   mode?: string;
+  root?: string;
+  configFile?: string | false;
+  build?: { outDir?: string; ssr?: unknown };
 }
 
 /**
@@ -168,6 +185,7 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
   enforce?: "pre" | "post";
   config?: (userConfig?: unknown, env?: ViteModeInfo) => Record<string, unknown>;
   configResolved?: (config: ViteModeInfo) => void;
+  closeBundle?: () => Promise<void>;
   transform?: (code: string, id: string) => { code: string; map: SourceMapV3 } | null;
   handleHotUpdate?: (ctx: { file: string; modules: unknown[] }) => void;
 } {
@@ -179,7 +197,11 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
     devMode,
     staticOptimize = false,
     compileTemplates,
+    prerender: prerenderOptions,
   } = options;
+  // The finished build the pre-renderer runs against, captured in
+  // `configResolved`. Null unless this is a client `vite build`.
+  let prerenderTarget: { root: string; outDir: string; configFile?: string | false; mode?: string } | null = null;
 
   // Provisional until Vite reports its command/mode through `config` /
   // `configResolved`; used as-is when the plugin is driven outside Vite.
@@ -214,6 +236,33 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
 
     configResolved(config: ViteModeInfo) {
       isDevMode = resolveDevMode(devMode, config);
+      // Never from the pre-renderer's own nested SSR build, nor from any other
+      // SSR build: only the client build has an index.html to render into.
+      if (
+        prerenderOptions &&
+        config.command === "build" &&
+        !config.build?.ssr &&
+        typeof process !== "undefined" &&
+        !process.env?.[PRERENDER_CHILD_ENV] &&
+        config.root
+      ) {
+        const outDir = config.build?.outDir ?? "dist";
+        const absolute = /^([a-zA-Z]:)?[\\/]/.test(outDir);
+        prerenderTarget = {
+          root: config.root,
+          outDir: absolute ? outDir : `${config.root.replace(/[\\/]+$/, "")}/${outDir}`,
+          configFile: config.configFile,
+          mode: config.mode,
+        };
+      }
+    },
+
+    async closeBundle() {
+      if (!prerenderOptions || !prerenderTarget) return;
+      const target = prerenderTarget;
+      prerenderTarget = null;
+      const results = await prerender(prerenderOptions, target);
+      for (const r of results) console.log(`[sibu prerender] ${r.route} → ${r.file} (${r.ms} ms)`);
     },
 
     transform(code: string, id: string): { code: string; map: SourceMapV3 } | null {

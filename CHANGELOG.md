@@ -6,6 +6,145 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.13.0] — 2026-10-29
+
+### Upgrade notes
+
+- **Bindings in a branch being replaced no longer run once more.** When one
+  flush both switches a `when()` / `match()` / `each()` / `KeepAlive` /
+  `DynamicComponent` branch and changes what the branch reads, the outgoing
+  branch is disposed first. Code that relied on that last run (a binding in a
+  closing panel observing the deselected value) no longer sees it.
+- **Widgets claim the keys they handle.** A key a `sibujs/widgets` widget acts
+  on is marked, and an enclosing widget — or `dialog()` from `sibujs/ui` — no
+  longer acts on it a second time: Escape in an open combobox inside a dialog
+  closes the combobox, not the dialog. Nothing stops propagation that did not
+  before.
+- Everything else is additive: `selectMenu()`, `isWidgetKeyEvent()`, the
+  `focus` option, route `head`, `routerReady()`, the pre-renderer and its
+  helpers are new. A router whose routes declare no `head` never touches
+  `<head>`.
+
+### Fixed — bindings inside an outgoing `when` / `match` branch ran after their data was gone
+
+A signal's subscribers are notified newest-first, and the bindings inside a
+directive's branch are always newer than the directive. So when the selector
+of a `match()` (or the condition of a `when()`) changed, every binding in the
+outgoing branch that read the same signal ran once more before the directive
+disposed it:
+
+```ts
+match(() => sel()?.name ?? "", { "": () => span("nothing selected") }, () => span(() => sel()!.name));
+setSel(null); // was: "Uncaught error during binding: Cannot read properties of null", once per binding
+```
+
+The scheduler now tracks ownership. A subscriber records the structural
+binding (the one behind `when`, `match`, `each`, `KeepAlive`,
+`DynamicComponent` or a reactive child) that was running when it was created.
+Before the drain runs a subscriber, it runs any of that subscriber's owners
+that are also pending, outermost first. An owner that replaces its branch
+disposes the branch's bindings and effects before their turn, so they never
+run against the state that removed them. An owner that keeps its branch lets
+them run normally in the same flush. The fix also covers:
+
+- a branch switched by a different signal written earlier in the same batch;
+- a `match` nested inside an outgoing `when`, whose selector no longer runs;
+- an `each()` row removed while a binding in the row reads the list;
+- a `KeepAlive` branch evicted by the switch;
+- effects tied to the branch's nodes.
+
+A subscriber with no pending owner runs exactly where it did before.
+Children point at their owner through a token that the owner's disposal
+empties, so an effect that outlives its branch does not retain the disposed
+directive.
+
+### Added — `focus` option on `when()` / `match()`
+
+The dev warning "a reactive rebuild discarded the focused element" can now be
+answered locally when dropping focus is intended:
+
+```ts
+when(() => selected(), () => PropertiesPanel(), { focus: "discard" });                  // silent; focus on <body>
+match(() => mode(), cases, fallback, { focus: { restoreTo: () => triggerEl } });        // focus moves there instead
+```
+
+`{ restoreTo }` still restores focus to the rebuilt counterpart by identity
+when there is one, and falls back to the warning when the target is not in the
+document. The options object may replace the else-branch / fallback argument.
+The default (`"preserve"`) is unchanged.
+
+### Added — `selectMenu()` in `sibujs/widgets`
+
+A headless "select-only combobox" (WAI-ARIA APG): a trigger button that opens
+a popup listbox whose options are arbitrary DOM, such as each font name rendered
+in its own typeface, which a native `<select>` cannot show. Focus stays on the
+trigger and the list is navigated through `aria-activedescendant`. It supports:
+
+- every key in the pattern (arrows, Alt+Up, Home / End, PageUp / PageDown,
+  Enter, Space, Tab, Escape, typeahead with repeated-letter cycling);
+- disabled options, a controlled (`value` + `onChange`) or uncontrolled
+  (`defaultValue`) selection, and reactive items;
+- outside press, focus return to the trigger, and scrolling the active option
+  into view.
+
+`bind()` returns a dispose that restores every attribute it touched, as the
+other widgets do.
+
+### Added — keyboard ownership: `isWidgetKeyEvent()` / `widgetKeyOwner()`
+
+Every widget in `sibujs/widgets` now marks the key events it acts on, so a
+page-level shortcut handler can leave them alone:
+
+```ts
+document.addEventListener("keydown", (e) => {
+  if (isWidgetKeyEvent(e)) return; // the dropdown already handled it
+  if (e.key === "ArrowLeft") nudgeLayer(-1, 0);
+});
+```
+
+Widgets ignore events a nested widget already claimed, and `dialog()` ignores
+a claimed Escape. The mark does not stop propagation.
+
+### Added — per-route `<head>` and `routerReady()`
+
+A route record (and `createRouter({ head })`, as defaults with a
+`titleTemplate`) can declare `head: { title, description, canonical, og, meta }`.
+Values are strings or getters `(route) => string` evaluated reactively, so
+route params and translated strings stay current. On every committed
+navigation the router updates `document.title` and the matching tags, and it
+removes tags the new route does not set. The values pass the same entry and
+URL policy as `Head()`. `og:title` / `og:description` / `og:url` default to
+the title, description and canonical URL. A component's `Head()` title still
+layers on top.
+
+`routerReady()` resolves once the initial navigation has settled and the
+matched route components (lazy chunks included) are loaded. It is the point at
+which to call `hydrate()` on a pre-rendered page.
+
+`resolveRouteHead()` and `routeHeadToHTML()` expose the same resolution for
+server rendering.
+
+### Added — build-time pre-rendering: `sibuVitePlugin({ prerender })`
+
+For an SPA served as static files by a non-Node backend:
+
+```ts
+sibuVitePlugin({ prerender: { routes: ["/", "/cotizar", "/galeria"], origin: "https://example.com" } })
+```
+
+After `vite build`, each route is rendered by the app's own entry in a
+registered DOM (jsdom, installed by the app). Each route runs in its own worker
+thread. The pre-renderer waits for every `fetch` and every body read on its
+response (`json()`, `text()`, `arrayBuffer()`, `blob()`, `formData()`, clones
+included), every `prerenderWait()` promise, the router's initial navigation
+and its lazy routes, then writes
+`dist/<route>/index.html` with the rendered body and that route's head. The
+untouched shell is kept as `dist/200.html` for the backend's fallback route.
+`isPrerendering()`, `prerenderRoute()` and `prerenderWait()` (in `sibujs/ssr`)
+let a route await or skip its data. See `examples/prerender-spa`.
+
+---
+
 ## [4.12.0] — 2026-10-20
 
 ### Upgrade notes

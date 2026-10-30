@@ -1,4 +1,4 @@
-import { track, untracked } from "../../reactivity/track";
+import { reactiveBinding, untracked } from "../../reactivity/track";
 import { globalSingleton } from "../../utils/globalSingleton";
 import { signal } from "../signals/signal";
 import { registerDisposer, replaceChildrenSafely } from "./dispose";
@@ -137,7 +137,9 @@ export function DynamicComponent(is: () => string | Component): HTMLDivElement {
 
   // Track reactive dependencies so render re-runs when `is()` changes.
   // Capture the teardown so disposing the container unsubscribes the effect.
-  const untrack = track(render);
+  // Structural: the mounted component's bindings are owned by this one, so a
+  // switch disposes them before they can re-run in the same flush.
+  const untrack = reactiveBinding(render, container, true);
   registerDisposer(container, untrack);
 
   return container;

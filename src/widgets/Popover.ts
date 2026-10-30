@@ -1,6 +1,7 @@
 import { createId } from "../core/rendering/createId";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundPopovers = new WeakMap<HTMLElement, () => void>();
 
@@ -68,8 +69,10 @@ export function popover(): {
       toggle();
     };
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "Escape" && isOpen()) {
         e.stopPropagation();
+        claimWidgetKey(e, "popover");
         close();
         els.trigger.focus();
       }

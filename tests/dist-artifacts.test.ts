@@ -259,6 +259,16 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // that keeps an outgoing route page on its own route. Raw ~87,990 B, gzip
     // ~30,060 B, still inside the 2% tolerance of the gzip baseline.
     //
+    // Raised again (raw 89,700 B, gzip baseline 30,100 B) in 4.13 for
+    // structural ownership in the scheduler: every subscriber records the
+    // `when` / `match` / `each` / `KeepAlive` / `DynamicComponent` / reactive
+    // child binding that created it, and the drain runs a pending owner before
+    // its descendants, so a branch being replaced is disposed before its
+    // bindings re-run against the state that removed it (they used to throw,
+    // once per binding). Plus the directives' `focus` option. Measured with the
+    // same minifier: +1,072 B raw, +339 B gzip; raw ~89,460 B, gzip ~30,550 B.
+    // Its dev warning text is compiled out.
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -266,8 +276,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(88_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(29_650 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(89_700);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(30_100 * 1.02));
   });
 });
 

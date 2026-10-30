@@ -3,6 +3,7 @@ import { derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
 import { domBinding } from "../reactivity/domBinding";
 import { snapshotAttributes } from "./attributeSnapshot";
+import { claimWidgetKey, isWidgetKeyEvent } from "./keyOwnership";
 
 const boundTablists = new WeakMap<HTMLElement, () => void>();
 
@@ -149,16 +150,20 @@ export function tabs(options: TabsOptions): {
     }, els.tablist);
 
     const onKey = (e: KeyboardEvent) => {
+      if (isWidgetKeyEvent(e)) return;
       if (e.key === "ArrowRight" || e.key === "ArrowDown") {
         e.preventDefault();
+        claimWidgetKey(e, "tabs");
         nextTab();
         els.tabs[activeTab()]?.focus();
       } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
         e.preventDefault();
+        claimWidgetKey(e, "tabs");
         prevTab();
         els.tabs[activeTab()]?.focus();
       } else if (e.key === "Home") {
         e.preventDefault();
+        claimWidgetKey(e, "tabs");
         const first = tabDefs.find((t) => !t.disabled);
         if (first) {
           setActiveTabState(first.id);
@@ -166,6 +171,7 @@ export function tabs(options: TabsOptions): {
         }
       } else if (e.key === "End") {
         e.preventDefault();
+        claimWidgetKey(e, "tabs");
         for (let i = tabDefs.length - 1; i >= 0; i--) {
           if (!tabDefs[i].disabled) {
             setActiveTabState(tabDefs[i].id);

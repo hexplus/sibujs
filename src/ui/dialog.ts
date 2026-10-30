@@ -1,5 +1,6 @@
 import { signal } from "../core/signals/signal";
 import { globalSingleton } from "../utils/globalSingleton";
+import { isWidgetKeyEvent } from "../widgets/keyOwnership";
 
 /**
  * dialog provides reactive dialog state management with escape-to-close support.
@@ -43,6 +44,9 @@ export function __resetDialogStack(): void {
 
 function handleGlobalKeydown(event: KeyboardEvent): void {
   if (event.key !== "Escape") return;
+  // An Escape a widget inside the dialog already acted on (closing a select
+  // menu or popover) closes that widget only, not the dialog around it.
+  if (isWidgetKeyEvent(event)) return;
   const top = dialogStack[dialogStack.length - 1];
   if (top) top.close();
 }

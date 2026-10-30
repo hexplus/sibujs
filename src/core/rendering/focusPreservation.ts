@@ -40,6 +40,20 @@ import { devWarnLazy } from "../dev";
 // what the warning points at.
 // ---------------------------------------------------------------------------
 
+/**
+ * What a rebuild does with focus it discarded. Set per directive through the
+ * `focus` option of `when()` / `match()`.
+ *
+ * - `"preserve"` (default) — re-establish focus on the rebuilt counterpart by
+ *   identity, and warn in dev when that is impossible.
+ * - `"discard"` — the rebuild drops focus ON PURPOSE (closing a panel with
+ *   Escape, say): no restoration attempt and no warning; focus rests on <body>.
+ * - `{ restoreTo }` — restore by identity first; when there is no counterpart,
+ *   move focus to `restoreTo` (an element, or a getter resolved at rebuild
+ *   time) instead of letting it fall to <body>.
+ */
+export type FocusPolicy = "preserve" | "discard" | { restoreTo: Element | (() => Element | null | undefined) };
+
 /** Identity attributes consulted, in priority order. */
 const IDENTITY_ATTRS = ["data-focus-key", "id", "name"] as const;
 
@@ -169,11 +183,20 @@ function refocus(el: Element, snapshot: FocusSnapshot): void {
  * @param snapshot Result of {@link captureFocusWithin}, or null.
  * @param nodes The nodes the rebuild produced.
  * @param where Name of the calling directive, used in the dev warning.
+ * @param policy The directive's {@link FocusPolicy}; `"preserve"` when omitted.
  * @returns Nothing.
  */
-export function restoreFocusWithin(snapshot: FocusSnapshot | null, nodes: readonly Node[], where: string): void {
+export function restoreFocusWithin(
+  snapshot: FocusSnapshot | null,
+  nodes: readonly Node[],
+  where: string,
+  policy?: FocusPolicy,
+): void {
   if (!snapshot) return;
   if (typeof document === "undefined") return;
+  // Dropping focus was the author's decision, so there is nothing to repair
+  // and nothing to warn about.
+  if (policy === "discard") return;
 
   const active = document.activeElement;
 
@@ -215,6 +238,17 @@ export function restoreFocusWithin(snapshot: FocusSnapshot | null, nodes: readon
     ambiguous = count > 1;
   }
 
+  // No counterpart: the author named where focus goes instead of <body>.
+  if (policy !== undefined && typeof policy === "object") {
+    const target = typeof policy.restoreTo === "function" ? policy.restoreTo() : policy.restoreTo;
+    if (target?.isConnected) {
+      (target as HTMLElement).focus();
+      if (document.activeElement === target) return;
+    }
+    // A missing or unfocusable target falls through to the warning, which is
+    // still accurate: focus did fall to <body>.
+  }
+
   // Composed inside the callback rather than in an `if (DEV)` block: a
   // published build leaves `DEV` as a runtime var, so a guarded block's string
   // literals are not provably dead and ship to production. See `devWarnLazy`.
@@ -232,7 +266,9 @@ export function restoreFocusWithin(snapshot: FocusSnapshot | null, nodes: readon
       "composition is lost outright — a composition belongs to the DOM node, so it cannot survive the node being " +
       `destroyed. ${why}, or stop the rebuild from happening: key the subtree with match(() => shapeKey(), { … }) ` +
       "so it is re-created only when the shape actually changes, and drive the rest with reactive attributes and " +
-      "text children, which mutate nodes in place instead of replacing them."
+      "text children, which mutate nodes in place instead of replacing them. If dropping focus is INTENDED here " +
+      '(closing a panel, say), pass { focus: "discard" } to when()/match() to silence this, or ' +
+      "{ focus: { restoreTo: element } } to send focus somewhere other than <body>."
     );
   });
 }

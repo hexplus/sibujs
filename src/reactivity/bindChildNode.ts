@@ -130,5 +130,7 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
   // subscribed.
   // The placeholder is passed as the binding's error owner so a failure on a
   // LATER scheduled run can still be offered to the enclosing ErrorBoundary.
-  return reactiveBinding(commit, placeholder);
+  // Structural, like `when`: the getter may replace the subtree it rendered,
+  // and the subscribers that subtree created are owned by this binding.
+  return reactiveBinding(commit, placeholder, true);
 }

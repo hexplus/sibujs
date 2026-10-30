@@ -5,8 +5,16 @@ import type { NodeChildren, Component as PublicComponent } from "../core/renderi
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { bindOwnerScope, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
+import { prerenderWait } from "../utils/prerenderHook";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
+import {
+  createRouteHeadController,
+  type RouteHead,
+  type RouteHeadController,
+  type RouterHeadOptions,
+  routeHasHead,
+} from "./routeHead";
 
 /**
  * Split a router URL into path, query and hash at the FIRST `#` and then the
@@ -240,6 +248,16 @@ export interface RouteBase {
   readonly path: string;
   readonly name?: string;
   readonly meta?: RouteMeta;
+  /**
+   * The document head while this route is committed: `title`, `description`,
+   * `canonical`, Open Graph (`og`) and extra `meta` entries. Values may be
+   * getters `(route) => string`, evaluated reactively. Nested records merge,
+   * the deepest winning; `createRouter({ head })` provides the defaults.
+   *
+   * The router manages the head only once some route (or the router) declares
+   * one, so an app without `head` is never touched.
+   */
+  readonly head?: RouteHead;
   readonly children?: RouteDef[];
   readonly beforeEnter?: Guard | Guard[];
   readonly alias?: string | string[];
@@ -337,6 +355,12 @@ export interface RouterOptions {
    * - number — cache all routes with this max cache size
    */
   readonly keepAlive?: boolean | string[] | number;
+  /**
+   * Head defaults for every route, plus `titleTemplate`. Declaring it (or a
+   * `head` on any route) makes the router own `document.title` and the
+   * description / canonical / Open Graph tags; see {@link RouteBase.head}.
+   */
+  readonly head?: RouterHeadOptions;
 }
 
 export type ScrollBehavior = (
@@ -1266,7 +1290,21 @@ export class SibuRouter {
   // excluded — it establishes the bootstrap route rather than superseding it.
   private navEpoch = 0;
 
+  // Created the first time a committed route needs a managed <head>.
+  private headController: RouteHeadController | null = null;
+
+  // Settles once the initial location has been resolved (committed or failed).
+  private readonly readyPromise: Promise<void>;
+  private resolveReady!: () => void;
+  // `readyPromise` plus the matched components loaded; created on the first
+  // `routerReady()` call only, so an app that never asks pays nothing and its
+  // outlets load exactly as before.
+  private loadedPromise: Promise<void> | null = null;
+
   constructor(routes: RouteDef[], options: RouterOptions = {}) {
+    this.readyPromise = new Promise<void>((resolve) => {
+      this.resolveReady = resolve;
+    });
     this.options = {
       mode: "history",
       base: "",
@@ -1317,13 +1355,40 @@ export class SibuRouter {
     // navigation before this fires, that navigation owns the initial route —
     // don't clobber it by re-navigating to the current location.
     queueMicrotask(() => {
+      let initial: Promise<unknown> = Promise.resolve();
       if (!this.navigator.isNavigating) {
         // Initial resolution: establishes the bootstrap route, so it must not
         // advance the generation and invalidate the bootstrap it is serving.
-        this.handleLocationChange(true, true);
+        initial = this.handleLocationChange(true, true);
       }
       this.isReadySetter(true);
+      // A pre-renderer serializes only once the initial route has committed (the
+      // outlets register their own component loads); in a browser this
+      // registration is a no-op.
+      prerenderWait(initial.then(this.resolveReady, this.resolveReady));
     });
+  }
+
+  /** Load the component of every record the current route matched, without instantiating any. */
+  private async preloadMatched(): Promise<void> {
+    const current = untracked(() => this.currentRouteGetter());
+    for (const record of current.matched) {
+      if ("redirect" in record) continue;
+      try {
+        await this.loader.preloadPlan(record, current.path);
+      } catch {
+        // The outlet reports a failed load when it renders. Its own attempt
+        // must see the ORIGINAL failure, not this one's "failed recently"
+        // throttle entry, so the attempt made here leaves no trace.
+        this.loader.clearErrors();
+      }
+    }
+  }
+
+  /** Settles after the initial navigation and its component loads; see `routerReady()`. */
+  whenReady(): Promise<void> {
+    this.loadedPromise ??= this.readyPromise.then(() => (this.destroyed ? undefined : this.preloadMatched()));
+    return this.loadedPromise;
   }
 
   private createInitialRoute(): RouteContext {
@@ -1338,9 +1403,9 @@ export class SibuRouter {
     };
   }
 
-  private handleLocationChange(skipHistory = true, initialResolution = false): void {
+  private handleLocationChange(skipHistory = true, initialResolution = false): Promise<unknown> {
     const path = this.getCurrentPath();
-    this.navigate(path, { replace: true, skipHistory, initialResolution }).catch((err) => {
+    return this.navigate(path, { replace: true, skipHistory, initialResolution }).catch((err) => {
       console.error("[Router] Error during location change navigation:", err);
     });
   }
@@ -1602,11 +1667,24 @@ export class SibuRouter {
     // Update current route
     this.currentRouteSetter(to);
 
+    // Document head for the committed route (title, description, Open Graph).
+    this.updateHead(to);
+
     // Run afterEach hooks
     this.guards.runAfterEach(to, from);
 
     // Handle scroll behavior
     this.handleScrollBehavior(to, from);
+  }
+
+  private updateHead(to: RouteContext): void {
+    if (typeof document === "undefined" || this.destroyed) return;
+    if (this.headController === null) {
+      // Lazily, so an app that never declares a head keeps full control of it.
+      if (!routeHasHead(to.matched, this.options.head)) return;
+      this.headController = createRouteHeadController(this.options.head);
+    }
+    this.headController.update(to);
   }
 
   private resolvePath(to: NavigationTarget): string {
@@ -1782,7 +1860,7 @@ export class SibuRouter {
    * anything. Pair with {@link instantiateComponent} at the commit boundary.
    */
   async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
-    return this.loader.loadPlan(route, routePath);
+    return prerenderWait(this.loader.loadPlan(route, routePath));
   }
 
   /**
@@ -1795,7 +1873,7 @@ export class SibuRouter {
     routePath: string,
     scope?: RouteScope,
   ): Promise<Element> {
-    return this.loader.instantiate(plan, route, routePath, scope);
+    return prerenderWait(this.loader.instantiate(plan, route, routePath, scope));
   }
 
   /** Resolve a route's module/factory without creating any component instance. */
@@ -1866,6 +1944,10 @@ export class SibuRouter {
     this.guards.clear();
     this.loader.clearCache();
     this.isReadySetter(false);
+    this.headController?.dispose();
+    this.headController = null;
+    // Nothing is left to wait for.
+    this.resolveReady();
   }
 
   // Cache management
@@ -2305,6 +2387,30 @@ export function router() {
     beforeResolve: (guard: NavigationGuard) => _routerRef.current?.beforeResolve(guard),
     afterEach: (hook: (to: RouteContext, from: RouteContext) => void) => _routerRef.current?.afterEach(hook),
   };
+}
+
+/**
+ * Resolves once the router has resolved the page's initial location AND loaded
+ * the components that location matched (lazy route chunks included).
+ *
+ * Await it before `hydrate()` on a pre-rendered page: the client tree is then
+ * built with every route component already loaded, so the outlet renders in
+ * the same task and the swap from pre-rendered markup shows no empty frame.
+ * Also resolves if the initial navigation fails or the router is destroyed.
+ *
+ * @returns A promise that never rejects.
+ * @throws If no router has been created yet.
+ *
+ * @example
+ * ```ts
+ * createRouter(routes, { mode: "history" });
+ * await routerReady();
+ * hydrate(App, document.getElementById("app")!);
+ * ```
+ */
+export function routerReady(): Promise<void> {
+  if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
+  return _routerRef.current.whenReady();
 }
 
 /**

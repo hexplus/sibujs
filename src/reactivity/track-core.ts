@@ -293,7 +293,27 @@ type SubWithList = Subscriber & {
   // The owner scope this subscriber was created in (see "Owner scope" below).
   // Absent for an effect or binding created outside any scope.
   _scope?: unknown;
+  // Set only on a STRUCTURAL binding: one whose run can replace the DOM
+  // subtree it renders (when / match / each / KeepAlive / a reactive child).
+  // Anything created while it runs is owned by it, through this token. See
+  // "Structural ownership" below.
+  _tok?: OwnerToken | null;
+  // The token of the nearest structural binding that was running when this
+  // subscriber was created, or null/absent. The drain runs a pending owner
+  // before its descendants, so a branch that is about to be replaced is
+  // disposed before its bindings get a chance to observe the state that
+  // replaces it.
+  _owner?: OwnerToken | null;
 };
+
+// Indirection between an owned subscriber and its owner. Children point at the
+// token, never at the owner itself, and the owner's disposal empties it: a
+// child that outlives its owner — an effect created in a branch and never tied
+// to a node, which is allowed — must not keep the disposed directive's closure
+// (factories, row buffers, old nodes) reachable.
+interface OwnerToken {
+  sub: SubWithList | null;
+}
 
 // ---------- Safe invoke ---------------------------------------------------
 
@@ -506,6 +526,30 @@ export function bindOwnerScope<A extends unknown[], R>(fn: (...args: A) => R): (
   return (...args: A) => runWithOwnerScope(scope, () => fn(...args));
 }
 
+// ---------- Structural ownership --------------------------------------------
+//
+// A signal's subscribers are notified newest-first (see `linkSignal`), and the
+// bindings inside a directive's branch are always newer than the directive. So
+// when one write both switches a branch and changes what the branch reads, the
+// branch's bindings used to run FIRST, against state that is only valid while
+// the branch is mounted (`span(() => selected()!.name)` after a deselect), and
+// throw — once per binding — before the directive disposed them.
+//
+// Order of notification cannot fix this in general: the branch may switch on a
+// different signal than the one its bindings read, written earlier in the same
+// batch. Ownership can. Every subscriber records the structural binding that
+// was running when it was created (`_owner`). When the drain is about to run a
+// subscriber whose owner chain holds a binding that is ALSO pending, it runs the
+// outermost such owner first. If that owner replaces the branch, the branch's
+// subscribers are disposed by the time their turn comes, and their disposed
+// guard skips them; if it keeps the branch, they run normally right after.
+//
+// Nothing else is reordered: a subscriber with no pending owner runs exactly
+// where it did before, so flushes that involve no branch switch are unchanged.
+// ---------------------------------------------------------------------------
+
+let currentStructOwner: OwnerToken | null = null;
+
 // ---------- Epoch counter for retrack-based pruning -----------------------
 
 let subscriberEpochCounter = 0;
@@ -545,6 +589,13 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   if (prevScope !== null && !sub._epoch && sub._scope === undefined) sub._scope = prevScope;
   const scope = sub._scope === undefined ? null : sub._scope;
   if (scope !== prevScope) currentOwnerScope = scope;
+  // Structural owner (see "Structural ownership" above): stamped on the first
+  // run of an effect or binding — never on a computed, which is never queued —
+  // and, for a structural binding, made current for its own body so whatever
+  // it builds is owned by it.
+  const prevStructOwner = currentStructOwner;
+  if (prevStructOwner !== null && !sub._epoch && !sub._c && sub._owner == null) sub._owner = prevStructOwner;
+  if (sub._tok != null) currentStructOwner = sub._tok;
   const epoch = ++subscriberEpochCounter;
   sub._epoch = epoch;
   sub._structDirty = false;
@@ -570,6 +621,7 @@ export function retrack(effectFn: () => void, subscriber: Subscriber): void {
   } finally {
     currentSubscriber = prev;
     currentOwnerScope = prevScope;
+    currentStructOwner = prevStructOwner;
     if (savedDepth !== 0) {
       suspendDepth = savedDepth;
       suspendSavedSub = savedSuspendSub;
@@ -696,7 +748,49 @@ export function track(effectFn: () => void, subscriber?: Subscriber): () => void
 //
 // The guard wraps BOTH the initial run and every notification-driven run.
 // ---------------------------------------------------------------------------
-export function reactiveBinding(commit: () => void, ownerNode?: unknown): () => void {
+export function reactiveBinding(commit: () => void, ownerNode?: unknown, structural?: boolean): () => void {
+  return createBinding(commit, ownerNode, structural === true)._dispose as () => void;
+}
+
+/**
+ * Handle returned by {@link structuralBinding}.
+ * @internal
+ */
+export interface StructuralBinding {
+  /** Dispose the binding. Idempotent. */
+  stop: () => void;
+  /**
+   * Run `fn` with this binding as the structural owner, for a render that
+   * happens outside the binding's own run (a directive's deferred first
+   * render), so what it builds is owned exactly as a later rebuild would be.
+   */
+  run: <T>(fn: () => T) => T;
+}
+
+/**
+ * A {@link reactiveBinding} whose run may REPLACE the subtree it renders —
+ * the binding behind `when`, `match`, `each` and `KeepAlive`. Subscribers
+ * created while it runs are owned by it, and the drain runs it before any of
+ * them when both are pending (see "Structural ownership").
+ * @internal
+ */
+export function structuralBinding(commit: () => void, ownerNode?: unknown): StructuralBinding {
+  const sub = createBinding(commit, ownerNode, true);
+  return {
+    stop: sub._dispose as () => void,
+    run: <T>(fn: () => T): T => {
+      const prev = currentStructOwner;
+      currentStructOwner = sub._tok ?? null;
+      try {
+        return fn();
+      } finally {
+        currentStructOwner = prev;
+      }
+    },
+  };
+}
+
+function createBinding(commit: () => void, ownerNode: unknown, structural: boolean): SubWithList {
   const run = (): void => {
     const s = subscriber as SubWithList & { _reentrant?: boolean; _disposed?: boolean };
     // A binding can be queued for notification and then disposed before the
@@ -731,6 +825,9 @@ export function reactiveBinding(commit: () => void, ownerNode?: unknown): () => 
   // rather than only for errors raised during synchronous rendering.
   subscriber._errorPhase = "binding";
   subscriber._errorNode = ownerNode;
+  subscriber._tok = null;
+  subscriber._owner = null;
+  if (structural) subscriber._tok = { sub: subscriber };
 
   // Initial run establishes the first dependency set (guarded, see above).
   //
@@ -756,20 +853,21 @@ export function reactiveBinding(commit: () => void, ownerNode?: unknown): () => 
   } catch (err) {
     subscriber._disposed = true;
     subscriber._errorNode = undefined;
+    if (subscriber._tok != null) subscriber._tok.sub = null;
     cleanup(subscriber);
     throw err;
   }
 
-  return (
-    subscriber._dispose ??
-    (subscriber._dispose = () => {
-      (subscriber as { _disposed?: boolean })._disposed = true;
-      // Drop the DOM reference so a disposed binding cannot keep a detached
-      // subtree alive through the subscriber object.
-      subscriber._errorNode = undefined;
-      cleanup(subscriber);
-    })
-  );
+  subscriber._dispose = () => {
+    (subscriber as { _disposed?: boolean })._disposed = true;
+    // Drop the DOM reference so a disposed binding cannot keep a detached
+    // subtree alive through the subscriber object.
+    subscriber._errorNode = undefined;
+    // Release every subscriber this one owned (see `OwnerToken`).
+    if (subscriber._tok != null) subscriber._tok.sub = null;
+    cleanup(subscriber);
+  };
+  return subscriber;
 }
 
 // ---------- recordDependency ----------------------------------------------
@@ -842,6 +940,10 @@ export function recordDependency(signal: ReactiveSignal) {
 // ---------------------------------------------------------------------------
 export function cleanup(subscriber: Subscriber): void {
   const sub = subscriber as SubWithList;
+  // A torn-down subscriber must not keep its owner's closure (and through it
+  // the owner's DOM range) reachable. Tested first so subscribers that never
+  // had an owner — every computed — keep their hidden class.
+  if (sub._owner != null) sub._owner = null;
   let node = sub.depsHead ?? null;
   // We clear the subscriber's head/tail up-front so we don't have to
   // repeatedly adjust them while unlinking — each node still needs its own
@@ -956,41 +1058,81 @@ function drainQueue(): void {
     // Remove from pendingSet BEFORE invoking so a cascading write during
     // this sub's execution can re-enqueue it. Enables sibling-effect
     // convergence; tickRepeat caps runaway loops.
-    pendingSet.delete(sub);
-
-    // An offender identified earlier in THIS drain stays parked. Skipping only
-    // the offender is what breaks the cycle — a quarantined subscriber stops
-    // writing, so its partner stops being re-enqueued.
-    if (quarantined.size > 0 && quarantined.has(sub)) continue;
-
-    // Stabilization gate: an upstream source changing does not mean this
-    // subscriber's observable inputs changed. Checked BEFORE tickRepeat so a
-    // suppressed run never counts toward the cycle ceiling.
     //
-    // Skipped entirely for subscribers with no computed dependency: they were
-    // enqueued by a source that provably changed value, so the walk could only
-    // ever return true. This keeps the plain-signal hot path allocation- and
-    // traversal-free, which is what the un-batched update workload exercises.
-    if ((sub as SubWithList)._hasComputedDep === true && !depsChanged(sub as SubWithList)) continue;
+    // A queue slot whose subscriber is no longer pending was already run
+    // ahead of its turn as a structural owner (see `runPendingOwners`), so the
+    // slot is spent. Outside that case every slot at or after `i` is pending:
+    // a subscriber is pushed only while absent from the set.
+    if (!pendingSet.delete(sub)) continue;
 
-    if (tickRepeat(sub)) {
-      cycleError(sub);
-      // Quarantine the offender and KEEP DRAINING. Aborting the whole queue
-      // here let one pathological subscriber discard unrelated, already-valid
-      // pending work — leaving legitimate effects un-run and application state
-      // half-updated. Containment must be scoped to the offender.
-      quarantined.add(sub);
-      continue;
+    // Run any pending structural owner of this subscriber first. If it
+    // replaces the branch `sub` lives in, `sub` is disposed by the time it
+    // runs below and its disposed guard makes the run a no-op.
+    if ((sub as SubWithList)._owner != null && pendingSet.size > 0) {
+      runPendingOwners(sub as SubWithList);
+      // The owner's run re-queued `sub`; it runs once, at its new slot.
+      if (pendingSet.has(sub)) continue;
     }
 
-    // Each re-run registers into the transaction that created this subscriber
-    // — nothing, for one created outside any (see withDisposerRollback).
-    const pushed = beginDisposerCapture((sub as SubWithList)._cap ?? null);
-    try {
-      safeInvoke(sub);
-    } finally {
-      if (pushed) endDisposerCapture();
+    runQueued(sub);
+  }
+}
+
+/**
+ * Run, outermost first, every owner of `sub` that is itself waiting in the
+ * queue. Re-walks after each run: an inner owner may still be pending once the
+ * outer one has decided to keep its branch.
+ */
+function runPendingOwners(sub: SubWithList): void {
+  for (;;) {
+    let outer: SubWithList | null = null;
+    for (let t = sub._owner ?? null; t !== null; ) {
+      const o = t.sub;
+      // A disposed owner ends the chain: it owns nothing that can still run.
+      if (o === null) break;
+      if (pendingSet.has(o)) outer = o;
+      t = o._owner ?? null;
     }
+    if (outer === null) return;
+    pendingSet.delete(outer);
+    runQueued(outer);
+  }
+}
+
+/** Run one dequeued subscriber through the drain's gates. */
+function runQueued(sub: Subscriber): void {
+  // An offender identified earlier in THIS drain stays parked. Skipping only
+  // the offender is what breaks the cycle — a quarantined subscriber stops
+  // writing, so its partner stops being re-enqueued.
+  if (quarantined.size > 0 && quarantined.has(sub)) return;
+
+  // Stabilization gate: an upstream source changing does not mean this
+  // subscriber's observable inputs changed. Checked BEFORE tickRepeat so a
+  // suppressed run never counts toward the cycle ceiling.
+  //
+  // Skipped entirely for subscribers with no computed dependency: they were
+  // enqueued by a source that provably changed value, so the walk could only
+  // ever return true. This keeps the plain-signal hot path allocation- and
+  // traversal-free, which is what the un-batched update workload exercises.
+  if ((sub as SubWithList)._hasComputedDep === true && !depsChanged(sub as SubWithList)) return;
+
+  if (tickRepeat(sub)) {
+    cycleError(sub);
+    // Quarantine the offender and KEEP DRAINING. Aborting the whole queue
+    // here let one pathological subscriber discard unrelated, already-valid
+    // pending work — leaving legitimate effects un-run and application state
+    // half-updated. Containment must be scoped to the offender.
+    quarantined.add(sub);
+    return;
+  }
+
+  // Each re-run registers into the transaction that created this subscriber
+  // — nothing, for one created outside any (see withDisposerRollback).
+  const pushed = beginDisposerCapture((sub as SubWithList)._cap ?? null);
+  try {
+    safeInvoke(sub);
+  } finally {
+    if (pushed) endDisposerCapture();
   }
 }
 
