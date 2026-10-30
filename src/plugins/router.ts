@@ -4,6 +4,8 @@ import { appendChildren, resolveClassValue, type TagProps } from "../core/render
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import { getRequestStore } from "../core/ssr-context";
+import { recordServerHead } from "../platform/serverHead";
 import { bindOwnerScope, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
 import { prerenderWait } from "../utils/prerenderHook";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
@@ -14,6 +16,7 @@ import {
   type RouteHeadController,
   type RouterHeadOptions,
   routeHasHead,
+  serverHeadLayer,
 } from "./routeHead";
 
 /**
@@ -296,6 +299,31 @@ export interface RouteBase {
    * ```
    */
   readonly key?: (route: RouteContext) => string;
+  /**
+   * HTTP status a server render of this route answers with. A `*` record
+   * answers 404 without it; a `redirect` record answers 302 (set `301` for a
+   * permanent move). The deepest matched record that declares one wins.
+   */
+  readonly status?: number;
+  /**
+   * How a server render treats this route (the deepest record that declares
+   * it wins; the default is to render it):
+   *
+   * - `"prerender"` — rendered at build time and on a per-request server.
+   * - `"ssr"` — rendered per request only; the build-time pre-renderer emits
+   *   the app shell plus the route's `head` for it, because its content is
+   *   per-request (a status page).
+   * - `"client"` — never rendered on a server: the shell plus the route's
+   *   `head` (a canvas designer, an admin panel). Excluded from the sitemap.
+   */
+  readonly render?: "ssr" | "prerender" | "client";
+  /**
+   * The concrete paths of a dynamic route, for the build-time pre-renderer:
+   * each entry is a params object for this record's path (`{ id: "taza" }`
+   * for `/producto/:id`) or a ready path string. May be async (read the
+   * catalog from the API at build time).
+   */
+  readonly getStaticPaths?: () => Iterable<Params | string> | Promise<Iterable<Params | string>>;
 }
 
 export interface ComponentRoute extends RouteBase {
@@ -324,7 +352,16 @@ export interface LazyRoute extends RouteBase {
 export type RouteDef = ComponentRoute | AsyncRoute | RedirectRoute | LazyRoute;
 
 export interface RouterOptions {
-  readonly mode?: "history" | "hash";
+  /**
+   * `"history"` (default) and `"hash"` read and write the browser location.
+   * `"memory"` keeps the location in the router itself: it starts at `url`
+   * and never touches `window`, `history` or `location`. Created inside a
+   * server request scope (`runInSSRContext`, `renderRoute`), a memory router
+   * belongs to that request only, so concurrent renders each have their own.
+   */
+  readonly mode?: "history" | "hash" | "memory";
+  /** Initial location of a `"memory"` router (`"/cotizar?servicio=dtf"`). Default `"/"`. */
+  readonly url?: string;
   readonly base?: string;
   readonly linkActiveClass?: string;
   readonly linkExactActiveClass?: string;
@@ -1293,6 +1330,20 @@ export class SibuRouter {
   // Created the first time a committed route needs a managed <head>.
   private headController: RouteHeadController | null = null;
 
+  // The location of a "memory" router (it has no browser location).
+  private memoryLocation = "/";
+
+  /**
+   * What the initial navigation did, for a server render's HTTP status: the
+   * result, and the status of the first redirect hop it took (a `redirect`
+   * record's `status`, 302 by default; 302 for a guard redirect).
+   * @internal
+   */
+  initialOutcome: { result: NavigationResult | null; redirectStatus: number | null } = {
+    result: null,
+    redirectStatus: null,
+  };
+
   // Settles once the initial location has been resolved (committed or failed).
   private readonly readyPromise: Promise<void>;
   private resolveReady!: () => void;
@@ -1327,6 +1378,7 @@ export class SibuRouter {
     this.isReadyGetter = isReadyState;
     this.isReadySetter = setIsReadyState;
 
+    if (this.options.mode === "memory") this.memoryLocation = this.options.url || "/";
     this.matcher = new RouteMatcher(routes);
     this.guards = new GuardManager(this.options.guardTimeout);
     this.loader = new ComponentLoader(this.options.cacheSize, this.options.errorRetryDelay);
@@ -1338,7 +1390,7 @@ export class SibuRouter {
   private initialize(): void {
     // Set up event listeners. Guarded so constructing a router under SSR (e.g.
     // createMemoryRouter, advertised for testing/SSR) doesn't throw on `window`.
-    if (typeof window !== "undefined") {
+    if (typeof window !== "undefined" && this.options.mode !== "memory") {
       if (this.options.mode === "history") {
         const popstateHandler = () => this.handleLocationChange(true);
         window.addEventListener("popstate", popstateHandler);
@@ -1359,7 +1411,9 @@ export class SibuRouter {
       if (!this.navigator.isNavigating) {
         // Initial resolution: establishes the bootstrap route, so it must not
         // advance the generation and invalidate the bootstrap it is serving.
-        initial = this.handleLocationChange(true, true);
+        initial = this.handleLocationChange(true, true).then((result) => {
+          this.initialOutcome.result = (result as NavigationResult | undefined) ?? null;
+        });
       }
       this.isReadySetter(true);
       // A pre-renderer serializes only once the initial route has committed (the
@@ -1412,6 +1466,7 @@ export class SibuRouter {
 
   private getCurrentPath(): string {
     const { mode, base } = this.options;
+    if (mode === "memory") return this.memoryLocation;
 
     // No DOM: there is no live location to read. `initialize()` already guards
     // listener registration for this case, but its `queueMicrotask` bootstrap
@@ -1524,7 +1579,13 @@ export class SibuRouter {
   private async performNavigation(
     to: RouteContext,
     from: RouteContext,
-    options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean },
+    options: {
+      replace?: boolean;
+      state?: unknown;
+      skipHistory?: boolean;
+      initialResolution?: boolean;
+      redirectStatus?: number;
+    },
     signal: AbortSignal,
     depth = 0,
     redirectChain: string[] = [],
@@ -1551,6 +1612,7 @@ export class SibuRouter {
         if (!isRouterNavigable(beforeEachResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= 302;
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
           ...chain,
           beforeEachResult,
@@ -1587,6 +1649,7 @@ export class SibuRouter {
                 if (!isRouterNavigable(result)) {
                   throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
+                options.redirectStatus ??= 302;
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
                   ...chain,
                   result,
@@ -1614,6 +1677,7 @@ export class SibuRouter {
           }
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= typeof route.status === "number" ? route.status : 302;
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
           ...chain,
           redirectPath,
@@ -1629,6 +1693,7 @@ export class SibuRouter {
         if (!isRouterNavigable(beforeResolveResult)) {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
+        options.redirectStatus ??= 302;
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
           ...chain,
           beforeResolveResult,
@@ -1654,10 +1719,14 @@ export class SibuRouter {
       throw new NavigationFailureError("aborted", from, to, undefined, abortReasonOf(signal));
     }
 
-    // Update browser history
-    if (!options.skipHistory) {
+    // Update browser history (a memory router keeps its own location)
+    if (this.options.mode === "memory") {
+      const search = serializeQuery(to.queryAll);
+      this.memoryLocation = to.path + (search ? `?${search}` : "") + (to.hash ? `#${to.hash}` : "");
+    } else if (!options.skipHistory) {
       this.updateHistory(to, options);
     }
+    if (options.initialResolution) this.initialOutcome.redirectStatus = options.redirectStatus ?? null;
 
     // Advance the navigation generation. Anything asynchronous that captured
     // the previous value has now been superseded and permanently loses the
@@ -1678,7 +1747,14 @@ export class SibuRouter {
   }
 
   private updateHead(to: RouteContext): void {
-    if (typeof document === "undefined" || this.destroyed) return;
+    if (this.destroyed) return;
+    // A memory router inside a server request records the head for the render
+    // result instead of writing into a document shared by every request.
+    if (this.options.mode === "memory" && getRequestStore()) {
+      if (routeHasHead(to.matched, this.options.head)) recordServerHead(serverHeadLayer(to, this.options.head));
+      return;
+    }
+    if (typeof document === "undefined") return;
     if (this.headController === null) {
       // Lazily, so an app that never declares a head keeps full control of it.
       if (!routeHasHead(to.matched, this.options.head)) return;
@@ -2045,11 +2121,30 @@ function abortReasonOf(signal: AbortSignal): NavigationFailureReason {
 // a null router ("Router not initialized"), even though `createRouter()` ran in
 // the first copy. `_routerRef.current` is the single source of truth.
 const ROUTER_KEY = Symbol.for("sibujs.router.v1");
-const _routerRef: { current: SibuRouter | null } = ((
+const _globalRouterRef: { current: SibuRouter | null } = ((
   globalThis as typeof globalThis & {
     [ROUTER_KEY]?: { current: SibuRouter | null };
   }
 )[ROUTER_KEY] ??= { current: null });
+
+/**
+ * The router `route()`, `navigate()`, `Route()` and `RouterLink` talk to: the
+ * current server request's memory router when one exists (see `createRouter`),
+ * the process-wide router otherwise. A request without its own router sees the
+ * global one, exactly as before request routers existed.
+ */
+const REQUEST_ROUTER = "router";
+const _routerRef = {
+  get current(): SibuRouter | null {
+    const own = getRequestStore()?.slots?.get(REQUEST_ROUTER) as SibuRouter | null | undefined;
+    return own ?? _globalRouterRef.current;
+  },
+  set current(router: SibuRouter | null) {
+    const slots = getRequestStore()?.slots;
+    if (slots?.get(REQUEST_ROUTER)) slots.set(REQUEST_ROUTER, router);
+    else _globalRouterRef.current = router;
+  },
+};
 
 // Bumped by every `createRouter()`. Outlets read it in their tracked pass, so
 // one built before the router existed renders once it does, and one built
@@ -2186,10 +2281,6 @@ function normalizeRoutes(routes: RouteDef[]): RouteDef[] {
  * @returns The created router instance.
  */
 export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, options: RouterOptions = {}): SibuRouter {
-  if (_routerRef.current) {
-    _routerRef.current.destroy();
-  }
-
   // Handle overload: createRouter(options) without routes array
   let routes: RouteDef[];
   if (Array.isArray(routesOrOptions)) {
@@ -2197,6 +2288,22 @@ export function createRouter(routesOrOptions: RouteDef[] | RouterOptions, option
   } else {
     options = routesOrOptions;
     routes = [];
+  }
+
+  // A memory router created inside a server request is that request's alone:
+  // it neither replaces nor destroys the process-wide router, and concurrent
+  // requests each see their own.
+  const store = getRequestStore();
+  if (options.mode === "memory" && store) {
+    const slots = (store.slots ??= new Map());
+    (slots.get(REQUEST_ROUTER) as SibuRouter | null | undefined)?.destroy();
+    const router = new SibuRouter(routes, options);
+    slots.set(REQUEST_ROUTER, router);
+    return router;
+  }
+
+  if (_routerRef.current) {
+    _routerRef.current.destroy();
   }
 
   _routerRef.current = new SibuRouter(routes, options);
