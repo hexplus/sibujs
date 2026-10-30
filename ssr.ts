@@ -17,6 +17,7 @@ export * from "./src/platform/ssr";
 export * from "./src/platform/renderHandler";
 export * from "./src/platform/renderRoute";
 export * from "./src/platform/ssrAsync";
+export type { StreamRenderOptions } from "./src/platform/ssrStream";
 export * from "./src/platform/staticSiteGenerator";
 export * from "./src/platform/wasm";
 export * from "./src/platform/worker";

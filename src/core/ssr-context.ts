@@ -25,6 +25,7 @@
  */
 import { devWarn } from "./dev";
 import { hydrationPending } from "./rendering/hydrationHooks";
+import { currentBoundary } from "./rendering/streamBoundary";
 export interface SSRStore {
   ssr: boolean;
   suspenseIdCounter: number;
@@ -77,6 +78,8 @@ export interface PendingWork {
   readonly label: string;
   /** `Date.now()` when the work was registered. */
   readonly since: number;
+  /** The streaming `Suspense` boundary it was started in, if any (see `streamBoundary`). */
+  readonly boundary?: unknown;
 }
 
 type ALSLike<T> = {
@@ -353,7 +356,7 @@ export function trackPending<T>(promise: T, label: string, hydration = true): T 
   const target = store?.pending ? store : hydration ? hydrationPending() : null;
   const pending = target?.pending;
   if (!target || !pending) return promise;
-  const entry: PendingWork = { label, since: Date.now() };
+  const entry: PendingWork = { label, since: Date.now(), boundary: currentBoundary() ?? undefined };
   pending.add(entry);
   const done = () => {
     pending.delete(entry);

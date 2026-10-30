@@ -5,6 +5,7 @@ import { captureScope, inAdoptScope, inScope } from "./adoptScope";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
 import { isHydrating } from "./hydrationHooks";
+import { currentBoundary, openBoundary } from "./streamBoundary";
 import type { Component } from "./types";
 
 // Marker used by ErrorBoundary to detect a pending error stored on a node
@@ -105,6 +106,8 @@ export function lazy<R extends Node = HTMLElement>(
 
     const container = div({ class: "sibu-lazy" });
     const scope = captureScope();
+    // Created inside a streaming Suspense boundary: the chunk's render belongs to it.
+    const boundary = currentBoundary();
     let disposed = false;
     // A placeholder, built outside any adoption scope: it takes no id, so the
     // ids that follow do not depend on whether the chunk is already loaded.
@@ -125,7 +128,8 @@ export function lazy<R extends Node = HTMLElement>(
           if (disposed) return;
           cached = mod.default;
           const component = cached;
-          const rendered = inScope(scope, () => component());
+          const build = () => inScope(scope, () => component());
+          const rendered = boundary ? boundary.enter(build) : build();
           replaceChildrenSafely(container, rendered);
         }),
       )
@@ -191,6 +195,12 @@ export interface SuspenseProps {
 export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   const container = div({ class: "sibu-suspense" });
   const scope = captureScope();
+  // A streaming server render streams this boundary's content on its own.
+  const boundary = openBoundary(container);
+  const commit = (el: Element) => {
+    replaceChildrenSafely(container, el);
+    boundary?.done();
+  };
 
   // Outside any adoption scope, like lazy()'s placeholder: a fallback the
   // server replaced must not shift the ids of what follows.
@@ -220,7 +230,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   const renderContent = bindOwnerScope(() => {
     if (suspenseDisposed) return;
     try {
-      const el = inScope(scope, nodes);
+      const el = boundary ? boundary.enter(() => inScope(scope, nodes)) : inScope(scope, nodes);
       childEl = el;
 
       // Committing swaps the fallback out for `el`. The fallback is
@@ -231,7 +241,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       if (el.classList.contains("sibu-lazy")) {
         // Already loaded synchronously — swap and skip the observer entirely.
         if (!el.querySelector(".sibu-lazy-loading")) {
-          replaceChildrenSafely(container, el);
+          commit(el);
           return;
         }
         observer = new MutationObserver(() => {
@@ -240,12 +250,12 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
           if (!loading) {
             observer?.disconnect();
             observer = null;
-            replaceChildrenSafely(container, el);
+            commit(el);
           }
         });
         observer.observe(el, { childList: true, subtree: true });
       } else {
-        replaceChildrenSafely(container, el);
+        commit(el);
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));

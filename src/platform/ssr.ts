@@ -43,6 +43,7 @@ import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue, sanitizeUrl } from "../utils/sanitize";
 import { type ComponentIslandOptions, componentIsland } from "./componentIsland";
 import { type AdoptOptions, type AdoptResult, hydrateAdopt } from "./hydrateAdopt";
+import { type StreamRenderOptions, streamPage } from "./ssrStream";
 
 /**
  * Attributes the server must never emit at all.
@@ -1077,7 +1078,21 @@ export async function collectStream(stream: AsyncGenerator<string> | AsyncIterab
  * ahead of individually-completing boundaries. See
  * `docs/architecture/ssr.md` for the precise streaming and failure semantics.
  */
-export function renderToReadableStream(element: HTMLElement | DocumentFragment | Node): ReadableStream<string> {
+export function renderToReadableStream(element: HTMLElement | DocumentFragment | Node): ReadableStream<string>;
+/**
+ * Stream a page built by `input` with out-of-order `Suspense`: the head and the
+ * shell (with each boundary's fallback) flush as soon as everything outside the
+ * boundaries has settled, then each boundary streams when it is ready, with a
+ * CSP-nonce-aware swap script, then the transferred state and the scripts.
+ * Backpressure: the next chunk is produced once the previous one was read.
+ * See `ssrStream.ts`.
+ */
+export function renderToReadableStream(input: () => Node, options?: StreamRenderOptions): ReadableStream<string>;
+export function renderToReadableStream(
+  element: HTMLElement | DocumentFragment | Node | (() => Node),
+  options?: StreamRenderOptions,
+): ReadableStream<string> {
+  if (typeof element === "function") return streamPage(element, options);
   const generator = renderToStream(element);
 
   return new ReadableStream<string>({

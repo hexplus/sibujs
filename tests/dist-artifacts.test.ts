@@ -286,6 +286,11 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // `sibujs/ssr`, not here. Measured: raw ~91,490 B, gzip ~31,440 B
     // (+~1,230 B raw, +~550 B gzip).
     //
+    // Raw 92,000 B, gzip baseline 31,000 B for streaming `Suspense`: the
+    // boundary slot `Suspense` and `lazy()` report to, so a streaming render
+    // flushes each boundary on its own (`core/rendering/streamBoundary.ts`).
+    // Measured: raw ~91,770 B, gzip ~31,560 B (+~280 B raw, +~110 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -293,8 +298,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(91_800);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(30_900 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(92_000);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(31_000 * 1.02));
   });
 });
 
