@@ -22,11 +22,18 @@ export interface RenderHandlerOptions extends RenderRouteOptions {
   /**
    * Keep rendered pages in memory. `max` entries (default 500), each for `ttl`
    * ms (default 60 000); `version()` is part of the key, so changing what it
-   * returns makes every cached page stale at once. Only 200 and 404 pages are
-   * cached; redirects, errors and pages that timed out always render. The
-   * cache also holds at most `maxBytes` of HTML (default 32 MB): any query
-   * string is a distinct key, so a client inventing them evicts the oldest
-   * pages but cannot grow the process without bound.
+   * returns makes every cached page stale at once. The cache also holds at
+   * most `maxBytes` of HTML (default 32 MB): any query string is a distinct
+   * key, so a client inventing them evicts the oldest pages but cannot grow the
+   * process without bound.
+   *
+   * A page is stored only when it is a 200 or 404 that did not time out AND
+   * its `Cache-Control` (from `cacheControl`) allows a shared cache: no
+   * `no-store`, `no-cache` or `private` directive. This cache is shared by
+   * every visitor, so a personalized page must say `private` (or `no-store`)
+   * — that is the opt-out, and the default 404 (`no-store`) is not stored
+   * either. `x-sibu-cache` says what happened: `hit`, `miss` (rendered and
+   * stored) or `bypass` (rendered, not stored).
    */
   cache?: { max?: number; ttl?: number; maxBytes?: number; version?: () => string | number };
   /**
@@ -48,6 +55,21 @@ interface Entry {
 }
 
 const encoder = new TextEncoder();
+
+/**
+ * Whether a `Cache-Control` value lets the handler's SHARED page cache keep
+ * the response. Directives are parsed (comma-separated, names
+ * case-insensitive, `private="set-cookie"` counts as `private`), not
+ * substring-matched; no header at all leaves the page cacheable.
+ */
+function sharedCacheable(control: string | null): boolean {
+  if (!control) return true;
+  for (const part of control.split(",")) {
+    const name = part.split("=")[0].trim().toLowerCase();
+    if (name === "no-store" || name === "no-cache" || name === "private") return false;
+  }
+  return true;
+}
 
 function defaultCacheControl(result: RouteRenderResult): string {
   // A page serialized with fallbacks because its data did not arrive in time
@@ -140,14 +162,18 @@ export function createRenderHandler(
     if (control) headers["cache-control"] = control;
     if (result.location) headers.location = result.location;
 
-    if (store && (result.status === 200 || result.status === 404) && !result.diagnostics.timedOut) {
-      const bytes = encoder.encode(result.html).byteLength;
-      if (bytes <= maxBytes) {
+    if (store) {
+      const eligible =
+        (result.status === 200 || result.status === 404) && !result.diagnostics.timedOut && sharedCacheable(control);
+      const bytes = eligible ? encoder.encode(result.html).byteLength : 0;
+      if (eligible && bytes <= maxBytes) {
         evict(key);
         store.set(key, { status: result.status, html: result.html, control, expires: Date.now() + ttl, bytes });
         cachedBytes += bytes;
         while (store.size > max || cachedBytes > maxBytes) evict(store.keys().next().value as string);
         headers["x-sibu-cache"] = "miss";
+      } else {
+        headers["x-sibu-cache"] = "bypass";
       }
     }
     return respond(result.status, result.html, head, headers);

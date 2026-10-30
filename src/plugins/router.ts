@@ -115,6 +115,22 @@ function trimTrailingSlashes(path: string): string {
   return end === path.length ? path : path.slice(0, end);
 }
 
+/**
+ * A request URL relative to the router's `base`: the base is removed when the
+ * path is the base itself or continues it at a segment boundary (`/app`,
+ * `/app/`, `/app/x` under `/app`; never `/application`). Query and hash are
+ * kept. Applied once, to an incoming URL — never to a navigation target.
+ */
+function stripBase(url: string, base: string | undefined): string {
+  const prefix = base ? trimTrailingSlashes(base) : "";
+  if (!prefix) return url;
+  const cut = url.search(/[?#]/);
+  const path = cut === -1 ? url : url.slice(0, cut);
+  const rest = cut === -1 ? "" : url.slice(cut);
+  if (path !== prefix && !path.startsWith(`${prefix}/`)) return url;
+  return (path.slice(prefix.length) || "/") + rest;
+}
+
 /** Strip a trailing slash so `/users/` and `/users` compare equal; root stays `/`. */
 function normalizePathname(path: string): string {
   if (!path) return "/";
@@ -373,7 +389,14 @@ export interface RouterOptions {
    * belongs to that request only, so concurrent renders each have their own.
    */
   readonly mode?: "history" | "hash" | "memory";
-  /** Initial location of a `"memory"` router (`"/cotizar?servicio=dtf"`). Default `"/"`. */
+  /**
+   * Initial location of a `"memory"` router (`"/cotizar?servicio=dtf"`).
+   * Default `"/"`. It is the REQUEST URL, like the browser's location: with a
+   * `base`, a path under it (`/app/cotizar`, `/app`, `/app/`) has the base
+   * stripped at a segment boundary, the query and hash kept; a path not under
+   * it (`/application`) is taken as it is. Navigation targets (`navigate()`,
+   * links, redirects) are application paths, without the base, in every mode.
+   */
   readonly url?: string;
   /**
    * `"strict"` (default): `/cotizar/` and `/cotizar` are different paths.
@@ -1410,7 +1433,7 @@ export class SibuRouter {
     this.isReadyGetter = isReadyState;
     this.isReadySetter = setIsReadyState;
 
-    if (this.options.mode === "memory") this.memoryLocation = this.options.url || "/";
+    if (this.options.mode === "memory") this.memoryLocation = stripBase(this.options.url || "/", this.options.base);
     this.matcher = new RouteMatcher(routes);
     this.guards = new GuardManager(this.options.guardTimeout);
     this.loader = new ComponentLoader(this.options.cacheSize, this.options.errorRetryDelay);

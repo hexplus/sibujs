@@ -271,7 +271,10 @@ settled; a boundary not yet ready is serialized with its fallback (its
 in-progress content held aside for the moment). Each boundary then streams as
 soon as its own work has settled — `<div hidden id="sibu-resolved-…">` plus
 `suspenseSwapScript()` — in finishing order; a ready boundary nested in a
-streamed one travels with it. Chunks are produced on demand (a one-slot channel:
+streamed one travels with it. A boundary streams on its own only once every
+boundary around it has been published (its swap target exists in the
+delivered document); one that is ready earlier waits and travels with its
+ancestor's chunk, so its content arrives once and leaves no hidden payload. Chunks are produced on demand (a one-slot channel:
 the renderer waits until the consumer read the previous chunk), and `cancel()`
 stops the render at once (it wakes a renderer waiting for a boundary). An error
 no `ErrorBoundary` claims errors the stream wherever it is recorded — while a
@@ -357,7 +360,10 @@ loaders are collected (`utils/transfer.ts`: one collector per section) into ONE
 script, `window.__SIBU_TRANSFER__ = {"v":1,"q":{…},"r":{…}}`, escaped by
 `escapeScriptJson`, with the render's nonce. The payload is capped
 (`maxStateBytes`, 1 MB): entries are dropped largest first and named in a dev
-warning. `__proto__`-style keys never cross in either direction. The browser
+warning. A route loader's automatic key is its path plus its function name;
+when two different loader functions reach the same key in one request (two
+`loader: async () => …` properties), the key is withheld and both fetch in the
+browser — `options.key` transfers them. `__proto__`-style keys never cross in either direction. The browser
 reads the global once (own property only, plain objects only, version checked)
 and primes its cache: each query entry keeps the server's `dataUpdatedAt`, so
 staleness is measured from when the server fetched it. A request's collectors

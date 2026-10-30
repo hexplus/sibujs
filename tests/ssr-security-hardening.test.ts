@@ -95,7 +95,9 @@ describe("createRenderHandler failures and cache bounds", () => {
     const res = await handle(new Request("http://x.test/"));
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(res.headers.get("x-sibu-cache")).toBeNull();
+    // Rendered and not stored.
+    expect(res.headers.get("x-sibu-cache")).toBe("bypass");
+    expect((await handle(new Request("http://x.test/"))).headers.get("x-sibu-cache")).toBe("bypass");
   });
 });
 

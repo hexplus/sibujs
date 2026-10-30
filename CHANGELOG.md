@@ -105,8 +105,16 @@ with what is left. `redirectBy` tells a `redirect` record from a guard redirect.
 `trailingSlash: "ignore"`. `createRenderHandler(routes, options)` wraps
 `renderRoute` as a `Request → Response` handler for a Node sidecar, with
 `Cache-Control` and a page cache keyed by URL and a data version, bounded by
-entries and by bytes (`cache.maxBytes`, default 32 MB). A page that timed out is
-never cached (`no-store`); a render that throws answers a bare 500.
+entries and by bytes (`cache.maxBytes`, default 32 MB). The cache is shared by
+every visitor, so it keeps only 200/404 pages that did not time out and whose
+`Cache-Control` has no `no-store`, `no-cache` or `private` (parsed, any case):
+a personalized page answers `private` and is rendered for each request, and
+`x-sibu-cache` reports `hit`, `miss` or `bypass`. A render that throws answers
+a bare 500. With a router `base`, the URL passed to `renderRoute` (and the
+request a handler receives) is the full request URL: the base is stripped once,
+at a segment boundary (`/app/about` under `/app`, never `/application`), the
+query and hash kept; navigation targets stay application paths, and a
+redirect's `location` carries the base once.
 
 ### Added — one head API for the server and the browser
 
@@ -142,7 +150,10 @@ See `docs/architecture/hydration-adopt.md` for the algorithm and its limits.
 
 The async renderers embed the request's `query()` cache, keyed `resource()`s
 (`resource(fetcher, { key })`) and route loaders (`executeLoader`, keyed by
-path) as one escaped script (`window.__SIBU_TRANSFER__`, the `serializeState`
+path and function name; two different loader functions with the same name for
+one path — two `loader: async () => …` properties — are not transferred at all
+and fetch again in the browser, unless given `options.key`) as one escaped
+script (`window.__SIBU_TRANSFER__`, the `serializeState`
 rules, nonce, a byte cap that drops the largest entries first and names them).
 The browser primes its cache from it: data still within `staleTime` is not
 fetched again, stale data shows at once and refetches in the background.
@@ -158,7 +169,8 @@ the body into the shell's `#app`, the route head replacing the shell's title,
 the transferred state before `</body>`. It writes `404.html` from the `*`
 route, `200.html`, `sitemap.xml` (not `noindex`, not `render: "client"`),
 `robots.txt` and `redirects.json`; `render: "client"` / `"ssr"` routes get the
-shell plus their head; guarded routes and guard redirects are left to the
+shell plus their route head, and are not rendered at build time (their
+components, and what they fetch, run only for a real request); guarded routes and guard redirects are left to the
 browser. `fetch` (a base URL or a function) supplies data at build time, and an
 unreachable API — or a route that does not render within `timeout` — fails the
 build naming the route. Head markup and state are inserted literally (`$&` in a
@@ -183,7 +195,9 @@ server HTML.
 boundaries has settled, then streams each boundary as soon as its own content
 and work are ready, with a nonce-aware swap script, then the state and the
 scripts. Chunks are produced on demand; `cancel()` stops the render at once.
-An error no `ErrorBoundary` claims errors the stream wherever it occurs — the
+A nested boundary that is ready before the one around it is published
+travels with that one's chunk, once. An error no `ErrorBoundary` claims errors
+the stream wherever it occurs — the
 status is long sent by then — with the failing node's DOM path. A head entry
 added after the head was flushed cannot change it.
 

@@ -375,6 +375,9 @@ export async function prerenderFromServerEntry(
       router: { ...(entry.routerOptions ?? {}), head: entry.head },
       app: entry.app,
       timeout: options.timeout ?? 15_000,
+      // A per-request page is written as the shell plus its route head: it is
+      // never rendered at build time, so its request-only fetches never run.
+      headOnly: ["ssr"] as const,
       hydration: options.hydration,
       nonce: options.nonce,
       maxStateBytes: options.maxStateBytes,

@@ -15,10 +15,35 @@ function transferSlot(): Map<string, unknown> | undefined {
   return requestSlot("resource:transfer", () => new Map<string, unknown>());
 }
 
+/** This request's transfer keys that must not cross (see {@link withholdTransfer}). */
+function withheldSlot(): Set<string> | undefined {
+  return requestSlot("resource:transfer:withheld", () => new Set<string>());
+}
+
 registerTransferCollector("r", () => {
   const slot = transferSlot();
-  return slot && slot.size > 0 ? Object.fromEntries(slot) : undefined;
+  if (!slot || slot.size === 0) return undefined;
+  const withheld = withheldSlot();
+  const out: Record<string, unknown> = {};
+  let any = false;
+  for (const [key, value] of slot) {
+    if (withheld?.has(key)) continue;
+    out[key] = value;
+    any = true;
+  }
+  return any ? out : undefined;
 });
+
+/**
+ * Keep `key` out of this request's transferred state, whatever is or will be
+ * stored under it: the browser then fetches it itself. For a key whose owner
+ * is ambiguous (two loaders resolved to it). Server only; a no-op outside a
+ * request.
+ * @internal
+ */
+export function withholdTransfer(key: string): void {
+  withheldSlot()?.add(key);
+}
 
 /**
  * Lifecycle callbacks follow the shared data-layer contract: an exception

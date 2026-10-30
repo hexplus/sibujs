@@ -56,6 +56,16 @@ export interface RenderRouteOptions extends AsyncRenderOptions {
    * collected head tags in `<head>` and the transfer script in `<body>`.
    */
   document?: DocumentOptions;
+  /**
+   * Render modes answered with the head alone, as `"client"` always is: the
+   * route is matched, guarded and redirected as usual, and its `head` is
+   * resolved from the route records, but no component (the route's or
+   * `app`'s) is built, so nothing it would fetch runs and nothing transfers.
+   * The pre-renderer passes `["ssr"]`: a per-request page ships as the shell
+   * plus its route head, without rendering it at build time.
+   * @internal
+   */
+  headOnly?: readonly RouteRenderMode[];
 }
 
 /** The routed part of a {@link renderRoute} result. */
@@ -274,7 +284,7 @@ export function renderRoute(
       const status = deepest(matched, "status") ?? (!leaf || leaf.path === "*" ? 404 : 200);
       const render: RouteRenderMode = deepest(matched, "render") ?? "default";
 
-      if (render === "client") {
+      if (render === "client" || options.headOnly?.includes(render)) {
         return {
           html: wrap("", headHtml0, ""),
           head: headHtml0,

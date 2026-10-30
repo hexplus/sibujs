@@ -278,8 +278,14 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       await waitFor(() => !pendingFor(store?.pending, undefined), shellDeadline, stopWaiting);
       failIfErrored();
       if (channel.cancelled) return;
-      // Boundaries already done are part of the shell.
-      for (const b of state.boundaries) if (b.done && !pendingFor(store?.pending, b.api)) b.emitted = true;
+      // Boundaries already done are part of the shell — unless an enclosing
+      // boundary is not, in which case its fallback is what the shell shows,
+      // and they travel with that boundary later.
+      for (const b of state.boundaries) {
+        const inline = (x: BoundaryRecord) => x.done && !pendingFor(store?.pending, x.api);
+        const enclosing = state.boundaries.filter((a) => a !== b && a.container.contains(b.container));
+        if (inline(b) && enclosing.every(inline)) b.emitted = true;
+      }
       const shell = serializeWithFallbacks(holder);
       const head = collectServerHead();
       let after = "";
@@ -300,15 +306,23 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       failIfErrored();
 
       // 2 — boundaries, in the order they finish.
+      //
+      // Ready is not enough to stream: a boundary's swap script needs its
+      // target in the delivered document, and a boundary nested in one still
+      // showing its fallback has none yet. It waits for its ancestor, whose
+      // chunk then carries it (see "travel with it" below) — exactly once.
       const deadline = Date.now() + (options.timeout ?? 10_000);
       const outstanding = () => state.boundaries.filter((b) => !b.emitted);
+      const ancestorsOf = (b: BoundaryRecord) =>
+        state.boundaries.filter((a) => a !== b && a.container.contains(b.container));
+      const emittable = (b: BoundaryRecord) => ready(b) && ancestorsOf(b).every((a) => a.emitted);
       let bodyClosed = false;
       for (;;) {
         if (outstanding().length === 0) break;
-        const next = outstanding().find(ready);
+        const next = outstanding().find(emittable);
         if (!next) {
           const progressed = await waitFor(
-            () => outstanding().some(ready) || outstanding().length === 0,
+            () => outstanding().some(emittable) || outstanding().length === 0,
             deadline,
             stopWaiting,
           );
@@ -325,9 +339,14 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
           if (channel.cancelled) return;
           failIfErrored();
         }
-        // Done boundaries nested inside this one travel with it.
-        for (const b of state.boundaries)
-          if (b !== next && ready(b) && next.container.contains(b.container)) b.emitted = true;
+        // Ready boundaries nested inside this one travel with it — those whose
+        // every boundary in between is ready too; the others are serialized
+        // with their fallback and stream later, now that their target exists.
+        for (const b of state.boundaries) {
+          if (b === next || !next.container.contains(b.container) || !ready(b)) continue;
+          const between = ancestorsOf(b).filter((a) => a !== next && next.container.contains(a.container));
+          if (between.every(ready)) b.emitted = true;
+        }
         next.emitted = true;
         if (!next.container.isConnected && !holder.contains(next.container)) continue;
         let html = "";

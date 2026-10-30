@@ -35,7 +35,12 @@ function startApi(): Promise<Server> {
         const p = CATALOG.find((x) => x.id === decodeURIComponent(url.pathname.slice(13)));
         return p ? json(200, p) : json(404, {});
       }
-      if (url.pathname === "/api/status") return json(200, { ok: true, checkedAt: "build" });
+      // A per-request endpoint: it needs the visitor's credentials, which a
+      // build does not have. `/estado` (render: "ssr") must never call it.
+      if (url.pathname === "/api/status") {
+        req.socket.destroy();
+        return;
+      }
       json(404, {});
     });
     server.listen(0, "127.0.0.1", () => resolve(server));
@@ -122,6 +127,12 @@ describe("prerender from a server entry", () => {
     expect(designer).not.toContain("__SIBU_TRANSFER__");
     const status = await page("estado/index.html");
     expect(status).toContain('<div id="app"></div>');
+    // A per-request page is not rendered at build time: its request-only API
+    // was never called, its route head is there, and nothing transfers.
+    expect(apiRequests).not.toContain("/api/status");
+    expect(status).toContain("Estado · Estampados Sibu</title>");
+    expect(status).toContain('<meta name="robots" content="noindex"');
+    expect(status).not.toContain("__SIBU_TRANSFER__");
     expect(await page("admin/index.html")).toContain('<meta name="robots" content="noindex, nofollow"');
   });
 
