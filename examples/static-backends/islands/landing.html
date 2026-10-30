@@ -1,0 +1,36 @@
+<!doctype html>
+<!--
+  Option 2: the backend renders the page with its own templates (this file is a
+  Jinja2 template for FastAPI; Go html/template and PHP work the same way), and
+  SibuJS only adds behaviour to the parts that need it. No SibuJS on the server.
+
+  The quote widget is an island: `data-sibu-island` names the setup registered in
+  islands.ts, `data-sibu-load="visible"` defers it until it scrolls into view, and
+  its server-rendered markup stays in place: enhance() binds to it.
+-->
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <title>{{ title }} · Estampados Sibu</title>
+    <meta name="description" content="{{ description }}" />
+    <meta property="og:title" content="{{ title }}" />
+    <meta property="og:image" content="{{ og_image }}" />
+    <script type="module" src="/assets/islands.js"></script>
+  </head>
+  <body>
+    <main class="landing">
+      <h1>Personalización textil</h1>
+      <section class="grid">
+        {% for p in products %}
+        <article class="card"><img src="{{ p.image }}" alt="{{ p.name }}" width="160" height="160" />
+          <h3>{{ p.name }}</h3><p>${{ p.price }}</p></article>
+        {% endfor %}
+      </section>
+      <form data-sibu-island="quote" data-sibu-load="visible" method="post" action="/api/quote">
+        <label for="q-name">Nombre</label><input id="q-name" name="name" />
+        <output data-sibu="count">0</output> caracteres
+        <button type="submit">Enviar</button>
+      </form>
+    </main>
+  </body>
+</html>
