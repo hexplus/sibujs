@@ -49,6 +49,10 @@ function currentScope(): LoaderScope {
 /**
  * Execute a route loader and wrap its result in a reactive Resource.
  *
+ * The result is transferred from a server render to the browser under the key
+ * `loader:<path>:<loader name>` (or `options.key`), so the browser does not run
+ * the loader again on takeover.
+ *
  * Executing a loader does not make its data visible to `loaderData()`; render
  * the route's component inside {@link renderWithLoader} (or use
  * {@link withLoader}) so the component reads its own route's data.
@@ -58,7 +62,11 @@ export function executeLoader<T>(
   context: { params: Record<string, string>; path: string },
   options?: ResourceOptions<T>,
 ): Resource<T> {
-  const res = resource<T>(({ signal }) => loader(context, { signal }), options);
+  // Keyed by route path (and loader name) unless the caller chose a key, so a
+  // server render transfers the loader's result and the browser starts from
+  // it instead of running the loader again.
+  const key = options?.key ?? `loader:${context.path}${loader.name ? `:${loader.name}` : ""}`;
+  const res = resource<T>(({ signal }) => loader(context, { signal }), { ...options, key });
   const disposeResource = res.dispose;
   res.dispose = () => {
     _disposed.add(res);

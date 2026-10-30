@@ -253,6 +253,8 @@ describe('hydrate(App, root, { strategy: "adopt" })', () => {
 
 describe("adopting the fixture landing page through the router", () => {
   it("creates zero element nodes and keeps the exact <img> nodes", async () => {
+    // jsdom has no canvas: the cards' recolor step gets no context and skips drawing.
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
     vi.stubGlobal("fetch", createStubFetch());
     const server = await renderRoute(routes, "/", { router: { head }, hydration: "adopt" });
     expect(server.status).toBe(200);

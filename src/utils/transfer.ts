@@ -16,7 +16,7 @@
  */
 
 import { getRequestStore } from "../core/ssr-context";
-import { readOwnGlobal } from "./guards";
+import { isUnsafeKey, readOwnGlobal } from "./guards";
 
 /** The window global the transfer script assigns. */
 export const TRANSFER_GLOBAL = "__SIBU_TRANSFER__";
@@ -67,8 +67,13 @@ export function collectTransfer(): Record<string, unknown> | null {
   let any = false;
   for (const [section, collect] of registry().collectors) {
     const entries = collect();
-    if (entries && Object.keys(entries).length > 0) {
-      out[section] = entries;
+    if (!entries) continue;
+    // `__proto__` and friends would turn into a prototype assignment in the
+    // emitted object literal; they never cross.
+    const safe: Record<string, unknown> = {};
+    for (const key of Object.keys(entries)) if (!isUnsafeKey(key)) safe[key] = entries[key];
+    if (Object.keys(safe).length > 0) {
+      out[section] = safe;
       any = true;
     }
   }
@@ -94,7 +99,10 @@ function readPayload(): Record<string, Record<string, unknown>> | null {
   const sections: Record<string, Record<string, unknown>> = Object.create(null);
   for (const key of Object.keys(raw)) {
     const section = raw[key];
-    if (key !== "v" && isPlainRecord(section)) sections[key] = section;
+    if (key === "v" || isUnsafeKey(key) || !isPlainRecord(section)) continue;
+    const entries: Record<string, unknown> = Object.create(null);
+    for (const k of Object.keys(section)) if (!isUnsafeKey(k)) entries[k] = section[k];
+    sections[key] = entries;
   }
   r.payload = sections;
   return sections;
