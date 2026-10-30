@@ -104,10 +104,26 @@ sibling joining the group, changes this one first) — so judging them at claim
 time would see the client's writes, not the user's. "Changed" is measured
 against the markup's own default: a drop-down with no `selected` option selects
 its first one untouched, and the client's `value` applies to it. When the
-session ends the snapshot is put back — selections by option VALUE, since the
-client may have rebuilt or reordered the options; values the client no longer
-offers are dropped, and when none is left the client's selection stands and no
-event is replayed. A select gets no property override for this. Every instance
+session ends the snapshot is put back, before the events are replayed:
+
+- The snapshot is the exact set of selected option NODES, each with its value
+  and its occurrence among the options sharing that value. An empty set is a
+  selection (a cleared multiple select, `selectedIndex = -1`) and is restored
+  as empty; it is not the same as a select that has no snapshot (untouched).
+- A selected option the client adopted keeps its selection wherever it moved,
+  as long as its value is unchanged — so the second of two equal-valued
+  options stays the selected one.
+- A selected option the client REBUILT (its server node is gone) is matched
+  among the options the client built with the same value: the one at the same
+  occurrence, else the first not yet matched. With repeated values this is a
+  deterministic best guess, not identity — nothing identifies a rebuilt option
+  — but it is one to one: it never selects more options than were selected,
+  nor a server option the user left alone.
+- A selected option with no counterpart is dropped. When nothing of a
+  non-empty selection is left, the client's own selection stands and no event
+  is replayed.
+
+A select gets no property override for this. Every instance
 override is removed when the session ends, and also when the build throws.
 
 ## Deferred and async content
@@ -157,5 +173,7 @@ injected attributes stripped; a deliberate mismatch replacing only its
 subtree; typed input and focus surviving; `ClientOnly` swap; `createId()`;
 `lazy()` content adopted; transferred query data. `tests/ssr-adopt-select.test.ts`:
 single and multiple selects, option- and select-level writes, an untouched
-select, reordered and removed options, replayed events, radios, and no override
-left behind. The replace strategy's own suite is unchanged.
+select, reordered and removed options, emptied selections, equal-valued
+options, `<optgroup>`, rebuilt options, replayed events, radios, and no
+override left behind; `tests-browser/ssr-adopt-select.spec.ts` checks the
+emptied and equal-valued cases with the real control in three browsers. The replace strategy's own suite is unchanged.

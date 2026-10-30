@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetIdCounter } from "../src/core/rendering/createId";
 import { each } from "../src/core/rendering/each";
-import { div, input, option, select, textarea } from "../src/core/rendering/html";
+import { div, input, optgroup, option, select, textarea } from "../src/core/rendering/html";
 import { signal } from "../src/core/signals/signal";
 import { hydrate } from "../src/platform/ssr";
 import { renderToStringAsync } from "../src/platform/ssrAsync";
@@ -222,5 +222,280 @@ describe("adopting hydration preserves a <select> the user changed", () => {
     expect(q<HTMLInputElement>("#r2").checked).toBe(true);
     expect(q<HTMLTextAreaElement>("#x").value).toBe("notes");
     expect(q<HTMLSelectElement>("#s").value).toBe("b");
+  });
+});
+
+/** The selected option NODES of `el`, in document order. */
+const selectedNodes = (el: HTMLSelectElement) => Array.from(el.options).filter((o) => o.selected);
+
+/**
+ * Server markup in which the options with `values` carry the `selected`
+ * attribute. The server DOM keeps `selected: true` as state, not as an
+ * attribute, so a multiple select's server-side selection is written into the
+ * markup here, as a static page or another server would deliver it.
+ */
+async function serverRenderSelected(app: () => Node, ...values: string[]): Promise<string> {
+  let html = await serverRender(app);
+  for (const v of values) html = html.replace(`<option value="${v}"`, `<option value="${v}" selected`);
+  return html;
+}
+
+/** Strip the adoption ids from the server's options, so the client cannot claim them and builds fresh ones. */
+function unclaimableOptions(root: Element): void {
+  for (const o of Array.from(root.querySelectorAll("option"))) o.removeAttribute("data-sibu-h");
+}
+
+describe("adopting hydration keeps an intentionally EMPTY selection", () => {
+  it("keeps a multiple select the user cleared, the server having selected one option", async () => {
+    const seen: number[] = [];
+    const App = () =>
+      select(
+        {
+          multiple: true,
+          on: { change: (e: Event) => seen.push((e.target as HTMLSelectElement).selectedOptions.length) },
+        },
+        [option({ value: "a", selected: true }, "A"), option({ value: "b" }, "B")],
+      );
+    container.innerHTML = await serverRenderSelected(App, "a");
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(selectedNodes(el)).toEqual([el.options[0]]);
+    el.options[0].selected = false;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(container.querySelector("select")).toBe(el);
+    expect(selectedNodes(el)).toEqual([]);
+    // The replayed change saw the restored, empty selection.
+    expect(seen).toEqual([0]);
+  });
+
+  it("keeps a multiple select the user cleared, the server having selected several options", async () => {
+    const App = () =>
+      select({ multiple: true }, [
+        option({ value: "a", selected: true }, "A"),
+        option({ value: "b" }, "B"),
+        option({ value: "c", selected: true }, "C"),
+      ]);
+    container.innerHTML = await serverRenderSelected(App, "a", "c");
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(selectedNodes(el).map((o) => o.value)).toEqual(["a", "c"]);
+    for (const o of Array.from(el.options)) o.selected = false;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([]);
+  });
+
+  it("keeps a single select emptied with selectedIndex = -1, and replays it", async () => {
+    const seen: number[] = [];
+    const App = () =>
+      select({ on: { change: (e: Event) => seen.push((e.target as HTMLSelectElement).selectedIndex) } }, [
+        option({ value: "a", selected: true }, "A"),
+        option({ value: "b" }, "B"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    el.selectedIndex = -1;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(el.selectedIndex).toBe(-1);
+    expect(selectedNodes(el)).toEqual([]);
+    expect(seen).toEqual([-1]);
+  });
+
+  it("leaves an untouched multiple select to the client's initialization", async () => {
+    const change = vi.fn();
+    const App = () =>
+      select({ multiple: true }, [option({ value: "a", selected: true }, "A"), option({ value: "b" }, "B")]);
+    container.innerHTML = await serverRenderSelected(App, "a");
+    const el = container.querySelector("select") as HTMLSelectElement;
+    el.addEventListener("change", change);
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([el.options[0]]);
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the client's selection when every previously selected option is gone", async () => {
+    // Keyed rows: the select itself stays adopted while its options change.
+    const [rows, setRows] = signal(["a", "b", "c"]);
+    const App = () =>
+      select(
+        { multiple: true },
+        each(
+          () => rows(),
+          (v) => option({ value: v(), selected: v() === "a" }, v().toUpperCase()),
+          { key: (v) => v },
+        ),
+      );
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    el.options[0].selected = false;
+    el.options[1].selected = true;
+    el.options[2].selected = true;
+    const change = vi.fn();
+    el.addEventListener("change", change);
+
+    setRows(["a", "z"]);
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(container.querySelector("select")).toBe(el);
+    expect(Array.from(el.options, (o) => o.value)).toEqual(["a", "z"]);
+    expect(selectedNodes(el).map((o) => o.value)).toEqual(["a"]);
+    expect(change).not.toHaveBeenCalled();
+  });
+});
+
+describe("adopting hydration keeps the selected option NODES, not their values", () => {
+  it("keeps the second of two equal-valued options in a single select", async () => {
+    const App = () => select([option({ value: "same" }, "First"), option({ value: "same" }, "Second")]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const second = el.options[1];
+    el.selectedIndex = 1;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(el.selectedIndex).toBe(1);
+    expect(selectedNodes(el)).toEqual([second]);
+  });
+
+  it("selects only the one equal-valued option the user chose in a multiple select", async () => {
+    const App = () =>
+      select({ multiple: true }, [
+        option({ value: "same" }, "1"),
+        option({ value: "same" }, "2"),
+        option({ value: "same" }, "3"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const chosen = el.options[1];
+    chosen.selected = true;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([chosen]);
+  });
+
+  it("selects exactly the two equal-valued options chosen, not the third", async () => {
+    const App = () =>
+      select({ multiple: true }, [
+        option({ value: "same" }, "1"),
+        option({ value: "same" }, "2"),
+        option({ value: "same" }, "3"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const [first, , third] = Array.from(el.options);
+    first.selected = true;
+    third.selected = true;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([first, third]);
+  });
+
+  it("keeps the exact selected node when the surviving options are reordered", async () => {
+    const [order, setOrder] = signal(["x", "y", "z"]);
+    const App = () =>
+      select(
+        each(
+          () => order(),
+          (k) => option({ value: "same" }, k()),
+          { key: (k) => k },
+        ),
+      );
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const y = el.options[1];
+    el.selectedIndex = 1;
+    setOrder(["z", "y", "x"]);
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(Array.from(el.options, (o) => o.textContent)).toEqual(["z", "y", "x"]);
+    expect(selectedNodes(el)).toEqual([y]);
+    expect(y.isConnected).toBe(true);
+  });
+
+  it("restores rebuilt equal-valued options one-to-one, by occurrence", async () => {
+    // Fallback policy: an option the client rebuilt is matched by its value and
+    // its occurrence among the options with that value, one to one.
+    const App = () =>
+      select({ multiple: true }, [
+        option({ value: "same" }, "1"),
+        option({ value: "same" }, "2"),
+        option({ value: "same" }, "3"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    unclaimableOptions(container);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const before = Array.from(el.options);
+    el.options[2].selected = true;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await hydrate(App, container, { strategy: "adopt" });
+    const after = Array.from(el.options);
+    expect(after).toHaveLength(3);
+    for (const o of after) expect(before).not.toContain(o);
+    expect(selectedNodes(el)).toEqual([after[2]]);
+  });
+
+  it("drops a removed selected option and keeps the surviving ones, selecting nothing extra", async () => {
+    // x and z are selected; z is removed. y shares z's value but was never
+    // selected, so it must not inherit z's selection.
+    const [rows, setRows] = signal(["x", "y", "z"]);
+    const App = () =>
+      select(
+        { multiple: true },
+        each(
+          () => rows(),
+          (k) => option({ value: "same" }, k()),
+          { key: (k) => k },
+        ),
+      );
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const [x, y] = Array.from(el.options);
+    x.selected = true;
+    el.options[2].selected = true;
+
+    setRows(["x", "y"]);
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(container.querySelector("select")).toBe(el);
+    expect(Array.from(el.options)).toEqual([x, y]);
+    expect(selectedNodes(el)).toEqual([x]);
+  });
+
+  it("keeps a selection inside an <optgroup>", async () => {
+    const App = () =>
+      select([
+        optgroup({ label: "One" }, [option({ value: "same" }, "1a"), option({ value: "same" }, "1b")]),
+        optgroup({ label: "Two" }, [option({ value: "same" }, "2a"), option({ value: "same" }, "2b")]),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const chosen = el.options[3];
+    el.selectedIndex = 3;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([chosen]);
+    expect(chosen.parentElement?.getAttribute("label")).toBe("Two");
+  });
+
+  it("uses the DOM's option value: the text when `value` is omitted, and empty values as values", async () => {
+    const App = () =>
+      select({ multiple: true }, [
+        option("One"),
+        option("Two"),
+        option({ value: "" }, "Empty 1"),
+        option({ value: "" }, "Empty 2"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(Array.from(el.options, (o) => o.value)).toEqual(["One", "Two", "", ""]);
+    const two = el.options[1];
+    const empty2 = el.options[3];
+    two.selected = true;
+    empty2.selected = true;
+    unclaimableOptions(container);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await hydrate(App, container, { strategy: "adopt" });
+    const after = Array.from(el.options);
+    expect(selectedNodes(el)).toEqual([after[1], after[3]]);
   });
 });

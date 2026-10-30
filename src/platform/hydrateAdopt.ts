@@ -116,6 +116,32 @@ const STICKY: Record<string, readonly string[]> = {
   dialog: ["open"],
 };
 
+/**
+ * A `<select>` the user changed before takeover, as it was when the session
+ * started. `chosen` is the exact selection — possibly EMPTY, which is a
+ * selection too (a cleared multiple select, `selectedIndex = -1`), and not the
+ * same as having no snapshot at all. Each chosen option keeps its node, for
+ * when it survives adoption, and its value plus its occurrence among the
+ * options with that value, for when the client rebuilt it.
+ */
+interface SelectSnapshot {
+  chosen: Array<{ node: HTMLOptionElement; value: string; occurrence: number }>;
+  /** Every option the server rendered: an option not in it was built by the client. */
+  server: Set<HTMLOptionElement>;
+}
+
+function snapshotSelect(select: HTMLSelectElement): SelectSnapshot {
+  const options = Array.from(select.options);
+  const seen = new Map<string, number>();
+  const chosen: SelectSnapshot["chosen"] = [];
+  for (const node of options) {
+    const occurrence = seen.get(node.value) ?? 0;
+    seen.set(node.value, occurrence + 1);
+    if (node.selected) chosen.push({ node, value: node.value, occurrence });
+  }
+  return { chosen, server: new Set(options) };
+}
+
 interface ClaimRecord {
   /** Sticky server attributes still awaiting a client write or read. */
   sticky: Set<string>;
@@ -172,12 +198,13 @@ class AdoptSession implements AdoptSink {
   readonly touched = new Set<Element>();
   readonly mismatches: AdoptMismatch[] = [];
   /**
-   * The values a user selected in a `<select>` before takeover. Taken before
-   * any client code runs: the client builds a select's options BEFORE the
-   * select, and an option's `selected` write changes the selection long
-   * before the select itself is claimed.
+   * The selection of each `<select>` the user changed before takeover. Taken
+   * before any client code runs: the client builds a select's options BEFORE
+   * the select, and an option's `selected` write changes the selection long
+   * before the select itself is claimed. Session-scoped: the references go
+   * with the session.
    */
-  readonly selections = new Map<HTMLSelectElement, string[]>();
+  readonly selections = new Map<HTMLSelectElement, SelectSnapshot>();
   /**
    * Checkboxes and radios the user changed before takeover, and their state —
    * for the same reason: checking a radio unchecks its group, so the client
@@ -202,13 +229,7 @@ class AdoptSession implements AdoptSink {
           if (id !== null && !this.byId.has(id)) this.byId.set(id, child as Element);
           const tag = (child as Element).localName;
           if (tag === "select" && isDirty(child as Element)) {
-            const select = child as HTMLSelectElement;
-            this.selections.set(
-              select,
-              Array.from(select.options)
-                .filter((o) => o.selected)
-                .map((o) => o.value),
-            );
+            this.selections.set(child as HTMLSelectElement, snapshotSelect(child as HTMLSelectElement));
           } else if (tag === "input" && isDirty(child as Element)) {
             const input = child as HTMLInputElement;
             if (input.type === "checkbox" || input.type === "radio") this.checks.set(input, input.checked);
@@ -565,26 +586,72 @@ class AdoptSession implements AdoptSink {
 }
 
 /**
- * Put the user's pre-takeover selections back, by option VALUE (the client may
- * have rebuilt or reordered the options). Selected values the client tree no
- * longer offers are dropped; when none is left, the client's own
- * initialization stands and nothing is replayed. Then the checkboxes and
- * radios the user changed get their state back.
+ * The options of the final `select` that stand for the snapshot's selection,
+ * one for one:
+ *
+ * - a chosen option still in the select, with the same value, is itself — its
+ *   node, wherever the client moved it;
+ * - a chosen option the client REBUILT (its node is gone) is matched among the
+ *   options the client built, with the same value: the one at the same
+ *   occurrence among those, else the first one not matched yet. When values
+ *   repeat this is a best guess — nothing identifies a rebuilt option better
+ *   — but it never selects more options than were chosen, and never one the
+ *   server rendered and the user left alone;
+ * - a chosen option with no counterpart is dropped.
+ */
+function survivingSelection(select: HTMLSelectElement, snapshot: SelectSnapshot): Set<HTMLOptionElement> {
+  const options = Array.from(select.options);
+  const present = new Set(options);
+  const result = new Set<HTMLOptionElement>();
+  const rebuilt = new Map<string, HTMLOptionElement[]>();
+  for (const o of options) {
+    if (snapshot.server.has(o)) continue;
+    const list = rebuilt.get(o.value);
+    if (list) list.push(o);
+    else rebuilt.set(o.value, [o]);
+  }
+  const lost: SelectSnapshot["chosen"] = [];
+  for (const entry of snapshot.chosen) {
+    // A node the client claimed for a DIFFERENT option (its value changed) is
+    // not the option the user chose.
+    if (present.has(entry.node) && entry.node.value === entry.value) result.add(entry.node);
+    else lost.push(entry);
+  }
+  for (const entry of lost) {
+    const candidates = rebuilt.get(entry.value);
+    if (!candidates) continue;
+    const atOccurrence = candidates[entry.occurrence];
+    const match = atOccurrence && !result.has(atOccurrence) ? atOccurrence : candidates.find((o) => !result.has(o));
+    if (match) result.add(match);
+  }
+  return result;
+}
+
+/**
+ * Put the user's pre-takeover selections back (see `survivingSelection`). An
+ * empty selection is restored as empty. A non-empty one of which nothing
+ * survives leaves the client's own initialization standing, and nothing is
+ * replayed. Then the checkboxes and radios the user changed get their state
+ * back.
  */
 function reselect(session: AdoptSession): void {
-  for (const [select, values] of session.selections) {
+  for (const [select, snapshot] of session.selections) {
     if (!session.claimed.has(select) || !session.root.contains(select)) {
       session.touched.delete(select);
       continue;
     }
-    const options = Array.from(select.options);
-    const offered = options.filter((o) => values.includes(o.value));
-    if (offered.length === 0) {
+    if (snapshot.chosen.length === 0) {
+      // Cleared on purpose: nothing selected, in a multiple and a single select.
+      select.selectedIndex = -1;
+      continue;
+    }
+    const keep = survivingSelection(select, snapshot);
+    if (keep.size === 0) {
       session.touched.delete(select);
       continue;
     }
-    if (select.multiple) for (const o of options) o.selected = values.includes(o.value);
-    else offered[0].selected = true;
+    if (select.multiple) for (const o of Array.from(select.options)) o.selected = keep.has(o);
+    else (keep.values().next().value as HTMLOptionElement).selected = true;
   }
   // Unchecked first: checking a radio last unchecks the rest of its group.
   const live = Array.from(session.checks).filter(([el]) => session.claimed.has(el) && session.root.contains(el));

@@ -127,8 +127,8 @@ every navigation.
 On output rendered with `{ hydration: "adopt" }`, the client tree is built on
 the server nodes: on matching markup no element is created, added, removed or
 moved, images do not reload, and text typed before the bundle loaded, checkbox
-and radio state, `<select>` choices (single and multiple, matched by option
-value), focus and scroll survive (the app's handlers receive replayed `input` /
+and radio state, `<select>` choices (single and multiple, the selected option
+nodes themselves, an emptied selection included), focus and scroll survive (the app's handlers receive replayed `input` /
 `change` events). Elements carry a creation-scope id (`data-sibu-h`) per
 directive scope, so content the server rebuilt after its data arrived still
 pairs. A divergent subtree is rebuilt on its own and reported — kind, DOM path,
