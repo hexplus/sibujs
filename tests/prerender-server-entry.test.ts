@@ -130,12 +130,9 @@ describe("prerender from a server entry", () => {
     expect(notFound).toContain("Página no encontrada");
     expect(notFound).toContain("No encontrado · Estampados Sibu</title>");
     const redirects = JSON.parse(await page("redirects.json"));
-    expect(redirects).toEqual(
-      expect.arrayContaining([
-        { from: "/cotizacion", to: "/cotizar", status: 301 },
-        { from: "/pedidos", to: "/", status: 302 },
-      ]),
-    );
+    // Only a route's own redirect is static; `/pedidos` redirects through a
+    // guard (it depends on the visitor) and is left to the browser.
+    expect(redirects).toEqual([{ from: "/cotizacion", to: "/cotizar", status: 301 }]);
   });
 
   it("lists only indexable, server-rendered pages in the sitemap", async () => {

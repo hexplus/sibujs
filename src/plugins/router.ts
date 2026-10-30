@@ -1349,9 +1349,15 @@ export class SibuRouter {
    * record's `status`, 302 by default; 302 for a guard redirect).
    * @internal
    */
-  initialOutcome: { result: NavigationResult | null; redirectStatus: number | null } = {
+  initialOutcome: {
+    result: NavigationResult | null;
+    redirectStatus: number | null;
+    /** Who redirected: a `redirect` record (the same for every visitor) or a guard (visitor-dependent). */
+    redirectBy: "route" | "guard" | null;
+  } = {
     result: null,
     redirectStatus: null,
+    redirectBy: null,
   };
 
   // Settles once the initial location has been resolved (committed or failed).
@@ -1600,6 +1606,7 @@ export class SibuRouter {
       skipHistory?: boolean;
       initialResolution?: boolean;
       redirectStatus?: number;
+      redirectBy?: "route" | "guard";
     },
     signal: AbortSignal,
     depth = 0,
@@ -1628,6 +1635,7 @@ export class SibuRouter {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         options.redirectStatus ??= 302;
+        options.redirectBy ??= "guard";
         return this.performNavigation(this.createRouteContext(beforeEachResult), from, options, signal, depth + 1, [
           ...chain,
           beforeEachResult,
@@ -1665,6 +1673,7 @@ export class SibuRouter {
                   throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
                 }
                 options.redirectStatus ??= 302;
+                options.redirectBy ??= "guard";
                 return this.performNavigation(this.createRouteContext(result), from, options, signal, depth + 1, [
                   ...chain,
                   result,
@@ -1693,6 +1702,7 @@ export class SibuRouter {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         options.redirectStatus ??= typeof route.status === "number" ? route.status : 302;
+        options.redirectBy ??= "route";
         return this.performNavigation(this.createRouteContext(redirectPath), from, options, signal, depth + 1, [
           ...chain,
           redirectPath,
@@ -1709,6 +1719,7 @@ export class SibuRouter {
           throw new NavigationFailureError("aborted", from, to, undefined, "unsafe-target");
         }
         options.redirectStatus ??= 302;
+        options.redirectBy ??= "guard";
         return this.performNavigation(this.createRouteContext(beforeResolveResult), from, options, signal, depth + 1, [
           ...chain,
           beforeResolveResult,
@@ -1741,7 +1752,10 @@ export class SibuRouter {
     } else if (!options.skipHistory) {
       this.updateHistory(to, options);
     }
-    if (options.initialResolution) this.initialOutcome.redirectStatus = options.redirectStatus ?? null;
+    if (options.initialResolution) {
+      this.initialOutcome.redirectStatus = options.redirectStatus ?? null;
+      this.initialOutcome.redirectBy = options.redirectBy ?? null;
+    }
 
     // Advance the navigation generation. Anything asynchronous that captured
     // the previous value has now been superseded and permanently loses the

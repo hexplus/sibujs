@@ -61,6 +61,7 @@ describe("renderRoute — the fixture app", () => {
     const r = await render("/cotizacion?servicio=dtf");
     expect(r.status).toBe(301);
     expect(r.location).toBe("/cotizar");
+    expect(r.redirectBy).toBe("route");
     expect(r.html).toBe("");
   });
 
@@ -105,6 +106,7 @@ describe("renderRoute — the fixture app", () => {
     const r = await render("/pedidos");
     expect(r.status).toBe(302);
     expect(r.location).toBe("/");
+    expect(r.redirectBy).toBe("guard");
     expect(r.html).toBe("");
   });
 

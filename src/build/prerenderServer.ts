@@ -49,6 +49,7 @@ interface RouteResultLike {
   render: string;
   noindex: boolean;
   failure: string | null;
+  redirectBy?: "route" | "guard" | null;
   diagnostics: { timedOut: boolean; pending: string[]; browserApis: string[] };
 }
 
@@ -361,6 +362,18 @@ export async function prerenderFromServerEntry(
           const { route, file } = job;
           const started = Date.now();
           const result = await render(route.path);
+          // A guard's redirect (a login page) depends on the visitor: it is not
+          // a static redirect, and the route is left to the browser.
+          if (result.location !== null && result.redirectBy === "guard") {
+            results.push({
+              route: route.path,
+              file: "",
+              ms: Date.now() - started,
+              status: result.status,
+              kind: "skipped",
+            });
+            continue;
+          }
           if (result.location !== null) {
             redirects.push({ from: route.path, to: result.location, status: result.status });
             results.push({

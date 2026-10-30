@@ -66,6 +66,11 @@ export interface RouteRenderResult extends RenderResult {
   noindex: boolean;
   /** Why the navigation did not commit (`"guard"`, `"redirect-loop"`, …), else `null`. */
   failure: string | null;
+  /**
+   * Who answered with the redirect: a `redirect` record (`"route"`, the same
+   * for every visitor) or a guard (`"guard"`, it depends on the visitor).
+   */
+  redirectBy: "route" | "guard" | null;
 }
 
 function deepest<K extends "status" | "render">(matched: readonly RouteDef[], key: K): RouteDef[K] | undefined {
@@ -113,7 +118,7 @@ export function renderRoute(
     const router = createRouter(routes, { ...options.router, mode: "memory", url });
     try {
       await router.whenReady();
-      const { result, redirectStatus } = router.initialOutcome;
+      const { result, redirectStatus, redirectBy } = router.initialOutcome;
       const committed = currentRoute();
       const matched = committed.matched;
       const base = options.router?.base ?? "";
@@ -136,6 +141,7 @@ export function renderRoute(
           render: "default",
           noindex: false,
           failure: reason,
+          redirectBy: null,
           diagnostics: { ...emptyDiagnostics(), durationMs: Date.now() - started },
         };
       }
@@ -166,6 +172,7 @@ export function renderRoute(
           render: "default",
           noindex,
           failure: null,
+          redirectBy,
           diagnostics: { ...emptyDiagnostics(), durationMs: Date.now() - started },
         };
       }
@@ -186,6 +193,7 @@ export function renderRoute(
           render,
           noindex,
           failure: null,
+          redirectBy: null,
           diagnostics: { ...emptyDiagnostics(), durationMs: Date.now() - started },
         };
       }
@@ -203,6 +211,7 @@ export function renderRoute(
         render,
         noindex: /<meta name="robots" content="[^"]*noindex/i.test(rendered.head),
         failure: null,
+        redirectBy: null,
       };
     } finally {
       router.destroy();
