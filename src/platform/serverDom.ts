@@ -1994,6 +1994,102 @@ export function installServerDom(options: { force?: boolean } = {}): () => void 
   };
 }
 
+// ─── Browser-API reads under a full DOM emulation ───────────────────────────
+
+/** Globals that only mean something in a browser, by the name a component reads. */
+const BROWSER_GLOBALS = [
+  "matchMedia",
+  "requestAnimationFrame",
+  "localStorage",
+  "sessionStorage",
+  "IntersectionObserver",
+  "ResizeObserver",
+] as const;
+
+const WATCHED = Symbol.for("sibujs.serverDom.watched.v1");
+
+function inServerRender(): boolean {
+  const shared = (
+    globalThis as Record<symbol, { als?: { getStore(): { ssr?: boolean } | undefined } | null } | undefined>
+  )[Symbol.for("sibujs.ssr.v1")];
+  return !!shared?.als?.getStore()?.ssr;
+}
+
+function watchProperty(target: object, key: string, api: string): void {
+  const desc = Object.getOwnPropertyDescriptor(target, key);
+  if (!desc || !desc.configurable) return;
+  const read = desc.get ? () => desc.get?.call(target) : () => desc.value;
+  let value = desc.value;
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: desc.enumerable,
+    get() {
+      if (inServerRender()) reportBrowserApi(api);
+      return desc.get ? read() : value;
+    },
+    set(v) {
+      if (desc.set) desc.set.call(target, v);
+      else value = v;
+    },
+  });
+}
+
+/**
+ * Under happy-dom or jsdom the browser-only globals EXIST, so a component that
+ * reads them during a server render runs silently against an emulation. In
+ * development, wrap them so a read made inside a server render is reported
+ * (warning + `diagnostics.browserApis`) and still answers as before. Reads
+ * outside a server render — a client test in the same process — are untouched.
+ * Installed once per realm; a no-op on the server DOM, where those globals do
+ * not exist and a read throws a ReferenceError instead.
+ * @internal
+ */
+export function watchBrowserApis(): void {
+  if (!DEV || isServerDom()) return;
+  const g = globalThis as Record<string | symbol, unknown>;
+  if (g[WATCHED]) return;
+  g[WATCHED] = true;
+  const win = g.window as Record<string, unknown> | undefined;
+  for (const key of BROWSER_GLOBALS) {
+    if (Object.hasOwn(g, key)) watchProperty(g, key, key);
+    if (win && win !== g && Object.hasOwn(win, key)) watchProperty(win, key, `window.${key}`);
+  }
+  const Doc = g.Document as { prototype: object } | undefined;
+  if (Doc && "fonts" in Doc.prototype) watchProperty(Doc.prototype, "fonts", "document.fonts");
+  const Canvas = g.HTMLCanvasElement as { prototype: { getContext?: (...args: unknown[]) => unknown } } | undefined;
+  const getContext = Canvas?.prototype.getContext;
+  if (Canvas && getContext) {
+    Canvas.prototype.getContext = function (this: unknown, ...args: unknown[]) {
+      if (inServerRender()) reportBrowserApi("HTMLCanvasElement.getContext()");
+      return getContext.apply(this, args);
+    };
+  }
+}
+
+const BROWSER_ONLY_NAMES =
+  /^(window|self|localStorage|sessionStorage|requestAnimationFrame|cancelAnimationFrame|matchMedia|IntersectionObserver|ResizeObserver|getComputedStyle|location|history|screen|innerWidth|innerHeight|scrollY|scrollX|devicePixelRatio) is not defined$/;
+
+/**
+ * Turn the ReferenceError a browser global raises in a server render into an
+ * error naming the API, the calling site, and the fix.
+ * @internal
+ */
+export function explainServerError(err: unknown): unknown {
+  if (!(err instanceof ReferenceError)) return err;
+  const m = BROWSER_ONLY_NAMES.exec(err.message);
+  if (!m) return err;
+  const site =
+    (err.stack ?? "")
+      .split("\n")[1]
+      ?.trim()
+      .replace(/^at\s+/, "") ?? "(unknown site)";
+  return new Error(
+    `[SibuJS SSR] browser-only API \`${m[1]}\` used during a server render (${site}). ` +
+      "Move the code into onMount() or an effect, or render the component with ClientOnly().",
+    { cause: err },
+  );
+}
+
 /**
  * Make sure SOME DOM is registered before a server render builds its tree:
  * an existing one (happy-dom, jsdom) is used as is, otherwise the server DOM

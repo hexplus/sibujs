@@ -271,6 +271,21 @@ describe("server DOM", () => {
     expect(warn.mock.calls.some((c) => String(c[0]).includes("ClientOnly()"))).toBe(true);
   });
 
+  it("explains a browser global that does not exist on the server", async () => {
+    await withServerDom(async () => {
+      const Theme = () =>
+        p(
+          (globalThis as unknown as { window: { matchMedia(q: string): unknown } }) &&
+            window.matchMedia("(prefers-color-scheme: dark)")
+            ? "dark"
+            : "light",
+        );
+      await expect(renderToStringAsync(() => Theme())).rejects.toThrow(
+        /browser-only API `window` used during a server render \(.*ssr-server-dom\.node\.test\.ts.*\)\. Move the code into onMount\(\)/,
+      );
+    });
+  });
+
   it("leaves an existing DOM in place", async () => {
     await withJsdom(async () => {
       const before = document;

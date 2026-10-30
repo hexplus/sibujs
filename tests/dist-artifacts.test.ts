@@ -269,6 +269,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // same minifier: +1,072 B raw, +339 B gzip; raw ~89,460 B, gzip ~30,550 B.
     // Its dev warning text is compiled out.
     //
+    // Raised again (raw 90,600 B, gzip baseline 30,350 B) in 4.14 for server
+    // rendering: `isServer()` / `isClient()`, `ClientOnly`, the request-scoped
+    // pending-work registry `lazy()` reports its chunk to, the request error
+    // sink in `reportError`, `effect`'s `server` option, the SSR gate on
+    // `onMount` / `onUnmount`, and the hydration-session slot `ClientOnly`
+    // reads. Measured: raw ~90,260 B, gzip ~30,900 B (+~800 B raw, +~350 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -276,8 +283,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(89_700);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(30_100 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(90_600);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(30_350 * 1.02));
   });
 });
 

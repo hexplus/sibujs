@@ -20,7 +20,7 @@ import { DEV } from "../core/dev";
 import { dispose } from "../core/rendering/dispose";
 import { getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
-import { ensureServerDom } from "./serverDom";
+import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState } from "./ssr";
 
@@ -254,15 +254,17 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   const errors: NonNullable<NonNullable<typeof store>["errors"]> = [];
   if (store) store.errors = errors;
 
-  // No DOM registered: build on the built-in server DOM.
+  // No DOM registered: build on the built-in server DOM. Under happy-dom or
+  // jsdom, report browser-only APIs read during the render (development).
   ensureServerDom();
+  watchBrowserApis();
 
   let root: Node;
   try {
     root = typeof input === "function" ? input() : input;
   } catch (err) {
     if (store) store.errors = undefined;
-    throw err;
+    throw explainServerError(err);
   }
   // A holder gives a root directive anchor the parent its deferred first render
   // requires, without adding an element to the output.
@@ -278,7 +280,8 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
 
   if (errors.length > 0) {
     releaseTree();
-    const { error, context } = errors[0];
+    const { context } = errors[0];
+    const error = explainServerError(errors[0].error) as Error;
     const where = context.node ? describeNodePath(context.node) : "(unknown position)";
     const label = context.name ? ` in ${context.name}` : "";
     throw new Error(`[SibuJS SSR] render failed${label} at ${where}: ${error.message}`, { cause: error });
