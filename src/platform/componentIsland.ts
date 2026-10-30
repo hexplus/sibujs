@@ -128,8 +128,17 @@ export function islandComponent<P>(
       throw new Error(`[SibuJS islands] props of "${ctx.root.getAttribute("data-sibu-island")}" failed validation`);
     }
     let disposed = false;
-    void hydrateAdopt(() => component(props as P), ctx.root).then(() => {
+    // Each island hydrates in its own session, so islands activating together
+    // end independently. Disposed while pending: the nodes it built are
+    // released once it ends, whichever way it ends.
+    const settle = () => {
       if (disposed) for (const child of Array.from(ctx.root.childNodes)) dispose(child);
+    };
+    hydrateAdopt(() => component(props as P), ctx.root).then(settle, (err) => {
+      settle();
+      if (typeof console !== "undefined") {
+        console.error(`[SibuJS islands] "${ctx.root.getAttribute("data-sibu-island")}" failed to hydrate:`, err);
+      }
     });
     return () => {
       disposed = true;

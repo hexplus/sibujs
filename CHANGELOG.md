@@ -147,7 +147,12 @@ both sides, likely cause — and a root that does not match replaces the whole
 tree with a development warning. A claimed element ends with exactly the
 client's attributes, kept server values re-checked against the URL policy.
 The claiming engine lives in `sibujs/ssr`; the core carries the scope hooks.
-See `docs/architecture/hydration-adopt.md` for the algorithm and its limits.
+Each hydration runs its own session, so islands or roots hydrating at once
+end independently, each as soon as its own lazy chunks and route loads have
+settled. An `each` row's id segment encodes its key losslessly (`1` and `"1"`
+are two rows, never one; a key that is not a string or a number is rejected
+while ids are assigned). See `docs/architecture/hydration-adopt.md` for the
+algorithm, the id format and its limits.
 
 ### Added — data transfer
 
@@ -225,13 +230,13 @@ get the created-element count and the adoption mismatches.
 ### Benchmarks
 
 `npm run bench:ssr` (also in CI): render time and memory per DOM, HTML size
-per marker mode (fixture landing page: 1 325 B with the root marker, 2 090 B
+per marker mode (fixture landing page: 1 325 B with the root marker, 2 058 B
 with adoption ids, 1 766 B with `renderToString`'s every-element marker), and
 takeover time (jsdom: replace 0.65 ms, adopt 0.95 ms median).
 
 ### Bundle size
 
-`cdn.global.js`: +~2.3 KB raw / +~1.1 KB gzip for `ClientOnly`,
+`cdn.global.js`: +~2.8 KB raw / +~1.3 KB gzip for `ClientOnly`,
 `isServer()` / `isClient()`, the pending-work and error registries, the
 adoption scope hooks and the streaming boundary slot. The adoption engine, the
 server DOM, the async renderers and the pre-renderer are not in it.

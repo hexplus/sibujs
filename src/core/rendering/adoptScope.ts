@@ -11,7 +11,7 @@
  *
  *   App scope ""        div#0  span#1  when → scope "2."
  *   when branch "2."    ul#2.0 each → scope "2.1."
- *   each row "2.1.k7x." li#2.1.k7x.0
+ *   each row "2.1._a."  li#2.1._a.0    (key "a"; key 7 → "2.1.-7.")
  *
  * Nothing here runs unless a server render asked for adoption markers or a
  * browser hydration is adopting: with no current scope every hook is one
@@ -25,6 +25,8 @@ export interface AdoptSink {
   on: boolean;
   /** Create (server) or claim (browser) the element with `id`; `null` means "create it normally". */
   el(tag: string, ns: string | undefined, id: string): Element | null;
+  /** The hydration session a browser sink belongs to (see `hydrationHooks`). */
+  h?: unknown;
 }
 
 /** A creation scope: id prefix, next index, the sink. */
@@ -39,6 +41,11 @@ let current: AdoptScope | null = null;
 /** True while a builder runs inside an adopt scope (server marking or browser adoption). */
 export function inAdoptScope(): boolean {
   return current?.s.on === true;
+}
+
+/** The sink of the scope a builder runs in now, or `null` outside any live scope. */
+export function currentSink(): AdoptSink | null {
+  return current?.s.on ? current.s : null;
 }
 
 /**
@@ -63,14 +70,26 @@ export function captureScope(): AdoptScope | null {
   return c?.s.on ? { p: `${c.p}${(c.n++).toString(36)}.`, n: 0, s: c.s } : null;
 }
 
-/** A child scope of `scope` identified by a key (an `each` row, a route record) rather than by position. */
+/**
+ * A child scope of `scope` identified by a key (an `each` row, a route record)
+ * rather than by position.
+ *
+ * The segment encodes the key itself, so distinct keys never share a scope:
+ * `_` and the text for a string, `-` and `String(key)` for a number — so `1`
+ * and `"1"` differ, while `0` and `-0` (one key in the reconciler's `Map`)
+ * agree, as do two `NaN`s. Every character outside `[A-Za-z0-9_-]` becomes `~`
+ * and its four-hex-digit UTF-16 unit: the segment stays attribute-safe and
+ * never holds the `.` that ends it, and a positional segment (base 36) never
+ * starts with `_` or `-`. Any other key type is rejected.
+ */
 export function keyedScope(scope: AdoptScope | null, key: unknown): AdoptScope | null {
   if (!scope?.s.on) return null;
-  // FNV-1a over the key text: short, safe in an attribute, stable on both sides.
-  const text = String(key);
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-  return { p: `${scope.p}k${(h >>> 0).toString(36)}.`, n: 0, s: scope.s };
+  const type = typeof key;
+  if (type !== "string" && type !== "number") {
+    throw new TypeError(`[SibuJS] adopt: a key must be a string or a number, not ${type}`);
+  }
+  const text = String(key).replace(/[^\w-]/g, (c) => `~${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  return { p: `${scope.p}${type === "string" ? "_" : "-"}${text}.`, n: 0, s: scope.s };
 }
 
 /**

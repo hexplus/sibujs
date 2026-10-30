@@ -291,6 +291,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // flushes each boundary on its own (`core/rendering/streamBoundary.ts`).
     // Measured: raw ~91,770 B, gzip ~31,560 B (+~280 B raw, +~110 B gzip).
     //
+    // Raw 92,500 B, gzip baseline 31,200 B for concurrent adopting
+    // hydrations: one session per hydration with its own waiters and end
+    // callbacks, work attributed to the session whose scope started it
+    // (`hydrationHooks.ts`), and lossless `each` / route key segments in
+    // place of a 32-bit hash, so `1` and `"1"` (or two colliding strings)
+    // never share a scope (`adoptScope.ts`). Measured: raw ~92,320 B, gzip
+    // ~31,790 B (+~480 B raw, +~220 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -298,8 +306,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(92_000);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(31_000 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(92_500);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(31_200 * 1.02));
   });
 });
 

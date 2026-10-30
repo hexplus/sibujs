@@ -31,7 +31,7 @@
 
 import { DEV } from "../core/dev";
 import { type AdoptScope, type AdoptSink, inAdoptScope, inScope } from "../core/rendering/adoptScope";
-import { beginHydration, hydrationPending } from "../core/rendering/hydrationHooks";
+import { beginHydration, inHydration } from "../core/rendering/hydrationHooks";
 import { resolveAttributeValue } from "../utils/sanitize";
 import { describeNodePath } from "./ssrAsync";
 
@@ -254,6 +254,8 @@ class AdoptSession implements AdoptSink {
   removed = 0;
   /** AdoptSink: numbering and claiming are on for the length of the session. */
   on = true;
+  /** AdoptSink: the hydration session work built in this sink's scopes belongs to. */
+  h: unknown = null;
   private restored = false;
 
   constructor(
@@ -738,12 +740,15 @@ export async function hydrateAdopt(
   container: Element,
   options: AdoptOptions = {},
 ): Promise<AdoptResult> {
-  const end = beginHydration();
+  // This hydration's own session: its pending work, its waiter, its end
+  // callbacks. Concurrent hydrations (islands) never share one.
+  const hydration = beginHydration();
   const session = new AdoptSession(container, options);
+  session.h = hydration;
   const rootScope: AdoptScope = { p: "", n: 0, s: session };
   let replacedRoot = false;
   try {
-    const tree = inScope(rootScope, component);
+    const tree = inHydration(hydration, () => inScope(rootScope, component));
     // The root: in place when it was claimed; otherwise placed at the start.
     if (tree.parentNode !== container) {
       if (tree.nodeType === 1 && !session.claimed.has(tree as Element)) {
@@ -759,34 +764,35 @@ export async function hydrateAdopt(
     }
 
     // Deferred first renders run in microtasks; lazy chunks and route loads
-    // are registered with the session. Wait for both, bounded.
+    // are registered with this session. Wait for both, bounded. Settling an
+    // entry wakes this session's waiter alone — never another hydration's.
     const deadline = Date.now() + (options.timeout ?? 10_000);
-    const pending = hydrationPending();
+    const { pending, wake } = hydration;
     for (;;) {
       await macrotask();
-      if (!pending || pending.pending.size === 0) {
+      if (pending.size === 0) {
         await macrotask();
-        if (!pending || pending.pending.size === 0) break;
+        if (pending.size === 0) break;
         continue;
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
-      const registry = pending;
       await new Promise<void>((resolve) => {
         const done = () => {
           clearTimeout(timer);
-          if (registry.wake === done) registry.wake = null;
+          wake.delete(done);
           resolve();
         };
         const timer = setTimeout(done, remaining);
-        registry.wake = done;
+        wake.add(done);
       });
     }
     session.finish();
   } finally {
-    // A build that threw must not leave instance overrides behind.
+    // A build that threw must not leave instance overrides behind, nor its
+    // session open.
     session.restore();
-    end();
+    hydration.end();
   }
   container.setAttribute("data-sibu-hydrated", "adopt");
   return {

@@ -38,7 +38,8 @@ the scope it was built in:
 ```text
 App scope ""           img#0  p#1  button#3  when → scope "4."
 when branch "4."       ul#4.1       each → scope "4.0."
-each row, key "a"      li#4.0.k1r9wi7g.0     (FNV-1a of the key)
+each row, key "a"      li#4.0._a.0
+each row, key 7        li#4.0.-7.0
 ```
 
 A rebuild restarts its scope at 0, so the branch the server built after its
@@ -48,6 +49,32 @@ children (`bindChildNode`), `lazy()`, `Suspense`, `Route()` / `Outlet()`
 (keyed by the route record's path). Placeholders a boundary replaces (`lazy()`'s
 loading span, a `Suspense` fallback) are built outside any scope, so they take
 no id and cannot shift the ids after them.
+
+**Keyed segments encode the key itself, not a hash.** A row is identified by
+its key, so its segment must be exactly as distinct as the reconciler's keys:
+`_` and the text for a string key, `-` and `String(key)` for a number. So `1`
+and `"1"` (two rows to `each`) are two scopes, and two strings can never
+collide, as they could under the 32-bit hash used before. Number keys follow
+the reconciler's `Map` equality: `0` and `-0` are one key (`String(-0)` is
+`"0"`), every `NaN` is one key, and every other distinct number has a
+distinct shortest decimal spelling. Every character outside `[A-Za-z0-9_-]`
+becomes `~` and its four-hex-digit UTF-16 unit (`/` → `~002f`), so:
+
+- the id is plain ASCII from `[A-Za-z0-9_.~-]` — safe in an attribute,
+  whatever the key holds (quotes, `&`, `<`, Unicode, a lone surrogate);
+- a segment never contains the `.` that ends it, and a keyed segment starts
+  with `_` or `-`, which a positional (base-36) one never does — so nested
+  segments cannot be read two ways;
+- the same key in two lists, or under two parent rows, sits under two
+  different parent prefixes.
+
+A key of any other type (boolean, `null`, bigint, object, symbol) has no
+lossless spelling and is rejected with a `TypeError` while ids are being
+assigned; outside an adopt render or hydration keys are not encoded at all.
+Route records are keyed the same way, by their path. The cost is the key's
+length (plus 4 characters per escaped character) in every id of the row,
+instead of a fixed 7–8: short ids and slugs cost less than the hash did, a
+long key costs more, on each element of its row.
 
 The server emits the id as `data-sibu-h`. Plain `renderToString` and the
 async renderers without `hydration: "adopt"` emit none.
@@ -149,6 +176,25 @@ is already in the cache, and a background refetch does not change structure.
 `ClientOnly` renders its fallback during the session (adopting the server's
 fallback) and swaps in its content in one synchronous step when it ends.
 
+**Every hydration has its own session.** Islands activating together, or
+several roots hydrated at once, each wait for their own work: a session's
+pending entries, its waiter and its end callbacks (`afterHydration`,
+`ClientOnly`) are its own, so settling one island's lazy chunk wakes that
+island alone, and a fast island ends without waiting for a slow one. Work and
+callbacks are attributed to the session whose creation scope the code builds
+in (each scope's sink carries its session), or whose synchronous build or end
+callbacks are running. Work nothing attributes — started outside every scope
+while sessions are open — holds all of them, and a callback registered that
+way runs once, after the last of them ends: releasing a session's unclaimed
+server nodes before work that may be its own has landed would remove server
+content. A hydration started while another one's code runs (inside its
+build) is that one's child: the parent waits for it, and its end callbacks run
+when the parent ends. A session that fails or times out closes alone; ending
+releases its waiter and timer, and an end callback that throws does not keep
+the others from running (the first error is rethrown). `isHydrating()` is true
+while any session is open. The open sessions live in a `globalThis` slot
+(`sibujs.hydration.v2`) shared by duplicate copies of the module.
+
 ## Mismatch
 
 A claim that fails creates a fresh element and reports it. When the session
@@ -181,7 +227,14 @@ bindings on matching markup; the fixture landing page through the router
 (creates no element, keeps the hero `<img>` node, no `/api/catalog` request);
 injected attributes stripped; a deliberate mismatch replacing only its
 subtree; typed input and focus surviving; `ClientOnly` swap; `createId()`;
-`lazy()` content adopted; transferred query data. `tests/ssr-adopt-select.test.ts`:
+`lazy()` content adopted; transferred query data. `tests/ssr-hydrate-adopt-concurrency.test.ts`:
+concurrent roots and islands completing in either order, a never-resolving
+chunk, a timeout beside a normal finish, a nested hydration, `ClientOnly` and
+`afterHydration` counts, a failing build, a throwing callback, and no waiter,
+timer or open session left behind. `tests/ssr-adopt-keys.test.ts`: `1` and
+`"1"` rows (typed input kept, reordering), keys that collided under the old
+hash, Unicode and punctuation, numeric edge cases, separate and nested lists,
+rejected key types, route paths. `tests/ssr-adopt-select.test.ts`:
 single and multiple selects, option- and select-level writes, an untouched
 select, reordered and removed options, emptied selections, equal-valued
 options, `<optgroup>`, rebuilt options, replayed events, radios, and no

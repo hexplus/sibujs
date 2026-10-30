@@ -54,12 +54,12 @@ describe("ClientOnly", () => {
   });
 
   it("keeps the fallback during an adopting hydration and swaps it in one step when it ends", async () => {
-    const end = beginHydration();
+    const hydration = beginHydration();
     const root = div([ClientOnly(() => span("real"), { fallback: () => span("fallback") })]);
     document.body.appendChild(root);
     await Promise.resolve();
     expect(root.textContent).toBe("fallback");
-    end();
+    hydration.end();
     expect(root.textContent).toBe("real");
     root.remove();
   });

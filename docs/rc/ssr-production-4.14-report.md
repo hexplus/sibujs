@@ -72,7 +72,7 @@ Acceptance, as tested:
 |---|---|---|
 | `renderToString` (marker on every element) | 1 766 B | 510 B |
 | async renderers (root marker only) | 1 325 B | 493 B |
-| with adoption ids | 2 090 B | 598 B |
+| with adoption ids | 2 058 B | 592 B |
 | transfer script | 404 B | 261 B |
 
 | Takeover in jsdom (median of 300) | median | p90 |
