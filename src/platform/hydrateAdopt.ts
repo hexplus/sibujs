@@ -157,18 +157,55 @@ function sameKind(a: Node, b: Node): boolean {
 }
 
 /**
+ * An option the HTML spec treats as disabled: its own `disabled`, or that of
+ * the `<optgroup>` it is a child of. `option.disabled` reflects only the first.
+ */
+function isOptionDisabled(option: HTMLOptionElement): boolean {
+  const parent = option.parentElement;
+  return option.disabled || (parent?.localName === "optgroup" && parent.hasAttribute("disabled"));
+}
+
+/**
  * The options a `<select>` selects from its markup alone — what the parser
- * chose before anyone touched it: the `selected` options of a multiple select;
- * otherwise the last `selected` option, or (a drop-down) the first enabled one.
+ * chose before anyone touched it.
+ *
+ * EXPLICIT selection comes from `selected` attributes and holds even on a
+ * disabled option: every marked option of a multiple select, else the last
+ * marked one. Only when nothing is marked does a drop-down choose an IMPLICIT
+ * default, and engines disagree on which (the spec: the first option not
+ * disabled, its optgroup's `disabled` included; WebKit ignores the optgroup's;
+ * engines differ again when every option is disabled). So the default is read
+ * from this engine itself: the select's markup — attributes only, which the
+ * user's choices do not touch — is parsed again in an inert document, where
+ * nothing loads or runs. Where that is unavailable the spec's rule stands in.
  */
 function defaultSelection(select: HTMLSelectElement): Set<HTMLOptionElement> {
   const options = Array.from(select.options);
+  const parsed = reparsedSelection(select, options);
+  if (parsed) return parsed;
   const marked = options.filter((o) => o.hasAttribute("selected"));
   if (select.multiple) return new Set(marked);
   if (marked.length > 0) return new Set([marked[marked.length - 1]]);
   if (select.size > 1) return new Set();
-  const first = options.find((o) => !o.disabled);
+  const first = options.find((o) => !isOptionDisabled(o));
   return new Set(first ? [first] : []);
+}
+
+/** The selection this engine's parser gives `select`'s markup, mapped onto `options`; `null` when it cannot tell. */
+function reparsedSelection(select: HTMLSelectElement, options: HTMLOptionElement[]): Set<HTMLOptionElement> | null {
+  if (typeof DOMParser !== "function") return null;
+  try {
+    const doc = new DOMParser().parseFromString(`<!doctype html><body>${select.outerHTML}`, "text/html");
+    const copy = doc.querySelector("select");
+    if (!copy || copy.options.length !== options.length) return null;
+    const chosen = new Set<HTMLOptionElement>();
+    Array.from(copy.options).forEach((o, i) => {
+      if (o.selected) chosen.add(options[i]);
+    });
+    return chosen;
+  } catch {
+    return null;
+  }
 }
 
 function isDirty(el: Element): boolean {
@@ -211,6 +248,8 @@ class AdoptSession implements AdoptSink {
    * writing a sibling (or a sibling joining the group) changes this one first.
    */
   readonly checks = new Map<HTMLInputElement, boolean>();
+  /** Form controls whose state differed from their markup when the session started: the user's. */
+  readonly dirty = new Set<Element>();
   created = 0;
   removed = 0;
   /** AdoptSink: numbering and claiming are on for the length of the session. */
@@ -228,11 +267,14 @@ class AdoptSession implements AdoptSink {
           const id = (child as Element).getAttribute(ADOPT_ID_ATTR);
           if (id !== null && !this.byId.has(id)) this.byId.set(id, child as Element);
           const tag = (child as Element).localName;
-          if (tag === "select" && isDirty(child as Element)) {
-            this.selections.set(child as HTMLSelectElement, snapshotSelect(child as HTMLSelectElement));
-          } else if (tag === "input" && isDirty(child as Element)) {
-            const input = child as HTMLInputElement;
-            if (input.type === "checkbox" || input.type === "radio") this.checks.set(input, input.checked);
+          if ((tag === "select" || tag === "input" || tag === "textarea") && isDirty(child as Element)) {
+            this.dirty.add(child as Element);
+            if (tag === "select") {
+              this.selections.set(child as HTMLSelectElement, snapshotSelect(child as HTMLSelectElement));
+            } else if (tag === "input") {
+              const input = child as HTMLInputElement;
+              if (input.type === "checkbox" || input.type === "radio") this.checks.set(input, input.checked);
+            }
           }
           walk(child);
         }
@@ -321,9 +363,10 @@ class AdoptSession implements AdoptSink {
       } else el.removeAttribute(attr.name);
     }
     this.claimed.set(el, { sticky });
-    if (isDirty(el) || this.selections.has(el as HTMLSelectElement) || this.checks.has(el as HTMLInputElement)) {
-      this.touched.add(el);
-    }
+    // Decided when the session started, not here: by the time a select is
+    // claimed its options' client writes have changed its selection, and a
+    // radio's siblings may have changed it too.
+    if (this.dirty.has(el)) this.touched.add(el);
     this.patchParent(el);
   }
 

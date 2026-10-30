@@ -499,3 +499,144 @@ describe("adopting hydration keeps the selected option NODES, not their values",
     expect(selectedNodes(el)).toEqual([after[1], after[3]]);
   });
 });
+
+/** Count the input/change events a select receives during hydration. */
+function replays(el: HTMLSelectElement): () => string[] {
+  const seen: string[] = [];
+  el.addEventListener("input", () => seen.push("input"));
+  el.addEventListener("change", () => seen.push("change"));
+  return () => seen;
+}
+
+describe("adopting hydration computes the markup's default selection as the browser does", () => {
+  // A: disabled through its optgroup; B, C: enabled. No `selected` attribute in
+  // the server markup (the server DOM keeps `selected: true` as state), so the
+  // parser selects B — the first option that is not disabled.
+  const Grouped = () =>
+    select({ id: "g" }, [
+      optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a" }, "A")]),
+      option({ value: "b" }, "B"),
+      option({ value: "c", selected: true }, "C"),
+    ]);
+
+  it("treats an untouched select after a disabled optgroup as untouched: the client's C stands", async () => {
+    container.innerHTML = await serverRender(Grouped);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(el.querySelector("optgroup")?.hasAttribute("disabled")).toBe(true);
+    expect(el.selectedIndex).toBe(1);
+    const c = el.options[2];
+
+    await hydrate(Grouped, container, { strategy: "adopt" });
+    expect(container.querySelector("select")).toBe(el);
+    expect(el.selectedIndex).toBe(2);
+    expect(selectedNodes(el)).toEqual([c]);
+  });
+
+  it("replays no input/change event for that untouched select", async () => {
+    container.innerHTML = await serverRender(Grouped);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const seen = replays(el);
+
+    await hydrate(Grouped, container, { strategy: "adopt" });
+    expect(seen()).toEqual([]);
+  });
+
+  it("keeps a genuine user change among the grouped options, and replays it", async () => {
+    // The client initializes B, the markup default; the user picked C.
+    const heard: number[] = [];
+    const App = () =>
+      select({ on: { change: (e: Event) => heard.push((e.target as HTMLSelectElement).selectedIndex) } }, [
+        optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a" }, "A")]),
+        option({ value: "b", selected: true }, "B"),
+        option({ value: "c" }, "C"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const c = el.options[2];
+    el.selectedIndex = 2;
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([c]);
+    expect(heard).toEqual([2]);
+  });
+
+  it("skips an individually disabled first option for the implicit default", async () => {
+    const App = () =>
+      select([
+        option({ value: "a", disabled: true }, "A"),
+        option({ value: "b" }, "B"),
+        option({ value: "c", selected: true }, "C"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(el.selectedIndex).toBe(1);
+    const seen = replays(el);
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(selectedNodes(el)).toEqual([el.options[2]]);
+    expect(seen()).toEqual([]);
+  });
+
+  it("honors an explicit `selected` on a disabled option or one in a disabled optgroup, untouched", async () => {
+    // The client marks the same option selected the server did; the server
+    // markup carries it as the `selected` attribute.
+    for (const value of ["a", "c"]) {
+      const App = () =>
+        select([
+          optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a", selected: value === "a" }, "A")]),
+          option({ value: "b" }, "B"),
+          option({ value: "c", disabled: true, selected: value === "c" }, "C"),
+        ]);
+      container.innerHTML = await serverRenderSelected(App, value);
+      const el = container.querySelector("select") as HTMLSelectElement;
+      const explicit = el.querySelector(`option[value="${value}"]`) as HTMLOptionElement;
+      // What the DOM does with it: the explicit selection holds, disabled or not.
+      expect(selectedNodes(el), value).toEqual([explicit]);
+      const seen = replays(el);
+
+      await hydrate(App, container, { strategy: "adopt" });
+      expect(seen(), value).toEqual([]);
+      expect(selectedNodes(el), value).toEqual([explicit]);
+      container.innerHTML = "";
+      __resetIdCounter();
+    }
+  });
+
+  it("treats a drop-down with every option disabled as untouched, whatever the DOM selected", async () => {
+    const App = () =>
+      select([
+        optgroup({ label: "Group", disabled: true }, [option({ value: "a" }, "A")]),
+        option({ value: "b", disabled: true }, "B"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const before = el.selectedIndex;
+    const seen = replays(el);
+
+    await hydrate(App, container, { strategy: "adopt" });
+    expect(seen()).toEqual([]);
+    expect(el.selectedIndex).toBe(before);
+  });
+
+  it("keeps multiple selects and listboxes on their default: nothing selected without `selected`", async () => {
+    for (const props of [{ multiple: true }, { size: 3 }]) {
+      const App = () =>
+        select(props, [
+          optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a" }, "A")]),
+          option({ value: "b" }, "B"),
+          option({ value: "c", selected: true }, "C"),
+        ]);
+      container.innerHTML = await serverRender(App);
+      const el = container.querySelector("select") as HTMLSelectElement;
+      expect(selectedNodes(el)).toEqual([]);
+      const c = el.options[2];
+      const seen = replays(el);
+
+      await hydrate(App, container, { strategy: "adopt" });
+      expect(seen()).toEqual([]);
+      expect(selectedNodes(el)).toEqual([c]);
+      container.innerHTML = "";
+      __resetIdCounter();
+    }
+  });
+});

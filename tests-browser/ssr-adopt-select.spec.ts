@@ -34,6 +34,19 @@ async function setup(page: Page): Promise<void> {
           m.option({ value: "a" }, "A"),
           m.option({ value: "b" }, "B"),
         ]),
+      // A inside a disabled optgroup; the client initializes C. The markup
+      // has no `selected`, so the engine picks its own implicit default.
+      grouped: () =>
+        m.select({ on: { change: seen("grouped") } }, [
+          m.optgroup({ label: "Unavailable", disabled: true }, [m.option({ value: "a" }, "A")]),
+          m.option({ value: "b" }, "B"),
+          m.option({ value: "c", selected: true }, "C"),
+        ]),
+      allDisabled: () =>
+        m.select({ on: { change: seen("allDisabled") } }, [
+          m.optgroup({ label: "Group", disabled: true }, [m.option({ value: "a" }, "A")]),
+          m.option({ value: "b", disabled: true }, "B"),
+        ]),
     };
     w.__sibu = {
       async render(name) {
@@ -88,4 +101,37 @@ test("keeps a multiple select the user emptied with the real control", async ({ 
   ).toBe(0);
   // The replayed change reported the empty selection.
   expect(await page.evaluate(() => (window as unknown as Win).__seen.cleared)).toEqual([0]);
+});
+
+test("leaves an untouched select after a disabled optgroup to the client, with no replay", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => (window as unknown as Win).__sibu.render("grouped"));
+  const sel = page.locator("#grouped select");
+  // Whatever this engine picked as the implicit default, nobody touched it.
+  const initial = await sel.evaluate((el: HTMLSelectElement) => el.selectedIndex);
+  expect(initial).not.toBe(2);
+  await page.evaluate(() => {
+    (window as unknown as { __c: Element }).__c = document.querySelectorAll("#grouped option")[2];
+  });
+  await page.evaluate(() => (window as unknown as Win).__sibu.take("grouped"));
+  await expect(page.locator("#grouped")).toHaveAttribute("data-sibu-hydrated", "adopt");
+  expect(
+    await page.evaluate(() => {
+      const el = document.querySelector("#grouped select") as HTMLSelectElement;
+      const c = (window as unknown as { __c: Element }).__c;
+      return { index: el.selectedIndex, same: el.selectedOptions[0] === c, count: el.selectedOptions.length };
+    }),
+  ).toEqual({ index: 2, same: true, count: 1 });
+  expect(await page.evaluate(() => (window as unknown as Win).__seen.grouped)).toBeUndefined();
+});
+
+test("leaves an untouched drop-down whose options are all disabled as the engine parsed it", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => (window as unknown as Win).__sibu.render("allDisabled"));
+  const sel = page.locator("#allDisabled select");
+  const initial = await sel.evaluate((el: HTMLSelectElement) => el.selectedIndex);
+  await page.evaluate(() => (window as unknown as Win).__sibu.take("allDisabled"));
+  await expect(page.locator("#allDisabled")).toHaveAttribute("data-sibu-hydrated", "adopt");
+  expect(await sel.evaluate((el: HTMLSelectElement) => el.selectedIndex)).toBe(initial);
+  expect(await page.evaluate(() => (window as unknown as Win).__seen.allDisabled)).toBeUndefined();
 });

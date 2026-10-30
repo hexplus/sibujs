@@ -101,10 +101,20 @@ any client code runs. The client builds a select's options before the select
 (an option's `selected` write changes the selection before the select is
 claimed), and checking one radio unchecks its group (a sibling's write, or a
 sibling joining the group, changes this one first) — so judging them at claim
-time would see the client's writes, not the user's. "Changed" is measured
-against the markup's own default: a drop-down with no `selected` option selects
-its first one untouched, and the client's `value` applies to it. When the
-session ends the snapshot is put back, before the events are replayed:
+time would see the client's writes, not the user's. Whether a control was
+changed is likewise decided at the start, for every form control, and claiming
+only looks it up. "Changed" is measured against the markup's own default.
+Explicit `selected` attributes decide it when present, disabled options
+included. Otherwise a drop-down picks an implicit default, and engines
+disagree on which: the spec takes the first option not disabled, counting an
+`<optgroup disabled>` as disabling its options; WebKit ignores the optgroup;
+all-disabled drop-downs differ too. So the session asks the engine: the
+select's markup (attributes only, which the user's choices do not change) is
+parsed again with `DOMParser`, an inert document where nothing loads or runs,
+and that selection is the default. Without `DOMParser` the spec's rule stands
+in. An untouched select then gets the client's initialization, with nothing
+replayed. When the session ends the snapshot is put back, before the events
+are replayed:
 
 - The snapshot is the exact set of selected option NODES, each with its value
   and its occurrence among the options sharing that value. An empty set is a
