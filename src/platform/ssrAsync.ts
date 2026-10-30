@@ -20,6 +20,7 @@ import { DEV } from "../core/dev";
 import { dispose } from "../core/rendering/dispose";
 import { getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
+import { ensureServerDom } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState } from "./ssr";
 
@@ -252,6 +253,9 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   // Collect this request's unclaimed errors instead of logging them.
   const errors: NonNullable<NonNullable<typeof store>["errors"]> = [];
   if (store) store.errors = errors;
+
+  // No DOM registered: build on the built-in server DOM.
+  ensureServerDom();
 
   let root: Node;
   try {
