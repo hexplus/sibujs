@@ -60,7 +60,11 @@ async function build(out: string, apiBase: string | undefined): Promise<void> {
   }
 }
 
+/** The fixture page modules the build process loaded (each records itself). */
+const loadedModules = () => (globalThis as { __sibuFixtureModules?: string[] }).__sibuFixtureModules ?? [];
+
 beforeAll(async () => {
+  (globalThis as { __sibuFixtureModules?: string[] }).__sibuFixtureModules = [];
   api = await startApi();
   outDir = await mkdtemp(join(tmpdir(), "sibu-prerender-server-"));
   await build(outDir, `http://127.0.0.1:${(api.address() as AddressInfo).port}`);
@@ -133,6 +137,10 @@ describe("prerender from a server entry", () => {
     expect(status).toContain("Estado · Estampados Sibu</title>");
     expect(status).toContain('<meta name="robots" content="noindex"');
     expect(status).not.toContain("__SIBU_TRANSFER__");
+    // Its lazy page module was not even imported; a pre-rendered lazy page's was.
+    expect(loadedModules()).not.toContain("status");
+    expect(loadedModules()).toContain("gallery");
+    expect(await page("galeria/index.html")).toContain("Galería de trabajos");
     expect(await page("admin/index.html")).toContain('<meta name="robots" content="noindex, nofollow"');
   });
 

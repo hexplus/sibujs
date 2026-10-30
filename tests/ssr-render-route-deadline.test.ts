@@ -144,4 +144,28 @@ describe("renderRoute — one deadline for the whole request", () => {
     expect([broken.status, broken.failure, broken.diagnostics.timedOut]).toEqual([200, null, false]);
     expect(broken.html).toContain('<p class="route-error-message">chunk failed</p>');
   });
+
+  it("gives loading the components only what navigation left of the same deadline", async () => {
+    // Each would fit in a fresh 300 ms budget; together they do not.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const lazyPage = vi.fn(() => delay(200).then(() => ({ default: () => p("slow page") })));
+    const routes: RouteDef[] = [{ path: "/", lazy: lazyPage, beforeEnter: () => delay(200).then(() => true) }];
+    const r = await bounded(renderRoute(routes, "/", { timeout: 300 }));
+    if (r === "hung") throw new Error("renderRoute hung");
+    expect([r.status, r.failure, r.html]).toEqual([503, "timeout", ""]);
+    expect(r.diagnostics.pending[0]).toMatch(/^route:(navigation|components)/);
+  });
+
+  it("still answers a redirect loop as a failed navigation, without loading anything", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const lazyPage = vi.fn(() => new Promise<{ default: () => Element }>(() => {}));
+    const routes: RouteDef[] = [
+      { path: "/a", redirect: "/b" },
+      { path: "/b", redirect: "/a" },
+      { path: "/c", lazy: lazyPage },
+    ];
+    const r = await renderRoute(routes, "/a", { timeout: 2000 });
+    expect([r.status, r.failure, r.location]).toEqual([500, "redirect-loop", null]);
+    expect(lazyPage).not.toHaveBeenCalled();
+  });
 });

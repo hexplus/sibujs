@@ -7,7 +7,6 @@ import { Landing } from "./pages/Landing";
 import { NotFound } from "./pages/NotFound";
 import { ProductPage } from "./pages/Product";
 import { Quote } from "./pages/Quote";
-import { Status } from "./pages/Status";
 
 export const ORIGIN = "https://fixture.test";
 
@@ -70,7 +69,13 @@ export const routes: RouteDef[] = [
     head: { title: "Ayuda" },
     children: [{ path: "/envios", name: "shipping", component: Shipping, head: { title: "Envíos" } }],
   },
-  { path: "/estado", name: "status", component: Status, render: "ssr", head: { title: "Estado", robots: "noindex" } },
+  {
+    path: "/estado",
+    name: "status",
+    lazy: () => import("./pages/Status"),
+    render: "ssr",
+    head: { title: "Estado", robots: "noindex" },
+  },
   { path: "/disenador", name: "designer", component: Designer, render: "client", head: { title: "Diseñador" } },
   {
     path: "/admin",

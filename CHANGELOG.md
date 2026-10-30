@@ -100,7 +100,10 @@ redirect (no body, the `location` percent-encoded), 403 (configurable) when a
 guard rejects, 503 `failure: "timeout"` when the route could not render in time.
 `timeout` is one deadline for the whole request: the navigation (guards
 included), the matched components' loads, then building and settling the page
-with what is left. `redirectBy` tells a `redirect` record from a guard redirect. Routes gain `status`, `render:
+with what is left. The components are loaded only for a response with a body:
+a redirect, a failed navigation, a `render: "client"` route and a
+pre-rendered `render: "ssr"` route answer from the navigation and the route
+records, without importing a lazy route's module. `redirectBy` tells a `redirect` record from a guard redirect. Routes gain `status`, `render:
 "ssr" | "prerender" | "client"` and `getStaticPaths()`, and the router gains
 `trailingSlash: "ignore"`. `createRenderHandler(routes, options)` wraps
 `renderRoute` as a `Request → Response` handler for a Node sidecar, with

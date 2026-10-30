@@ -99,8 +99,12 @@ request: work is registered with `trackPending()` (which `lazy()`, `query()`,
 twice in a row, or the timeout. A timed-out render serializes what is ready.
 
 `renderRoute()` sets ONE deadline (`timeout`) when the request starts. The
-initial navigation (guards — `beforeEnter` is not covered by `guardTimeout`) and
-the matched components' loads must finish before it, or the result is a 503
+initial navigation (guards — `beforeEnter` is not covered by `guardTimeout`)
+comes first, and its outcome and the matched records decide the response: a
+redirect, a failed navigation, a `render: "client"` route or a `headOnly` mode
+(the pre-renderer's `["ssr"]`) is answered right there, without loading the
+matched components. For a response with a body, the navigation and the
+components' loads must finish before the deadline, or the result is a 503
 with `failure: "timeout"` and `diagnostics.pending` naming the phase
 (`route:navigation`, `route:components`) and the registered work. The page is
 then built and settled with what is left. The router is destroyed either way,

@@ -100,3 +100,113 @@ describe('renderRoute with headOnly: ["ssr"]', () => {
     expect(Account).not.toHaveBeenCalled();
   });
 });
+
+// Responses without a body are decided by the navigation and the route records
+// alone: the matched components are not loaded for them, so a lazy import that
+// hangs, throws or has request-time side effects never runs.
+describe("responses without a body never load the matched components", () => {
+  const never = () => new Promise<{ default: () => Element }>(() => {});
+
+  it("answers a head-only lazy route whose import would hang, without calling the loader", async () => {
+    const lazyAccount = vi.fn(never);
+    const routes: RouteDef[] = [{ path: "/account", lazy: lazyAccount, render: "ssr", head: { title: "Account" } }];
+    const r = await renderRoute(routes, "/account", { headOnly: ["ssr"], timeout: 20 });
+    expect(r.status).toBe(200);
+    expect(r.head).toContain("<title>Account</title>");
+    expect([r.html, r.state, r.failure, r.diagnostics.timedOut]).toEqual(["", "", null, false]);
+    expect(lazyAccount).not.toHaveBeenCalled();
+  });
+
+  it("never calls a head-only route's loader that would throw, nor the app shell", async () => {
+    const throwing = vi.fn((): Promise<{ default: () => Element }> => {
+      throw new Error("module-level code ran");
+    });
+    const app = vi.fn(() => div("shell"));
+    const routes: RouteDef[] = [
+      {
+        path: "/area",
+        component: () => div([Outlet()]),
+        render: "ssr",
+        head: { title: "Area" },
+        children: [{ path: "/inherited", lazy: throwing, head: { title: "Inherited" } }],
+      },
+    ];
+    const r = await renderRoute(routes, "/area/inherited", { headOnly: ["ssr"], app });
+    expect([r.status, r.render, r.html]).toEqual([200, "ssr", ""]);
+    expect(r.head).toContain("<title>Inherited</title>");
+    expect(throwing).not.toHaveBeenCalled();
+    expect(app).not.toHaveBeenCalled();
+  });
+
+  it("still loads and renders a child that overrides the inherited mode", async () => {
+    const lazyStatic = vi.fn(async () => ({ default: () => p("static child") }));
+    const routes: RouteDef[] = [
+      {
+        path: "/area",
+        component: () => div([Outlet()]),
+        render: "ssr",
+        children: [{ path: "/static", lazy: lazyStatic, render: "prerender" }],
+      },
+    ];
+    const r = await renderRoute(routes, "/area/static", { headOnly: ["ssr"] });
+    expect([r.status, r.render]).toEqual([200, "prerender"]);
+    expect(r.html).toContain("static child");
+    expect(lazyStatic).toHaveBeenCalled();
+  });
+
+  it('answers render: "client" with an unavailable component', async () => {
+    const lazyEditor = vi.fn(never);
+    const routes: RouteDef[] = [{ path: "/editor", lazy: lazyEditor, render: "client", head: { title: "Editor" } }];
+    const r = await renderRoute(routes, "/editor", { timeout: 20 });
+    expect([r.status, r.render, r.html, r.diagnostics.timedOut]).toEqual([200, "client", "", false]);
+    expect(r.head).toContain("<title>Editor</title>");
+    expect(lazyEditor).not.toHaveBeenCalled();
+  });
+
+  it("answers permanent, temporary and guard redirects to an unloadable target", async () => {
+    const lazyNew = vi.fn(never);
+    const routes: RouteDef[] = [
+      { path: "/old", redirect: "/new", status: 301 },
+      { path: "/moved", redirect: "/new" },
+      { path: "/members", component: () => p("members"), beforeEnter: () => "/new?from=members" },
+      { path: "/new", lazy: lazyNew, head: { title: "New" } },
+    ];
+    const permanent = await renderRoute(routes, "/old", { timeout: 20 });
+    expect([permanent.status, permanent.location, permanent.redirectBy]).toEqual([301, "/new", "route"]);
+    const temporary = await renderRoute(routes, "/moved", { timeout: 20 });
+    expect([temporary.status, temporary.location, temporary.redirectBy]).toEqual([302, "/new", "route"]);
+    const guarded = await renderRoute(routes, "/members", { timeout: 20 });
+    expect([guarded.status, guarded.location, guarded.redirectBy]).toEqual([302, "/new?from=members", "guard"]);
+    for (const r of [permanent, temporary, guarded]) {
+      expect([r.html, r.state, r.diagnostics.timedOut]).toEqual(["", "", false]);
+    }
+    expect(lazyNew).not.toHaveBeenCalled();
+  });
+
+  it("keeps the base, query and hash of a redirect to an unloadable target", async () => {
+    const lazyNew = vi.fn(never);
+    const routes: RouteDef[] = [
+      { path: "/old", redirect: "/new?tab=a&tab=b#top", status: 308 },
+      { path: "/new", lazy: lazyNew },
+    ];
+    const r = await renderRoute(routes, "/app/old", { router: { base: "/app" }, timeout: 20 });
+    expect([r.status, r.location]).toEqual([308, "/app/new?tab=a&tab=b#top"]);
+    expect(lazyNew).not.toHaveBeenCalled();
+  });
+
+  it("answers a rejected navigation without loading the target", async () => {
+    const lazyPrivate = vi.fn(never);
+    const routes: RouteDef[] = [{ path: "/private", lazy: lazyPrivate, beforeEnter: () => false }];
+    const r = await renderRoute(routes, "/private", { timeout: 20 });
+    expect([r.status, r.failure, r.diagnostics.timedOut]).toEqual([403, "guard", false]);
+    expect(lazyPrivate).not.toHaveBeenCalled();
+  });
+
+  it('loads the component of a render: "ssr" route for a real request', async () => {
+    const lazyAccount = vi.fn(async () => ({ default: () => p("account body") }));
+    const routes: RouteDef[] = [{ path: "/account", lazy: lazyAccount, render: "ssr" }];
+    const r = await renderRoute(routes, "/account");
+    expect(r.html).toContain("account body");
+    expect(lazyAccount).toHaveBeenCalled();
+  });
+});

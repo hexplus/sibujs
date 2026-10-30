@@ -20,7 +20,10 @@
 //
 // `timeout` is ONE deadline for the whole request: the initial navigation
 // (guards included), loading the matched components, then building and
-// settling the page, which gets whatever budget is left.
+// settling the page, which gets whatever budget is left. The components are
+// loaded only for a response with a body: a redirect, a failed navigation, a
+// `render: "client"` route and a `headOnly` mode answer from the navigation
+// outcome and the route records, without importing anything.
 
 import { DEV } from "../core/dev";
 import { assertRequestIsolation, getRequestStore, runInSSRContext } from "../core/ssr-context";
@@ -216,8 +219,11 @@ export function renderRoute(
     };
 
     try {
+      // Navigation first (guards, redirects): the outcome and the matched
+      // records decide the response. The matched components are loaded only
+      // for a response with a body, further down — a redirect, a failed
+      // navigation or a head-only page never imports them.
       if (!(await before(router.whenNavigated(), deadline))) return timedOut("route:navigation");
-      if (!(await before(router.whenReady(), deadline))) return timedOut("route:components");
       const { result, redirectStatus, redirectBy } = router.initialOutcome;
       const committed = currentRoute();
       const matched = committed.matched;
@@ -301,7 +307,9 @@ export function renderRoute(
         };
       }
 
-      // Building and settling the page get what is left of the deadline.
+      // A body: load the matched components, then build and settle the page,
+      // each with what is left of the deadline.
+      if (!(await before(router.whenReady(), deadline))) return timedOut("route:components");
       const rendered = await renderToStringAsync(options.app ?? (() => Route()), {
         ...options,
         timeout: Math.max(0, deadline - Date.now()),
