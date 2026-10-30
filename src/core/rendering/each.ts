@@ -3,7 +3,9 @@ import { bindOwnerScope, resumeTracking, structuralBinding, suspendTracking } fr
 import { DEV, devAssert, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { signal } from "../signals/signal";
+import { captureScope, inScope, keyedScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
+import { isHydrating } from "./hydrationHooks";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -146,6 +148,7 @@ export function each<T>(
 
   requireDocument();
   const anchor = document.createComment("each:anchor");
+  const scope = captureScope();
   // Sentinel end marker — stable boundary reference, eliminates
   // the O(n) managed-nodes Set + sibling walk on every update.
   const end = document.createComment("each:end");
@@ -198,7 +201,11 @@ export function each<T>(
 
     // Insert sentinel once, right after anchor
     if (!sentinelInserted) {
-      parent.insertBefore(end, anchor.nextSibling);
+      // Adopting server markup: the server's own end marker closes the rows
+      // it rendered; take its place, so the adopted rows stay where they are.
+      const serverEnd = isHydrating() ? findServerEnd(anchor) : null;
+      if (serverEnd) parent.replaceChild(end, serverEnd);
+      else parent.insertBefore(end, anchor.nextSibling);
       sentinelInserted = true;
     }
 
@@ -265,7 +272,7 @@ export function each<T>(
           // bindings and effects it creates, which track in their own scopes.
           suspendTracking();
           try {
-            node = resolveNodeChild(render(itemGetter, indexGetter));
+            node = resolveNodeChild(inScope(keyedScope(scope, key), () => render(itemGetter, indexGetter)));
           } finally {
             resumeTracking();
           }
@@ -477,4 +484,22 @@ export function each<T>(
   }
 
   return anchor;
+}
+
+/**
+ * The `each:end` comment closing the server-rendered range opened at `anchor`
+ * (nested lists skipped), or null.
+ */
+function findServerEnd(anchor: Node): Comment | null {
+  let depth = 0;
+  for (let n = anchor.nextSibling; n; n = n.nextSibling) {
+    if (n.nodeType !== 8) continue;
+    const data = (n as Comment).data;
+    if (data === "each:anchor") depth++;
+    else if (data === "each:end") {
+      if (depth === 0) return n as Comment;
+      depth--;
+    }
+  }
+  return null;
 }

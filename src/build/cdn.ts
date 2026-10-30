@@ -24,6 +24,7 @@ const SUBPATH_ENTRIES = [
   "ui",
   "widgets",
   "ssr",
+  "ssr/dom",
   "devtools",
   "performance",
   "ecosystem",
@@ -161,7 +162,8 @@ export function generateImportMap(baseUrl?: string): {
   };
   // Sub-path imports for tree-shaking in browsers
   for (const entry of SUBPATH_ENTRIES) {
-    imports[`${PACKAGE_NAME}/${entry}`] = `${base}/dist/${entry}.js`;
+    // A nested subpath (`ssr/dom`) is built flat (`dist/ssr-dom.js`).
+    imports[`${PACKAGE_NAME}/${entry}`] = `${base}/dist/${entry.replace("/", "-")}.js`;
   }
 
   return {

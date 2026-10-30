@@ -1,142 +1,242 @@
-# Design note: adopting hydration (`strategy: "adopt"`)
+# Adopting hydration (`strategy: "adopt"`)
 
-Status: **proposed, not implemented.** 4.12 ships SVG serialization, the no-DOM
-error, `embed()` and the nullable getter types; the adopting mode was scoped
-out because it does not fit one reviewable change. This note records the
-approach, the marker format and the risks so it can be built as its own
-release. Until then `hydrate()` keeps the replace strategy described in
-[hydration.md](./hydration.md), and no partial adopt mode exists.
-
-## Goal
+Status: **shipped in 4.14, opt-in.** `hydrate()` keeps the replace strategy
+described in [hydration.md](./hydration.md) as its default; nothing changes
+for an app that does not ask for adoption.
 
 ```ts
-hydrate(App, root, { strategy: "adopt" });
+// Server: mark the output.
+const { html, state } = await renderToStringAsync(() => App(), { hydration: "adopt" });
+// or: renderRoute(routes, url, { hydration: "adopt" }), or the pre-renderer's `hydration: "adopt"`.
+
+// Browser: bind to it.
+await hydrate(() => App(), document.getElementById("app")!, { strategy: "adopt" });
 ```
 
-On markup that matches what `App()` builds, hydration binds effects,
-listeners, refs and `onMount` to the **existing** server nodes. A
-`MutationObserver` on `root` records zero `childList` mutations; clicks,
-reactive text and reactive attributes work. A subtree that does not match is
-built fresh and swapped in for that subtree only, and reported through
-`onMismatch` and the development diagnostics. `strategy: "replace"` stays the
-default.
+On markup that matches what `App()` builds, the client tree is built **on the
+server nodes**: every element a tag factory or `html` template creates is the
+server's element, so bindings, listeners and refs attach to what is already on
+screen. Images and iframes do not reload, text typed before the bundle loaded
+stays, focus and scroll stay. Code: `src/core/rendering/adoptScope.ts` (core,
+~550 B gzip), `src/platform/hydrateAdopt.ts` (`sibujs/ssr`).
 
-## Why it does not fit in one change
+## Ids: creation scopes, not a global counter
 
-Adoption has to happen while the tree is being built, because a binding closes
-over the node its builder created; it cannot be moved to another node later.
-That puts a hook in every place the core creates or inserts a node:
+SibuJS builds trees bottom-up — a factory's children are evaluated before the
+factory runs — so "the next node in document order" cannot be claimed. The
+proposal used a request-wide creation counter instead. That breaks on the
+most common server render: data arrives, a `when` rebuilds its branch, and
+every element created after that point is numbered differently from the
+browser's single build; two boundaries resolving in a different order shift
+each other too.
 
-| Site | What adoption needs there |
-|---|---|
-| `tagFactory` (and `customElement`) | claim the server element instead of `createElement` |
-| `appendChildren`, the `textContent` fast path | verify a child is already in place instead of appending; reuse an equal text node |
-| `bindChildNode` placeholders | claim the existing `<!---->` and the nodes after it |
-| `when` / `match` | the deferred first render claims the server branch instead of inserting one |
-| `each` | claim rows by key between `each:anchor` and `each:end` |
-| `Fragment`, `html` templates | the same claim / verify as the tag factory |
-| `setSafeAttribute` | write only differing values; remove server attributes the client did not write |
+**Deviation: ids are paths.** Each directive reserves a slot in its parent's
+sequence when it is created (synchronously, so the slot is deterministic) and
+opens a scope for its content. An element's id is its creation index inside
+the scope it was built in:
 
-`cdn.global.js` has about 60 B of gzip headroom under its budget after 4.12, so
-the hooks must cost almost nothing when unused (see "Bundle cost").
+```text
+App scope ""           img#0  p#1  button#3  when → scope "4."
+when branch "4."       ul#4.1       each → scope "4.0."
+each row, key "a"      li#4.0._a.0
+each row, key 7        li#4.0.-7.0
+```
 
-## Approach: creation-order claiming
+A rebuild restarts its scope at 0, so the branch the server built after its
+data arrived has the ids the browser's first build gives it, whatever happened
+before. Scopes open at: `when`, `match`, each `each` row (keyed), reactive
+children (`bindChildNode`), `lazy()`, `Suspense`, `Route()` / `Outlet()`
+(keyed by the route record's path). Placeholders a boundary replaces (`lazy()`'s
+loading span, a `Suspense` fallback) are built outside any scope, so they take
+no id and cannot shift the ids after them.
 
-SibuJS builds trees bottom-up — a factory's arguments, its children, are
-evaluated before the factory runs — and components may build nodes in any
-order before arranging them. Claiming "the next node in document order" would
-therefore fail on ordinary code. Instead, the server and the client agree on a
-**creation sequence**: the n-th element `App()` creates on the server is the
-n-th element it creates on the client, as long as the component is
-deterministic.
+**Keyed segments encode the key itself, not a hash.** A row is identified by
+its key, so its segment must be exactly as distinct as the reconciler's keys:
+`_` and the text for a string key, `-` and `String(key)` for a number. So `1`
+and `"1"` (two rows to `each`) are two scopes, and two strings can never
+collide, as they could under the 32-bit hash used before. Number keys follow
+the reconciler's `Map` equality: `0` and `-0` are one key (`String(-0)` is
+`"0"`), every `NaN` is one key, and every other distinct number has a
+distinct shortest decimal spelling. Every character outside `[A-Za-z0-9_-]`
+becomes `~` and its four-hex-digit UTF-16 unit (`/` → `~002f`), so:
 
-1. **Server.** Inside `runInSSRContext(fn, { hydration: "adopt" })` the tag
-   factories stamp each element with its creation index from a counter in the
-   request's SSR store (request-scoped, like `idCounter`). `renderToString`
-   emits it as `data-sibu-h`.
-2. **Client.** `hydrate(App, root, { strategy: "adopt" })` indexes
-   `root.querySelectorAll("[data-sibu-h]")` into a map, installs an adopt
-   context, and calls `App()`. Each element creation takes the next index; if
-   the map holds an element with that index, the same tag and namespace, and it
-   is not yet claimed, the factory returns it instead of a new element.
-3. **Children.** When a factory appends children to a claimed element, it
-   checks each child against the element's existing `childNodes` in order. A
-   child already in place is not re-inserted; a text child equal to the server
-   text node binds to that node.
-4. **Attributes.** Writes go through `setSafeAttribute` as today, skipping a
-   write whose value is already present. After the element's props are
-   applied, server attributes the client did not write are removed, so the
-   adopted element ends with exactly the client's attribute set and policy.
-5. **Deferred renders.** `when`, `match` and `each` render their first branch
-   in a microtask. The adopt context is captured with the owner scope those
-   renders already carry, and released once the last deferred first render
-   has run.
-6. **Mismatch.** A claim that fails (index missing, other tag, already claimed)
-   creates a fresh node. When that node is appended where a server node sits,
-   the server node is replaced by it — one `childList` mutation for that
-   subtree only — and an `onMismatch` report is produced (`kind: "tag"`,
-   `"child-count"`, `"text"`; a new `"order"` kind for a node in the wrong
-   position). Nothing outside the subtree changes.
-7. **Cleanup.** `data-sibu-h` attributes are removed after hydration (attribute
-   mutations only), and `root` gets `data-sibu-hydrated="adopt"`.
+- the id is plain ASCII from `[A-Za-z0-9_.~-]` — safe in an attribute,
+  whatever the key holds (quotes, `&`, `<`, Unicode, a lone surrogate);
+- a segment never contains the `.` that ends it, and a keyed segment starts
+  with `_` or `-`, which a positional (base-36) one never does — so nested
+  segments cannot be read two ways;
+- the same key in two lists, or under two parent rows, sits under two
+  different parent prefixes.
 
-`onMount` needs no change: an adopted element is already connected, so its
-callbacks run in the microtask after construction, as they do for a
-freshly mounted tree.
+A key of any other type (boolean, `null`, bigint, object, symbol) has no
+lossless spelling and is rejected with a `TypeError` while ids are being
+assigned; outside an adopt render or hydration keys are not encoded at all.
+Route records are keyed the same way, by their path. The cost is the key's
+length (plus 4 characters per escaped character) in every id of the row,
+instead of a fixed 7–8: short ids and slugs cost less than the hash did, a
+long key costs more, on each element of its row.
 
-## Marker format
+The server emits the id as `data-sibu-h`. Plain `renderToString` and the
+async renderers without `hydration: "adopt"` emit none.
 
-All markers are emitted only by an SSR render that asked for adoption; plain
-`renderToString` output is unchanged.
+## Claiming and placement
 
-| Marker | Where | Purpose |
-|---|---|---|
-| `data-sibu-h="<n>"` | every element built by a factory or `html` | creation index |
-| `<!--when-->` … `<!--/when-->` | around a `when` branch | branch extent (the start marker exists today) |
-| `<!--match-->` … `<!--/match-->` | around a `match` branch | branch extent |
-| `<!--each:anchor-->` … `<!--each:end-->` | around a list (exists today) | list extent |
-| `<!--k:<key>-->` | before each `each` row | row identity; the key is written with the comment-terminator escaping SSR already applies |
-| `<!--\|-->` | between two adjacent text nodes | keeps the HTML parser from merging them, so child positions line up |
+`hydrate(…, { strategy: "adopt" })` indexes the `data-sibu-h` elements under
+the root and opens a hydration session. Every element creation inside a scope
+asks the session for its id; a server element with that id, the same tag and
+namespace, not claimed yet, is returned instead of a new element.
 
-## Risks
+**Deviation: text and comment nodes are swapped, not adopted.** A reactive
+text binding closes over the text node it created, and text nodes cannot carry
+ids. So while a claimed element is being built, its `appendChild` puts each
+child at a cursor over the server children: an adopted element already there
+stays; a fresh text or comment node replaces the server node it corresponds to
+(the next server node of its kind — a comment with the same text — past any
+branch content of a preceding directive). The proposal's "zero `childList`
+mutations" becomes: **zero element nodes created, added, removed or moved** on
+matching markup; only text and comment nodes are swapped, which is invisible
+and cannot reload anything. Adjacent server text nodes are kept apart with a
+`<!--|-->` separator so the parser does not merge them.
 
-- **Non-deterministic components.** `Date.now()`, `Math.random()`,
-  `typeof window` checks, different data or locale on the two sides shift the
-  creation sequence. The result is correct but degrades to subtree
-  replacement; diagnostics should name the first index that diverged.
-- **Async construction.** `lazy()`, `Suspense` and a direct async route
-  component build after an `await`. Their nodes would be created outside the
-  adopt context and replace their server markup. A first version should
-  document them as replace-only.
-- **Text normalisation.** The parser merges adjacent text and decodes
-  entities; whitespace-only text from formatted HTML has no client
-  counterpart. Hence the text separator marker, and server output must not
-  be reformatted between render and delivery.
-- **Pre-hydration input.** An adopted `<input>` keeps what the user typed,
-  unlike replace mode. That is usually desired, but it is a difference to
-  document, and a `value` binding's first write must not clobber it silently.
-- **Trust.** Adopted markup may come from a stale cache or a proxy. Step 4
-  (exact client attribute set, through the client policy) keeps server-only
-  or injected attributes from surviving; `on*` attributes are already never
-  serialized. Text content is replaced when it differs.
-- **Concurrency.** Two `hydrate()` calls in one tick must not share an adopt
-  context; the context is per call and keyed to its owner scope.
-- **Bundle cost.** Seven hook sites in the core. To keep `cdn.global.js`
-  inside its budget, each site should test one module-level slot
-  (`if (adopt) …`) that `sibujs/ssr`'s `hydrate` fills, keeping the claiming
-  logic out of the core bundle. Estimated core cost: under 200 B gzip.
+These placement rules are instance overrides on the claimed elements (and the
+root) for the length of the session, so the core's `appendChild` /
+`insertBefore` calls need no hooks. The core needed only in-place guards: a
+branch already after its anchor is not re-inserted, `replaceChildrenSafely`
+keeps claimed nodes that are already the first children, `each` takes over the
+server's `each:end`.
 
-## Acceptance tests to write with it
+## Attributes
 
-- Matching markup: a `MutationObserver` on the root records zero `childList`
-  records during `hydrate`; a click handler runs once; reactive text and an
-  attribute update in place; refs point at the server nodes.
-- `when` / `match` / `each` adopt their server branches and rows, then update
-  normally.
-- A deliberately mismatched subtree is replaced alone, with one report, and its
-  siblings keep their identity.
-- Server attributes the client does not write are removed; a `javascript:`
-  `href` injected into cached markup does not survive.
-- Plain `renderToString` output and `strategy: "replace"` are byte-for-byte and
-  behaviour-for-behaviour unchanged.
-- The same suite in Chromium, Firefox and WebKit.
+A claimed element ends with exactly the attributes the client writes, through
+the client's policy. At claim time server attributes are removed, except those
+whose removal would change the element's live state: `src` / `srcset` / `sizes`
+on media, `poster`, `data` on `<object>`, a form control's `value` / `checked` /
+`type`, `open`. Those are re-checked against the URL policy at once (an injected
+`javascript:` value goes) and dropped when the session ends unless the client
+wrote or read them. `on*` attributes are never serialized in the first place.
+
+## Interaction before takeover
+
+A claimed `<input>` / `<textarea>` / `<select>` whose state differs from its
+markup (the user typed) keeps it: the session ignores the client's first value
+writes to it, and when it ends it dispatches `input` and `change` on the control
+so the app's handlers bring their state in line. Focus and scroll stay because
+the nodes stay.
+
+Selects, checkboxes and radios are snapshotted when the session STARTS, before
+any client code runs. The client builds a select's options before the select
+(an option's `selected` write changes the selection before the select is
+claimed), and checking one radio unchecks its group (a sibling's write, or a
+sibling joining the group, changes this one first) — so judging them at claim
+time would see the client's writes, not the user's. Whether a control was
+changed is likewise decided at the start, for every form control, and claiming
+only looks it up. "Changed" is measured against the markup's own default.
+Explicit `selected` attributes decide it when present, disabled options
+included. Otherwise a drop-down picks an implicit default, and engines
+disagree on which: the spec takes the first option not disabled, counting an
+`<optgroup disabled>` as disabling its options; WebKit ignores the optgroup;
+all-disabled drop-downs differ too. So the session asks the engine: the
+select's markup (attributes only, which the user's choices do not change) is
+parsed again with `DOMParser`, an inert document where nothing loads or runs,
+and that selection is the default. Without `DOMParser` the spec's rule stands
+in. An untouched select then gets the client's initialization, with nothing
+replayed. When the session ends the snapshot is put back, before the events
+are replayed:
+
+- The snapshot is the exact set of selected option NODES, each with its value
+  and its occurrence among the options sharing that value. An empty set is a
+  selection (a cleared multiple select, `selectedIndex = -1`) and is restored
+  as empty; it is not the same as a select that has no snapshot (untouched).
+- A selected option the client adopted keeps its selection wherever it moved,
+  as long as its value is unchanged — so the second of two equal-valued
+  options stays the selected one.
+- A selected option the client REBUILT (its server node is gone) is matched
+  among the options the client built with the same value: the one at the same
+  occurrence, else the first not yet matched. With repeated values this is a
+  deterministic best guess, not identity — nothing identifies a rebuilt option
+  — but it is one to one: it never selects more options than were selected,
+  nor a server option the user left alone.
+- A selected option with no counterpart is dropped. When nothing of a
+  non-empty selection is left, the client's own selection stands and no event
+  is replayed.
+
+A select gets no property override for this. Every instance
+override is removed when the session ends, and also when the build throws.
+
+## Deferred and async content
+
+`when` / `match` / `each` first renders run in microtasks, `lazy()` chunks and
+route loads later. The session registers that work (`trackPending` reports to
+it in the browser) and ends once it has settled, or after `timeout` (10 s).
+While it runs, a claimed `lazy()` container or `Suspense` boundary keeps the
+server's content on screen instead of showing its loading UI, and a route
+outlet shows no spinner. Data fetches do not hold the session: transferred data
+is already in the cache, and a background refetch does not change structure.
+
+`ClientOnly` renders its fallback during the session (adopting the server's
+fallback) and swaps in its content in one synchronous step when it ends.
+
+**Every hydration has its own session.** Islands activating together, or
+several roots hydrated at once, each wait for their own work: a session's
+pending entries, its waiter and its end callbacks (`afterHydration`,
+`ClientOnly`) are its own, so settling one island's lazy chunk wakes that
+island alone, and a fast island ends without waiting for a slow one. Work and
+callbacks are attributed to the session whose creation scope the code builds
+in (each scope's sink carries its session), or whose synchronous build or end
+callbacks are running. Work nothing attributes — started outside every scope
+while sessions are open — holds all of them, and a callback registered that
+way runs once, after the last of them ends: releasing a session's unclaimed
+server nodes before work that may be its own has landed would remove server
+content. A hydration started while another one's code runs (inside its
+build) is that one's child: the parent waits for it, and its end callbacks run
+when the parent ends. A session that fails or times out closes alone; ending
+releases its waiter and timer, and an end callback that throws does not keep
+the others from running (the first error is rethrown). `isHydrating()` is true
+while any session is open. The open sessions live in a `globalThis` slot
+(`sibujs.hydration.v2`) shared by duplicate copies of the module.
+
+## Mismatch
+
+A claim that fails creates a fresh element and reports it. When the session
+ends, every server element nothing claimed is removed. So a divergent subtree is
+replaced on its own; its siblings stay adopted. Reports (`onMismatch`, or a
+development warning) carry the kind (`tag`, `missing`, `extra`, `text`), the
+DOM path, the id, both sides, and the likely cause (a browser-only read during
+render, non-deterministic values, data the server did not have). A root that
+does not match replaces the whole tree and says so in development.
+
+`createId()` lines up: the server counter is request-scoped and starts at 0, as
+a fresh page does.
+
+## Limitations
+
+- `KeepAlive`, `DynamicComponent`, `Portal` and `KeepAliveRoute` open no scope.
+  Their content is created fresh in the browser and replaces the server's
+  locally (reported as mismatches).
+- An element created with `document.createElement` directly (not through a tag
+  factory or `html`) is not adopted.
+- Server output must not be reformatted between render and delivery
+  (whitespace text nodes would not pair).
+- The session overrides methods on claimed instances until it ends; code that
+  inspects own properties of those nodes during the session sees them.
+
+## Tests
+
+`tests/ssr-hydrate-adopt.test.ts`: zero created/moved elements and live
+bindings on matching markup; the fixture landing page through the router
+(creates no element, keeps the hero `<img>` node, no `/api/catalog` request);
+injected attributes stripped; a deliberate mismatch replacing only its
+subtree; typed input and focus surviving; `ClientOnly` swap; `createId()`;
+`lazy()` content adopted; transferred query data. `tests/ssr-hydrate-adopt-concurrency.test.ts`:
+concurrent roots and islands completing in either order, a never-resolving
+chunk, a timeout beside a normal finish, a nested hydration, `ClientOnly` and
+`afterHydration` counts, a failing build, a throwing callback, and no waiter,
+timer or open session left behind. `tests/ssr-adopt-keys.test.ts`: `1` and
+`"1"` rows (typed input kept, reordering), keys that collided under the old
+hash, Unicode and punctuation, numeric edge cases, separate and nested lists,
+rejected key types, route paths. `tests/ssr-adopt-select.test.ts`:
+single and multiple selects, option- and select-level writes, an untouched
+select, reordered and removed options, emptied selections, equal-valued
+options, `<optgroup>`, rebuilt options, replayed events, radios, and no
+override left behind; `tests-browser/ssr-adopt-select.spec.ts` checks the
+emptied and equal-valued cases with the real control in three browsers. The replace strategy's own suite is unchanged.

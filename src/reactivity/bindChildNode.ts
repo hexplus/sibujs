@@ -1,5 +1,6 @@
 import { DEV, devWarn } from "../core/dev";
 import { reportError } from "../core/errors";
+import { captureScope, inScope } from "../core/rendering/adoptScope";
 import { dispose } from "../core/rendering/dispose";
 import { captureFocusWithin, restoreFocusWithin } from "../core/rendering/focusPreservation";
 import type { NodeChild } from "../core/rendering/types";
@@ -16,11 +17,13 @@ import { reactiveBinding } from "./track";
  */
 export function bindChildNode(placeholder: Comment, getter: () => NodeChild | NodeChild[]): () => void {
   let lastNodes: Node[] = [];
+  // Every run builds its nodes in this child's own scope (adopting hydration).
+  const scope = captureScope();
 
   function commit() {
     let result: NodeChild | NodeChild[];
     try {
-      result = getter();
+      result = inScope(scope, getter);
     } catch (err) {
       // The getter is USER code. Keeping the previously rendered children is
       // the right containment, but reporting only under a dev flag made the

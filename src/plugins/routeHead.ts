@@ -1,5 +1,6 @@
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
+import type { ServerHeadLayer } from "../platform/serverHead";
 import { untracked } from "../reactivity/track";
 import { acquireTitle, type ResourceLease } from "../utils/documentResources";
 import { planHeadElementEntry, planMetaEntry, STATIC_VALUE_RESOLVER, serializeHeadEntry } from "../utils/headEntry";
@@ -41,6 +42,39 @@ export interface RouteHeadOpenGraph {
   siteName?: RouteHeadValue;
 }
 
+/** Twitter card tags a route can set (`twitter:*`). Declaring any turns on the fallbacks below. */
+export interface RouteHeadTwitter {
+  /** `twitter:card`, e.g. `"summary_large_image"`. */
+  card?: RouteHeadValue;
+  /** `twitter:site`, the site's handle. */
+  site?: RouteHeadValue;
+  /** `twitter:creator`. */
+  creator?: RouteHeadValue;
+  /** `twitter:title`. Defaults to the Open Graph title. */
+  title?: RouteHeadValue;
+  /** `twitter:description`. Defaults to the Open Graph description. */
+  description?: RouteHeadValue;
+  /** `twitter:image` (absolute URL). Defaults to `og:image`. */
+  image?: RouteHeadValue;
+}
+
+/** One `<link rel="alternate" hreflang>` translation of the page. */
+export interface RouteHeadAlternate {
+  /** BCP 47 language tag, or `"x-default"`. */
+  hreflang: string;
+  /** Absolute URL of the translated page. */
+  href: RouteHeadValue;
+}
+
+/**
+ * A JSON-LD object (`{ "@context": "https://schema.org", "@type": "Product", … }`).
+ * Serialized with `JSON.stringify` and the script escaping `serializeState`
+ * uses, so `</script>`, `<!--` and U+2028/U+2029 in the data cannot leave the
+ * script element.
+ */
+export type JsonLd = { [key: string]: JsonLdValue };
+type JsonLdValue = string | number | boolean | null | JsonLdValue[] | { [key: string]: JsonLdValue };
+
 /**
  * The `head` of a route record (and of `createRouter({ head })`, as defaults).
  *
@@ -62,6 +96,14 @@ export interface RouteHead {
    * their `name` or `property`; an entry with neither is ignored.
    */
   meta?: Record<string, RouteHeadValue>[];
+  /** `<meta name="robots">`, e.g. `"noindex, nofollow"`. A `noindex` route is left out of the sitemap. */
+  robots?: RouteHeadValue;
+  /** Twitter card tags. */
+  twitter?: RouteHeadTwitter;
+  /** Translations of the page (`<link rel="alternate" hreflang>`), identified by `hreflang`. */
+  alternates?: RouteHeadAlternate[] | ((route: RouteContext) => RouteHeadAlternate[]);
+  /** Structured data: one or more JSON-LD objects, or a getter returning them. */
+  jsonLd?: JsonLd | JsonLd[] | ((route: RouteContext) => JsonLd | JsonLd[] | null | undefined);
 }
 
 /** Router-level head options: defaults for every route, plus the title template. */
@@ -77,8 +119,10 @@ export interface RouterHeadOptions extends RouteHead {
 export interface ResolvedHeadTag {
   /** Identity used to replace / remove the tag across navigations. */
   key: string;
-  tag: "meta" | "link";
+  tag: "meta" | "link" | "script";
   attrs: Record<string, string>;
+  /** Text content (the escaped JSON of a JSON-LD script). */
+  text?: string;
 }
 
 /** The head a route resolves to. */
@@ -97,7 +141,48 @@ const OG_FIELDS: [keyof RouteHeadOpenGraph, string][] = [
 ];
 
 /** Open Graph properties whose content is a URL. */
-const OG_URL_PROPERTIES = new Set(["og:image", "og:url"]);
+const OG_URL_PROPERTIES = new Set(["og:image", "og:url", "twitter:image"]);
+
+const TWITTER_FIELDS: [keyof RouteHeadTwitter, string][] = [
+  ["card", "twitter:card"],
+  ["site", "twitter:site"],
+  ["creator", "twitter:creator"],
+  ["title", "twitter:title"],
+  ["description", "twitter:description"],
+  ["image", "twitter:image"],
+];
+
+/** Marker identifying a JSON-LD script the router publishes (its index). */
+const JSON_LD_ATTR = "data-sibu-ld";
+
+/**
+ * Serialize JSON-LD for a `<script type="application/ld+json">` body: `<`, `>`,
+ * `&`, U+2028 and U+2029 become `\u` escapes, which JSON parsers read back as
+ * the original characters, so the data can never close the script element.
+ *
+ * @param data One JSON-LD object or a list of them.
+ * @returns The escaped JSON text.
+ */
+export function serializeJsonLd(data: JsonLd | JsonLd[]): string {
+  return JSON.stringify(data)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+/**
+ * A complete JSON-LD `<script>` element, for a backend template or a static
+ * page. The only non-executable script SibuJS emits: its type is
+ * `application/ld+json` and its body is {@link serializeJsonLd}'s output.
+ *
+ * @param data One JSON-LD object or a list of them.
+ * @returns `<script type="application/ld+json">…</script>`.
+ */
+export function jsonLdScript(data: JsonLd | JsonLd[]): string {
+  return `<script type="application/ld+json">${serializeJsonLd(data)}</script>`;
+}
 
 /** Marker on every head element the router publishes (and the pre-renderer writes). */
 export const ROUTE_HEAD_ATTR = "data-sibu-head";
@@ -129,12 +214,21 @@ function mergeHeads(route: RouteContext, defaults: RouterHeadOptions | undefined
   const merged: RouteHead = {};
   const og: RouteHeadOpenGraph = {};
   const meta = new Map<string, Record<string, RouteHeadValue>>();
+  let twitter: RouteHeadTwitter | undefined;
   for (const layer of layers) {
     if (layer.title !== undefined) merged.title = layer.title;
     if (layer.description !== undefined) merged.description = layer.description;
     if (layer.canonical !== undefined) merged.canonical = layer.canonical;
+    if (layer.robots !== undefined) merged.robots = layer.robots;
+    if (layer.alternates !== undefined) merged.alternates = layer.alternates;
+    if (layer.jsonLd !== undefined) merged.jsonLd = layer.jsonLd;
     if (layer.og) {
       for (const [field] of OG_FIELDS) if (layer.og[field] !== undefined) og[field] = layer.og[field];
+    }
+    if (layer.twitter) {
+      twitter ??= {};
+      for (const [field] of TWITTER_FIELDS)
+        if (layer.twitter[field] !== undefined) twitter[field] = layer.twitter[field];
     }
     for (const entry of layer.meta ?? []) {
       const id = metaIdentity(entry);
@@ -142,6 +236,7 @@ function mergeHeads(route: RouteContext, defaults: RouterHeadOptions | undefined
     }
   }
   merged.og = og;
+  merged.twitter = twitter;
   merged.meta = Array.from(meta.values());
   return merged;
 }
@@ -157,7 +252,8 @@ function metaIdentity(entry: Record<string, RouteHeadValue>): string | null {
 
 function applyTemplate(title: string, template: RouterHeadOptions["titleTemplate"]): string {
   if (!template) return title;
-  return typeof template === "function" ? template(title) : template.replace("%s", title);
+  // A callback: a title is text, and `$&` / `$'` in it are not replacement patterns.
+  return typeof template === "function" ? template(title) : template.replace("%s", () => title);
 }
 
 /**
@@ -181,14 +277,31 @@ export function resolveRouteHead(route: RouteContext, defaults?: RouterHeadOptio
 
   const tags: ResolvedHeadTag[] = [];
   const push = (key: string, tag: "meta" | "link", attrs: Record<string, string>): void => {
+    // Deepest record wins: a free-form `meta` entry for the same key replaces
+    // a field-derived one, keeping the first one's position.
+    const existing = tags.findIndex((t) => t.key === key);
+    if (existing !== -1) tags.splice(existing, 1);
     const plan =
       tag === "meta" ? planMetaEntry(attrs, STATIC_VALUE_RESOLVER) : planHeadElementEntry(attrs, STATIC_VALUE_RESOLVER);
     if (plan.kind === "drop") return;
-    tags.push({ key, tag, attrs: Object.fromEntries(plan.attributes) });
+    const planned = Object.fromEntries(plan.attributes);
+    // A link whose URL the policy refused describes nothing; drop it rather
+    // than publish `<link rel="canonical">` with no href.
+    if (tag === "link" && !planned.href) return;
+    tags.push({ key, tag, attrs: planned });
   };
 
   if (description !== null) push("meta:name:description", "meta", { name: "description", content: description });
+  const robots = resolveValue(merged.robots, route);
+  if (robots !== null) push("meta:name:robots", "meta", { name: "robots", content: robots });
   if (canonical !== null) push("link:rel:canonical", "link", { rel: "canonical", href: canonical });
+
+  const alternates = typeof merged.alternates === "function" ? merged.alternates(route) : merged.alternates;
+  for (const alt of alternates ?? []) {
+    const href = resolveValue(alt.href, route);
+    if (href === null || !alt.hreflang) continue;
+    push(`link:hreflang:${alt.hreflang.toLowerCase()}`, "link", { rel: "alternate", hreflang: alt.hreflang, href });
+  }
 
   const og = merged.og ?? {};
   for (const [field, property] of OG_FIELDS) {
@@ -209,6 +322,27 @@ export function resolveRouteHead(route: RouteContext, defaults?: RouterHeadOptio
     push(`meta:property:${property}`, "meta", { property, content: value });
   }
 
+  if (merged.twitter) {
+    const tw = merged.twitter;
+    const ogValue = (field: keyof RouteHeadOpenGraph): string | null => {
+      const fromOg = og[field] === undefined ? undefined : resolveValue(og[field], route);
+      if (fromOg !== undefined) return fromOg;
+      return field === "title" ? ownTitle : field === "description" ? description : null;
+    };
+    for (const [field, name] of TWITTER_FIELDS) {
+      let value = tw[field] === undefined ? undefined : resolveValue(tw[field], route);
+      if (value === undefined && (field === "title" || field === "description" || field === "image")) {
+        value = ogValue(field);
+      }
+      if (value == null) continue;
+      if (OG_URL_PROPERTIES.has(name)) {
+        value = sanitizeUrl(value);
+        if (value === "") continue;
+      }
+      push(`meta:name:${name}`, "meta", { name, content: value });
+    }
+  }
+
   for (const entry of merged.meta ?? []) {
     const id = metaIdentity(entry);
     if (!id) continue;
@@ -220,7 +354,46 @@ export function resolveRouteHead(route: RouteContext, defaults?: RouterHeadOptio
     push(`meta:${id}`, "meta", attrs);
   }
 
+  const ld = typeof merged.jsonLd === "function" ? merged.jsonLd(route) : merged.jsonLd;
+  const ldList = ld == null ? [] : Array.isArray(ld) ? ld : [ld];
+  ldList.forEach((data, i) => {
+    let text: string;
+    try {
+      text = serializeJsonLd(data);
+    } catch {
+      return;
+    }
+    tags.push({
+      key: `script:${JSON_LD_ATTR}:${i}`,
+      tag: "script",
+      attrs: { type: "application/ld+json", [JSON_LD_ATTR]: String(i) },
+      text,
+    });
+  });
+
   return { title, tags };
+}
+
+/** One resolved tag as HTML, with the router's ownership marker. */
+function tagToHTML(t: ResolvedHeadTag): string {
+  if (t.tag === "script") {
+    return `<script type="application/ld+json" ${JSON_LD_ATTR}="${t.attrs[JSON_LD_ATTR]}" ${ROUTE_HEAD_ATTR}="">${t.text ?? ""}</script>`;
+  }
+  const html = serializeHeadEntry(t.tag, t.attrs);
+  return html ? html.replace(/ \/>$/, ` ${ROUTE_HEAD_ATTR}="" />`) : "";
+}
+
+/**
+ * The head a committed route contributes to a server render: its title (when
+ * it resolves one) and each tag as HTML keyed for deduplication.
+ * @internal
+ */
+export function serverHeadLayer(route: RouteContext, defaults: RouterHeadOptions | undefined): ServerHeadLayer {
+  const head = resolveRouteHead(route, defaults);
+  return {
+    title: head.title ?? undefined,
+    tags: head.tags.map((t) => ({ key: t.key, html: tagToHTML(t) })).filter((t) => t.html !== ""),
+  };
 }
 
 function escapeText(value: string): string {
@@ -239,8 +412,8 @@ export function routeHeadToHTML(head: ResolvedRouteHead): string {
   const parts: string[] = [];
   if (head.title !== null) parts.push(`<title>${escapeText(head.title)}</title>`);
   for (const t of head.tags) {
-    const html = serializeHeadEntry(t.tag, t.attrs);
-    if (html) parts.push(html.replace(/ \/>$/, ` ${ROUTE_HEAD_ATTR}="" />`));
+    const html = tagToHTML(t);
+    if (html) parts.push(html);
   }
   return parts.join("\n");
 }
@@ -284,7 +457,8 @@ export function createRouteHeadController(defaults: RouterHeadOptions | undefine
 
   const publish = (tag: ResolvedHeadTag): void => {
     const existing = owned.get(tag.key);
-    if (existing && sameAttrs(existing, tag.attrs)) return;
+    if (existing && sameAttrs(existing, tag.attrs) && (tag.text === undefined || existing.textContent === tag.text))
+      return;
     if (!existing) {
       for (const el of Array.from(document.head.querySelectorAll(selectorFor(tag.key)))) {
         if (initial.has(el)) {
@@ -297,6 +471,8 @@ export function createRouteHeadController(defaults: RouterHeadOptions | undefine
     // half-updated element is ever connected.
     const next = document.createElement(tag.tag);
     for (const [name, value] of Object.entries(tag.attrs)) next.setAttribute(name, value);
+    // JSON-LD only: a non-executable data block, its text already escaped.
+    if (tag.tag === "script" && tag.attrs.type === "application/ld+json") next.textContent = tag.text ?? "";
     next.setAttribute(ROUTE_HEAD_ATTR, "");
     if (existing?.parentNode) existing.replaceWith(next);
     else document.head.appendChild(next);

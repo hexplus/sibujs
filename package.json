@@ -1,6 +1,6 @@
 {
   "name": "sibujs",
-  "version": "4.13.1",
+  "version": "4.14.0",
   "description": "A function-based frontend framework with fine-grained reactivity and no virtual DOM. Tag factories return live DOM nodes you can hold and mutate, signals update only what changed, and nothing needs a compiler — it runs from a script tag or a bundler.",
   "keywords": [
     "frontend",
@@ -41,12 +41,13 @@
     "typecheck:tests": "tsc -p tsconfig.test.json",
     "hooks:install": "node scripts/hooks/install.mjs",
     "certify:rc": "node scripts/certify/run.mjs",
-    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup --config tsup.cdn.config.ts",
+    "build": "tsup index.ts data.ts browser.ts patterns.ts motion.ts ui.ts widgets.ts ssr.ts ssr-dom.ts devtools.ts performance.ts ecosystem.ts plugins.ts build.ts testing.ts extras.ts --dts --format esm,cjs --out-dir dist --clean && tsup --config tsup.cdn.config.ts",
     "example:chess:build": "node scripts/build-example-chess.mjs",
     "example:serve": "node tests-browser/server.mjs",
     "bench": "node bench.mjs",
     "bench:islands-dx": "node bench/islands-dx.mjs",
     "bench:islands-size": "node bench/islands-size.mjs",
+    "bench:ssr": "node --expose-gc bench/ssr-dom.mjs 1000 && node bench/ssr-takeover.mjs 200",
     "bench:save": "node bench.mjs --save",
     "bench:check": "node bench.mjs --compare",
     "publish:npm": "node publish.mjs",
@@ -94,6 +95,11 @@
       "types": "./dist/ssr.d.ts",
       "import": "./dist/ssr.js",
       "require": "./dist/ssr.cjs"
+    },
+    "./ssr/dom": {
+      "types": "./dist/ssr-dom.d.ts",
+      "import": "./dist/ssr-dom.js",
+      "require": "./dist/ssr-dom.cjs"
     },
     "./devtools": {
       "types": "./dist/devtools.d.ts",
@@ -172,6 +178,7 @@
     "chess.js": "^1.4.0",
     "esbuild": "^0.27.7",
     "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^20.14.6",
     "jsdom": "^26.1.0",
     "tsup": "^8.5.1",
     "typescript": "^5.8.3",

@@ -6,6 +6,243 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.14.0] — 2026-10-30
+
+### Upgrade notes
+
+Everything below is opt-in. A browser app sees no change. Inside a server
+render (`runInSSRContext`) five things behave differently, each the documented
+intent that the code did not meet:
+
+- `query()` now fetches during a server render. It used to start its request
+  inside an effect, effects do not run on the server, so it never fetched and
+  `data()` stayed at `initialData`. `renderToString` is still synchronous and
+  does not wait; the new async renderers do. `resource(source, fetcher)` fetches
+  on the server for the same reason.
+- `onMount()` / `onUnmount()` no longer run inside an SSR scope when happy-dom
+  or jsdom is registered (they were skipped only when `document` was missing).
+- `Head()` inside a request scope records its entries for the render result
+  instead of writing into the `document.head` every request shares. The entry
+  belongs to the component (disposing it withdraws the entry) and its getters
+  are read when the head is collected, after the render settled.
+- An async server render (`renderToStringAsync`, `renderRoute`, the streaming
+  form) refuses to run on a server runtime without AsyncLocalStorage, where
+  concurrent requests would share one store; the synchronous renderers are
+  unaffected.
+- A route `head` whose `canonical` (or new `alternates` entry) the URL policy
+  refuses is left out entirely instead of rendering `<link rel="canonical">`
+  without an `href`.
+
+`renderToString`, `renderToDocument`, the node form of
+`renderToReadableStream`, `hydrate()` (replace), `island(id, factory)`,
+`hydrateIslands`, `enhance()` / `mountIslands()` and the 4.13 pre-renderer's
+output are unchanged.
+
+### Added — `renderToStringAsync()` / `renderToDocumentAsync()` / `settled()`
+
+```ts
+const { html, head, state, status, diagnostics } = await renderToStringAsync(() => App());
+```
+
+One `await` serializes a settled page: every deferred `when` / `match` / `each`
+commit has run and every unit of async work started in the request has
+settled — `lazy()` chunks, `query()` / `resource()` fetches, the router's
+navigation and route loads, `prerenderWait()` promises. Work is registered per
+request, so concurrent renders never wait for each other. A `timeout` (default
+5 s) serializes what is ready, `Suspense` and `lazy()` keep their fallbacks,
+and `diagnostics.pending` names what was still running
+(`query:/api/catalog (5003 ms)`). Intervals and window-focus refetches are off
+on the server; a disabled query is not waited for. An error no `ErrorBoundary`
+claims rejects with the failing node's DOM path. The result carries the head
+collected during the render and the transfer script (below). `settled(root?)`
+is the low-level wait for a custom pipeline. The async renderers put
+`data-sibu-ssr` on top-level elements only (`marker: "all"` for the
+every-element form). `formatRenderDiagnostics()` and the `log` option print one
+summary per render.
+
+### Added — a built-in server DOM (`sibujs/ssr/dom`)
+
+The async renderers install it when no DOM is registered: no happy-dom or jsdom
+needed. It implements what the runtime and serializer use — nodes, attributes
+(+ namespaces), `classList`, `dataset`, `style` as a declaration map, events
+with bubbling and `preventDefault`, `MutationObserver`, a selector engine,
+form-control IDL semantics — and its output is byte-identical to jsdom's (a
+string `style` with shorthands is the one difference from happy-dom, whose
+CSSOM expands them). A browser-only call (`animate()`, `showModal()`,
+`innerHTML =`) throws an error naming the API and the calling source location;
+`canvas.getContext()` and `document.fonts` answer "unavailable" and are
+reported. It defines no `window`. On the fixture landing page, 1 000 renders
+take 0.24 ms each (jsdom 0.86 ms, happy-dom 0.81 ms) and registering it costs
+1.0 MB of heap (jsdom 16.2 MB, happy-dom 13.0 MB). `installServerDom()` never
+replaces an existing DOM.
+
+### Added — `isServer()`, `isClient()`, `ClientOnly()`, `effect(fn, { server: true })`
+
+`ClientOnly(() => canvasView(), { fallback: () => img(…) })` renders the
+fallback on the server and in the first paint, and the content in the browser
+(after an adopting hydration, in one synchronous swap). `isServer()` is true in
+an SSR scope and in the pre-renderer. Effects stay client-only; `server: true`
+opts one in. Under happy-dom / jsdom, reading `localStorage`, `matchMedia`,
+`requestAnimationFrame`, `IntersectionObserver`, `ResizeObserver`,
+`document.fonts` or `getContext()` during a server render warns in development
+with the reading site; under the server DOM a `window is not defined` is
+rethrown with the fix.
+
+### Added — `renderRoute(routes, url)` and request-scoped memory routers
+
+`createRouter(routes, { mode: "memory", url })` keeps its location in the
+router; created inside a request scope it belongs to that request, so
+concurrent renders each have their own router and the process-wide one is
+untouched. `renderRoute` renders a URL through it — guards, `beforeEnter`,
+redirects, lazy routes, nested `Outlet()` — and answers with a status: 200,
+404 for the `*` route or a record's `status`, 301/302 plus `location` for a
+redirect (no body, the `location` percent-encoded), 403 (configurable) when a
+guard rejects, 503 `failure: "timeout"` when the route could not render in time.
+`timeout` is one deadline for the whole request: the navigation (guards
+included), the matched components' loads, then building and settling the page
+with what is left. The components are loaded only for a response with a body:
+a redirect, a failed navigation, a `render: "client"` route and a
+pre-rendered `render: "ssr"` route answer from the navigation and the route
+records, without importing a lazy route's module. `redirectBy` tells a `redirect` record from a guard redirect. Routes gain `status`, `render:
+"ssr" | "prerender" | "client"` and `getStaticPaths()`, and the router gains
+`trailingSlash: "ignore"`. `createRenderHandler(routes, options)` wraps
+`renderRoute` as a `Request → Response` handler for a Node sidecar, with
+`Cache-Control` and a page cache keyed by URL and a data version, bounded by
+entries and by bytes (`cache.maxBytes`, default 32 MB). The cache is shared by
+every visitor, so it keeps only 200/404 pages that did not time out and whose
+`Cache-Control` has no `no-store`, `no-cache` or `private` (parsed, any case):
+a personalized page answers `private` and is rendered for each request, and
+`x-sibu-cache` reports `hit`, `miss` or `bypass`. A render that throws answers
+a bare 500. With a router `base`, the URL passed to `renderRoute` (and the
+request a handler receives) is the full request URL: the base is stripped once,
+at a segment boundary (`/app/about` under `/app`, never `/application`), the
+query and hash kept; navigation targets stay application paths, and a
+redirect's `location` carries the base once.
+
+### Added — one head API for the server and the browser
+
+Route `head` gains `robots`, `twitter` (falling back to the Open Graph values),
+`alternates` (hreflang) and `jsonLd` (serialized with `serializeJsonLd()`, which
+escapes `<`, `>`, `&` and U+2028 / U+2029). During a server render the route
+head and every `Head()` in the tree are collected into `result.head`; the
+innermost entry wins its key and each key is emitted once. Only live entries
+count: a `Head()` in a branch the render switched away from is withdrawn, which
+reveals the entry it overrode, and a getter (`title: () => q.data()?.name`)
+contributes its value once the render has settled. The values pass the same
+escaping, URL and meta-refresh policy as in the browser (a reactive entry never
+publishes a refresh). In the browser the router applies the same fields on
+every navigation.
+
+### Added — adopting hydration: `hydrate(App, root, { strategy: "adopt" })`
+
+On output rendered with `{ hydration: "adopt" }`, the client tree is built on
+the server nodes: on matching markup no element is created, added, removed or
+moved, images do not reload, and text typed before the bundle loaded, checkbox
+and radio state, `<select>` choices (single and multiple, the selected option
+nodes themselves, an emptied selection included), focus and scroll survive (the app's handlers receive replayed `input` /
+`change` events). Elements carry a creation-scope id (`data-sibu-h`) per
+directive scope, so content the server rebuilt after its data arrived still
+pairs. A divergent subtree is rebuilt on its own and reported — kind, DOM path,
+both sides, likely cause — and a root that does not match replaces the whole
+tree with a development warning. A claimed element ends with exactly the
+client's attributes, kept server values re-checked against the URL policy.
+The claiming engine lives in `sibujs/ssr`; the core carries the scope hooks.
+Each hydration runs its own session, so islands or roots hydrating at once
+end independently, each as soon as its own lazy chunks and route loads have
+settled. An `each` row's id segment encodes its key losslessly (`1` and `"1"`
+are two rows, never one; a key that is not a string or a number is rejected
+while ids are assigned). See `docs/architecture/hydration-adopt.md` for the
+algorithm, the id format and its limits.
+
+### Added — data transfer
+
+The async renderers embed the request's `query()` cache, keyed `resource()`s
+(`resource(fetcher, { key })`) and route loaders (`executeLoader`, keyed by
+path and function name; two different loader functions with the same name for
+one path — two `loader: async () => …` properties — are not transferred at all
+and fetch again in the browser, unless given `options.key`) as one escaped
+script (`window.__SIBU_TRANSFER__`, the `serializeState`
+rules, nonce, a byte cap that drops the largest entries first and names them).
+The browser primes its cache from it: data still within `staleTime` is not
+fetched again, stale data shows at once and refetches in the background.
+`query(…, { ssr: false })` opts a query out. `serializeState` gains a `global`
+option.
+
+### Added — pre-rendering from a server entry
+
+`sibuVitePlugin({ prerender: { server: "src/entry-server.ts" } })` renders each
+route with `renderRoute()` on the server DOM, with no jsdom: every route
+without params, every `getStaticPaths()` page and every redirect by default,
+the body into the shell's `#app`, the route head replacing the shell's title,
+the transferred state before `</body>`. It writes `404.html` from the `*`
+route, `200.html`, `sitemap.xml` (not `noindex`, not `render: "client"`),
+`robots.txt` and `redirects.json`; `render: "client"` / `"ssr"` routes get the
+shell plus their route head, and are not rendered at build time (their
+components, and what they fetch, run only for a real request); guarded routes and guard redirects are left to the
+browser. `fetch` (a base URL or a function) supplies data at build time, and an
+unreachable API — or a route that does not render within `timeout` — fails the
+build naming the route. Head markup and state are inserted literally (`$&` in a
+title is text). New options: `outDir`,
+`trailingSlash`, `notFound`, `sitemap`, `robots`, `hydration`, `nonce`,
+`maxStateBytes`, `container`. In the jsdom mode the new outputs are opt-in. A
+re-run renders into the kept `200.html` shell. The plugin exposes its options
+as `api.prerender`. See `fixtures/ssr-app` and `examples/static-backends`.
+
+### Added — component islands from a server render
+
+`island("cart", Cart, props, { load: "visible" })` renders the component with
+the island marker, its props as JSON and adoption ids. In the browser
+`registerIsland("cart", islandComponent(Cart, validate))` adopts only that
+subtree when `mountIslands()` activates it; the rest of the page keeps inert
+server HTML.
+
+### Added — out-of-order streaming
+
+`renderToReadableStream(() => App(), options)` flushes the head and the shell
+(each `Suspense` boundary on its fallback) once everything outside the
+boundaries has settled, then streams each boundary as soon as its own content
+and work are ready, with a nonce-aware swap script, then the state and the
+scripts. Chunks are produced on demand; `cancel()` stops the render at once.
+A nested boundary that is ready before the one around it is published
+travels with that one's chunk, once. An error no `ErrorBoundary` claims errors
+the stream wherever it occurs — the
+status is long sent by then — with the failing node's DOM path. A head entry
+added after the head was flushed cannot change it.
+
+### Added — `renderOnServer()` and `hydrateInTest()` in `sibujs/testing`
+
+Render a route table (with `url`) or a component and query the HTML and head
+(`text`, `getByText`, `meta`, `title`, …); take server HTML over in a test and
+get the created-element count and the adoption mismatches.
+
+### Security
+
+- `serializeState()` emits a payload holding a `"__proto__"` key through
+  `JSON.parse`, so the browser reads it as data, as the server did; in an
+  object literal the key set the prototype instead.
+- The serializer escapes comment text beginning with `>` or `->`, which closed
+  the comment at its start.
+- A route head `titleTemplate` and the pre-renderer insert titles with a
+  replacement callback: `$&` / `$'` in a title no longer splice in text.
+- `trailingSlash: "ignore"` and the server DOM's `!important` parsing no longer
+  backtrack quadratically on a long run of `/` or spaces from the request.
+
+### Benchmarks
+
+`npm run bench:ssr` (also in CI): render time and memory per DOM, HTML size
+per marker mode (fixture landing page: 1 325 B with the root marker, 2 058 B
+with adoption ids, 1 766 B with `renderToString`'s every-element marker), and
+takeover time (jsdom: replace 0.65 ms, adopt 0.95 ms median).
+
+### Bundle size
+
+`cdn.global.js`: +~2.8 KB raw / +~1.3 KB gzip for `ClientOnly`,
+`isServer()` / `isClient()`, the pending-work and error registries, the
+adoption scope hooks and the streaming boundary slot. The adoption engine, the
+server DOM, the async renderers and the pre-renderer are not in it.
+
+---
+
 ## [4.13.1] — 2026-10-30
 
 ### Upgrade notes

@@ -1,6 +1,6 @@
 import { getRequestScopedCache } from "../core/ssr-context";
 import { globalSingleton } from "../utils/globalSingleton";
-import { type Resource, type ResourceOptions, resource } from "./resource";
+import { type Resource, type ResourceOptions, resource, withholdTransfer } from "./resource";
 
 export type RouteLoaderFn<T = unknown> = (
   context: { params: Record<string, string>; path: string },
@@ -47,7 +47,47 @@ function currentScope(): LoaderScope {
 }
 
 /**
+ * The automatic transfer key of `loader` for `context`, or `undefined` when
+ * the loader must not transfer.
+ *
+ * The key is `loader:<path>:<function name>`: the same on the server and in
+ * the browser, unlike a counter or the function's (minified) source. A name
+ * is not an identity, though — every `loader: async () => …` property is named
+ * `"loader"`, and an arrow passed inline has none — so on the server the first
+ * loader FUNCTION to use a key owns it for the request. Another function
+ * reaching the same key makes it ambiguous: the key is withheld from the
+ * transferred state (the owner's value included) and that loader runs without
+ * one, so in the browser both fetch again. Correct data over a skipped fetch;
+ * give such loaders an explicit `options.key` to transfer them.
+ */
+function automaticKey(loader: RouteLoaderFn<unknown>, context: { path: string }): string | undefined {
+  const key = `loader:${context.path}${loader.name ? `:${loader.name}` : ""}`;
+  const cache = getRequestScopedCache<Map<string, RouteLoaderFn<unknown>>>("routeLoader");
+  if (!cache) return key;
+  let owners = cache.get("owners");
+  if (!owners) {
+    owners = new Map();
+    cache.set("owners", owners);
+  }
+  const owner = owners.get(key);
+  if (owner === undefined) {
+    owners.set(key, loader);
+    return key;
+  }
+  if (owner === loader) return key;
+  withholdTransfer(key);
+  return undefined;
+}
+
+/**
  * Execute a route loader and wrap its result in a reactive Resource.
+ *
+ * The result is transferred from a server render to the browser under the key
+ * `loader:<path>:<loader name>` (or `options.key`), so the browser does not run
+ * the loader again on takeover. Two different loader functions with the same
+ * name for the same path (two `loader: async () => …` properties, two
+ * anonymous loaders) cannot be told apart: neither transfers, and both fetch in
+ * the browser, unless they have explicit keys.
  *
  * Executing a loader does not make its data visible to `loaderData()`; render
  * the route's component inside {@link renderWithLoader} (or use
@@ -58,7 +98,11 @@ export function executeLoader<T>(
   context: { params: Record<string, string>; path: string },
   options?: ResourceOptions<T>,
 ): Resource<T> {
-  const res = resource<T>(({ signal }) => loader(context, { signal }), options);
+  // Keyed by route path (and loader name) unless the caller chose a key, so a
+  // server render transfers the loader's result and the browser starts from
+  // it instead of running the loader again.
+  const key = options?.key ?? automaticKey(loader as RouteLoaderFn<unknown>, context);
+  const res = resource<T>(({ signal }) => loader(context, { signal }), { ...options, key });
   const disposeResource = res.dispose;
   res.dispose = () => {
     _disposed.add(res);

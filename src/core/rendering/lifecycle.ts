@@ -22,6 +22,7 @@
 
 import { getOwnerScope, runWithOwnerScope } from "../../reactivity/track";
 import { type RuntimeErrorPhase, reportError } from "../errors";
+import { isSSR } from "../ssr-context";
 import { registerDisposer } from "./dispose";
 
 type CleanupFn = () => void;
@@ -317,8 +318,10 @@ function registerUnmountWatcher(element: Element, cb: DisconnectCb): () => void 
  * @param element Optional element to observe (HTML or SVG); if provided, waits until it's connected.
  */
 export function onMount(callback: MountCallback, element?: Element): void {
-  // No-op during SSR — lifecycle hooks are client-only
-  if (typeof document === "undefined") return;
+  // No-op during SSR — lifecycle hooks are client-only. Checked by the SSR
+  // flag as well as by `document`: with happy-dom / jsdom (or the server DOM)
+  // registered, a server render has a document but must not run mount code.
+  if (typeof document === "undefined" || isSSR()) return;
   // The callback runs after the render that registered it, so it runs in that
   // render's owner scope: an effect it creates belongs where the component
   // does. The cleanup it returns is pinned to the same scope.
@@ -372,7 +375,7 @@ export function onMount(callback: MountCallback, element?: Element): void {
  * @param element The element to watch for removal (HTML or SVG)
  */
 export function onUnmount(callback: CleanupFn, element: Element): void {
-  if (typeof document === "undefined") return;
+  if (typeof document === "undefined" || isSSR()) return;
   // Teardown runs in the owner scope of the render that registered it, however
   // the element leaves (dispose, or a native removal seen by the observer) and
   // whoever triggers it.

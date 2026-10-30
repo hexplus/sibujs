@@ -1,13 +1,17 @@
 import { registerDisposer } from "../core/rendering/dispose";
 import { effect } from "../core/signals/effect";
+import { getRequestStore } from "../core/ssr-context";
 import { acquireBase, acquireTitle, type BaseSpec, type ResourceLease } from "../utils/documentResources";
 import {
   type HeadValueResolver,
   planHeadElementEntry,
   planMetaEntry,
   STATIC_VALUE_RESOLVER as STATIC_HEAD_RESOLVER,
+  serializeHeadEntry,
+  serializePlannedHeadEntry,
 } from "../utils/headEntry";
 import { sanitizeUrl } from "../utils/sanitize";
+import { recordServerHead, type ServerHeadLayer } from "./serverHead";
 
 // ============================================================================
 // HEAD COMPONENT - Meta tag management for SEO
@@ -239,8 +243,64 @@ interface HeadProps {
  * Supports dynamic title, meta tags, link tags, and structured data.
  * Each instance tracks its own elements and effects for independent cleanup.
  */
+/** Dedup key of a head entry, shared with the router's route head (`meta:name:description`). */
+function headEntryKey(tag: "meta" | "link", attrs: Record<string, string>): string {
+  const lower = (v: string | undefined) => (v ?? "").toLowerCase();
+  if (tag === "meta") {
+    if (attrs.name) return `meta:name:${lower(attrs.name)}`;
+    if (attrs.property) return `meta:property:${lower(attrs.property)}`;
+    if (attrs["http-equiv"]) return `meta:http-equiv:${lower(attrs["http-equiv"])}`;
+    return `meta:${JSON.stringify(attrs)}`;
+  }
+  const rel = lower(attrs.rel);
+  if (rel === "canonical") return "link:rel:canonical";
+  if (rel === "alternate" && attrs.hreflang) return `link:hreflang:${lower(attrs.hreflang)}`;
+  return `link:${rel}:${attrs.href ?? ""}`;
+}
+
+/**
+ * The layer a server `Head()` contributes, resolved NOW. Runs when the request
+ * collects its head — after the render settled — so a getter reading a query
+ * contributes the loaded value, not the one it had at construction. Meta
+ * entries go through the client's own plan (`CLIENT_RESOLVER`): an entry with
+ * a getter is reactive, and a reactive entry never publishes a refresh
+ * directive on either side.
+ */
+function resolveHeadForServer(props: HeadProps): ServerHeadLayer {
+  const layer: ServerHeadLayer = { tags: [] };
+  if (props.title != null) layer.title = CLIENT_RESOLVER.resolveValue("title", props.title);
+  for (const entry of props.meta ?? []) {
+    const plan = planMetaEntry(entry, CLIENT_RESOLVER);
+    if (plan.kind === "drop") continue;
+    const attrs = Object.fromEntries(plan.attributes);
+    layer.tags.push({ key: headEntryKey("meta", attrs), html: serializePlannedHeadEntry("meta", plan.attributes) });
+  }
+  for (const attrs of props.link ?? []) {
+    const html = serializeHeadEntry("link", attrs);
+    if (html) layer.tags.push({ key: headEntryKey("link", attrs), html });
+  }
+  return layer;
+}
+
+/**
+ * During a server render, `Head()` records its title, meta and link entries in
+ * the request (returned as `result.head`) instead of writing into a document
+ * every concurrent request shares. The layer belongs to the anchor: disposing
+ * the component (a `when()` branch switched away while the render settled)
+ * withdraws it, so only live components contribute. External `script` and
+ * `base` entries are browser-side trust decisions and are not emitted on the
+ * server; they apply when the component renders in the browser.
+ */
+function recordHeadForServer(props: HeadProps, anchor: Comment): boolean {
+  const withdraw = recordServerHead(() => resolveHeadForServer(props));
+  if (!withdraw) return false;
+  registerDisposer(anchor, withdraw);
+  return true;
+}
+
 export function Head(props: HeadProps): Comment {
   const anchor = document.createComment("sibu-head");
+  if (getRequestStore()?.ssr && recordHeadForServer(props, anchor)) return anchor;
   const managedElements: HTMLElement[] = [];
   const effectCleanups: Array<() => void> = [];
 
