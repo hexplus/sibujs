@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 export * from "./src/platform/head";
+export { type ComponentIslandOptions, componentIsland, ISLAND_PROPS_ATTR, islandComponent } from "./src/platform/componentIsland";
 export { ADOPT_ID_ATTR, type AdoptMismatch, type AdoptOptions, type AdoptResult } from "./src/platform/hydrateAdopt";
 export * from "./src/platform/incrementalRegeneration";
 export * from "./src/platform/microfrontend";

@@ -41,6 +41,7 @@ import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue, sanitizeUrl } from "../utils/sanitize";
+import { type ComponentIslandOptions, componentIsland } from "./componentIsland";
 import { type AdoptOptions, type AdoptResult, hydrateAdopt } from "./hydrateAdopt";
 
 /**
@@ -1103,11 +1104,29 @@ export function renderToReadableStream(element: HTMLElement | DocumentFragment |
 /** Allowlist for island ids — they appear in attribute selectors and object lookups. */
 const SAFE_ID = /^[A-Za-z0-9_-]+$/;
 
-export function island(id: string, component: () => HTMLElement): HTMLElement {
+export function island(id: string, component: () => HTMLElement): HTMLElement;
+/**
+ * A component island rendered on the server: the markup carries the island
+ * marker, its serialized `props` and adoption ids, and the browser adopts just
+ * this subtree with `registerIsland(name, islandComponent(Component))` +
+ * `mountIslands()`. See `componentIsland`.
+ */
+export function island<P>(
+  name: string,
+  component: (props: P) => Node,
+  props: P,
+  options?: ComponentIslandOptions,
+): HTMLElement;
+export function island<P>(
+  id: string,
+  component: ((props: P) => Node) | (() => HTMLElement),
+  ...rest: [P?, ComponentIslandOptions?]
+): HTMLElement {
+  if (rest.length > 0) return componentIsland(id, component as (props: P) => Node, rest[0] as P, rest[1]);
   if (!SAFE_ID.test(id)) {
     throw new Error(`[SibuJS SSR] island: id must match [A-Za-z0-9_-]+ (got: ${JSON.stringify(id.slice(0, 32))})`);
   }
-  const el = component();
+  const el = (component as () => HTMLElement)();
   el.setAttribute("data-sibu-island", id);
   return el;
 }
