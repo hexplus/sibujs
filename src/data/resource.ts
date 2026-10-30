@@ -233,7 +233,7 @@ export function resource<T, S = void>(
   }
 
   // Each fetch is registered with a server render, which waits for it.
-  const run = (sourceValue: S) => trackPending(doFetch(sourceValue), "resource");
+  const run = (sourceValue: S) => trackPending(doFetch(sourceValue), "resource", false);
 
   if (source) {
     // Auto-refetch when source changes. Runs on the server too (`server`), so

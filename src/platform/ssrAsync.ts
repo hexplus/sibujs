@@ -17,9 +17,11 @@
 // never wait for each other.
 
 import { DEV } from "../core/dev";
+import { inScope } from "../core/rendering/adoptScope";
 import { dispose } from "../core/rendering/dispose";
 import { getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
+import { createServerAdoptScope } from "./hydrateAdopt";
 import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState } from "./ssr";
@@ -152,6 +154,13 @@ export interface AsyncRenderOptions {
    * each, and nothing reads it beneath the root).
    */
   marker?: "all" | "root" | "none";
+  /**
+   * `"adopt"` marks the output for `hydrate(App, root, { strategy: "adopt" })`:
+   * every element built by a tag factory or `html` carries its creation id
+   * (`data-sibu-h`), so the browser binds to these nodes instead of replacing
+   * them. Default: no markers (the output `hydrate()`'s replace strategy uses).
+   */
+  hydration?: "adopt" | "replace";
 }
 
 /**
@@ -259,9 +268,12 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   ensureServerDom();
   watchBrowserApis();
 
+  const ids = options.hydration === "adopt" ? new WeakMap<Element, string>() : null;
+  const scope = ids ? createServerAdoptScope(ids) : null;
+
   let root: Node;
   try {
-    root = typeof input === "function" ? input() : input;
+    root = typeof input === "function" ? inScope(scope, input) : input;
   } catch (err) {
     if (store) store.errors = undefined;
     throw explainServerError(err);
@@ -293,7 +305,7 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
     );
   }
 
-  const content = renderToStringWith(holder, { marker: options.marker ?? "root", ids: null });
+  const content = renderToStringWith(holder, { marker: options.marker ?? "root", ids });
   const head = collectServerHead();
 
   let state = "";

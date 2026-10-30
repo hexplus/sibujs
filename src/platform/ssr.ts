@@ -41,6 +41,7 @@ import { readOwnGlobal } from "../utils/guards";
 import { serializeHeadEntry } from "../utils/headEntry";
 import { isForbiddenMetaEntry } from "../utils/metaRefresh";
 import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue, sanitizeUrl } from "../utils/sanitize";
+import { type AdoptOptions, type AdoptResult, hydrateAdopt } from "./hydrateAdopt";
 
 /**
  * Attributes the server must never emit at all.
@@ -543,10 +544,14 @@ export function renderToStringWith(element: Node, opts: SerializeOptions): strin
 
 function renderNodeToString(element: Node, context: ParseContext, opts: SerializeOptions, depth: number): string {
   if (element instanceof DocumentFragment) {
+    let prevText = false;
     return Array.from(element.childNodes)
       .map((child) => {
+        const isText = child.nodeType === 3;
+        const sep = opts.ids && isText && prevText ? "<!--|-->" : "";
+        prevText = isText;
         try {
-          return renderNodeToString(child, context, opts, depth);
+          return sep + renderNodeToString(child, context, opts, depth);
         } catch (err) {
           return ssrErrorComment(err);
         }
@@ -558,7 +563,13 @@ function renderNodeToString(element: Node, context: ParseContext, opts: Serializ
   if (typeof frame === "string") return frame;
 
   let html = frame.open;
+  let prevText = false;
   for (const child of frame.children) {
+    // Adopt-marked output: keep adjacent text nodes apart, or the HTML parser
+    // merges them and the browser cannot pair them with its own text nodes.
+    const isText = child.nodeType === 3;
+    if (opts.ids && isText && prevText) html += "<!--|-->";
+    prevText = isText;
     try {
       html += renderNodeToString(child, frame.context, opts, depth + 1);
     } catch (err) {
@@ -618,8 +629,27 @@ export interface HydrationMismatch {
  *
  * @see docs/architecture/hydration.md
  */
-export function hydrate(component: () => HTMLElement, container: HTMLElement, options: HydrateOptions = {}): void {
-  const clientTree = component();
+export function hydrate(
+  component: () => Node,
+  container: Element,
+  options: AdoptOptions & { strategy: "adopt" },
+): Promise<AdoptResult>;
+export function hydrate(
+  component: () => HTMLElement,
+  container: HTMLElement,
+  options?: HydrateOptions & { strategy?: "replace" },
+): void;
+export function hydrate(
+  component: () => Node,
+  target: Element,
+  input: (HydrateOptions & { strategy?: "replace" }) | (AdoptOptions & { strategy: "adopt" }) = {},
+): Promise<AdoptResult> | undefined {
+  // Opt-in: bind to the server nodes instead of replacing them. Needs server
+  // output rendered with `{ hydration: "adopt" }`. See hydrateAdopt.ts.
+  if (input.strategy === "adopt") return hydrateAdopt(component, target, input);
+  const options: HydrateOptions = input;
+  const container = target as HTMLElement;
+  const clientTree = component() as HTMLElement;
 
   if (options.diagnostics) {
     const mismatches: HydrationMismatch[] = [];

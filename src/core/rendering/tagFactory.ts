@@ -5,6 +5,7 @@ import { reactiveBinding } from "../../reactivity/track";
 import { isBlockedElement } from "../../utils/elementPolicy";
 import { isEventHandlerAttr, sanitizeCSSDeclaration, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
+import { createScopedElement } from "./adoptScope";
 import { registerDisposer } from "./dispose";
 import { noDocument } from "./requireDocument";
 import type { NodeChild, NodeChildren } from "./types";
@@ -391,7 +392,9 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
     }
     if (typeof document === "undefined") noDocument();
-    const el = ns ? document.createElementNS(ns, tag) : document.createElement(tag);
+    // Through the adopt scope: stamped with its id by an adopt server render,
+    // or the claimed server element during an adopting hydration.
+    const el = createScopedElement(tag, ns);
 
     // Fast path: tag() — no arguments
     if (first === undefined) return el;

@@ -1,4 +1,4 @@
-import { div, each, h1, header, main, p, section, when } from "../../../../index";
+import { div, each, h1, header, img, main, p, section, when } from "../../../../index";
 import { query } from "../../../../data";
 import { fetchCatalog } from "../api";
 import { ProductCard } from "../components/ProductCard";
@@ -13,6 +13,7 @@ export function Landing(): HTMLElement {
   const catalog = catalogQuery();
   return main({ class: "landing" }, [
     header({ class: "hero" }, [
+      img({ class: "hero-img", src: "/img/hero.jpg", alt: "", width: "1200", height: "480" }),
       h1("Personalización textil"),
       p({ class: "lead" }, "Estampado DTF, vinil y bordado con entrega en 48 horas."),
     ]),

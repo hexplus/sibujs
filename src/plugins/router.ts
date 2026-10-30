@@ -1,5 +1,7 @@
 import { devWarn, isDev } from "../core/dev";
+import { type AdoptScope, captureScope, inScope, keyedScope } from "../core/rendering/adoptScope";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
+import { isHydrating } from "../core/rendering/hydrationHooks";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
@@ -1167,7 +1169,8 @@ class ComponentLoader {
   ): Promise<Element> {
     // The factory runs in the instance's route scope, so everything it creates
     // reads the route this instance was committed with (see `RouteScope`).
-    const result = scope ? runWithOwnerScope(scope, component) : component();
+    const build = () => (scope ? runWithOwnerScope(scope, component) : component());
+    const result = scope?.adopt ? inScope(scope.adopt, build) : build();
 
     // Runtime thenable detection on the *real* invocation — never a second,
     // speculative call made only to classify. (RC-003)
@@ -2351,6 +2354,8 @@ export function setRoutes(routes: RouteDef[]): void {
  * page rendered) is not the page's, and falls back to the router-global route.
  */
 class RouteScope {
+  /** Creation scope the instance is built in (adopting hydration); see `adoptScope`. */
+  adopt: AdoptScope | null = null;
   private readonly get: () => RouteContext | null;
   private readonly set: (route: RouteContext | null) => void;
   private released = false;
@@ -2419,8 +2424,10 @@ async function instantiateScoped(
   routeDef: RouteDef,
   routePath: string,
   route: RouteContext,
+  adopt: AdoptScope | null = null,
 ): Promise<Element> {
   const scope = new RouteScope(route);
+  scope.adopt = adopt;
   const node = await router.instantiateComponent(plan, routeDef, routePath, scope);
   if (node) {
     instanceScopes.set(node, scope);
@@ -2693,6 +2700,7 @@ function instanceKey(owner: RouteDef, records: readonly RouteDef[], route: Route
  */
 export function Route(): Node {
   const anchor = document.createComment("route-outlet");
+  const adoptScope = captureScope();
   let currentNode: Node | null = null;
   let loadingNode: Node | null = null;
   let errorNode: Node | null = null;
@@ -2754,7 +2762,9 @@ export function Route(): Node {
   };
 
   const showLoading = () => {
-    if (!loadingNode && anchor.parentNode) {
+    // Adopting server markup: the server's rendered route stays on screen
+    // while its chunk loads, instead of a spinner beside it.
+    if (!loadingNode && anchor.parentNode && !isHydrating()) {
       loadingNode = document.createElement("div");
       (loadingNode as HTMLElement).className = "route-loading";
       (loadingNode as HTMLElement).setAttribute("role", "status");
@@ -2931,7 +2941,14 @@ export function Route(): Node {
           // may synchronously navigate, dispose this outlet's owner, or
           // otherwise invalidate the generation — and for a direct
           // AsyncComponent it also awaits, so ownership can move either way.
-          const node = await instantiateScoped(_routerRef.current, plan, routeDef, route.path, route);
+          const node = await instantiateScoped(
+            _routerRef.current,
+            plan,
+            routeDef,
+            route.path,
+            route,
+            keyedScope(adoptScope, routeDef.path),
+          );
 
           // Second ownership check, immediately before the synchronous commit,
           // re-reading the parent rather than trusting one captured earlier.
@@ -3820,6 +3837,7 @@ export function __removeRouterPagehideHandler(): void {
  */
 export function Outlet(): Node {
   const anchor = document.createComment("route-outlet-nested");
+  const adoptScope = captureScope();
   let currentNode: Node | null = null;
   let currentChild: RouteDef | null = null;
   // Instance key (see `RouteBase.key`) of the mounted child.
@@ -3920,7 +3938,14 @@ export function Outlet(): Node {
       // Create exactly one instance. Arbitrary user code: it may synchronously
       // navigate, dispose this outlet's owner, or otherwise invalidate the
       // generation — an `await` is not the only way ownership moves.
-      const node = await instantiateScoped(_routerRef.current, plan, childRoute, cacheKey, route);
+      const node = await instantiateScoped(
+        _routerRef.current,
+        plan,
+        childRoute,
+        cacheKey,
+        route,
+        keyedScope(adoptScope, childRoute.path),
+      );
 
       // Second ownership check, immediately before the synchronous commit, and
       // re-reading the parent rather than trusting one captured earlier. The

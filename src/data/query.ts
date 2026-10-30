@@ -662,7 +662,7 @@ export function query<T>(
       return;
     }
     // A server render waits for this request before it serializes.
-    entry.promise = trackPending(promise, `query:${key}`) as Promise<T>;
+    entry.promise = trackPending(promise, `query:${key}`, false) as Promise<T>;
 
     try {
       const result = await promise;

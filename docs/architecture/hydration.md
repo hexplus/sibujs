@@ -42,8 +42,10 @@ render, not as work-sharing between server and client.** If your reason for
 adopting SSR is SEO, first-contentful-paint, or link previews, this delivers it.
 If your reason is to avoid re-rendering on the client, it does not.
 
-An opt-in adopting strategy that binds to the server nodes instead is designed
-but not implemented; see [hydration-adopt.md](./hydration-adopt.md).
+Since 4.14 an opt-in adopting strategy binds to the server nodes instead —
+`hydrate(App, root, { strategy: "adopt" })` on output rendered with
+`{ hydration: "adopt" }`; see [hydration-adopt.md](./hydration-adopt.md). The
+replace strategy described here stays the default and is unchanged.
 
 ## Mismatch policy
 

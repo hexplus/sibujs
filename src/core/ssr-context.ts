@@ -24,6 +24,7 @@
  * suspense-id counter so concurrent streaming renders never collide.
  */
 import { devWarn } from "./dev";
+import { hydrationPending } from "./rendering/hydrationHooks";
 export interface SSRStore {
   ssr: boolean;
   suspenseIdCounter: number;
@@ -341,17 +342,22 @@ export function runInSSRContext<T>(fn: () => T): T {
  *
  * @param promise The work to wait for.
  * @param label Shown in `settled()` diagnostics when the work outlives the timeout.
+ * @param hydration Also hold an adopting hydration in the browser (default).
+ * Data fetches pass `false`: the structure they change is already rendered.
  * @returns `promise`.
  */
-export function trackPending<T>(promise: T, label: string): T {
+export function trackPending<T>(promise: T, label: string, hydration = true): T {
   const store = getRequestStore();
-  const pending = store?.pending;
-  if (!pending) return promise;
+  // In a browser, an adopting hydration waits for structural work (a lazy
+  // chunk, a route load) before it releases the server markup it did not claim.
+  const target = store?.pending ? store : hydration ? hydrationPending() : null;
+  const pending = target?.pending;
+  if (!target || !pending) return promise;
   const entry: PendingWork = { label, since: Date.now() };
   pending.add(entry);
   const done = () => {
     pending.delete(entry);
-    store.wake?.();
+    target.wake?.();
   };
   try {
     Promise.resolve(promise).then(done, done);

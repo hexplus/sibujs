@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 export * from "./src/platform/head";
+export { ADOPT_ID_ATTR, type AdoptMismatch, type AdoptOptions, type AdoptResult } from "./src/platform/hydrateAdopt";
 export * from "./src/platform/incrementalRegeneration";
 export * from "./src/platform/microfrontend";
 export * from "./src/platform/routeActions";

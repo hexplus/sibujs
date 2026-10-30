@@ -16,6 +16,10 @@
 
 interface HydrationSession {
   done: Array<() => void>;
+  /** Async work the adoption waits for (lazy chunks, route loads), by label. */
+  pending: Set<{ label: string }>;
+  /** Called when an entry leaves `pending`. */
+  wake: (() => void) | null;
 }
 
 const slot = ((globalThis as Record<symbol, { s: HydrationSession | null } | undefined>)[
@@ -43,11 +47,20 @@ export function afterHydration(fn: () => void): void {
  */
 export function beginHydration(): () => void {
   if (slot.s) return () => {};
-  const session: HydrationSession = { done: [] };
+  const session: HydrationSession = { done: [], pending: new Set(), wake: null };
   slot.s = session;
   return () => {
     if (slot.s !== session) return;
     slot.s = null;
     for (const fn of session.done) fn();
   };
+}
+
+/**
+ * The open session's pending-work registry, for `trackPending` (browser side)
+ * and the adoption's settle loop.
+ * @internal
+ */
+export function hydrationPending(): Pick<HydrationSession, "pending" | "wake"> | null {
+  return slot.s;
 }
