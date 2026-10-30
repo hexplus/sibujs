@@ -204,5 +204,7 @@ export * from "./e2e";
 export * from "./queries";
 // Snapshot testing
 export * from "./snapshot";
+// Server rendering: renderOnServer() and hydrateInTest()
+export * from "./ssr";
 // Visual regression testing
 export * from "./visualRegression";
