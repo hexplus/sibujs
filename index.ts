@@ -112,6 +112,8 @@ export {
   enableSSR,
   getRequestScopedCache,
   getSSRStore,
+  isClient,
+  isServer,
   isSSR,
   runInSSRContext,
   type SSRStore,

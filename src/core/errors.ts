@@ -274,12 +274,37 @@ function defaultReport(error: Error, context: RuntimeErrorContext): void {
  * resolution as a built-in one. Ordinary application code should prefer
  * `ErrorBoundary` or `setRuntimeErrorHandler`.
  */
+type ErrorSink = Array<{ error: Error; context: RuntimeErrorContext }>;
+
+/** The current request's error sink (`SSRStore.errors`), when an async server render opened one. */
+function requestErrorSink(): ErrorSink | undefined {
+  const shared = (globalThis as Record<symbol, unknown>)[Symbol.for("sibujs.ssr.v1")] as
+    | {
+        als: { getStore(): { errors?: ErrorSink } | undefined } | null;
+        fallbackStore: { errors?: ErrorSink };
+        fallbackDepth: number;
+      }
+    | undefined;
+  if (!shared) return undefined;
+  const store = shared.als ? shared.als.getStore() : shared.fallbackDepth > 0 ? shared.fallbackStore : undefined;
+  return store?.errors;
+}
+
 export function reportError(error: unknown, context: RuntimeErrorContext): void {
   const err = normalizeError(error);
 
   untrackedRun(() => {
     // 1. Nearest error boundary — only when it explicitly claims the error.
     if (claimedByBoundary(err, context)) return;
+
+    // 1b. An async server render collecting this request's failures (see
+    //     `renderToStringAsync`). Read through the shared SSR registry rather
+    //     than imported, to keep this module free of import cycles.
+    const sink = requestErrorSink();
+    if (sink) {
+      sink.push({ error: err, context });
+      return;
+    }
 
     // 2. Application-configured handler. Skipped when we are already inside it,
     //    which bounds handler-triggered recursion without ever latching off.

@@ -1,5 +1,6 @@
 import { bindOwnerScope } from "../../reactivity/track";
 import { reportError } from "../errors";
+import { trackPending } from "../ssr-context";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
 import type { Component } from "./types";
@@ -101,7 +102,9 @@ export function lazy<R extends Node = HTMLElement>(
     const container = div({ class: "sibu-lazy" });
     let disposed = false;
 
-    importFn()
+    // A server render waits for the chunk (and, through the settle loop, for
+    // whatever the loaded component starts).
+    trackPending(importFn(), "lazy")
       .then(
         // The component renders after the import resolves, in the owner scope
         // of whoever rendered the placeholder.

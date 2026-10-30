@@ -1365,7 +1365,7 @@ export class SibuRouter {
       // A pre-renderer serializes only once the initial route has committed (the
       // outlets register their own component loads); in a browser this
       // registration is a no-op.
-      prerenderWait(initial.then(this.resolveReady, this.resolveReady));
+      prerenderWait(initial.then(this.resolveReady, this.resolveReady), "router:navigation");
     });
   }
 
@@ -1860,7 +1860,7 @@ export class SibuRouter {
    * anything. Pair with {@link instantiateComponent} at the commit boundary.
    */
   async loadPlan(route: RouteDef, routePath: string): Promise<RoutePlan> {
-    return prerenderWait(this.loader.loadPlan(route, routePath));
+    return prerenderWait(this.loader.loadPlan(route, routePath), `router:load ${route.path}`);
   }
 
   /**
@@ -1873,7 +1873,7 @@ export class SibuRouter {
     routePath: string,
     scope?: RouteScope,
   ): Promise<Element> {
-    return prerenderWait(this.loader.instantiate(plan, route, routePath, scope));
+    return prerenderWait(this.loader.instantiate(plan, route, routePath, scope), `router:render ${route.path}`);
   }
 
   /** Resolve a route's module/factory without creating any component instance. */

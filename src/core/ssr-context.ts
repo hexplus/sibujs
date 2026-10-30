@@ -51,6 +51,31 @@ export interface SSRStore {
    * will ever use. See `plugins/i18n.ts`.
    */
   locale?: string;
+  /**
+   * Async work started inside this request that a server render must wait for
+   * before it serializes: `lazy()` chunks, `query()` / `resource()` fetches, the
+   * router's initial navigation and route loads, `prerenderWait()` promises.
+   * Created by `runInSSRContext`; `settled()` drains it. See `trackPending`.
+   */
+  pending?: Set<PendingWork>;
+  /** Called whenever an entry leaves `pending`, so a waiting `settled()` re-checks. */
+  wake?: (() => void) | null;
+  /**
+   * Errors no `ErrorBoundary` claimed during this request. When present,
+   * `reportError` records them here instead of the console, and an async
+   * server render rejects with the first one.
+   */
+  errors?: Array<{ error: Error; context: { phase: string; name?: string; node?: unknown } }>;
+  /** Request-scoped slots of other subsystems (router, head collector, transferred state). */
+  slots?: Map<string, unknown>;
+}
+
+/** One unit of async work a server render waits for. */
+export interface PendingWork {
+  /** What the work is, for diagnostics: `query:/api/catalog`, `lazy`, `router:navigation`. */
+  readonly label: string;
+  /** `Date.now()` when the work was registered. */
+  readonly since: number;
 }
 
 type ALSLike<T> = {
@@ -221,6 +246,45 @@ export function getRequestScopedCache<V>(name: string): Map<string, V> | null {
   return c as Map<string, V>;
 }
 
+/**
+ * A request-scoped slot for a subsystem (the SSR router, the head collector,
+ * transferred state), or `undefined` outside a request scope.
+ *
+ * @param name Subsystem key.
+ * @param create Builds the slot's value the first time it is read in a request.
+ */
+export function requestSlot<T>(name: string, create?: () => T): T | undefined {
+  const store = getRequestStore();
+  if (!store) return undefined;
+  const slots = (store.slots ??= new Map());
+  if (!slots.has(name) && create) slots.set(name, create());
+  return slots.get(name) as T | undefined;
+}
+
+const PRERENDER_HOST = Symbol.for("sibujs.prerender.v1");
+
+/**
+ * True while the code runs on a server: inside an SSR scope (`runInSSRContext`,
+ * `withSSR`, `enableSSR`) or in the build-time pre-renderer. Use it to keep
+ * browser-only work (canvas, `document.fonts`, storage, `matchMedia`) out of a
+ * server render; `ClientOnly` and `onMount` are usually the better tools.
+ *
+ * @returns `true` on the server, `false` in a browser.
+ */
+export function isServer(): boolean {
+  return getSSRStore().ssr || (globalThis as Record<symbol, unknown>)[PRERENDER_HOST] !== undefined;
+}
+
+/**
+ * The opposite of {@link isServer}: true in a browser (or a browser-like test
+ * environment) that is not rendering for a server.
+ *
+ * @returns `true` in a browser, `false` on the server.
+ */
+export function isClient(): boolean {
+  return !isServer();
+}
+
 /** Enable SSR mode. Side effects (effect, watch, onMount) become no-ops. */
 export function enableSSR(): void {
   getSSRStore().ssr = true;
@@ -237,7 +301,14 @@ export function disableSSR(): void {
  * it falls back to mutating the module-global store.
  */
 export function runInSSRContext<T>(fn: () => T): T {
-  const store: SSRStore = { ssr: true, suspenseIdCounter: 0, idCounter: 0, locale: undefined };
+  const store: SSRStore = {
+    ssr: true,
+    suspenseIdCounter: 0,
+    idCounter: 0,
+    locale: undefined,
+    pending: new Set(),
+    wake: null,
+  };
   if (als) {
     return als.run(store, fn);
   }
@@ -245,25 +316,49 @@ export function runInSSRContext<T>(fn: () => T): T {
   // Module-global fallback for runtimes without AsyncLocalStorage (browser,
   // some edge runtimes). Unreachable under the Node test runner where `als`
   // is always present.
-  /* v8 ignore next 15 */
-  const prevSSR = fallbackStore.ssr;
-  const prevCounter = fallbackStore.suspenseIdCounter;
-  const prevIdCounter = fallbackStore.idCounter;
-  const prevLocale = fallbackStore.locale;
-  fallbackStore.ssr = true;
-  fallbackStore.suspenseIdCounter = 0;
-  fallbackStore.idCounter = 0;
-  fallbackStore.locale = undefined;
+  /* v8 ignore next 12 */
+  const prev = { ...fallbackStore };
+  Object.assign(fallbackStore, store);
   _shared.fallbackDepth++;
   try {
     return fn();
   } finally {
     _shared.fallbackDepth--;
-    fallbackStore.ssr = prevSSR;
-    fallbackStore.suspenseIdCounter = prevCounter;
-    fallbackStore.idCounter = prevIdCounter;
-    fallbackStore.locale = prevLocale;
+    for (const key of Object.keys(fallbackStore) as (keyof SSRStore)[]) {
+      if (!(key in prev)) delete fallbackStore[key];
+    }
+    Object.assign(fallbackStore, prev);
   }
+}
+
+/**
+ * Register async work the current server render must wait for.
+ *
+ * A no-op outside a request scope (`runInSSRContext`), so client code pays one
+ * store lookup. Returns `promise` unchanged, so it can wrap a call in place.
+ * A hostile thenable is adopted once through `Promise.resolve`; its rejection
+ * is the caller's to handle and is not observed here beyond settling the entry.
+ *
+ * @param promise The work to wait for.
+ * @param label Shown in `settled()` diagnostics when the work outlives the timeout.
+ * @returns `promise`.
+ */
+export function trackPending<T>(promise: T, label: string): T {
+  const store = getRequestStore();
+  const pending = store?.pending;
+  if (!pending) return promise;
+  const entry: PendingWork = { label, since: Date.now() };
+  pending.add(entry);
+  const done = () => {
+    pending.delete(entry);
+    store.wake?.();
+  };
+  try {
+    Promise.resolve(promise).then(done, done);
+  } catch {
+    done();
+  }
+  return promise;
 }
 
 /**

@@ -12,6 +12,7 @@ export * from "./src/platform/routeMiddleware";
 export * from "./src/platform/scrollRestoration";
 export * from "./src/platform/serviceWorker";
 export * from "./src/platform/ssr";
+export * from "./src/platform/ssrAsync";
 export * from "./src/platform/staticSiteGenerator";
 export * from "./src/platform/wasm";
 export * from "./src/platform/worker";

@@ -365,7 +365,29 @@ function foreignAttrName(attr: Attr): string {
  *     non-blank `title` is not served — so a frame changed behind the
  *     framework's back is never served wider than `embed()` built it.
  */
-function serializeOpenTag(element: Element, tag: string, foreign: boolean): string | null {
+/**
+ * How a render path marks its output.
+ * @internal
+ */
+export interface SerializeOptions {
+  /**
+   * Where `data-sibu-ssr="true"` goes: on every element (`renderToString`'s
+   * historical output), on top-level elements only, or nowhere.
+   */
+  marker: "all" | "root" | "none";
+  /** Adoption ids (`data-sibu-h`) of elements built under an adopt render. */
+  ids: WeakMap<Element, string> | null;
+}
+
+const LEGACY_SERIALIZE: SerializeOptions = { marker: "all", ids: null };
+
+function serializeOpenTag(
+  element: Element,
+  tag: string,
+  foreign: boolean,
+  opts: SerializeOptions,
+  depth: number,
+): string | null {
   let html = `<${tag}`;
   // Collected only for `<meta>`, and keyed by the emitted RAW names so the
   // shared policy can reject duplicate case-insensitive spellings itself.
@@ -405,9 +427,16 @@ function serializeOpenTag(element: Element, tag: string, foreign: boolean): stri
     html += tail;
   }
 
+  // Adoption id: the client claims this element by it (see hydrate "adopt").
+  const hid = opts.ids?.get(element);
+  if (hid !== undefined) html += ` data-sibu-h="${hid}"`;
+
   // The SSR provenance marker. `dataset.sibuHydrate` was read through the
   // clobberable `dataset` property; the attribute it reflects is read directly.
-  if (!getAttributeOf(element, "data-sibu-hydrate")) {
+  if (
+    (opts.marker === "all" || (opts.marker === "root" && depth === 0)) &&
+    !getAttributeOf(element, "data-sibu-hydrate")
+  ) {
     html += ` data-sibu-ssr="true"`;
   }
 
@@ -439,7 +468,12 @@ interface ElementFrame {
  * An element the parser would rebuild in another namespace in `context` is
  * stripped with its subtree (see {@link fitsParseContext}).
  */
-function serializeNode(node: Node, context: ParseContext): string | ElementFrame {
+function serializeNode(
+  node: Node,
+  context: ParseContext,
+  opts: SerializeOptions = LEGACY_SERIALIZE,
+  depth = 0,
+): string | ElementFrame {
   if (node.nodeType === 3) return escapeHtml(node.textContent || "");
   // Comment node — escape every comment-terminator form.
   if (node.nodeType === 8) return `<!--${safeCommentText(node.textContent || "")}-->`;
@@ -469,7 +503,7 @@ function serializeNode(node: Node, context: ParseContext): string | ElementFrame
   const lowerName = tag.toLowerCase();
   if (!fitsParseContext(ns, lowerName, element, context)) return DEV ? `<!--ssr:${tag}-misplaced-->` : "";
 
-  const openTag = serializeOpenTag(element, tag, foreign);
+  const openTag = serializeOpenTag(element, tag, foreign, opts, depth);
   if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
 
   const children = childNodesOf(element);
@@ -496,15 +530,23 @@ function serializeNode(node: Node, context: ParseContext): string | ElementFrame
  * stripped from the serialized output.
  */
 export function renderToString(element: HTMLElement | DocumentFragment | Node): string {
-  return renderNodeToString(element, ParseContext.Html);
+  return renderNodeToString(element, ParseContext.Html, LEGACY_SERIALIZE, 0);
 }
 
-function renderNodeToString(element: Node, context: ParseContext): string {
+/**
+ * `renderToString` with explicit marker options — the async renderers' entry.
+ * @internal
+ */
+export function renderToStringWith(element: Node, opts: SerializeOptions): string {
+  return renderNodeToString(element, ParseContext.Html, opts, 0);
+}
+
+function renderNodeToString(element: Node, context: ParseContext, opts: SerializeOptions, depth: number): string {
   if (element instanceof DocumentFragment) {
     return Array.from(element.childNodes)
       .map((child) => {
         try {
-          return renderNodeToString(child, context);
+          return renderNodeToString(child, context, opts, depth);
         } catch (err) {
           return ssrErrorComment(err);
         }
@@ -512,13 +554,13 @@ function renderNodeToString(element: Node, context: ParseContext): string {
       .join("");
   }
 
-  const frame = serializeNode(element, context);
+  const frame = serializeNode(element, context, opts, depth);
   if (typeof frame === "string") return frame;
 
   let html = frame.open;
   for (const child of frame.children) {
     try {
-      html += renderNodeToString(child, frame.context);
+      html += renderNodeToString(child, frame.context, opts, depth + 1);
     } catch (err) {
       html += ssrErrorComment(err);
     }
@@ -835,34 +877,43 @@ export function isDangerousMetaRefresh(metaProps: Record<string, string>): boole
  * attribute context). URL attributes in meta/link/scripts/bodyAttrs pass
  * through `sanitizeUrl`. The page `title` is HTML-escaped.
  */
-export function renderToDocument(
-  component: () => HTMLElement,
-  options: {
-    title?: string;
-    meta?: Record<string, string>[];
-    links?: Record<string, string>[];
-    /**
-     * External script URLs appended to `<body>`. Each passes the scheme
-     * allowlist; an allowed URL is still code that runs with the page's
-     * authority, so this option is an explicit trust decision — first-party
-     * or pinned URLs only, never request-derived values.
-     */
-    scripts?: string[];
-    bodyAttrs?: Record<string, string>;
-    /**
-     * Raw HTML injected into `<head>`. Must be wrapped in `trustHTML()`
-     * to confirm the content is developer-controlled.
-     */
-    headExtra?: TrustedHTML;
-  } = {},
-): string {
+/** Document options shared by `renderToDocument` and `renderToDocumentAsync`. */
+export interface DocumentOptions {
+  title?: string;
+  meta?: Record<string, string>[];
+  links?: Record<string, string>[];
+  /**
+   * External script URLs appended to `<body>`. Each passes the scheme
+   * allowlist; an allowed URL is still code that runs with the page's
+   * authority, so this option is an explicit trust decision — first-party
+   * or pinned URLs only, never request-derived values.
+   */
+  scripts?: string[];
+  bodyAttrs?: Record<string, string>;
+  /**
+   * Raw HTML injected into `<head>`. Must be wrapped in `trustHTML()`
+   * to confirm the content is developer-controlled.
+   */
+  headExtra?: TrustedHTML;
+}
+
+export function renderToDocument(component: () => HTMLElement, options: DocumentOptions = {}): string {
   let content: string;
   try {
     content = renderToString(component());
   } catch (err) {
     content = ssrErrorComment(err);
   }
+  return assembleDocument(content, options, "", "");
+}
 
+/**
+ * The document `renderToDocument` emits, around already-rendered `content`.
+ * `head` and `bodyEnd` are framework-generated markup (collected head tags,
+ * the transfer script), escaped by their producers.
+ * @internal
+ */
+export function assembleDocument(content: string, options: DocumentOptions, head: string, bodyEnd: string): string {
   // Names filtered, values sanitized, duplicate casings rejected, and dangerous
   // `<meta http-equiv="refresh" content="0;url=javascript:...">` entries dropped
   // — all by the one shared pipeline the client also runs.
@@ -896,10 +947,20 @@ export function renderToDocument(
     ${options.title != null ? `<title>${escapeHtml(options.title)}</title>` : ""}
     ${metaTags}
     ${linkTags}
-    ${options.headExtra || ""}
+    ${options.headExtra || ""}${
+      head
+        ? `
+    ${head}`
+        : ""
+    }
   </head>
   <body${bodyAttrs}>
-    <div id="app">${content}</div>
+    <div id="app">${content}</div>${
+      bodyEnd
+        ? `
+    ${bodyEnd}`
+        : ""
+    }
     ${scriptTags}
   </body>
 </html>`;
@@ -1323,11 +1384,25 @@ export function escapeScriptJson(json: string): string {
 /** Default maximum size of a serialized SSR payload (1 MB). */
 const DEFAULT_MAX_SSR_BYTES = 1024 * 1024;
 
+/** A window global name `serializeState` may assign: an identifier, nothing else. */
+const SAFE_GLOBAL_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
 export function serializeState(
   state: Record<string, unknown>,
   nonce?: string,
-  options?: { maxBytes?: number },
+  options?: {
+    maxBytes?: number;
+    /**
+     * The window global to assign (default `__SIBU_SSR_DATA__`). Must be a
+     * plain identifier; anything else throws.
+     */
+    global?: string;
+  },
 ): string {
+  const globalName = options?.global ?? SSR_DATA_ATTR;
+  if (!SAFE_GLOBAL_NAME.test(globalName)) {
+    throw new Error(`[SibuJS SSR] serializeState: global must be an identifier (got: ${JSON.stringify(globalName)})`);
+  }
   const rawJson = JSON.stringify(state);
   const maxBytes = options?.maxBytes ?? DEFAULT_MAX_SSR_BYTES;
   // Count bytes, not characters — multibyte strings still count correctly.
@@ -1340,7 +1415,7 @@ export function serializeState(
   }
   const json = escapeScriptJson(rawJson);
   const nonceAttr = nonce ? ` nonce="${escapeAttr(nonce)}"` : "";
-  return `<script${nonceAttr}>window.${SSR_DATA_ATTR}=${json}</script>`;
+  return `<script${nonceAttr}>window.${globalName}=${json}</script>`;
 }
 
 /**

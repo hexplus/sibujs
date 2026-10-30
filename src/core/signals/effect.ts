@@ -8,6 +8,14 @@ import { isSSR } from "../ssr-context";
 export interface EffectOptions {
   /** Error handler for exceptions thrown during effect execution. */
   onError?: (error: unknown) => void;
+  /**
+   * Also run during a server render. By default an effect is a client-only
+   * side effect and does nothing under SSR. With `server: true` it runs on the
+   * server exactly as in the browser — reactively, until the render is
+   * disposed — which is what a data primitive needs to start a fetch the server
+   * render then awaits. Browser APIs are still off limits inside it.
+   */
+  server?: boolean;
 }
 
 const _g = globalThis as any;
@@ -207,8 +215,8 @@ function disposeEffect(ctx: EffectCtx): void {
 export function effect(effectFn: EffectBody | (() => void), options?: EffectOptions): () => void {
   devAssert(typeof effectFn === "function", "effect: argument must be a function.");
 
-  // No-op during SSR — side effects are client-only
-  if (isSSR()) return () => {};
+  // No-op during SSR — side effects are client-only unless opted in.
+  if (isSSR() && !options?.server) return () => {};
 
   // Allocate a single per-effect state object. All per-effect state lives
   // here; module-level helper functions receive `ctx` as their only
