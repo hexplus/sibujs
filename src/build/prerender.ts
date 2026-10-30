@@ -224,13 +224,11 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
   await fs.rm(tmpDir, { recursive: true, force: true });
 
   // 1 — the same entry, built for Node, with the app's own config and plugins.
-  const vite = (await import(pathToFileURL(requireFromApp.resolve("vite")).href)) as {
-    build: (config: Record<string, unknown>) => Promise<unknown>;
-  };
+  const viteBuild = await loadViteBuild(requireFromApp, fs, path, pathToFileURL);
   const prev = process.env[PRERENDER_CHILD_ENV];
   process.env[PRERENDER_CHILD_ENV] = "1";
   try {
-    await vite.build({
+    await viteBuild({
       configFile: ctx.configFile,
       root: ctx.root,
       mode: ctx.mode,
@@ -250,6 +248,11 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
     else process.env[PRERENDER_CHILD_ENV] = prev;
   }
 
+  // The build emits ES modules, but its code-split chunks are `.js`. Node
+  // without ESM syntax detection (before 22.7) parses a `.js` file outside a
+  // `"type": "module"` package as CommonJS, so a lazy route chunk failed with
+  // "Cannot use import statement outside a module". Declare the directory ESM.
+  await fs.writeFile(path.join(tmpDir, "package.json"), '{ "type": "module" }\n', "utf8");
   const workerFile = path.join(tmpDir, "render-worker.mjs");
   await fs.writeFile(workerFile, WORKER_SOURCE, "utf8");
   const entryUrl = pathToFileURL(path.join(tmpDir, "entry.mjs")).href;
@@ -289,6 +292,62 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
     await fs.rm(tmpDir, { recursive: true, force: true });
   }
   return results;
+}
+
+type ViteBuild = (config: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * The file an export-map entry points at for an ES-module `import`.
+ * @internal
+ */
+export function esmEntryOf(entry: unknown): string | undefined {
+  if (typeof entry === "string") return entry;
+  if (entry === null || typeof entry !== "object") return undefined;
+  const conditions = entry as Record<string, unknown>;
+  for (const key of ["import", "module-sync", "default"]) {
+    const found = esmEntryOf(conditions[key]);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
+ * Vite's `build()`, from the app's own Vite, loaded as an ES module.
+ *
+ * `createRequire().resolve("vite")` follows REQUIRE conditions. Node versions
+ * that honor `"module-sync"` (22.10+) are sent to Vite's ESM build, but older
+ * ones — 22.3.0, this package's declared minimum — get `index.cjs`, which
+ * attaches `build` in a loop that Node's CommonJS export detection cannot see,
+ * so `import()` of it exposed no `build` at all. The ESM entry is therefore
+ * read from Vite's export map; the CommonJS interop `default` is the fallback.
+ */
+async function loadViteBuild(
+  requireFromApp: { resolve: (id: string) => string },
+  fs: { readFile: (p: string, enc: "utf8") => Promise<string> },
+  path: { dirname: (p: string) => string; join: (...p: string[]) => string },
+  pathToFileURL: (p: string) => URL,
+): Promise<ViteBuild> {
+  let resolved: string;
+  try {
+    resolved = requireFromApp.resolve("vite");
+  } catch {
+    throw new Error("[sibu prerender] needs Vite to build the entry for Node, and could not resolve it from the app.");
+  }
+  let url = pathToFileURL(resolved).href;
+  try {
+    const pkgPath = requireFromApp.resolve("vite/package.json");
+    const pkg = JSON.parse(await fs.readFile(pkgPath, "utf8")) as { exports?: Record<string, unknown> };
+    const entry = esmEntryOf(pkg.exports?.["."]);
+    if (entry) url = pathToFileURL(path.join(path.dirname(pkgPath), entry)).href;
+  } catch {
+    // No readable export map: keep the require-resolved entry.
+  }
+  const mod = (await import(url)) as { build?: ViteBuild; default?: { build?: ViteBuild } };
+  const build = mod.build ?? mod.default?.build;
+  if (typeof build !== "function") {
+    throw new Error(`[sibu prerender] the Vite module at ${url} has no build() function.`);
+  }
+  return build;
 }
 
 interface WorkerInput {

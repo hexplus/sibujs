@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { findEntryInHtml, outputFileFor, prerender, resolveInsideOutDir } from "../src/build/prerender";
+import { esmEntryOf, findEntryInHtml, outputFileFor, prerender, resolveInsideOutDir } from "../src/build/prerender";
 
 // ---------------------------------------------------------------------------
 // sibuVitePlugin({ prerender }): a real `vite build` of examples/prerender-spa
@@ -68,6 +68,21 @@ describe("prerender build", () => {
 });
 
 describe("prerender helpers", () => {
+  it("loads Vite's ESM entry from its export map, whatever the require condition resolves to", async () => {
+    // Node 22.3.0 (the declared minimum) resolves `require("vite")` to
+    // index.cjs, whose `build` is invisible to import(); the export map names
+    // the ESM build on every Node version.
+    const pkg = JSON.parse(
+      await readFile(fileURLToPath(new URL("../node_modules/vite/package.json", import.meta.url)), "utf8"),
+    );
+    expect(esmEntryOf(pkg.exports["."])).toBe("./dist/node/index.js");
+    expect(esmEntryOf("./x.js")).toBe("./x.js");
+    expect(esmEntryOf({ require: "./a.cjs", import: { types: "./t.d.ts", default: "./a.mjs" } })).toBe("./a.mjs");
+    expect(esmEntryOf({ "module-sync": "./s.js", require: "./a.cjs" })).toBe("./s.js");
+    expect(esmEntryOf({ require: "./a.cjs" })).toBeUndefined();
+    expect(esmEntryOf(null)).toBeUndefined();
+  });
+
   it("finds the module entry in index.html", () => {
     expect(findEntryInHtml('<script type="module" src="/src/main.ts"></script>')).toBe("/src/main.ts");
     expect(findEntryInHtml('<script src="/src/a.ts" type="module"></script>')).toBe("/src/a.ts");
