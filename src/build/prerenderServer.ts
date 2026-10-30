@@ -207,7 +207,13 @@ export async function prerenderFromServerEntry(
   const outDir = options.outDir ? path.resolve(ctx.root, options.outDir) : ctx.outDir;
   const origin = (options.origin ?? "http://localhost").replace(/\/+$/, "");
   const serverEntry = path.resolve(ctx.root, String(options.server).replace(/^\//, ""));
-  const shellPath = path.join(ctx.outDir, "index.html");
+  // A re-run (`sibujs prerender`) finds `index.html` already rendered; the
+  // untouched shell kept from the first run is the template then.
+  const keptShell = path.join(ctx.outDir, typeof options.shell === "string" ? options.shell : "200.html");
+  const shellPath = await fs
+    .access(keptShell)
+    .then(() => keptShell)
+    .catch(() => path.join(ctx.outDir, "index.html"));
   const shell = await fs.readFile(shellPath, "utf8");
   // A fresh directory per run: Node caches ES modules by URL, so a second build
   // in the same process must not import the previous run's driver.

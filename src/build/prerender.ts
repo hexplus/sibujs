@@ -274,7 +274,12 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
   const timeout = options.timeout ?? 15_000;
   const settle = options.settle ?? 50;
 
-  const templatePath = path.join(ctx.outDir, "index.html");
+  // A re-run finds `index.html` already rendered: use the kept shell then.
+  const keptShell = path.join(ctx.outDir, typeof options.shell === "string" ? options.shell : "200.html");
+  const templatePath = await fs
+    .access(keptShell)
+    .then(() => keptShell)
+    .catch(() => path.join(ctx.outDir, "index.html"));
   const template = await fs.readFile(templatePath, "utf8");
 
   let entry = options.entry;
