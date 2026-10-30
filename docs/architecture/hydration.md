@@ -113,6 +113,11 @@ hydrate(() => Form({ initialName: draft ?? serverName }), container);
 This is an application concern; the framework does not attempt it automatically,
 because it cannot know which pre-hydration edits are meaningful.
 
+The adopting strategy (4.14, opt-in) does keep them: the user's controls are
+the adopted nodes, their first client value write is ignored, and `input` /
+`change` are replayed so the app's state follows. See
+[hydration-adopt.md](./hydration-adopt.md).
+
 ## Lifecycle
 
 - `onCleanup` handlers registered on the hydrated tree run when the container is

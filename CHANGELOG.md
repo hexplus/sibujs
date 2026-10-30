@@ -6,6 +6,187 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.14.0] — 2026-10-30
+
+### Upgrade notes
+
+Everything below is opt-in. A browser app sees no change. Inside a server
+render (`runInSSRContext`) four things behave differently, each the documented
+intent that the code did not meet:
+
+- `query()` now fetches during a server render. It used to start its request
+  inside an effect, effects do not run on the server, so it never fetched and
+  `data()` stayed at `initialData`. `renderToString` is still synchronous and
+  does not wait; the new async renderers do. `resource(source, fetcher)` fetches
+  on the server for the same reason.
+- `onMount()` / `onUnmount()` no longer run inside an SSR scope when happy-dom
+  or jsdom is registered (they were skipped only when `document` was missing).
+- `Head()` inside a request scope records its entries for the render result
+  instead of writing into the `document.head` every request shares.
+- A route `head` whose `canonical` (or new `alternates` entry) the URL policy
+  refuses is left out entirely instead of rendering `<link rel="canonical">`
+  without an `href`.
+
+`renderToString`, `renderToDocument`, the node form of
+`renderToReadableStream`, `hydrate()` (replace), `island(id, factory)`,
+`hydrateIslands`, `enhance()` / `mountIslands()` and the 4.13 pre-renderer's
+output are unchanged.
+
+### Added — `renderToStringAsync()` / `renderToDocumentAsync()` / `settled()`
+
+```ts
+const { html, head, state, status, diagnostics } = await renderToStringAsync(() => App());
+```
+
+One `await` serializes a settled page: every deferred `when` / `match` / `each`
+commit has run and every unit of async work started in the request has
+settled — `lazy()` chunks, `query()` / `resource()` fetches, the router's
+navigation and route loads, `prerenderWait()` promises. Work is registered per
+request, so concurrent renders never wait for each other. A `timeout` (default
+5 s) serializes what is ready, `Suspense` and `lazy()` keep their fallbacks,
+and `diagnostics.pending` names what was still running
+(`query:/api/catalog (5003 ms)`). Intervals and window-focus refetches are off
+on the server; a disabled query is not waited for. An error no `ErrorBoundary`
+claims rejects with the failing node's DOM path. The result carries the head
+collected during the render and the transfer script (below). `settled(root?)`
+is the low-level wait for a custom pipeline. The async renderers put
+`data-sibu-ssr` on top-level elements only (`marker: "all"` for the
+every-element form). `formatRenderDiagnostics()` and the `log` option print one
+summary per render.
+
+### Added — a built-in server DOM (`sibujs/ssr/dom`)
+
+The async renderers install it when no DOM is registered: no happy-dom or jsdom
+needed. It implements what the runtime and serializer use — nodes, attributes
+(+ namespaces), `classList`, `dataset`, `style` as a declaration map, events
+with bubbling and `preventDefault`, `MutationObserver`, a selector engine,
+form-control IDL semantics — and its output is byte-identical to jsdom's (a
+string `style` with shorthands is the one difference from happy-dom, whose
+CSSOM expands them). A browser-only call (`animate()`, `showModal()`,
+`innerHTML =`) throws an error naming the API and the calling source location;
+`canvas.getContext()` and `document.fonts` answer "unavailable" and are
+reported. It defines no `window`. On the fixture landing page, 1 000 renders
+take 0.24 ms each (jsdom 0.86 ms, happy-dom 0.81 ms) and registering it costs
+1.0 MB of heap (jsdom 16.2 MB, happy-dom 13.0 MB). `installServerDom()` never
+replaces an existing DOM.
+
+### Added — `isServer()`, `isClient()`, `ClientOnly()`, `effect(fn, { server: true })`
+
+`ClientOnly(() => canvasView(), { fallback: () => img(…) })` renders the
+fallback on the server and in the first paint, and the content in the browser
+(after an adopting hydration, in one synchronous swap). `isServer()` is true in
+an SSR scope and in the pre-renderer. Effects stay client-only; `server: true`
+opts one in. Under happy-dom / jsdom, reading `localStorage`, `matchMedia`,
+`requestAnimationFrame`, `IntersectionObserver`, `ResizeObserver`,
+`document.fonts` or `getContext()` during a server render warns in development
+with the reading site; under the server DOM a `window is not defined` is
+rethrown with the fix.
+
+### Added — `renderRoute(routes, url)` and request-scoped memory routers
+
+`createRouter(routes, { mode: "memory", url })` keeps its location in the
+router; created inside a request scope it belongs to that request, so
+concurrent renders each have their own router and the process-wide one is
+untouched. `renderRoute` renders a URL through it — guards, `beforeEnter`,
+redirects, lazy routes, nested `Outlet()` — and answers with a status: 200,
+404 for the `*` route or a record's `status`, 301/302 plus `location` for a
+redirect (no body), 403 (configurable) when a guard rejects. `redirectBy` tells
+a `redirect` record from a guard redirect. Routes gain `status`, `render:
+"ssr" | "prerender" | "client"` and `getStaticPaths()`, and the router gains
+`trailingSlash: "ignore"`. `createRenderHandler(routes, options)` wraps
+`renderRoute` as a `Request → Response` handler for a Node sidecar, with
+`Cache-Control` and a page cache keyed by URL and a data version.
+
+### Added — one head API for the server and the browser
+
+Route `head` gains `robots`, `twitter` (falling back to the Open Graph values),
+`alternates` (hreflang) and `jsonLd` (serialized with `serializeJsonLd()`, which
+escapes `<`, `>`, `&` and U+2028 / U+2029). During a server render the route
+head and every `Head()` in the tree are collected into `result.head`; the
+innermost entry wins its key and each key is emitted once. In the browser the
+router applies the same fields on every navigation.
+
+### Added — adopting hydration: `hydrate(App, root, { strategy: "adopt" })`
+
+On output rendered with `{ hydration: "adopt" }`, the client tree is built on
+the server nodes: on matching markup no element is created, added, removed or
+moved, images do not reload, and text typed before the bundle loaded, checkbox
+state, focus and scroll survive (the app's handlers receive replayed `input` /
+`change` events). Elements carry a creation-scope id (`data-sibu-h`) per
+directive scope, so content the server rebuilt after its data arrived still
+pairs. A divergent subtree is rebuilt on its own and reported — kind, DOM path,
+both sides, likely cause — and a root that does not match replaces the whole
+tree with a development warning. A claimed element ends with exactly the
+client's attributes, kept server values re-checked against the URL policy.
+The claiming engine lives in `sibujs/ssr`; the core carries the scope hooks.
+See `docs/architecture/hydration-adopt.md` for the algorithm and its limits.
+
+### Added — data transfer
+
+The async renderers embed the request's `query()` cache, keyed `resource()`s
+(`resource(fetcher, { key })`) and route loaders (`executeLoader`, keyed by
+path) as one escaped script (`window.__SIBU_TRANSFER__`, the `serializeState`
+rules, nonce, a byte cap that drops the largest entries first and names them).
+The browser primes its cache from it: data still within `staleTime` is not
+fetched again, stale data shows at once and refetches in the background.
+`query(…, { ssr: false })` opts a query out. `serializeState` gains a `global`
+option.
+
+### Added — pre-rendering from a server entry
+
+`sibuVitePlugin({ prerender: { server: "src/entry-server.ts" } })` renders each
+route with `renderRoute()` on the server DOM, with no jsdom: every route
+without params, every `getStaticPaths()` page and every redirect by default,
+the body into the shell's `#app`, the route head replacing the shell's title,
+the transferred state before `</body>`. It writes `404.html` from the `*`
+route, `200.html`, `sitemap.xml` (not `noindex`, not `render: "client"`),
+`robots.txt` and `redirects.json`; `render: "client"` / `"ssr"` routes get the
+shell plus their head; guarded routes and guard redirects are left to the
+browser. `fetch` (a base URL or a function) supplies data at build time, and an
+unreachable API fails the build naming the route. New options: `outDir`,
+`trailingSlash`, `notFound`, `sitemap`, `robots`, `hydration`, `nonce`,
+`maxStateBytes`, `container`. In the jsdom mode the new outputs are opt-in. A
+re-run renders into the kept `200.html` shell. The plugin exposes its options
+as `api.prerender`. See `fixtures/ssr-app` and `examples/static-backends`.
+
+### Added — component islands from a server render
+
+`island("cart", Cart, props, { load: "visible" })` renders the component with
+the island marker, its props as JSON and adoption ids. In the browser
+`registerIsland("cart", islandComponent(Cart, validate))` adopts only that
+subtree when `mountIslands()` activates it; the rest of the page keeps inert
+server HTML.
+
+### Added — out-of-order streaming
+
+`renderToReadableStream(() => App(), options)` flushes the head and the shell
+(each `Suspense` boundary on its fallback) once everything outside the
+boundaries has settled, then streams each boundary as soon as its own content
+and work are ready, with a nonce-aware swap script, then the state and the
+scripts. Chunks are produced on demand; `cancel()` stops the render.
+
+### Added — `renderOnServer()` and `hydrateInTest()` in `sibujs/testing`
+
+Render a route table (with `url`) or a component and query the HTML and head
+(`text`, `getByText`, `meta`, `title`, …); take server HTML over in a test and
+get the created-element count and the adoption mismatches.
+
+### Benchmarks
+
+`npm run bench:ssr` (also in CI): render time and memory per DOM, HTML size
+per marker mode (fixture landing page: 1 325 B with the root marker, 2 090 B
+with adoption ids, 1 766 B with `renderToString`'s every-element marker), and
+takeover time (jsdom: replace 0.65 ms, adopt 0.95 ms median).
+
+### Bundle size
+
+`cdn.global.js`: +~2.3 KB raw / +~1.1 KB gzip for `ClientOnly`,
+`isServer()` / `isClient()`, the pending-work and error registries, the
+adoption scope hooks and the streaming boundary slot. The adoption engine, the
+server DOM, the async renderers and the pre-renderer are not in it.
+
+---
+
 ## [4.13.1] — 2026-10-30
 
 ### Upgrade notes

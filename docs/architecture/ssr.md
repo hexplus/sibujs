@@ -7,19 +7,26 @@ request
    │
    ▼
 runInSSRContext(() => { ... })     ← per-request AsyncLocalStorage scope
+   │                                 (renderRoute / renderToStringAsync open one)
+   ▼
+build DOM tree                     ← happy-dom, jsdom, or the built-in server DOM
    │
    ▼
-build DOM tree                     ← requires a DOM implementation
-   │
+settled()                          ← directive commits, lazy chunks, fetches,
+   │                                 router loads registered in THIS request
    ▼
 renderToString(element)            ← serialise DOM → HTML string
    │
    ▼
-serializeState(state, nonce)       ← escaped <script> payload
+collected head + transfer script   ← escaped, nonce-aware
    │
    ▼
 response
 ```
+
+Since 4.14 `renderToStringAsync()` / `renderToDocumentAsync()` /
+`renderRoute()` run the whole pipeline; `renderToString` remains the
+synchronous serializer of a tree as it is.
 
 ## SSR requires a DOM implementation
 
@@ -52,23 +59,43 @@ builder (`div()`, `svg()`, `html`, `Fragment`, `when`, `match`, `each`, `KeepAli
 `renderToString needs a DOM: register happy-dom or jsdom globals first` (since
 4.12; it used to be `ReferenceError: document is not defined`).
 
-`when`, `match` and `each` render their first branch in a microtask, once their
-anchor is attached, so let one run before serializing:
+### The built-in server DOM (4.14)
 
-```js
-const html = await runInSSRContext(async () => {
-  const tree = App();
-  await Promise.resolve();
-  return renderToString(tree);
-});
-```
+`sibujs/ssr/dom` (`src/platform/serverDom.ts`) is a minimal DOM implementing
+only what the runtime and the serializer use. The async renderers install it
+when no DOM is registered; `installServerDom()` does it explicitly and never
+replaces an existing DOM. It is NOT the "DOM-free path" declined in 4.12, which
+would have routed every DOM access in the core through an indirection every
+client bundle pays for: the core is unchanged and still talks to `document`;
+the server DOM is just another `document`, shipped only in `sibujs/ssr`.
 
-A DOM-free rendering path (a minimal internal node implementation used only
-during SSR) was considered for 4.12 and not built: it would route every DOM
-access in the core through an indirection that every client bundle pays for,
-and give the attribute policy a second, non-browser DOM to be right about. This differs from frameworks that
-render straight to a string, and it is a real deployment consideration: it costs
-memory per process and rules out DOM-less edge runtimes.
+- **Parity.** Output is byte-identical to jsdom's on the fixture pages and on a
+  page covering every serializer path (`tests/ssr-server-dom.node.test.ts`).
+  `style` values are kept as written (no CSSOM normalization); happy-dom's CSSOM
+  expands shorthands in a string `style`, which is the one difference from it.
+- **Form controls** follow the browser's IDL rules the attribute writer relies
+  on: `value` / `checked` / `selected` are state that does not reflect,
+  `disabled` reflects.
+- **Browser-only APIs** throw an error naming the API and the calling source
+  frame (`animate()`, `showModal()`, `requestFullscreen()`, `innerHTML =`); probes
+  (`canvas.getContext()`, `document.fonts`) answer "unavailable" and are
+  recorded in `diagnostics.browserApis`. There is no `window`.
+- **Cost** (`npm run bench:ssr`, fixture landing page, 1 000 renders, Node 24):
+
+| DOM | per render | heap to register | heap after 1 000 renders |
+|---|---|---|---|
+| server DOM | 0.24 ms | 1.0 MB | 4.4 MB |
+| jsdom | 0.86 ms | 16.2 MB | 20.4 MB |
+| happy-dom | 0.81 ms | 13.0 MB | 13.8 MB |
+
+### Waiting for the tree (4.14)
+
+`when`, `match` and `each` render their first branch in a microtask, `lazy()`
+chunks, fetches and router loads later. `settled()` waits for all of it, per
+request: work is registered with `trackPending()` (which `lazy()`, `query()`,
+`resource()`, `prerenderWait()` and the router call) on the request's
+`SSRStore.pending`, and the loop runs macrotask turns until that set is empty
+twice in a row, or the timeout. A timed-out render serializes what is ready.
 
 **What does work without a DOM** (verified in a bare Node environment,
 `tests/ssr-hardening-node-env.test.ts`):
@@ -80,9 +107,8 @@ memory per process and rules out DOM-less edge runtimes.
 | `deserializeState` (returns `undefined`) | yes |
 | SSR context / `runInSSRContext` / `isSSR` | yes |
 | `resolveServerRoute` — matching, params, query, hash, redirects | yes |
-| Building elements (`div(...)`) and `renderToString` | **no** — the builder throws the setup error above |
-
-So server-side *routing* is DOM-free; server-side *rendering* is not.
+| Building elements (`div(...)`) and `renderToString` | needs a DOM — the built-in server DOM is enough |
+| `renderToStringAsync` / `renderRoute` / the server-entry pre-renderer | yes — they install the server DOM |
 
 ## Request isolation
 
@@ -219,7 +245,22 @@ them. Returning a Web `ReadableStream` does not make `renderToReadableStream`
 usable in a DOM-less runtime. The supported floor is SibuJS's declared Node
 version (`>=22.3.0`) plus a DOM (`jsdom`, `linkedom`, `happy-dom`).
 
-### Streaming is shell-then-batch, not per-boundary progressive
+### Out-of-order streaming (4.14)
+
+`renderToReadableStream(() => App(), options)` — a function, not a node —
+streams per boundary. `Suspense` reports its container to the streaming render
+(`core/rendering/streamBoundary.ts`); work started while a boundary's content
+builds is attributed to it, and a `lazy()` created inside it renders inside it.
+The head and the shell flush once the work attributed to no boundary has
+settled; a boundary not yet ready is serialized with its fallback (its
+in-progress content held aside for the moment). Each boundary then streams as
+soon as its own work has settled — `<div hidden id="sibu-resolved-…">` plus
+`suspenseSwapScript()` — in finishing order; a ready boundary nested in a
+streamed one travels with it. Chunks are produced on demand (a one-slot channel:
+the renderer waits until the consumer read the previous chunk), and `cancel()`
+stops the render. The node form below is unchanged.
+
+### Streaming is shell-then-batch, not per-boundary progressive (the node form)
 
 This distinction is easy to misread, so it is worth stating precisely.
 
@@ -264,15 +305,30 @@ renders cannot collide on marker ids.
 
 ### `query()` under SSR
 
-`query()` **does** fetch during server rendering. Its effect runs on creation and
-starts a request like it would on the client; results land in the
-**request-scoped** cache (see [Request isolation](#request-isolation) above), not
-the process-global one, so concurrent requests cannot read each other's data.
+Before 4.14 this section said `query()` fetched during server rendering; it did
+not. Its request started inside an `effect()`, and effects are no-ops under SSR,
+so a query on the server never fetched and `data()` stayed at `initialData`.
 
-What SSR does *not* do is wait for those requests before serializing: nothing in
-`renderToString`/`renderToStream` blocks on in-flight queries. To get data into
-server markup, resolve it before rendering, or put the dependent subtree behind
-`ssrSuspense`.
+Since 4.14 the query's internal effects run on the server (`effect(fn, {
+server: true })`): it fetches, results land in the **request-scoped** cache, and
+the request is registered so the async renderers wait for it. Intervals and
+window-focus / reconnect listeners are never installed on the server;
+`enabled: false` and `ssr: false` queries do not fetch. `renderToString` still
+serializes synchronously and waits for nothing.
+
+### Data transfer (4.14)
+
+After the render settles, the request's query cache, keyed resources and
+loaders are collected (`utils/transfer.ts`: one collector per section) into ONE
+script, `window.__SIBU_TRANSFER__ = {"v":1,"q":{…},"r":{…}}`, escaped by
+`escapeScriptJson`, with the render's nonce. The payload is capped
+(`maxStateBytes`, 1 MB): entries are dropped largest first and named in a dev
+warning. `__proto__`-style keys never cross in either direction. The browser
+reads the global once (own property only, plain objects only, version checked)
+and primes its cache: each query entry keeps the server's `dataUpdatedAt`, so
+staleness is measured from when the server fetched it. A request's collectors
+read only that request's caches, which is what keeps concurrent renders apart
+(`tests/ssr-data-transfer.test.ts`).
 
 ## Invariants
 
