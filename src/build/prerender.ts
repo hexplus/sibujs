@@ -36,8 +36,54 @@ export interface PrerenderRoute {
 }
 
 export interface PrerenderOptions {
-  /** Routes to render. */
-  routes: Array<string | PrerenderRoute>;
+  /**
+   * Routes to render. With `server`, defaults to `"auto"`: every route of the
+   * exported table without params, plus the paths `getStaticPaths()` lists
+   * for dynamic ones. A query variant (`"/cotizar?servicio=dtf"`) is rendered
+   * only when listed, and needs its own `output` file.
+   */
+  routes?: Array<string | PrerenderRoute> | "auto";
+  /**
+   * A SERVER ENTRY module (relative to the Vite root) exporting the app's
+   * `routes`, and optionally `head` (router head defaults), `routerOptions`
+   * and `app` (the shell around `Route()`). Routes are then rendered with
+   * `renderRoute()` on the built-in server DOM — the request-scoped router,
+   * async data, the collected head and transferred state — with no jsdom.
+   * Without it, the 4.13 mode runs the client entry in jsdom.
+   */
+  server?: string;
+  /** Output dir (relative to the Vite root). Default: Vite's `build.outDir`. */
+  outDir?: string;
+  /**
+   * Data at build time: a base URL that relative `fetch()` URLs (`/api/…`)
+   * resolve against (a running API), or a `fetch` implementation. A request
+   * that cannot reach it fails the build, naming the route. Default: `origin`.
+   * Server-entry mode only.
+   */
+  fetch?: string | typeof fetch;
+  /**
+   * `"always"` (default): `/cotizar` is written as `cotizar/index.html`, the
+   * sitemap lists `/cotizar/`. `"never"`: `cotizar.html`, listed as `/cotizar`
+   * (the static server must map `/cotizar` to `cotizar.html`).
+   */
+  trailingSlash?: "always" | "never";
+  /**
+   * URL rendered through the `*` route and written as `404.html` (when it
+   * answers 404). Default `"/404"` with `server`; off otherwise. `false` to skip.
+   */
+  notFound?: string | false;
+  /** Write `sitemap.xml` (pages not `noindex`, not `render: "client"`). Default `true` with `server`, `false` otherwise. */
+  sitemap?: boolean;
+  /** Write `robots.txt` pointing at the sitemap; a string adds rules (`"Disallow: /admin"`). Default `false`. */
+  robots?: boolean | string;
+  /** `"adopt"`: mark the output for `hydrate(App, root, { strategy: "adopt" })`. Server-entry mode only. */
+  hydration?: "adopt" | "replace";
+  /** CSP nonce for the transfer script. Server-entry mode only. */
+  nonce?: string;
+  /** Cap on each page's transferred state in bytes. Server-entry mode only. */
+  maxStateBytes?: number;
+  /** Id of the element the body renders into. Default `"app"`. Server-entry mode only. */
+  container?: string;
   /**
    * The client entry module, relative to the Vite root. Default: the first
    * `<script type="module" src>` in the source `index.html`.
@@ -79,6 +125,13 @@ export interface PrerenderResult {
   route: string;
   file: string;
   ms: number;
+  /** HTTP status the route answered with (server-entry mode). */
+  status?: number;
+  /**
+   * `page` (rendered body), `shell` (head only), `redirect` (listed in
+   * redirects.json), `not-found` (404.html), `skipped` (a guard rejected it).
+   */
+  kind?: "page" | "shell" | "redirect" | "not-found" | "skipped";
 }
 
 /** Environment variable marking the nested SSR build, so it does not pre-render again. */
@@ -101,7 +154,7 @@ export function findEntryInHtml(html: string): string | null {
  * could escape it.
  * @internal
  */
-export function outputFileFor(route: PrerenderRoute): string {
+export function outputFileFor(route: PrerenderRoute, trailingSlash: "always" | "never" = "always"): string {
   if (route.output) {
     const output = route.output;
     // Relative to the output dir; a leading slash is accepted and dropped. A
@@ -141,6 +194,10 @@ export function outputFileFor(route: PrerenderRoute): string {
       }
       return decoded;
     });
+  if (trailingSlash === "never" && segments.length > 0) {
+    const last = segments.pop() as string;
+    return [...segments, `${last}.html`].join("/");
+  }
   return [...segments, "index.html"].join("/");
 }
 
@@ -184,14 +241,33 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
   const path = await import("node:path");
   const { pathToFileURL } = await import("node:url");
   const { createRequire } = await import("node:module");
+  const requireFromRoot = createRequire(path.join(ctx.root, "package.json"));
 
+  if (options.server) {
+    const { prerenderFromServerEntry } = await import("./prerenderServer");
+    return prerenderFromServerEntry(options, ctx, {
+      outputFileFor,
+      resolveInsideOutDir,
+      loadViteBuild: () => loadViteBuild(requireFromRoot, fs, path, pathToFileURL),
+      childEnv: PRERENDER_CHILD_ENV,
+    });
+  }
+
+  if (options.routes === undefined || options.routes === "auto") {
+    throw new Error(
+      '[sibu prerender] `routes: "auto"` needs a server entry (`prerender.server`); list the routes instead.',
+    );
+  }
   const routes: PrerenderRoute[] = options.routes.map((r) => (typeof r === "string" ? { path: r } : r));
+  if (options.notFound) routes.push({ path: options.notFound, output: "404.html" });
   if (routes.length === 0) return [];
+  const trailingSlash = options.trailingSlash === "never" ? "never" : "always";
+  const outDir = options.outDir ? path.resolve(ctx.root, options.outDir) : ctx.outDir;
   // Every destination is validated before anything is built or rendered, so an
   // unsafe route fails the build without touching the disk.
   const planned = routes.map((route) => {
-    const file = outputFileFor(route);
-    resolveInsideOutDir(path, ctx.outDir, file);
+    const file = outputFileFor(route, trailingSlash);
+    resolveInsideOutDir(path, outDir, file);
     return { route, file };
   });
   const origin = (options.origin ?? "http://localhost").replace(/\/+$/, "");
@@ -220,7 +296,7 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
     throw new Error("[sibu prerender] needs jsdom to render routes. Install it: npm i -D jsdom");
   }
 
-  const tmpDir = path.join(ctx.outDir, ".sibu-prerender");
+  const tmpDir = path.join(outDir, ".sibu-prerender");
   await fs.rm(tmpDir, { recursive: true, force: true });
 
   // 1 — the same entry, built for Node, with the app's own config and plugins.
@@ -258,11 +334,13 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
   const entryUrl = pathToFileURL(path.join(tmpDir, "entry.mjs")).href;
   const jsdomUrl = pathToFileURL(jsdomPath).href;
 
+  await fs.mkdir(outDir, { recursive: true });
   if (options.shell !== false) {
-    await fs.writeFile(path.join(ctx.outDir, options.shell ?? "200.html"), template, "utf8");
+    await fs.writeFile(path.join(outDir, options.shell ?? "200.html"), template, "utf8");
   }
 
   const results: PrerenderResult[] = [];
+  const indexable: string[] = [];
   const queue = [...planned];
   const concurrency = Math.max(1, options.concurrency ?? 4);
   try {
@@ -281,15 +359,31 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
             settle,
           });
           // Re-checked at the write boundary itself.
-          const target = resolveInsideOutDir(path, ctx.outDir, file);
+          const target = resolveInsideOutDir(path, outDir, file);
           await fs.mkdir(path.dirname(target), { recursive: true });
           await fs.writeFile(target, html, "utf8");
           results.push({ route: route.path, file, ms: Date.now() - started });
+          if (file !== "404.html" && !/<meta\b[^>]*name=["']robots["'][^>]*content=["'][^"']*noindex/i.test(html)) {
+            const pathname = route.path.split(/[?#]/)[0];
+            indexable.push(
+              trailingSlash === "always" && pathname !== "/" ? `${pathname.replace(/\/+$/, "")}/` : pathname,
+            );
+          }
         }
       }),
     );
   } finally {
     await fs.rm(tmpDir, { recursive: true, force: true });
+  }
+  // Opt-in here: a 4.13 build writes exactly what it wrote before.
+  if (options.sitemap && indexable.length > 0) {
+    const { buildSitemap } = await import("./prerenderServer");
+    await fs.writeFile(path.join(outDir, "sitemap.xml"), buildSitemap(origin, indexable.sort()), "utf8");
+  }
+  if (options.robots) {
+    const extra = typeof options.robots === "string" ? `${options.robots.trim()}\n` : "";
+    const sitemapLine = options.sitemap && indexable.length > 0 ? `Sitemap: ${origin}/sitemap.xml\n` : "";
+    await fs.writeFile(path.join(outDir, "robots.txt"), `User-agent: *\nAllow: /\n${extra}${sitemapLine}`, "utf8");
   }
   return results;
 }

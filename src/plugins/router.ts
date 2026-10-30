@@ -364,6 +364,13 @@ export interface RouterOptions {
   readonly mode?: "history" | "hash" | "memory";
   /** Initial location of a `"memory"` router (`"/cotizar?servicio=dtf"`). Default `"/"`. */
   readonly url?: string;
+  /**
+   * `"strict"` (default): `/cotizar/` and `/cotizar` are different paths.
+   * `"ignore"`: a trailing slash is dropped before matching, so `/cotizar/` is
+   * the `/cotizar` route — what a static server serving `cotizar/index.html`
+   * at `/cotizar/` (FastAPI `StaticFiles`, nginx, S3) needs.
+   */
+  readonly trailingSlash?: "strict" | "ignore";
   readonly base?: string;
   readonly linkActiveClass?: string;
   readonly linkExactActiveClass?: string;
@@ -1495,7 +1502,12 @@ export class SibuRouter {
   }
 
   private createRouteContext(fullPath: string): RouteContext {
-    const { path, query: queryString, hash } = splitRouteUrl(fullPath);
+    const split = splitRouteUrl(fullPath);
+    const { query: queryString, hash } = split;
+    const path =
+      this.options.trailingSlash === "ignore" && split.path.length > 1
+        ? split.path.replace(/\/+$/, "") || "/"
+        : split.path;
     const query = parseQuery(queryString);
     const queryAll = parseQueryAll(queryString);
 

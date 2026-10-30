@@ -166,3 +166,14 @@ describe('createRouter({ mode: "memory", url })', () => {
     destroyRouter();
   });
 });
+
+describe('createRouter({ trailingSlash: "ignore" })', () => {
+  it("resolves /cotizar/ to the /cotizar route; the default stays strict", async () => {
+    const strict = await render("/cotizar/");
+    expect(strict.status).toBe(404);
+    const loose = await renderRoute(routes, "/cotizar/", { router: { head, trailingSlash: "ignore" } });
+    expect(loose.status).toBe(200);
+    expect(loose.route?.path).toBe("/cotizar");
+    expect(loose.html).toContain("Cotiza tu pedido");
+  });
+});

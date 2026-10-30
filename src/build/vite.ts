@@ -262,7 +262,15 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
       const target = prerenderTarget;
       prerenderTarget = null;
       const results = await prerender(prerenderOptions, target);
-      for (const r of results) console.log(`[sibu prerender] ${r.route} → ${r.file} (${r.ms} ms)`);
+      for (const r of results) {
+        const what =
+          r.kind === "redirect"
+            ? `redirect ${r.status} (redirects.json)`
+            : r.kind === "skipped"
+              ? `skipped (${r.status})`
+              : r.file;
+        console.log(`[sibu prerender] ${r.route} → ${what} (${r.ms} ms)`);
+      }
     },
 
     transform(code: string, id: string): { code: string; map: SourceMapV3 } | null {
