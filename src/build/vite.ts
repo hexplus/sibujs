@@ -188,6 +188,8 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
   closeBundle?: () => Promise<void>;
   transform?: (code: string, id: string) => { code: string; map: SourceMapV3 } | null;
   handleHotUpdate?: (ctx: { file: string; modules: unknown[] }) => void;
+  /** For tooling (`sibujs prerender`): the options this plugin was created with. */
+  api: { prerender: PrerenderOptions | undefined };
 } {
   const {
     hmr = true,
@@ -210,6 +212,7 @@ export function sibuVitePlugin(options: SibuVitePluginOptions = {}): {
   return {
     name: "sibu-vite-plugin",
     enforce: "pre",
+    api: { prerender: prerenderOptions },
 
     config(_userConfig?: unknown, env?: ViteModeInfo) {
       isDevMode = resolveDevMode(devMode, env);
