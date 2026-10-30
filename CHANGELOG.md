@@ -134,8 +134,10 @@ sibuVitePlugin({ prerender: { routes: ["/", "/cotizar", "/galeria"], origin: "ht
 
 After `vite build`, each route is rendered by the app's own entry in a
 registered DOM (jsdom, installed by the app). Each route runs in its own worker
-thread. The pre-renderer waits for every `fetch`, every `prerenderWait()`
-promise, the router's initial navigation and its lazy routes, then writes
+thread. The pre-renderer waits for every `fetch` and every body read on its
+response (`json()`, `text()`, `arrayBuffer()`, `blob()`, `formData()`, clones
+included), every `prerenderWait()` promise, the router's initial navigation
+and its lazy routes, then writes
 `dist/<route>/index.html` with the rendered body and that route's head. The
 untouched shell is kept as `dist/200.html` for the backend's fallback route.
 `isPrerendering()`, `prerenderRoute()` and `prerenderWait()` (in `sibujs/ssr`)

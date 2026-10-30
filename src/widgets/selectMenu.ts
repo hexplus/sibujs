@@ -188,8 +188,15 @@ export function selectMenu<T>(options: SelectMenuOptions<T>): SelectMenu<T> {
     const restoreListbox = snapshotAttributes(listbox, ["id", "role", "tabindex"]);
     const prevHidden = listbox.hidden;
     // Options are discovered lazily (the list may be reactive), so each one is
-    // snapshotted the first time bind() writes to it.
+    // snapshotted the first time bind() writes to it, and given back as soon as
+    // it leaves the list — the binding never holds an option it no longer shows.
     const optionRestores = new Map<HTMLElement, () => void>();
+    // The id generated for an element that had none. Allocated from the shared
+    // monotonic counter, never from the element's index: an index is reused
+    // when an option is inserted before another, which gave two options the
+    // same id and made `aria-activedescendant` ambiguous. Weak, so an element
+    // that returns to the list gets its id back without being retained.
+    const generatedIds = new WeakMap<HTMLElement, string>();
     // Option element → index, rebuilt on every pass, for pointer handling.
     let optionIndex = new Map<HTMLElement, number>();
 
@@ -203,6 +210,17 @@ export function selectMenu<T>(options: SelectMenuOptions<T>): SelectMenu<T> {
     trigger.setAttribute("aria-controls", listboxId);
     if (trigger.tabIndex < 0) trigger.tabIndex = 0;
 
+    const generatedIdFor = (el: HTMLElement, taken: ReadonlySet<string>): string => {
+      let id = generatedIds.get(el);
+      // Skip an id the page or another option already uses, so a generated id
+      // never collides with an author-supplied one.
+      while (id === undefined || taken.has(id) || el.ownerDocument.getElementById(id) !== null) {
+        id = createId(`${listboxId}-opt`);
+      }
+      generatedIds.set(el, id);
+      return id;
+    };
+
     let lastScrolled: HTMLElement | null = null;
     const stopBinding = domBinding(() => {
       const items = getItems();
@@ -214,18 +232,38 @@ export function selectMenu<T>(options: SelectMenuOptions<T>): SelectMenu<T> {
 
       const nextIndex = new Map<HTMLElement, number>();
       let activeEl: HTMLElement | null = null;
+      // Collected first, so a generated id can avoid every id the options of
+      // this pass already carry — including author ids on elements that are
+      // not in the document yet, which `getElementById` cannot see.
+      const optionEls: Array<HTMLElement | null> = [];
+      const taken = new Set<string>();
       for (let i = 0; i < items.length; i++) {
         const el = els.option(items[i], i);
+        optionEls.push(el);
+        if (el?.id) taken.add(el.id);
+      }
+      for (let i = 0; i < items.length; i++) {
+        const el = optionEls[i];
         if (!el) continue;
         if (!optionRestores.has(el)) optionRestores.set(el, snapshotAttributes(el, OPTION_ATTRS));
         nextIndex.set(el, i);
-        if (!el.id) el.id = `${listboxId}-opt-${i}`;
+        if (!el.id) {
+          el.id = generatedIdFor(el, taken);
+          taken.add(el.id);
+        }
         el.setAttribute("role", "option");
         el.setAttribute("aria-selected", sel !== null && isEqual(items[i], sel) ? "true" : "false");
         const disabled = isDisabled(items[i]);
         if (disabled) el.setAttribute("aria-disabled", "true");
         else el.removeAttribute("aria-disabled");
         if (i === idx && !disabled) activeEl = el;
+      }
+      // Options that left the list are no longer this widget's to manage.
+      for (const [el, restore] of optionRestores) {
+        if (nextIndex.has(el)) continue;
+        restore();
+        optionRestores.delete(el);
+        if (lastScrolled === el) lastScrolled = null;
       }
       optionIndex = nextIndex;
 

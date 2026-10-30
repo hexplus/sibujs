@@ -469,3 +469,130 @@ describe("selectMenu: dispose", () => {
     expect(() => dispose()).not.toThrow();
   });
 });
+
+describe("selectMenu: generated option ids under reactive updates", () => {
+  // Each item owns one element, created on demand and kept, like a keyed list.
+  function reactiveMenu(initial: string[]) {
+    const [items, setItems] = signal<string[]>(initial);
+    const elements = new Map<string, HTMLLIElement>();
+    const elementFor = (item: string): HTMLLIElement => {
+      let li = elements.get(item);
+      if (!li) {
+        li = document.createElement("li");
+        li.textContent = item;
+        elements.set(item, li);
+      }
+      return li;
+    };
+    // The DOM follows the item order, as a rendered list would.
+    const render = () => listbox.replaceChildren(...items().map(elementFor));
+    render();
+    const menu = selectMenu<string>({ items: () => items() });
+    const dispose = menu.bind({ trigger, listbox, option: (item) => elementFor(item) });
+    const update = (next: string[]) => {
+      setItems(next);
+      render();
+    };
+    const idOf = (item: string) => elementFor(item).id;
+    const ids = () => items().map(idOf);
+    return { menu, dispose, update, idOf, ids, elementFor };
+  }
+
+  beforeEach(() => {
+    listbox.replaceChildren();
+  });
+
+  const expectUnique = (ids: string[]) => {
+    expect(ids.every((id) => id !== "")).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    for (const id of ids) expect(document.querySelectorAll(`[id="${id}"]`)).toHaveLength(1);
+  };
+
+  it("prepending an option does not reuse an existing option's id", () => {
+    const m = reactiveMenu(["A"]);
+    const a = m.idOf("A");
+    m.update(["B", "A"]);
+    expect(m.idOf("A")).toBe(a);
+    expectUnique(m.ids());
+  });
+
+  it("inserting an option in the middle keeps ids unique and stable", () => {
+    const m = reactiveMenu(["A", "C"]);
+    const before = { A: m.idOf("A"), C: m.idOf("C") };
+    m.update(["A", "B", "C"]);
+    expect(m.idOf("A")).toBe(before.A);
+    expect(m.idOf("C")).toBe(before.C);
+    expectUnique(m.ids());
+  });
+
+  it("reordering existing elements keeps each element's id", () => {
+    const m = reactiveMenu(["A", "B", "C"]);
+    const before = { A: m.idOf("A"), B: m.idOf("B"), C: m.idOf("C") };
+    m.update(["C", "A", "B"]);
+    expect({ A: m.idOf("A"), B: m.idOf("B"), C: m.idOf("C") }).toEqual(before);
+    expectUnique(m.ids());
+  });
+
+  it("removing options restores them, and new options get fresh ids", () => {
+    const m = reactiveMenu(["A", "B", "C"]);
+    const removed = m.elementFor("B");
+    const usedIds = new Set(m.ids());
+    m.update(["A", "C"]);
+    // A removed option is given back as it was: no generated id, no roles.
+    expect(removed.hasAttribute("id")).toBe(false);
+    expect(removed.hasAttribute("role")).toBe(false);
+    expect(removed.hasAttribute("aria-selected")).toBe(false);
+    m.update(["A", "C", "D", "E"]);
+    expectUnique(m.ids());
+    expect(usedIds.has(m.idOf("D"))).toBe(false);
+    expect(usedIds.has(m.idOf("E"))).toBe(false);
+  });
+
+  it("preserves user-supplied ids and never generates one that collides with them", () => {
+    const m = reactiveMenu(["A"]);
+    const mine = m.elementFor("B");
+    // An author id shaped exactly like the next generated ones.
+    mine.id = m.idOf("A").replace(/\d+$/, (n) => String(Number(n) + 1));
+    const other = m.elementFor("C");
+    other.id = m.idOf("A").replace(/\d+$/, (n) => String(Number(n) + 2));
+    const authored = [mine.id, other.id];
+    m.update(["B", "A", "C", "D"]);
+    expect([m.idOf("B"), m.idOf("C")]).toEqual(authored);
+    expectUnique(m.ids());
+  });
+
+  it("aria-activedescendant points at the active option's element after updates and navigation", () => {
+    const m = reactiveMenu(["A", "B"]);
+    m.menu.open("first");
+    const active = () => document.getElementById(trigger.getAttribute("aria-activedescendant") ?? "");
+    expect(active()).toBe(m.elementFor("A"));
+    key("ArrowDown");
+    expect(active()).toBe(m.elementFor("B"));
+    // Prepend: index 1 is now A. The reference must name exactly that element.
+    m.update(["Z", "A", "B"]);
+    expect(active()).toBe(m.elementFor("A"));
+    key("ArrowDown");
+    expect(active()).toBe(m.elementFor("B"));
+    key("Home");
+    expect(active()).toBe(m.elementFor("Z"));
+    expectUnique(m.ids());
+  });
+
+  it("dispose removes generated ids and restores original attributes", () => {
+    const m = reactiveMenu(["A", "B"]);
+    const authored = m.elementFor("C");
+    authored.id = "authored";
+    authored.setAttribute("aria-selected", "custom");
+    m.update(["C", "A", "B"]);
+    m.dispose();
+    for (const item of ["A", "B"]) {
+      const el = m.elementFor(item);
+      expect(el.hasAttribute("id")).toBe(false);
+      expect(el.hasAttribute("role")).toBe(false);
+      expect(el.hasAttribute("aria-selected")).toBe(false);
+    }
+    expect(authored.id).toBe("authored");
+    expect(authored.getAttribute("aria-selected")).toBe("custom");
+    expect(authored.hasAttribute("role")).toBe(false);
+  });
+});

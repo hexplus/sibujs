@@ -103,16 +103,70 @@ export function findEntryInHtml(html: string): string | null {
  */
 export function outputFileFor(route: PrerenderRoute): string {
   if (route.output) {
-    if (route.output.split(/[\\/]/).includes("..")) throw new Error(`[sibu prerender] unsafe output "${route.output}"`);
-    return route.output.replace(/^[\\/]+/, "");
+    const output = route.output;
+    // Relative to the output dir; a leading slash is accepted and dropped. A
+    // drive (`C:\x`, `C:x`) is refused rather than dropped: it names another
+    // root, not a place inside this one.
+    if (/^[A-Za-z]:/.test(output) || output.includes("\0")) {
+      throw new Error(`[sibu prerender] unsafe output "${output}": must be a path relative to the output dir`);
+    }
+    const segments = output.split(/[\\/]+/).filter(Boolean);
+    if (segments.length === 0 || segments.some((s) => s === "." || s === "..")) {
+      throw new Error(`[sibu prerender] unsafe output "${output}": "." and ".." segments are not allowed`);
+    }
+    return segments.join("/");
   }
   const pathname = route.path.split(/[?#]/)[0];
   if (!pathname.startsWith("/")) throw new Error(`[sibu prerender] route "${route.path}" must start with "/"`);
-  const segments = pathname.split("/").filter(Boolean);
-  if (segments.some((s) => s === ".." || s === ".")) {
-    throw new Error(`[sibu prerender] unsafe route "${route.path}"`);
-  }
-  return [...segments.map(decodeURIComponent), "index.html"].join("/");
+  // Validate what each segment DECODES to: `%2e%2e` is `..`, `%2f` / `%5c`
+  // are separators. Checking the encoded text first let `/%2e%2e/x` through.
+  const segments = pathname
+    .split("/")
+    .filter(Boolean)
+    .map((raw) => {
+      let decoded: string;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {
+        throw new Error(
+          `[sibu prerender] route "${route.path}" has malformed percent-encoding in "${raw}"; ` +
+            "encode a literal % as %25.",
+        );
+      }
+      if (decoded === "." || decoded === ".." || /[\\/\0]/.test(decoded)) {
+        throw new Error(
+          `[sibu prerender] unsafe route "${route.path}": segment "${raw}" decodes to "${decoded}", ` +
+            'which could leave the output dir (".", "..", or a path separator).',
+        );
+      }
+      return decoded;
+    });
+  return [...segments, "index.html"].join("/");
+}
+
+/**
+ * Absolute destination of `file` inside `outDir`, refusing anything that
+ * resolves outside it. The last line of defence at the write boundary, so a
+ * path `outputFileFor` let through can still never escape.
+ * @internal
+ */
+export function resolveInsideOutDir(
+  path: {
+    resolve: (...p: string[]) => string;
+    relative: (a: string, b: string) => string;
+    isAbsolute: (p: string) => boolean;
+  },
+  outDir: string,
+  file: string,
+): string {
+  const root = path.resolve(outDir);
+  const target = path.resolve(root, file);
+  const rel = path.relative(root, target);
+  // Compared by path segment, never by string prefix: `/out-evil` starts with
+  // `/out` but is outside it.
+  const escapes = rel === "" || rel === ".." || /^\.\.[\\/]/.test(rel) || path.isAbsolute(rel);
+  if (escapes) throw new Error(`[sibu prerender] refusing to write "${file}": it resolves outside ${root}`);
+  return target;
 }
 
 /**
@@ -133,6 +187,13 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
 
   const routes: PrerenderRoute[] = options.routes.map((r) => (typeof r === "string" ? { path: r } : r));
   if (routes.length === 0) return [];
+  // Every destination is validated before anything is built or rendered, so an
+  // unsafe route fails the build without touching the disk.
+  const planned = routes.map((route) => {
+    const file = outputFileFor(route);
+    resolveInsideOutDir(path, ctx.outDir, file);
+    return { route, file };
+  });
   const origin = (options.origin ?? "http://localhost").replace(/\/+$/, "");
   const timeout = options.timeout ?? 15_000;
   const settle = options.settle ?? 50;
@@ -199,13 +260,13 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
   }
 
   const results: PrerenderResult[] = [];
-  const queue = [...routes];
+  const queue = [...planned];
   const concurrency = Math.max(1, options.concurrency ?? 4);
   try {
     await Promise.all(
       Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
-        for (let route = queue.shift(); route; route = queue.shift()) {
-          const file = outputFileFor(route);
+        for (let job = queue.shift(); job; job = queue.shift()) {
+          const { route, file } = job;
           const started = Date.now();
           const html = await renderInWorker(workerFile, {
             entryUrl,
@@ -216,7 +277,8 @@ export async function prerender(options: PrerenderOptions, ctx: PrerenderBuildCo
             timeout,
             settle,
           });
-          const target = path.join(ctx.outDir, file);
+          // Re-checked at the write boundary itself.
+          const target = resolveInsideOutDir(path, ctx.outDir, file);
           await fs.mkdir(path.dirname(target), { recursive: true });
           await fs.writeFile(target, html, "utf8");
           results.push({ route: route.path, file, ms: Date.now() - started });
@@ -311,18 +373,59 @@ try {
     tracked.finally(() => { pending.delete(tracked); lastActivity = Date.now(); });
   };
 
+  // Hold serialization while \`p\` is pending, WITHOUT handling it: the caller
+  // receives a promise that settles exactly as \`p\` does, so a rejection the
+  // app handles behaves normally and one it ignores still reaches the
+  // unhandledRejection listener below (attaching a handler to \`p\` itself
+  // would silently mark it handled).
+  const observe = (p) => {
+    let release;
+    const tracked = new Promise((r) => { release = r; });
+    pending.add(tracked);
+    tracked.finally(() => { pending.delete(tracked); lastActivity = Date.now(); });
+    return Promise.resolve(p).then(
+      (value) => { release(); return value; },
+      (error) => { release(); throw error; },
+    );
+  };
+
   // Every fetch holds serialization until it settles; relative URLs resolve
   // against the route's URL, as they would in the browser.
   const nodeFetch = globalThis.fetch;
   if (typeof nodeFetch === "function") {
     const wrapped = (input, init) => {
       const target = typeof input === "string" || input instanceof URL ? new URL(String(input), url) : input;
-      const p = nodeFetch(target, init);
-      track(p);
-      return p;
+      return observe(nodeFetch(target, init));
     };
     globalThis.fetch = wrapped;
     win.fetch = wrapped;
+  }
+
+  // A fetch settles when the HEADERS arrive; the data the page renders comes
+  // from a body reader that may still be waiting for the rest of the response.
+  // Each reader call is held like the fetch itself. Patched on the prototype —
+  // this thread exists only to render one route — so clones, and Responses the
+  // app builds itself, are covered, and \`this\` / brand checks are the native
+  // ones. Bodies nobody reads are never touched, so an unused or long-lived
+  // body does not hold the page. Reading \`response.body\` directly as a stream
+  // is NOT held (a stream may never end); wrap such a read in prerenderWait().
+  const ResponseCtor = globalThis.Response;
+  if (typeof ResponseCtor === "function") {
+    const proto = ResponseCtor.prototype;
+    for (const name of ["arrayBuffer", "blob", "bytes", "formData", "json", "text"]) {
+      const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+      const original = descriptor?.value;
+      if (typeof original !== "function") continue;
+      Object.defineProperty(proto, name, {
+        ...descriptor,
+        value: {
+          // A method-shorthand keeps the native name and is not constructible.
+          [name](...args) {
+            return observe(Reflect.apply(original, this, args));
+          },
+        }[name],
+      });
+    }
   }
 
   globalThis[Symbol.for("sibujs.prerender.v1")] = { route, wait: track };
