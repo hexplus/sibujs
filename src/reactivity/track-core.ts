@@ -304,6 +304,10 @@ type SubWithList = Subscriber & {
   // disposed before its bindings get a chance to observe the state that
   // replaces it.
   _owner?: OwnerToken | null;
+  // Set on a structural binding whose subtree is FROZEN: it stays in the DOM
+  // (a branch playing its leave transition) but must not react any more. Every
+  // subscriber it owns is skipped by the drain. See `StructuralBinding.freeze`.
+  _frozen?: boolean;
 };
 
 // Indirection between an owned subscriber and its owner. Children point at the
@@ -550,6 +554,23 @@ export function bindOwnerScope<A extends unknown[], R>(fn: (...args: A) => R): (
 
 let currentStructOwner: OwnerToken | null = null;
 
+// Number of live frozen structural bindings. While it is zero, which is always
+// unless a directive is playing a leave transition, the drain's frozen check is
+// a single compare.
+let frozenOwners = 0;
+
+/** Whether any owner up `sub`'s ownership chain is frozen. */
+function hasFrozenOwner(sub: SubWithList): boolean {
+  for (let t = sub._owner ?? null; t !== null; ) {
+    const o = t.sub;
+    // A disposed owner ends the chain, as in `runPendingOwners`.
+    if (o === null) return false;
+    if (o._frozen === true) return true;
+    t = o._owner ?? null;
+  }
+  return false;
+}
+
 // ---------- Epoch counter for retrack-based pruning -----------------------
 
 let subscriberEpochCounter = 0;
@@ -765,6 +786,15 @@ export interface StructuralBinding {
    * render), so what it builds is owned exactly as a later rebuild would be.
    */
   run: <T>(fn: () => T) => T;
+  /**
+   * Stop every subscriber created under this binding (through `run`, or while
+   * it ran) from running again, without disposing anything. Their DOM stays
+   * as it is and their disposers stay registered, so a subtree can keep
+   * showing its last state, and keep its lifecycle alive, until it is removed.
+   * Disposing the binding lifts the freeze. Absent on a structural binding
+   * provided by an older copy of the runtime.
+   */
+  freeze?: () => void;
 }
 
 /**
@@ -786,6 +816,12 @@ export function structuralBinding(commit: () => void, ownerNode?: unknown): Stru
       } finally {
         currentStructOwner = prev;
       }
+    },
+    freeze: () => {
+      const s = sub as SubWithList & { _disposed?: boolean };
+      if (s._disposed || s._frozen) return;
+      s._frozen = true;
+      frozenOwners++;
     },
   };
 }
@@ -827,6 +863,7 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
   subscriber._errorNode = ownerNode;
   subscriber._tok = null;
   subscriber._owner = null;
+  subscriber._frozen = false;
   if (structural) subscriber._tok = { sub: subscriber };
 
   // Initial run establishes the first dependency set (guarded, see above).
@@ -860,6 +897,10 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
 
   subscriber._dispose = () => {
     (subscriber as { _disposed?: boolean })._disposed = true;
+    if (subscriber._frozen) {
+      subscriber._frozen = false;
+      frozenOwners--;
+    }
     // Drop the DOM reference so a disposed binding cannot keep a detached
     // subtree alive through the subscriber object.
     subscriber._errorNode = undefined;
@@ -1101,6 +1142,10 @@ function runPendingOwners(sub: SubWithList): void {
 
 /** Run one dequeued subscriber through the drain's gates. */
 function runQueued(sub: Subscriber): void {
+  // Owned by a frozen subtree (a branch playing its leave transition): it keeps
+  // its last output and does not run. Its dependency edges stay until the
+  // subtree is disposed, so a later write just lands here again.
+  if (frozenOwners !== 0 && hasFrozenOwner(sub as SubWithList)) return;
   // An offender identified earlier in THIS drain stays parked. Skipping only
   // the offender is what breaks the cycle — a quarantined subscriber stops
   // writing, so its partner stops being re-enqueued.

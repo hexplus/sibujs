@@ -6,6 +6,101 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.15.0] — Unreleased
+
+### Upgrade notes
+
+Every new option is opt-in and every default renders what 4.14 rendered, with
+one exception: style-map keys that 4.14 turned into the wrong CSS property now
+set the right one (below). If a stylesheet or script relied on the wrong name
+(reading `--foo-bar` for a `--fooBar` key), switch it to the key's real name.
+
+### Fixed — style-map keys name the same CSS property on the client and the server
+
+The tag factories kebab-cased every capital letter of a `style` key, so a
+custom property (whose name is case-sensitive) became a different one
+(`{ "--fooBar": 1 }` set `--foo-bar`), and `cssFloat`, `msTransform` and
+`webkitLineClamp` became `css-float`, `ms-transform` and `webkit-line-clamp`:
+invalid names a browser drops and the server DOM wrote into the markup
+verbatim. The server DOM's `el.style.fooBar` access used a second, different
+copy of the rule. One mapping now serves the static style map, per-property
+getters, whole-`style` getters (including removing a property a later run no
+longer lists, under the same name it was set with), the server DOM's
+`style` property access and the `toHaveStyle` test matcher:
+
+- a key starting with `--` passes through untouched;
+- `cssFloat` is `float`;
+- camelCase becomes kebab-case;
+- a vendor prefix (`webkit`, `moz`, `ms`, `o`) gets its leading dash however
+  it is capitalized: `msTransform` and `MsTransform` are both `-ms-transform`;
+- a key that is already a property name (`background-color`,
+  `-webkit-line-clamp`) is unchanged.
+
+### Fixed — a `Fragment` (or any `DocumentFragment`) as a `when()` / `match()` branch
+
+A fragment empties itself when it is inserted, and the directives kept only the
+fragment: on the next switch they had nothing to remove, so the old branch's
+nodes stayed on the page, with live bindings, next to the new ones. The
+directives now record a fragment's nodes before inserting it and release
+exactly those, plus whatever the fragment's reactive children have rendered
+since. Several sibling nodes are a supported branch, and need no wrapper
+element:
+
+```ts
+when(() => confirming(), () => Fragment([button("Yes"), button("No")]));
+```
+
+A bare fragment handed in instead of a factory is re-attached, like a bare
+element.
+
+### Added — exit and enter transitions for `when()` and `match()`
+
+```ts
+match(() => screen(), { attract: () => Attract(), draw: () => Draw(), done: () => Done() }, {
+  transition: { enterClass: "screen-in", leaveClass: "screen-out", mode: "out-in" },
+});
+```
+
+`DirectiveOptions.transition` takes `enterClass` / `leaveClass` (the option
+names of `transition()` in `sibujs/motion`), custom `enter` / `leave`
+callbacks that receive the branch's nodes and may return a promise (Web
+Animations), `mode` (`"both"`, the default; `"out-in"`; `"in-out"`),
+`maxDuration` and `appear`. At a switch, the outgoing branch:
+
+- is frozen: its bindings and effects stop, so it shows its last state instead
+  of reacting to the state the new branch owns;
+- gets `inert` and `aria-hidden="true"`, and focus inside it follows the
+  directive's `focus` policy as on any rebuild;
+- is removed and disposed when its leave ends: on `animationend` /
+  `transitionend` of each of its elements, when the custom `leave` settles, or
+  at a timeout computed from its styles (delay + duration x iterations, + 50
+  ms), capped by `maxDuration` and never more than 5 s. Nothing animating
+  (zero durations, a reduced-motion stylesheet, `display: none`) removes it
+  synchronously.
+
+Its `onUnmount` and `registerDisposer` teardowns run at that removal, so a
+canvas or a `requestAnimationFrame` loop can run until it has faded out.
+Several branches may be leaving at once; switching back to a bare element that
+is still leaving cancels its leave. The first render enters only with
+`appear: true`. Disposing the directive removes leaving branches at once.
+Server renders ignore transitions. Without `transition`, a switch removes and
+disposes the old branch at once, as before.
+
+### Added — `each()`: a dev warning when a direct `item()` read goes stale, and `item.peek()`
+
+`render` runs once per key, untracked, so `img({ src: p().url })` keeps the
+first url when the key later receives a replacement item. In development, a
+row whose `render` read `item()` (or `index()`) directly now warns at the
+moment that read goes stale, once per render call site, naming the key and the
+call site; a read in a binding (`src: () => p().url`) or an effect, and a list
+whose items are never replaced, never warn. `item.peek()` and `index.peek()`
+read the current value without subscribing and are never reported: the
+explicit form of an intentional one-time read. The check is compiled out of
+production builds. The getters are typed `EachItem<T>` / `EachIndex`; existing
+render callbacks typed `(item: () => T)` still type-check.
+
+---
+
 ## [4.14.1] — 2026-10-30
 
 ### Fixed — writing form-control defaults on the server DOM

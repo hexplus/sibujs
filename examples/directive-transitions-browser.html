@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS when()/match() transitions — browser test fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      @keyframes fade { from { opacity: 1; } to { opacity: 0; } }
+      @keyframes rise { from { transform: translateY(8px); } to { transform: none; } }
+      /* Shorthands on purpose: the leave timing is read from computed styles. */
+      .out { animation: fade 200ms ease forwards; }
+      .in { animation: rise 150ms ease; }
+      .slide-out { transition: opacity 200ms ease, transform 300ms ease 50ms; opacity: 0; transform: translateX(20px); }
+      @media (prefers-reduced-motion: reduce) {
+        .out, .in { animation-duration: 0.01ms !important; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="when-host"></div>
+      <div id="transition-host"></div>
+      <div id="fragment-host"></div>
+    </main>
+    <script type="module">
+      import { Fragment, button, div, input, onUnmount, signal, span, when } from "../dist/index.js";
+
+      const unmounted = [];
+
+      // A `when` with a CSS-animation leave and a focusable field in each branch.
+      const [on, setOn] = signal(true);
+      const panel = (name) => {
+        const el = div({ class: "panel", "data-name": name }, [input({ id: "field", "data-branch": name })]);
+        onUnmount(() => unmounted.push({ name, at: performance.now() }), el);
+        return el;
+      };
+      document.getElementById("when-host").appendChild(
+        when(() => on(), () => panel("A"), () => panel("B"), { transition: { leaveClass: "out", enterClass: "in" } }),
+      );
+
+      // A CSS-transition leave with two properties and a delay.
+      const [slid, setSlid] = signal(true);
+      document.getElementById("transition-host").appendChild(
+        when(() => slid(), () => span({ class: "slider" }, "slide"), { transition: { leaveClass: "slide-out" } }),
+      );
+
+      // A multi-node branch.
+      const [pair, setPair] = signal(true);
+      document.getElementById("fragment-host").appendChild(
+        when(
+          () => pair(),
+          () => Fragment([button({ "data-pair": "yes" }, "Yes"), button({ "data-pair": "no" }, "No")]),
+          () => span({ "data-pair": "none" }, "none"),
+          { transition: { leaveClass: "out" } },
+        ),
+      );
+
+      window.__t = {
+        toggle: () => {
+          const switchedAt = performance.now();
+          setOn(!on());
+          return switchedAt;
+        },
+        slide: () => {
+          const switchedAt = performance.now();
+          setSlid(!slid());
+          return switchedAt;
+        },
+        pair: () => setPair(!pair()),
+        unmounted: () => unmounted.slice(),
+        panels: () =>
+          Array.from(document.querySelectorAll("#when-host .panel")).map((el) => ({
+            name: el.dataset.name,
+            inert: el.hasAttribute("inert"),
+            hidden: el.getAttribute("aria-hidden"),
+            leaving: el.classList.contains("out"),
+          })),
+        focused: () => document.activeElement?.dataset?.branch ?? document.activeElement?.tagName ?? null,
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

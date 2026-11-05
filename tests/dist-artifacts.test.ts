@@ -299,6 +299,18 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // never share a scope (`adoptScope.ts`). Measured: raw ~92,320 B, gzip
     // ~31,790 B (+~480 B raw, +~220 B gzip).
     //
+    // Raw 97,800 B, gzip baseline 33,300 B in 4.15 for `when()` / `match()`
+    // transitions and multi-node branches: the enter/leave engine (computed
+    // timings, end events, the 5 s cap, custom JS phases;
+    // `core/rendering/branchTransition.ts`), leaving-branch bookkeeping and the
+    // `out-in` / `in-out` sequencing in the directives, fragment branches whose
+    // reactive children keep rendering after insertion, the frozen-owner check
+    // in the scheduler, the shared style-key mapping and `each` rows' `peek()`.
+    // The transition engine cannot be shaken out: `transition` is a plain
+    // options object, so every `when` / `match` references it. Measured: raw
+    // ~97,480 B, gzip ~33,875 B (+~5,160 B raw, +~2,090 B gzip; about 4,400 B
+    // raw of it the transitions).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -306,8 +318,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(92_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(31_200 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(97_800);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(33_300 * 1.02));
   });
 });
 

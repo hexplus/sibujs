@@ -13,9 +13,18 @@ import { reactiveBinding } from "./track";
  *
  * @param placeholder Anchor Comment node for insertion
  * @param getter Function returning NodeChild or NodeChild[] to render
+ * @param exposeNodes When true, the nodes the binding currently renders can be
+ * read back with {@link renderedNodes}. For a placeholder whose rendered nodes
+ * are SIBLINGS in a range someone else releases node by node (a `Fragment`
+ * child used as a `when` branch): a re-render puts new nodes in the live DOM,
+ * outside the range that was recorded when the fragment was inserted.
  * @returns Teardown function to cancel the binding
  */
-export function bindChildNode(placeholder: Comment, getter: () => NodeChild | NodeChild[]): () => void {
+export function bindChildNode(
+  placeholder: Comment,
+  getter: () => NodeChild | NodeChild[],
+  exposeNodes?: boolean,
+): () => void {
   let lastNodes: Node[] = [];
   // Every run builds its nodes in this child's own scope (adopting hydration).
   const scope = captureScope();
@@ -135,5 +144,21 @@ export function bindChildNode(placeholder: Comment, getter: () => NodeChild | No
   // LATER scheduled run can still be offered to the enclosing ErrorBoundary.
   // Structural, like `when`: the getter may replace the subtree it rendered,
   // and the subscribers that subtree created are owned by this binding.
+  if (exposeNodes) renderedBy.set(placeholder, () => lastNodes);
   return reactiveBinding(commit, placeholder, true);
+}
+
+// Placeholders created with `exposeNodes`, mapped to a reader of what they
+// render now. Only `Fragment` children register, so the hot path of a reactive
+// child inside an element pays nothing.
+const renderedBy = new WeakMap<Node, () => Node[]>();
+
+/**
+ * The nodes a reactive child bound with `exposeNodes` renders right now, or
+ * `null` for any other node.
+ *
+ * @internal
+ */
+export function renderedNodes(placeholder: Node): Node[] | null {
+  return renderedBy.get(placeholder)?.() ?? null;
 }

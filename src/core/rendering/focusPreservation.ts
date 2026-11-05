@@ -218,7 +218,9 @@ export function restoreFocusWithin(
 
   // The node itself survived (reused or reordered) and merely lost focus. No
   // identity matching needed — this IS the element the user was editing.
-  if (snapshot.el.isConnected) {
+  // Unless it is still on the page only to play a leave transition: an inert
+  // subtree cannot hold focus, so look for its counterpart instead.
+  if (snapshot.el.isConnected && !snapshot.el.closest("[inert]")) {
     refocus(snapshot.el, snapshot);
     return;
   }
