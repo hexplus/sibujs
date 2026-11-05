@@ -41,9 +41,15 @@ longer lists, under the same name it was set with), the server DOM's
 A fragment empties itself when it is inserted, and the directives kept only the
 fragment: on the next switch they had nothing to remove, so the old branch's
 nodes stayed on the page, with live bindings, next to the new ones. The
-directives now record a fragment's nodes before inserting it and release
-exactly those, plus whatever the fragment's reactive children have rendered
-since. Several sibling nodes are a supported branch, and need no wrapper
+directives now record a fragment's nodes before inserting it and treat the
+branch as the range those nodes render: rows an `each()` at its top level adds
+later, a nested `when()` / `match()` branch, a `KeepAlive` case, a router
+outlet's page and what a reactive child renders now are made inert, animated,
+removed and re-attached with it. Nodes such a range gains while the branch is
+leaving are made inert (and given the leave class) as they appear. Cleanup
+registered on a fragment the branch factory built (`onCleanup(fn, fragment)`)
+runs when the branch is released, after its nodes, even if the fragment was
+empty. Several sibling nodes are a supported branch, and need no wrapper
 element:
 
 ```ts
@@ -71,10 +77,13 @@ Animations), `mode` (`"both"`, the default; `"out-in"`; `"in-out"`),
   of reacting to the state the new branch owns;
 - gets `inert` and `aria-hidden="true"`, and focus inside it follows the
   directive's `focus` policy as on any rebuild;
-- is removed and disposed when its leave ends: on `animationend` /
-  `transitionend` of each of its elements, when the custom `leave` settles, or
-  at a timeout computed from its styles (delay + duration x iterations, + 50
-  ms), capped by `maxDuration` and never more than 5 s. Nothing animating
+- is removed and disposed when its leave ends: once every animation and
+  transition its elements actually started has finished (`getAnimations()`,
+  so a listed property that does not change is not waited for; where that API
+  is missing, one `animationend` / `transitionend` per `animation-name` /
+  `transition-property` entry), when the custom `leave` settles, or at a
+  timeout computed from its styles (CSS list matching: delay + duration x
+  iterations, + 50 ms), capped by `maxDuration` and never more than 5 s. Nothing animating
   (zero durations, a reduced-motion stylesheet, `display: none`) removes it
   synchronously.
 

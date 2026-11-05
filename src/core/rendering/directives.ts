@@ -1,4 +1,3 @@
-import { renderedNodes } from "../../reactivity/bindChildNode";
 import { bindOwnerScope, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
 import type { StructuralBinding } from "../../reactivity/track-core";
 import { devWarnLazy } from "../dev";
@@ -8,6 +7,7 @@ import { captureScope, inScope } from "./adoptScope";
 import { type DirectiveTransition, type PhaseRun, runPhase } from "./branchTransition";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, type FocusSnapshot, restoreFocusWithin } from "./focusPreservation";
+import { collectRange, hasRange, rangeEnd, registerRange } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -91,10 +91,11 @@ export interface DirectiveOptions {
    *   focused while it fades (focus inside it follows the `focus` policy, as
    *   on any rebuild);
    * - plays its leave (`leaveClass`, or a custom `leave`) where it is in the
-   *   DOM, and is removed and disposed when that ends: on `animationend` /
-   *   `transitionend` of its elements, when the custom `leave` promise
-   *   settles, or at a timeout computed from its styles, capped by
-   *   `maxDuration` and never more than 5 s. Zero durations (no animation, a
+   *   DOM, and is removed and disposed when that ends: once every animation
+   *   and transition its elements actually started has finished (read with
+   *   `getAnimations()`; end events where it is missing), when the custom
+   *   `leave` promise settles, or at a timeout computed from its styles,
+   *   capped by `maxDuration` and never more than 5 s. Zero durations (no animation, a
    *   reduced-motion stylesheet, `display: none`) remove it synchronously.
    *
    * Its `onUnmount` callbacks and `registerDisposer` teardowns run when it is
@@ -124,12 +125,18 @@ function isDirectiveOptions(value: unknown): value is DirectiveOptions {
  *
  * A branch may be several nodes: a `DocumentFragment` empties itself when it is
  * inserted, so its child nodes are recorded before insertion and the branch is
- * released through them, not through the (by then empty) fragment.
+ * released through them, not through the (by then empty) fragment. And a
+ * branch is a RANGE: a start that renders siblings of its own (an `each()`
+ * anchor, a nested `when` / `match`, a `Fragment` function child) brings
+ * everything it renders now, which `refreshNodes` re-reads before the branch is
+ * made inert, animated, removed or re-attached.
  */
 interface Branch {
   /** The node the branch resolved to: an element, a text node, or a fragment. */
   source: Node;
-  /** The top-level nodes it inserted after the anchor. */
+  /** The nodes it was inserted as: the fragment's children, or `[source]`. */
+  starts: Node[];
+  /** Every node it occupies after the anchor, as of the last `refreshNodes`. */
   nodes: Node[];
   /** Whether the directive produced it (and so disposes it). See `resolveBranch`. */
   owned: boolean;
@@ -143,10 +150,14 @@ interface Branch {
   waiting: boolean;
 }
 
-// A fragment's child nodes, recorded when it was first inserted, so a bare
-// fragment branch (one handed in rather than built) can be re-attached after
-// its insertion emptied it.
-const fragmentNodes = new WeakMap<Node, Node[]>();
+// A fragment's child nodes, recorded when it was first inserted: insertion
+// empties it, and a bare fragment (one handed in rather than built) is
+// re-attached through them.
+const fragmentStarts = new WeakMap<Node, Node[]>();
+// The nodes a bare branch occupied when it was last detached (its range, with
+// whatever an `each()` or nested directive in it rendered), so re-attaching it
+// puts all of them back.
+const detachedRanges = new WeakMap<Node, Node[]>();
 
 const NOOP = (): void => {};
 
@@ -196,53 +207,41 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     );
   }
 
-  let nodes: Node[];
+  let starts: Node[];
   if (node.nodeType === 11) {
     // A fragment: record its children before inserting it empties it. A bare
     // fragment re-attached later is already empty; put back what it held.
     if (node.firstChild) {
-      nodes = Array.from(node.childNodes);
-      fragmentNodes.set(node, nodes);
+      starts = Array.from(node.childNodes);
+      fragmentStarts.set(node, starts);
     } else {
-      nodes = fragmentNodes.get(node) ?? [];
+      starts = fragmentStarts.get(node) ?? [];
     }
-    if (nodes.length === 0) return null;
   } else {
-    nodes = [node];
+    starts = [node];
   }
-  return { source: node, nodes, owned, owner: null, phase: null, restore: null, waiting: false };
+  const nodes = (!owned && detachedRanges.get(node)) || starts;
+  // An empty fragment the directive built still has a lifetime: cleanup
+  // registered on the fragment itself runs when the branch is released.
+  if (nodes.length === 0 && !owned) return null;
+  return { source: node, starts, nodes, owned, owner: null, phase: null, restore: null, waiting: false };
 }
 
 /**
- * Bring a FRAGMENT branch's node list up to date before it is released, made
- * inert, or searched for focus. A reactive child of the fragment
- * (`Fragment([() => …])`) renders after its placeholder comment, and every
- * re-render replaces those nodes in the live DOM, so the list recorded at
- * insertion goes stale: the nodes it rendered since are added, in DOM order,
- * and the ones it has already removed (and disposed) are dropped.
+ * Bring a branch's node list up to date before it is released, made inert,
+ * animated, or searched for focus. Its starts render siblings after insertion
+ * — rows of an `each()`, a nested `when` / `match` branch, what a `Fragment`
+ * function child renders now — so the list recorded at insertion goes stale.
+ * The range of every start is read again (DOM order, deduplicated); nodes a
+ * renderer already removed (and disposed) are dropped.
  */
 function refreshNodes(branch: Branch): void {
-  if (branch.source.nodeType !== 11) return;
-  const out: Node[] = [];
-  const seen = new Set<Node>();
-  const nodes = branch.nodes;
-  for (let i = 0; i < nodes.length; i++) {
-    const node = nodes[i];
-    if (node.parentNode === null || seen.has(node)) continue;
-    seen.add(node);
-    out.push(node);
-    const rendered = node.nodeType === 8 ? renderedNodes(node) : null;
-    if (rendered === null) continue;
-    for (let j = 0; j < rendered.length; j++) {
-      const child = rendered[j];
-      if (child.parentNode === null || seen.has(child)) continue;
-      seen.add(child);
-      out.push(child);
-    }
-  }
-  branch.nodes = out;
-  // A bare fragment is re-attached from this list (see `resolveBranch`).
-  if (!branch.owned) fragmentNodes.set(branch.source, out);
+  const starts = branch.starts;
+  // The common case: one node that renders no sibling range.
+  if (starts.length === 1 && rangeEnd(starts[0]) === starts[0]) return;
+  branch.nodes = collectRange(starts);
+  // A bare branch is re-attached from this list (see `resolveBranch`).
+  if (!branch.owned) detachedRanges.set(branch.source, branch.nodes);
 }
 
 /** Put a branch's nodes, in order, right after the anchor. */
@@ -278,6 +277,10 @@ function releaseBranch(branch: Branch): void {
     if (branch.owned) dispose(node);
     node.parentNode?.removeChild(node);
   }
+  // An owned fragment is a lifetime of its own: cleanup registered on the
+  // fragment object (`onCleanup(fn, fragment)`) runs after its nodes', once.
+  // The fragment is empty by now, so this reaches only its own registrations.
+  if (branch.owned && branch.source.nodeType === 11) dispose(branch.source);
   if (branch.owner !== null) {
     branch.owner.stop();
     branch.owner = null;
@@ -290,28 +293,59 @@ function releaseBranch(branch: Branch): void {
  * from an element that turns inert, and doing it here makes every engine agree
  * before the focus policy decides where focus goes.
  *
- * @returns A function restoring the attributes as they were.
+ * A branch whose range can still grow while it leaves (an `each()` or a
+ * directive at its top level that is not frozen, because the caller owns it)
+ * is watched until the leave ends: an element added to its range is made
+ * inert too, and given `leaveClass` when the leave is class-based.
+ *
+ * @returns A function restoring what was changed, and ending the watch.
  */
-function makeInert(nodes: Node[]): () => void {
+function makeInert(branch: Branch, leaveClass: string | undefined): () => void {
   const saved: [Element, string | null, string | null][] = [];
+  const marked = new Set<Node>();
+  const mark = (nodes: Node[]): void => {
+    for (let i = 0; i < nodes.length; i++) {
+      if (nodes[i].nodeType !== 1 || marked.has(nodes[i])) continue;
+      const el = nodes[i] as Element;
+      marked.add(el);
+      saved.push([el, el.getAttribute("inert"), el.getAttribute("aria-hidden")]);
+      el.setAttribute("inert", "");
+      el.setAttribute("aria-hidden", "true");
+    }
+  };
   const active = typeof document !== "undefined" ? document.activeElement : null;
-  let holdsFocus = false;
-  for (let i = 0; i < nodes.length; i++) {
-    if (nodes[i].nodeType !== 1) continue;
-    const el = nodes[i] as Element;
-    saved.push([el, el.getAttribute("inert"), el.getAttribute("aria-hidden")]);
-    el.setAttribute("inert", "");
-    el.setAttribute("aria-hidden", "true");
-    if (active && (el === active || el.contains(active))) holdsFocus = true;
+  mark(branch.nodes);
+  const initial = saved.length;
+  for (let i = 0; i < initial; i++) {
+    const el = saved[i][0];
+    if (active && (el === active || el.contains(active))) {
+      (active as HTMLElement).blur?.();
+      break;
+    }
   }
-  if (holdsFocus) (active as HTMLElement).blur?.();
+  let observer: MutationObserver | null = null;
+  const parent = branch.nodes[0]?.parentNode;
+  if (parent && typeof MutationObserver === "function" && branch.starts.some(hasRange)) {
+    observer = new MutationObserver(() => {
+      refreshNodes(branch);
+      const before = saved.length;
+      mark(branch.nodes);
+      // Only once the leave is playing (an `in-out` leave waits for the enter).
+      if (leaveClass && saved[0]?.[0].classList.contains(leaveClass)) {
+        for (let i = before; i < saved.length; i++) saved[i][0].classList.add(leaveClass);
+      }
+    });
+    observer.observe(parent, { childList: true });
+  }
   return () => {
+    observer?.disconnect();
     for (let i = 0; i < saved.length; i++) {
       const [el, inert, hidden] = saved[i];
       if (inert === null) el.removeAttribute("inert");
       else el.setAttribute("inert", inert);
       if (hidden === null) el.removeAttribute("aria-hidden");
       else el.setAttribute("aria-hidden", hidden);
+      if (leaveClass && i >= initial) el.classList.remove(leaveClass);
     }
   };
 }
@@ -427,7 +461,7 @@ function directive(
     }
     refreshNodes(branch);
     branch.owner?.freeze?.();
-    branch.restore = makeInert(branch.nodes);
+    branch.restore = makeInert(branch, t.leave ? undefined : t.leaveClass);
     if (t.mode === "in-out") {
       // An older branch still waiting for the enter this switch interrupted
       // has nothing left to wait for.
@@ -562,6 +596,18 @@ function directive(
   // disposed (or frozen) before any of its bindings can re-run against the new
   // state.
   const binding = structuralBinding(update, anchor);
+  // This directive's range, for an enclosing branch that holds the anchor: it
+  // ends with the last node of the branch furthest from the anchor — the oldest
+  // one still leaving, otherwise the current one.
+  registerRange(anchor, () => {
+    for (let i = 0; i <= leaving.length; i++) {
+      const branch = i < leaving.length ? leaving[i] : current;
+      if (branch === null) break;
+      const nodes = collectRange(branch.starts);
+      if (nodes.length > 0) return nodes[nodes.length - 1];
+    }
+    return null;
+  });
   registerDisposer(anchor, () => {
     disposed = true;
     deferred = false;
@@ -606,8 +652,9 @@ function directive(
  *
  * A branch may be SEVERAL sibling nodes: return a `Fragment([...])` (or any
  * `DocumentFragment`). No wrapper element is needed, and on every switch all of
- * its nodes — including whatever its reactive children rendered since — are
- * removed and disposed together.
+ * its nodes — including what its reactive children, an `each()` or a nested
+ * `when` / `match` at its top level render now — are removed and disposed
+ * together. Cleanup registered on the fragment itself runs then too.
  *
  * The branch is rebuilt whenever the condition's VALUE changes (`Object.is`),
  * not only when its truthiness flips, so

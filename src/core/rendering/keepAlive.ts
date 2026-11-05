@@ -1,6 +1,7 @@
 import { bindOwnerScope, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
+import { registerNodesRange } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -132,6 +133,9 @@ export function KeepAlive(
   // evicted by a switch is disposed before its bindings can re-run in the same
   // flush. (A branch that is merely detached stays live by design.)
   const binding = structuralBinding(update);
+  // The shown case sits after the anchor; an enclosing directive branch that
+  // holds this anchor takes it along.
+  registerNodesRange(anchor, () => [currentNode]);
   const untrack = binding.stop;
 
   if (!initialized) {

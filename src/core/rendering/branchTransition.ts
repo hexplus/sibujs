@@ -8,8 +8,10 @@ import { reportError } from "../errors";
 // on the FIRST of:
 //   - the custom `enter` / `leave` callback's promise settling (or the callback
 //     returning synchronously);
-//   - every element of the branch reporting the end of its CSS animation or
-//     transition (`animationend` / `transitionend` on the element itself);
+//   - every animation and transition each element of the branch actually
+//     started having finished (`getAnimations()`); where that API is missing,
+//     an `animationend` / `transitionend` on the element itself for every
+//     `animation-name` / `transition-property` entry;
 //   - a timeout derived from the computed styles (+ 50 ms of slack), capped by
 //     `maxDuration` and by a hard 5 s ceiling, so a phase can never hang: an
 //     infinite animation, an end event that never fires, or a promise that
@@ -68,61 +70,87 @@ const SLACK_MS = 50;
 // A total at or below this is "no animation": a reduced-motion stylesheet
 // typically shortens durations to 0.01ms rather than 0.
 const INSTANT_MS = 1;
+const END_EVENTS = ["transitionend", "animationend"] as const;
+
+/** A comma-separated computed list, trimmed; `fallback` when the engine reports nothing. */
+function parseList(list: string | undefined, fallback: string): string[] {
+  return (list?.trim() ? list : fallback).split(",").map((part) => part.trim());
+}
 
 /** `"0.3s, 120ms"` → `[300, 120]`. */
 function parseTimes(list: string | undefined): number[] {
-  if (!list) return [0];
-  return list.split(",").map((part) => {
-    const v = part.trim();
-    const n = Number.parseFloat(v);
-    if (!Number.isFinite(n)) return 0;
-    return v.endsWith("ms") ? n : n * 1000;
-  });
+  return parseList(list, "0s").map((v) => (Number.parseFloat(v) || 0) * (v.endsWith("ms") ? 1 : 1000));
 }
 
 interface Timing {
   /** Longest end time in ms (Infinity for an infinite animation). */
   total: number;
-  /** The end event that marks `total`. */
-  event: "animationend" | "transitionend";
-  /** How many such events to wait for. */
-  count: number;
+  /** End events still expected, per `transition-property` entry. */
+  transitions: Map<string, number>;
+  /** End events still expected, per `animation-name` entry. */
+  animations: Map<string, number>;
+  /** Total of both maps. */
+  pending: number;
 }
 
-/** The longest animation or transition the element will run, from its computed style. */
+/**
+ * Every transition and animation the element will run, from its computed style.
+ *
+ * CSS list matching: `transition-property` and `animation-name` say how many
+ * there are; the duration, delay and iteration lists repeat to match them, and
+ * their surplus entries are ignored. `transition-property` defaults to `all`;
+ * a `none` entry runs nothing. Returns null when nothing runs longer than
+ * `INSTANT_MS`.
+ */
 function measure(el: Element): Timing | null {
   if (typeof getComputedStyle !== "function") return null;
   const cs = getComputedStyle(el);
   if (cs.display === "none") return null;
+  const timing: Timing = { total: 0, transitions: new Map(), animations: new Map(), pending: 0 };
+  const expect = (
+    map: Map<string, number>,
+    names: string[],
+    durations: number[],
+    delays: number[],
+    iterations: string[],
+  ): void => {
+    for (let i = 0; i < names.length; i++) {
+      const duration = durations[i % durations.length];
+      if (names[i] === "none" || duration <= 0) continue;
+      const count = iterations[i % iterations.length];
+      const runs = count === "infinite" ? Number.POSITIVE_INFINITY : Number.parseFloat(count) || 1;
+      timing.total = Math.max(timing.total, delays[i % delays.length] + duration * runs);
+      map.set(names[i], (map.get(names[i]) ?? 0) + 1);
+      timing.pending++;
+    }
+  };
+  expect(
+    timing.transitions,
+    parseList(cs.transitionProperty, "all"),
+    parseTimes(cs.transitionDuration),
+    parseTimes(cs.transitionDelay),
+    ["1"],
+  );
+  expect(
+    timing.animations,
+    parseList(cs.animationName, "none"),
+    parseTimes(cs.animationDuration),
+    parseTimes(cs.animationDelay),
+    parseList(cs.animationIterationCount, "1"),
+  );
+  return timing.total <= INSTANT_MS ? null : timing;
+}
 
-  const tDur = parseTimes(cs.transitionDuration);
-  const tDel = parseTimes(cs.transitionDelay);
-  let transition = 0;
-  let transitions = 0;
-  for (let i = 0; i < tDur.length; i++) {
-    if (tDur[i] <= 0) continue;
-    transitions++;
-    transition = Math.max(transition, tDur[i] + tDel[i % tDel.length]);
-  }
-
-  const aDur = parseTimes(cs.animationDuration);
-  const aDel = parseTimes(cs.animationDelay);
-  const names = (cs.animationName || "").split(",");
-  const iterations = (cs.animationIterationCount || "1").split(",");
-  let animation = 0;
-  let animations = 0;
-  for (let i = 0; i < aDur.length; i++) {
-    if (aDur[i] <= 0 || names[i % names.length].trim() === "none") continue;
-    const raw = iterations[i % iterations.length].trim();
-    const count = raw === "infinite" ? Number.POSITIVE_INFINITY : Number.parseFloat(raw) || 1;
-    animations++;
-    animation = Math.max(animation, aDel[i % aDel.length] + aDur[i] * count);
-  }
-
-  if (animation <= INSTANT_MS && transition <= INSTANT_MS) return null;
-  return animation >= transition
-    ? { total: animation, event: "animationend", count: animations }
-    : { total: transition, event: "transitionend", count: transitions };
+/**
+ * Which expected entry an end event completes: its own name, the listed
+ * shorthand of a longhand (`margin` for `margin-top`), `all`, or — for an
+ * event carrying no name (a synthetic one) — any pending entry.
+ */
+function matchEntry(map: Map<string, number>, name: unknown): string | undefined {
+  if (typeof name !== "string" || name === "") return map.keys().next().value;
+  if (map.has(name)) return name;
+  for (const key of map.keys()) if (name.startsWith(`${key}-`)) return key;
+  return map.has("all") ? "all" : undefined;
 }
 
 /**
@@ -189,25 +217,53 @@ export function runPhase(
   });
 
   // Measured AFTER the class is applied: reading the computed style resolves
-  // the animation the class just started.
+  // the animation the class just started. An element is done when every
+  // transition and animation it runs has reported its end, so the first of
+  // several (a shared duration with different delays) cannot end the phase.
   let longest = 0;
   let waiting = 0;
   for (let i = 0; i < elements.length; i++) {
     const el = elements[i];
     const timing = measure(el);
     if (timing === null) continue;
+    // Where the engine exposes them (every supported browser), the animations
+    // and transitions that actually started are known exactly: a listed
+    // `transition-property` whose value did not change starts none, so it is
+    // not waited for. Each settles on finish or cancel; the timeout below
+    // still caps the phase. Reading them flushes the style change above.
+    const running = typeof el.getAnimations === "function" ? el.getAnimations() : null;
+    if (running !== null) {
+      if (running.length === 0) continue;
+      longest = Math.max(longest, timing.total);
+      waiting++;
+      let left = running.length;
+      const settle = () => {
+        if (--left === 0 && !finished && --waiting === 0) finish(true);
+      };
+      for (const animation of running) animation.finished.then(settle, settle);
+      continue;
+    }
     longest = Math.max(longest, timing.total);
     waiting++;
-    let remaining = timing.count;
     const onEnd = (event: Event) => {
       // Ends bubbling up from descendants are theirs, not the branch's.
-      if (event.target !== el) return;
-      if (--remaining > 0) return;
-      el.removeEventListener(timing.event, onEnd);
-      if (--waiting === 0) finish(true);
+      if (event.target !== el || timing.pending === 0) return;
+      const transition = event.type === "transitionend";
+      const map = transition ? timing.transitions : timing.animations;
+      const key = matchEntry(
+        map,
+        (event as TransitionEvent & AnimationEvent)[transition ? "propertyName" : "animationName"],
+      );
+      if (key === undefined) return;
+      const left = (map.get(key) as number) - 1;
+      if (left > 0) map.set(key, left);
+      else map.delete(key);
+      if (--timing.pending === 0 && --waiting === 0) finish(true);
     };
-    el.addEventListener(timing.event, onEnd);
-    cleanups.push(() => el.removeEventListener(timing.event, onEnd));
+    for (const type of END_EVENTS) el.addEventListener(type, onEnd);
+    cleanups.push(() => {
+      for (const type of END_EVENTS) el.removeEventListener(type, onEnd);
+    });
   }
 
   if (waiting === 0) {

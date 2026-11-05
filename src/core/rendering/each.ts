@@ -12,6 +12,7 @@ import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
+import { registerRange } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -619,6 +620,9 @@ export function each<T>(
     pendingCount = 0;
   };
   registerDisposer(anchor, disposeRange);
+  // The rows are siblings ending at the `each:end` sentinel, so a directive
+  // whose branch holds this anchor can treat the whole list as one unit.
+  registerRange(anchor, () => (sentinelInserted ? end : null));
 
   // Fallback: if the anchor wasn't in the DOM during the initial track
   // (common when each() is called inside tagFactory nodes), schedule

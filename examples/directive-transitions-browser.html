@@ -11,6 +11,19 @@
       .out { animation: fade 200ms ease forwards; }
       .in { animation: rise 150ms ease; }
       .slide-out { transition: opacity 200ms ease, transform 300ms ease 50ms; opacity: 0; transform: translateX(20px); }
+      /* Longhands: ONE duration shared by two properties with different delays. */
+      .panel-x { opacity: 1; transform: none; }
+      .longhand-out {
+        transition-property: opacity, transform;
+        transition-duration: 200ms;
+        transition-delay: 0ms, 500ms;
+        opacity: 0;
+        transform: translateX(20px);
+      }
+      /* Long enough for a test to interact with the leaving rows under load (the cap is 5 s). */
+      /* `color` is listed with a long duration but never changes: nothing waits for it. */
+      .noop-out { transition-property: opacity, color; transition-duration: 200ms, 3s; opacity: 0; }
+      .slow-out { animation: fade 4500ms linear forwards; }
       @media (prefers-reduced-motion: reduce) {
         .out, .in { animation-duration: 0.01ms !important; }
       }
@@ -21,9 +34,13 @@
       <div id="when-host"></div>
       <div id="transition-host"></div>
       <div id="fragment-host"></div>
+      <div id="longhand-host"></div>
+      <div id="rows-host"></div>
+      <div id="noop-host"></div>
+      <button id="after-rows">after</button>
     </main>
     <script type="module">
-      import { Fragment, button, div, input, onUnmount, signal, span, when } from "../dist/index.js";
+      import { Fragment, button, div, each, input, onUnmount, signal, span, when } from "../dist/index.js";
 
       const unmounted = [];
 
@@ -55,7 +72,82 @@
         ),
       );
 
+      // CSS longhands: the leave must outlast the delayed transform.
+      const longhand = { unmountedAt: 0, ends: [] };
+      const [lh, setLh] = signal(true);
+      document.getElementById("longhand-host").appendChild(
+        when(
+          () => lh(),
+          () => {
+            const el = div({ class: "panel-x", "data-longhand": "" }, "longhand");
+            el.addEventListener("transitionend", (e) =>
+              longhand.ends.push({ property: e.propertyName, at: performance.now(), connected: el.isConnected }),
+            );
+            onUnmount(() => {
+              longhand.unmountedAt = performance.now();
+            }, el);
+            return el;
+          },
+          { transition: { leaveClass: "longhand-out" } },
+        ),
+      );
+
+      // A fragment branch whose rows come from each(): rendered after insertion.
+      const clicks = [];
+      const rowFocus = [];
+      document.addEventListener("focusin", (e) => {
+        const row = e.target instanceof Element ? e.target.getAttribute("data-row") : null;
+        if (row !== null) rowFocus.push(row);
+      });
+      const [rowsOn, setRowsOn] = signal(true);
+      const [rows] = signal([1, 2]);
+      document.getElementById("rows-host").appendChild(
+        when(
+          () => rowsOn(),
+          () =>
+            Fragment([
+              span("rows:"),
+              each(rows, (item) => button({ "data-row": String(item()), on: { click: () => clicks.push(item()) } }, `row ${item()}`), {
+                key: (item) => item,
+              }),
+            ]),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+
+      // A listed property that never changes must not hold the leave.
+      const noop = { unmountedAt: 0 };
+      const [noopOn, setNoopOn] = signal(true);
+      document.getElementById("noop-host").appendChild(
+        when(
+          () => noopOn(),
+          () => {
+            const el = div({ class: "panel-x", "data-noop": "" }, "noop");
+            onUnmount(() => {
+              noop.unmountedAt = performance.now();
+            }, el);
+            return el;
+          },
+          { transition: { leaveClass: "noop-out" } },
+        ),
+      );
+
       window.__t = {
+        noop: () => {
+          const switchedAt = performance.now();
+          setNoopOn(false);
+          return switchedAt;
+        },
+        noopUnmountedAt: () => noop.unmountedAt,
+        longhand: () => {
+          const switchedAt = performance.now();
+          setLh(false);
+          return switchedAt;
+        },
+        longhandLog: () => ({ ...longhand, ends: longhand.ends.slice() }),
+        hideRows: () => setRowsOn(false),
+        clicks: () => clicks.slice(),
+        rowFocus: () => rowFocus.slice(),
         toggle: () => {
           const switchedAt = performance.now();
           setOn(!on());

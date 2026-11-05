@@ -311,6 +311,25 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // ~97,480 B, gzip ~33,875 B (+~5,160 B raw, +~2,090 B gzip; about 4,400 B
     // raw of it the transitions).
     //
+    // Raw 98,700 B, gzip baseline 33,550 B for the 4.15 review fixes, which are
+    // correctness, not features: a branch is tracked as the RANGE its starts
+    // render (`core/rendering/range.ts` — `each()` rows, nested directive
+    // branches, fragment function children, so they are made inert, animated,
+    // removed and re-attached with the branch), an owned fragment's own
+    // cleanup runs on release, and leave timing follows CSS list matching
+    // (`transition-property` / `animation-name` decide how many transitions and
+    // animations run; one end event per entry). Measured: raw ~98,320 B, gzip
+    // ~34,190 B (+~840 B raw, +~310 B gzip).
+    //
+    // Raw 99,600 B, gzip baseline 33,850 B for the follow-ups that close the
+    // documented limits of those fixes: a leave waits for what
+    // `getAnimations()` says actually started (a listed property that does not
+    // change no longer holds the branch until the fallback), a range that grows
+    // while its branch leaves (a caller-owned `each()`) is watched so late nodes
+    // turn inert too, and `KeepAlive` registers its range (the router outlets
+    // do as well, in `sibujs/plugins`). Measured: raw ~99,230 B, gzip
+    // ~34,490 B (+~910 B raw, +~300 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -318,8 +337,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(97_800);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(33_300 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(99_600);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(33_850 * 1.02));
   });
 });
 

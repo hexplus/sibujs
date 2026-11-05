@@ -2,6 +2,7 @@ import { devWarn, isDev } from "../core/dev";
 import { type AdoptScope, captureScope, inScope, keyedScope } from "../core/rendering/adoptScope";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { isHydrating } from "../core/rendering/hydrationHooks";
+import { registerNodesRange } from "../core/rendering/range";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
@@ -3133,6 +3134,9 @@ export function Route(): Node {
   // Tie cleanup to the anchor so removing this outlet's subtree (e.g. a parent
   // layout change) releases its tracking + nodes immediately — not only on
   // destroyRouter(). Idempotent, so the destroyRouter() drain stays safe.
+  // What the outlet renders sits after its anchor; a `when` / `match` branch
+  // holding this anchor takes it along (see core/rendering/range.ts).
+  registerNodesRange(anchor, () => [currentNode, loadingNode, errorNode]);
   registerDisposer(anchor, routeCleanup);
   routeCleanups.push(routeCleanup);
 
@@ -3410,6 +3414,9 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   };
   // The cached detached subtrees are the heaviest leak here — release them when
   // the outlet's anchor subtree is disposed, not only on destroyRouter().
+  // What the outlet renders sits after its anchor; a `when` / `match` branch
+  // holding this anchor takes it along (see core/rendering/range.ts).
+  registerNodesRange(anchor, () => [currentNode]);
   registerDisposer(anchor, kaCleanup);
   routeCleanups.push(kaCleanup);
 
@@ -3762,6 +3769,9 @@ export function Suspense(props: {
   // Teardown. Invalidating the generation *before* releasing nodes is what
   // makes a late resolution permanently non-committing rather than merely
   // late: `commitTarget` fails closed from here on.
+  // What the outlet renders sits after its anchor; a `when` / `match` branch
+  // holding this anchor takes it along (see core/rendering/range.ts).
+  registerNodesRange(anchor, () => [currentNode, fallbackNode]);
   registerDisposer(anchor, () => {
     tornDown = true;
     generation++;
@@ -4081,6 +4091,9 @@ export function Outlet(): Node {
     currentChild = null;
     currentKey = null;
   };
+  // What the outlet renders sits after its anchor; a `when` / `match` branch
+  // holding this anchor takes it along (see core/rendering/range.ts).
+  registerNodesRange(anchor, () => [currentNode]);
   registerDisposer(anchor, outletCleanup);
   routeCleanups.push(outletCleanup);
   return anchor;

@@ -46,12 +46,18 @@ async function open(page: Page) {
 test("the old branch stays, inert, until its CSS animation ends; onUnmount runs then", async ({ page }) => {
   await open(page);
   const x = t(page);
-  const switchedAt = await x.toggle();
-  expect(await x.panels()).toEqual([
+  // Read in the same task as the switch: a separate round trip can land after
+  // the 200 ms animation on a loaded machine.
+  const { switchedAt, panels, unmounted } = await page.evaluate(() => {
+    const api = (window as never as { __t: T }).__t;
+    const at = api.toggle();
+    return { switchedAt: at, panels: api.panels(), unmounted: api.unmounted() };
+  });
+  expect(panels).toEqual([
     { name: "B", inert: false, hidden: null, leaving: false },
     { name: "A", inert: true, hidden: "true", leaving: true },
   ]);
-  expect(await x.unmounted()).toEqual([]);
+  expect(unmounted).toEqual([]);
 
   await expect(page.locator("#when-host .panel")).toHaveCount(1, { timeout: 3000 });
   const [entry] = await x.unmounted();
@@ -97,4 +103,83 @@ test("with reduced motion the switch is synchronous", async ({ page }) => {
   await x.toggle();
   expect((await x.panels()).map((p) => p.name)).toEqual(["B"]);
   expect((await x.unmounted()).map((u) => u.name)).toEqual(["A"]);
+});
+
+test("CSS longhands: one shared duration, two delays — the leave outlasts the delayed property", async ({ page }) => {
+  await open(page);
+  // Let the initial style settle so adding the class starts both transitions.
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const switchedAt = await page.evaluate(() => (window as never as { __t: { longhand: () => number } }).__t.longhand());
+  await expect(page.locator("[data-longhand]")).toHaveCount(0, { timeout: 3000 });
+  const log = await page.evaluate(
+    () =>
+      (
+        window as never as {
+          __t: {
+            longhandLog: () => {
+              unmountedAt: number;
+              ends: { property: string; at: number; connected: boolean }[];
+            };
+          };
+        }
+      ).__t.longhandLog(),
+  );
+  const opacity = log.ends.find((e) => e.property === "opacity");
+  // Still in the document when the first property finished (200 ms)...
+  expect(opacity, "opacity transitionend").toBeDefined();
+  expect(opacity?.connected).toBe(true);
+  // ...and removed only once the delayed one had (500 ms delay + 200 ms). The
+  // removal follows the transform transition's `finished`, which an engine
+  // resolves before it dispatches `transitionend` (and on a loaded machine the
+  // computed fallback may come first), so the lifecycle timestamp is the gate.
+  expect(log.unmountedAt - switchedAt).toBeGreaterThanOrEqual(650);
+});
+
+test("rows an each() rendered into a leaving fragment branch cannot be focused or clicked", async ({ page }) => {
+  await open(page);
+  await expect(page.locator("[data-row]")).toHaveCount(2);
+  const box = await page.locator('[data-row="1"]').boundingBox();
+  // Focus a control before the rows, so Tab would walk through them.
+  await page.evaluate(() => (document.querySelector("[data-pair]") as HTMLElement).focus());
+  await page.evaluate(() => (window as never as { __t: { hideRows: () => void } }).__t.hideRows());
+
+  // Still on screen while the leave plays, inert and carrying the leave class.
+  await expect(page.locator("[data-row][inert].slow-out")).toHaveCount(2);
+
+  // A real pointer click on a row does not activate it, Tab never lands on
+  // one (every focus change is recorded in the page), and script cannot
+  // focus one either.
+  if (box) await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  for (let i = 0; i < 6; i++) await page.keyboard.press("Tab");
+  const result = await page.evaluate(() => {
+    const t = (window as never as { __t: { clicks: () => number[]; rowFocus: () => string[] } }).__t;
+    const row = document.querySelector('[data-row="2"]') as HTMLElement | null;
+    row?.focus();
+    return {
+      stillLeaving: document.querySelectorAll("[data-row][inert]").length,
+      scripted: row !== null && document.activeElement === row,
+      clicks: t.clicks(),
+      rowFocus: t.rowFocus(),
+    };
+  });
+  expect(result.stillLeaving, "the leave ended before the interaction was checked").toBe(2);
+  expect(result.scripted).toBe(false);
+  expect(result.clicks).toEqual([]);
+  expect(result.rowFocus).toEqual([]);
+
+  // The rows leave with the branch.
+  await expect(page.locator("[data-row]")).toHaveCount(0, { timeout: 8000 });
+});
+
+test("a listed transition-property that never changes does not hold the leave", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  const switchedAt = await page.evaluate(() => (window as never as { __t: { noop: () => number } }).__t.noop());
+  await expect(page.locator("[data-noop]")).toHaveCount(0, { timeout: 4000 });
+  const unmountedAt = await page.evaluate(
+    () => (window as never as { __t: { noopUnmountedAt: () => number } }).__t.noopUnmountedAt(),
+  );
+  // The opacity transition (200 ms) ran; `color` (3 s) never started.
+  expect(unmountedAt - switchedAt).toBeGreaterThanOrEqual(150);
+  expect(unmountedAt - switchedAt).toBeLessThan(2000);
 });
