@@ -23,6 +23,8 @@
       /* Long enough for a test to interact with the leaving rows under load (the cap is 5 s). */
       /* `color` is listed with a long duration but never changes: nothing waits for it. */
       .noop-out { transition-property: opacity, color; transition-duration: 200ms, 3s; opacity: 0; }
+      .late-out { animation: fade 1200ms linear forwards; }
+      .row-in { animation: rise 300ms ease; }
       .slow-out { animation: fade 4500ms linear forwards; }
       @media (prefers-reduced-motion: reduce) {
         .out, .in { animation-duration: 0.01ms !important; }
@@ -37,6 +39,8 @@
       <div id="longhand-host"></div>
       <div id="rows-host"></div>
       <div id="noop-host"></div>
+      <div id="late-host"></div>
+      <div id="enter-host"></div>
       <button id="after-rows">after</button>
     </main>
     <script type="module">
@@ -132,7 +136,60 @@
         ),
       );
 
+      // A caller-owned list whose row arrives partway through the leave.
+      const late = { hidden: 0, added: 0, stillLeaving: false, removed: {}, ends: {} };
+      const [lateOn, setLateOn] = signal(true);
+      const [lateItems, setLateItems] = signal([1]);
+      const lateHost = document.getElementById("late-host");
+      const lateFragment = Fragment([
+        each(lateItems, (item) => button({ "data-late": String(item.peek()) }, `late ${item.peek()}`), {
+          key: (item) => item,
+        }),
+      ]);
+      lateHost.appendChild(when(() => lateOn(), lateFragment, { transition: { leaveClass: "late-out" } }));
+      lateHost.addEventListener("animationend", (e) => {
+        late.ends[e.target.dataset.late] = performance.now();
+      }, true);
+      new MutationObserver((records) => {
+        for (const r of records)
+          for (const n of r.removedNodes) if (n.dataset?.late) late.removed[n.dataset.late] ??= performance.now();
+      }).observe(lateHost, { childList: true });
+
+      // A branch whose rows come from a top-level each(): they enter with it.
+      const entered = [];
+      const [enterOn, setEnterOn] = signal(false);
+      const [enterItems] = signal([1, 2]);
+      const enterHost = document.getElementById("enter-host");
+      enterHost.addEventListener("animationstart", (e) => {
+        if (e.target.dataset?.enter) entered.push({ row: e.target.dataset.enter, name: e.animationName });
+      }, true);
+      enterHost.appendChild(
+        when(
+          () => enterOn(),
+          () =>
+            Fragment([
+              each(enterItems, (item) => span({ "data-enter": String(item.peek()) }, `row ${item.peek()}`), {
+                key: (item) => item,
+              }),
+            ]),
+          { transition: { enterClass: "row-in" } },
+        ),
+      );
+
       window.__t = {
+        // Hide, then add the row 300 ms into the leave, timed inside the page.
+        hideThenAddLate: () => {
+          late.hidden = performance.now();
+          setLateOn(false);
+          setTimeout(() => {
+            late.added = performance.now();
+            late.stillLeaving = document.querySelector('[data-late="1"]') !== null;
+            setLateItems([1, 2]);
+          }, 300);
+        },
+        lateLog: () => JSON.parse(JSON.stringify(late)),
+        showEnter: () => setEnterOn(true),
+        entered: () => entered.slice(),
         noop: () => {
           const switchedAt = performance.now();
           setNoopOn(false);

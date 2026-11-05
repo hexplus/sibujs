@@ -183,3 +183,43 @@ test("a listed transition-property that never changes does not hold the leave", 
   expect(unmountedAt - switchedAt).toBeGreaterThanOrEqual(150);
   expect(unmountedAt - switchedAt).toBeLessThan(2000);
 });
+
+test("a row added partway through a leave is waited for, not cut off", async ({ page }) => {
+  await open(page);
+  await expect(page.locator("[data-late]")).toHaveCount(1);
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await page.evaluate(() => (window as never as { __t: { hideThenAddLate: () => void } }).__t.hideThenAddLate());
+  await expect(page.locator('[data-late="2"].late-out[inert]')).toHaveCount(1, { timeout: 3000 });
+  await expect(page.locator("[data-late]")).toHaveCount(0, { timeout: 6000 });
+  const log = await page.evaluate(
+    () =>
+      (
+        window as never as {
+          __t: { lateLog: () => { hidden: number; added: number; stillLeaving: boolean; removed: Record<string, number> } };
+        }
+      ).__t.lateLog(),
+  );
+  // The row joined while the 1.2 s leave was playing...
+  expect(log.stillLeaving).toBe(true);
+  // ...and the branch was removed only once the late row's own 1.2 s
+  // animation had run, not when the first row's ended (~900 ms earlier).
+  expect(log.removed["2"] - log.added).toBeGreaterThanOrEqual(1100);
+  expect(log.removed["1"] - log.hidden).toBeGreaterThanOrEqual(log.added - log.hidden + 1100);
+});
+
+test("rows a top-level each() renders enter with their branch", async ({ page }) => {
+  await open(page);
+  await page.evaluate(() => (window as never as { __t: { showEnter: () => void } }).__t.showEnter());
+  await expect(page.locator("[data-enter]")).toHaveCount(2);
+  await expect
+    .poll(() =>
+      page.evaluate(() => (window as never as { __t: { entered: () => { row: string; name: string }[] } }).__t.entered()),
+    )
+    .toEqual(
+      expect.arrayContaining([
+        { row: "1", name: "rise" },
+        { row: "2", name: "rise" },
+      ]),
+    );
+  await expect(page.locator(".row-in")).toHaveCount(0, { timeout: 3000 });
+});

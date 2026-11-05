@@ -330,6 +330,16 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // do as well, in `sibujs/plugins`). Measured: raw ~99,230 B, gzip
     // ~34,490 B (+~910 B raw, +~300 B gzip).
     //
+    // Raw 100,700 B, gzip baseline 34,250 B for the third review round's
+    // correctness fixes: deferred first renders (`each`, `when` / `match`,
+    // `KeepAlive`, `out-in` builds) check the captured structural owner and do
+    // not run inside a branch that froze (`captureFrozen`); rows that join a
+    // leaving range are enrolled in the running phase under its absolute
+    // deadline; a hidden caller-owned range is parked in a detached fragment so
+    // it keeps reconciling; an enter waits (a bounded number of microtask
+    // turns) for nested first renders. Measured: raw ~100,290 B, gzip
+    // ~34,850 B (+~1,060 B raw, +~365 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -337,8 +347,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(99_600);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(33_850 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(100_700);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(34_250 * 1.02));
   });
 });
 

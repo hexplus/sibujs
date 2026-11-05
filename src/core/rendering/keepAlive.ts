@@ -1,7 +1,7 @@
-import { bindOwnerScope, structuralBinding } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { registerNodesRange } from "./range";
+import { registerNodesRange, setPending } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -139,9 +139,13 @@ export function KeepAlive(
   const untrack = binding.stop;
 
   if (!initialized) {
+    // Not in a subtree that froze before the first render could run.
+    const frozen = captureFrozen();
+    setPending(anchor, true);
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!initialized && anchor.parentNode) binding.run(update);
+        setPending(anchor, false);
+        if (!initialized && anchor.parentNode && !frozen()) binding.run(update);
       }),
     );
   }

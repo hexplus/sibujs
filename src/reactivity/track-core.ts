@@ -559,6 +559,24 @@ let currentStructOwner: OwnerToken | null = null;
 // a single compare.
 let frozenOwners = 0;
 
+const NEVER_FROZEN = (): boolean => false;
+
+/**
+ * Capture the structural owner in effect now, and return a check for whether
+ * it (or an owner above it) has since been frozen. Deferred work scheduled on
+ * a subtree's behalf — a directive's or a list's first render, queued in a
+ * microtask, which the drain's frozen check never sees — calls it before it
+ * reads state or builds DOM. @internal
+ */
+export function captureFrozen(): () => boolean {
+  const tok = currentStructOwner;
+  if (tok === null) return NEVER_FROZEN;
+  return () => {
+    const owner = tok.sub;
+    return frozenOwners !== 0 && owner !== null && (owner._frozen === true || hasFrozenOwner(owner));
+  };
+}
+
 /** Whether any owner up `sub`'s ownership chain is frozen. */
 function hasFrozenOwner(sub: SubWithList): boolean {
   for (let t = sub._owner ?? null; t !== null; ) {

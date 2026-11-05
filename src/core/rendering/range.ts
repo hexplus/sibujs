@@ -26,6 +26,23 @@ export function registerRange(start: Node, last: () => Node | null): void {
   ends.set(start, last);
 }
 
+// Anchors whose first render is still queued (a renderer created where it had
+// no parent yet renders in a microtask). An enter waits for them, so the rows
+// a top-level `each()` renders are part of what enters.
+const pending = new WeakSet<Node>();
+
+/** Mark `anchor`'s first render as queued (`true`) or done / abandoned (`false`). @internal */
+export function setPending(anchor: Node, queued: boolean): void {
+  if (queued) pending.add(anchor);
+  else pending.delete(anchor);
+}
+
+/** Whether any of `nodes` still has its first render queued. @internal */
+export function anyPending(nodes: readonly Node[]): boolean {
+  for (const node of nodes) if (pending.has(node)) return true;
+  return false;
+}
+
 /** Whether `node` renders a sibling range whose content can change. @internal */
 export function hasRange(node: Node): boolean {
   return ends.has(node);

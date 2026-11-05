@@ -66,6 +66,7 @@ interface ReactiveApi {
   runWithOwnerScope?: typeof core.runWithOwnerScope;
   bindOwnerScope?: typeof core.bindOwnerScope;
   structuralBinding?: typeof core.structuralBinding;
+  captureFrozen?: typeof core.captureFrozen;
   version: string;
   __dupWarned?: boolean;
 }
@@ -118,6 +119,7 @@ function resolveReactiveApi(): ReactiveApi {
     runWithOwnerScope: core.runWithOwnerScope,
     bindOwnerScope: core.bindOwnerScope,
     structuralBinding: core.structuralBinding,
+    captureFrozen: core.captureFrozen,
     version: _runtimeVersion,
   };
   g[REGISTRY_KEY] = local;
@@ -162,3 +164,7 @@ export const bindOwnerScope: typeof core.bindOwnerScope = API.bindOwnerScope ?? 
 export const structuralBinding: typeof core.structuralBinding =
   API.structuralBinding ??
   ((commit, ownerNode) => ({ stop: API.reactiveBinding(commit, ownerNode), run: (fn) => fn() }));
+
+// Frozen-owner capture. Additive the same way. An older active copy has no
+// frozen owners at all, so "never frozen" is exactly its behaviour.
+export const captureFrozen: typeof core.captureFrozen = API.captureFrozen ?? (() => () => false);

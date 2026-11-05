@@ -9,7 +9,7 @@ import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { getRequestStore } from "../core/ssr-context";
 import { recordServerHead } from "../platform/serverHead";
-import { bindOwnerScope, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
+import { bindOwnerScope, captureFrozen, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
 import { prerenderWait } from "../utils/prerenderHook";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
@@ -3110,9 +3110,11 @@ export function Route(): Node {
   const attachWait = attachRetry(anchor, onAttached);
   const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
+    // Not inside a branch that froze (began its leave) before this ran.
+    const frozen = captureFrozen();
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!routeInitialized && anchor.parentNode) wrappedUpdate();
+        if (!routeInitialized && anchor.parentNode && !frozen()) wrappedUpdate();
       }),
     );
   }
@@ -3381,9 +3383,11 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   const attachWait = attachRetry(anchor, update);
   const kaTeardown = track(wrappedUpdate);
   if (!initialized) {
+    // Not inside a branch that froze (began its leave) before this ran.
+    const frozen = captureFrozen();
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!initialized && anchor.parentNode) wrappedUpdate();
+        if (!initialized && anchor.parentNode && !frozen()) wrappedUpdate();
       }),
     );
   }
@@ -3780,7 +3784,13 @@ export function Suspense(props: {
 
   // Rendered in a microtask, in the owner scope the boundary was created in —
   // content built inside a route instance belongs to that instance's route.
-  queueMicrotask(bindOwnerScope(render));
+  // Not inside a branch that froze (began its leave) before this ran.
+  const frozen = captureFrozen();
+  queueMicrotask(
+    bindOwnerScope(() => {
+      if (!frozen()) render();
+    }),
+  );
 
   return anchor;
 }
@@ -4068,9 +4078,11 @@ export function Outlet(): Node {
   if (!anchor.parentNode) {
     // The deferred first pass must read the same route the binding does: the
     // enclosing instance's, carried by the owner scope.
+    // Not inside a branch that froze (began its leave) before this ran.
+    const frozen = captureFrozen();
     queueMicrotask(
       bindOwnerScope(() => {
-        if (anchor.parentNode) update();
+        if (anchor.parentNode && !frozen()) update();
       }),
     );
   }

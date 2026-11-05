@@ -1,6 +1,7 @@
 import { batch } from "../../reactivity/batch";
 import {
   bindOwnerScope,
+  captureFrozen,
   isTrackingSuspended,
   resumeTracking,
   structuralBinding,
@@ -12,7 +13,7 @@ import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
-import { registerRange } from "./range";
+import { registerRange, setPending } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -629,10 +630,16 @@ export function each<T>(
   // a one-time retry so the initial items render before first paint.
   if (!initialized) {
     // Rows built by the deferred first render carry the owner scope `each()`
-    // was created in (see `bindOwnerScope`).
+    // was created in (see `bindOwnerScope`). Not in a subtree that froze in
+    // the meantime (a branch now playing its leave): the getter would read
+    // state that branch no longer owns. A later write retries through the
+    // scheduler, which holds frozen subscribers the same way.
+    const frozen = captureFrozen();
+    setPending(anchor, true);
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!initialized && !rangeDisposed && anchor.parentNode) {
+        setPending(anchor, false);
+        if (!initialized && !rangeDisposed && anchor.parentNode && !frozen()) {
           binding.run(update);
         }
       }),

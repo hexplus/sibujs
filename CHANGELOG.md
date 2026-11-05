@@ -46,7 +46,9 @@ branch as the range those nodes render: rows an `each()` at its top level adds
 later, a nested `when()` / `match()` branch, a `KeepAlive` case, a router
 outlet's page and what a reactive child renders now are made inert, animated,
 removed and re-attached with it. Nodes such a range gains while the branch is
-leaving are made inert (and given the leave class) as they appear. Cleanup
+leaving are made inert and join the running leave (the branch waits for their
+animation too, within the original deadline). A bare branch hidden by a switch
+is parked off the page and keeps reconciling, so it comes back current. Cleanup
 registered on a fragment the branch factory built (`onCleanup(fn, fragment)`)
 runs when the branch is released, after its nodes, even if the fragment was
 empty. Several sibling nodes are a supported branch, and need no wrapper
@@ -91,7 +93,9 @@ Its `onUnmount` and `registerDisposer` teardowns run at that removal, so a
 canvas or a `requestAnimationFrame` loop can run until it has faded out.
 Several branches may be leaving at once; switching back to a bare element that
 is still leaving cancels its leave. The first render enters only with
-`appear: true`. Disposing the directive removes leaving branches at once.
+`appear: true`; an enter waits for the first render of a top-level `each()` (or
+nested directive), so its rows enter with the branch. A nested renderer whose
+branch has frozen does not run its queued first render. Disposing the directive removes leaving branches at once.
 Server renders ignore transitions. Without `transition`, a switch removes and
 disposes the old branch at once, as before.
 

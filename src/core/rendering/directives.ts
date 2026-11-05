@@ -1,4 +1,4 @@
-import { bindOwnerScope, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
 import type { StructuralBinding } from "../../reactivity/track-core";
 import { devWarnLazy } from "../dev";
 import { reportError } from "../errors";
@@ -7,7 +7,7 @@ import { captureScope, inScope } from "./adoptScope";
 import { type DirectiveTransition, type PhaseRun, runPhase } from "./branchTransition";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, type FocusSnapshot, restoreFocusWithin } from "./focusPreservation";
-import { collectRange, hasRange, rangeEnd, registerRange } from "./range";
+import { anyPending, collectRange, hasRange, rangeEnd, registerRange, setPending } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -105,7 +105,10 @@ export interface DirectiveOptions {
    * Switching again while a branch is leaving does not interrupt it; several
    * branches may be leaving at once. Switching back to a bare element (or
    * fragment) branch that is still leaving cancels its leave and re-attaches
-   * it. The first render plays no enter unless `appear: true`. Disposing the
+   * it. The first render plays no enter unless `appear: true`. An enter waits
+   * for the first render of a top-level `each()` or nested directive (a few
+   * microtask turns at most), so those rows enter with the branch; rows such a
+   * range adds while the branch leaves join the leave. Disposing the
    * directive removes leaving branches at once. Server renders ignore
    * transitions entirely.
    */
@@ -154,10 +157,19 @@ interface Branch {
 // empties it, and a bare fragment (one handed in rather than built) is
 // re-attached through them.
 const fragmentStarts = new WeakMap<Node, Node[]>();
-// The nodes a bare branch occupied when it was last detached (its range, with
-// whatever an `each()` or nested directive in it rendered), so re-attaching it
-// puts all of them back.
+// The nodes a bare branch occupies (its range, with whatever an `each()` or
+// nested directive in it rendered), as of its last refresh: taking back a bare
+// branch that is still leaving re-inserts all of them.
 const detachedRanges = new WeakMap<Node, Node[]>();
+// Where a hidden bare branch with a range is parked: a detached fragment, so
+// its `each()` / nested directives still have a parent and keep reconciling
+// while it is off the page. Re-attaching takes the fragment's CURRENT content.
+const parked = new WeakMap<Node, DocumentFragment>();
+
+// How many microtask turns an enter waits for nested first renders (a nested
+// directive's branch can hold another renderer that renders a turn later).
+// Bounded, so content that never renders cannot hold the enter.
+const ENTER_WAIT_TURNS = 8;
 
 const NOOP = (): void => {};
 
@@ -220,7 +232,8 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
   } else {
     starts = [node];
   }
-  const nodes = (!owned && detachedRanges.get(node)) || starts;
+  const park = owned ? undefined : parked.get(node);
+  const nodes = park?.firstChild ? Array.from(park.childNodes) : (!owned && detachedRanges.get(node)) || starts;
   // An empty fragment the directive built still has a lifetime: cleanup
   // registered on the fragment itself runs when the branch is released.
   if (nodes.length === 0 && !owned) return null;
@@ -272,10 +285,17 @@ function releaseBranch(branch: Branch): void {
     branch.restore = null;
   }
   const nodes = branch.nodes;
+  // A bare branch with a range is parked rather than dropped: see `parked`.
+  let park: DocumentFragment | undefined;
+  if (!branch.owned && (branch.source.nodeType === 11 || branch.starts.some(hasRange))) {
+    park = parked.get(branch.source);
+    if (park === undefined) parked.set(branch.source, (park = document.createDocumentFragment()));
+  }
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i];
     if (branch.owned) dispose(node);
-    node.parentNode?.removeChild(node);
+    if (park !== undefined) park.appendChild(node);
+    else node.parentNode?.removeChild(node);
   }
   // An owned fragment is a lifetime of its own: cleanup registered on the
   // fragment object (`onCleanup(fn, fragment)`) runs after its nodes', once.
@@ -296,11 +316,11 @@ function releaseBranch(branch: Branch): void {
  * A branch whose range can still grow while it leaves (an `each()` or a
  * directive at its top level that is not frozen, because the caller owns it)
  * is watched until the leave ends: an element added to its range is made
- * inert too, and given `leaveClass` when the leave is class-based.
+ * inert too, and handed to `onLate` — the running leave enrolls it.
  *
- * @returns A function restoring what was changed, and ending the watch.
+ * @returns A function restoring the attributes, and ending the watch.
  */
-function makeInert(branch: Branch, leaveClass: string | undefined): () => void {
+function makeInert(branch: Branch, onLate: (elements: Element[]) => void): () => void {
   const saved: [Element, string | null, string | null][] = [];
   const marked = new Set<Node>();
   const mark = (nodes: Node[]): void => {
@@ -330,10 +350,7 @@ function makeInert(branch: Branch, leaveClass: string | undefined): () => void {
       refreshNodes(branch);
       const before = saved.length;
       mark(branch.nodes);
-      // Only once the leave is playing (an `in-out` leave waits for the enter).
-      if (leaveClass && saved[0]?.[0].classList.contains(leaveClass)) {
-        for (let i = before; i < saved.length; i++) saved[i][0].classList.add(leaveClass);
-      }
+      if (saved.length > before) onLate(saved.slice(before).map((entry) => entry[0]));
     });
     observer.observe(parent, { childList: true });
   }
@@ -345,7 +362,6 @@ function makeInert(branch: Branch, leaveClass: string | undefined): () => void {
       else el.setAttribute("inert", inert);
       if (hidden === null) el.removeAttribute("aria-hidden");
       else el.setAttribute("aria-hidden", hidden);
-      if (leaveClass && i >= initial) el.classList.remove(leaveClass);
     }
   };
 }
@@ -366,6 +382,9 @@ function directive(
   const tr = options?.transition !== undefined && !isServer() ? options.transition : undefined;
   const anchor = document.createComment(name);
   const scope = captureScope();
+  // Deferred work (the first render, an `out-in` build) is skipped once the
+  // subtree this directive was created in froze: see `captureFrozen`.
+  const frozen = captureFrozen();
   let current: Branch | null = null;
   let last: unknown;
 
@@ -461,7 +480,9 @@ function directive(
     }
     refreshNodes(branch);
     branch.owner?.freeze?.();
-    branch.restore = makeInert(branch, t.leave ? undefined : t.leaveClass);
+    // Late elements join the running class-based leave; an `in-out` branch
+    // still waiting has none yet, and starts it over its refreshed range.
+    branch.restore = makeInert(branch, (late) => branch.phase?.add?.(late));
     if (t.mode === "in-out") {
       // An older branch still waiting for the enter this switch interrupted
       // has nothing left to wait for.
@@ -488,21 +509,52 @@ function directive(
     const t = tr as DirectiveTransition;
     const entering = current;
     if (entering !== null && (!first || t.appear === true)) {
-      entering.phase = runPhase(
-        entering.nodes,
-        t.enterClass,
-        t.enter,
-        t.maxDuration,
-        () => {
+      // A nested renderer in the branch (a top-level `each()`) renders its
+      // first rows a microtask later; the enter waits for them, so they enter
+      // with the branch. A switch, a disposal or a reclaim in the meantime
+      // cancels the wait through the placeholder phase.
+      if (anyPending(entering.nodes)) {
+        let cancelled = false;
+        let turns = 0;
+        entering.phase = {
+          cancel: () => {
+            cancelled = true;
+          },
+        };
+        const step = (): void => {
+          if (cancelled) return;
+          refreshNodes(entering);
+          if (anyPending(entering.nodes) && ++turns < ENTER_WAIT_TURNS) {
+            queueMicrotask(step);
+            return;
+          }
           entering.phase = null;
-          if (t.mode === "in-out") startWaitingLeaves();
-        },
-        `${name}(enter)`,
-      );
+          startEnter(entering);
+        };
+        queueMicrotask(step);
+        return;
+      }
+      startEnter(entering);
       // Still entering: the waiting leaves start from its completion.
       if (entering.phase !== null) return;
     }
     if (t.mode === "in-out") startWaitingLeaves();
+  };
+
+  /** Play the enter of `entering`, then start any `in-out` leave it held back. */
+  const startEnter = (entering: Branch): void => {
+    const t = tr as DirectiveTransition;
+    entering.phase = runPhase(
+      entering.nodes,
+      t.enterClass,
+      t.enter,
+      t.maxDuration,
+      () => {
+        entering.phase = null;
+        if (t.mode === "in-out") startWaitingLeaves();
+      },
+      `${name}(enter)`,
+    );
   };
 
   // An `out-in` build, run once the last leave ended (from an event or a
@@ -511,6 +563,7 @@ function directive(
   // as every rebuild does.
   const buildDeferred = bindOwnerScope((): void => {
     deferred = false;
+    if (frozen()) return;
     const focused = deferredFocus;
     deferredFocus = null;
     const parent = anchor.parentNode;
@@ -630,9 +683,11 @@ function directive(
     // The deferred first render builds the branch outside any reactive run, so
     // it carries the owner scope the directive was created in, and runs as the
     // branch's structural owner, as every later rebuild does.
+    setPending(anchor, true);
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!disposed && !initialized && anchor.parentNode) binding.run(update);
+        setPending(anchor, false);
+        if (!disposed && !initialized && anchor.parentNode && !frozen()) binding.run(update);
       }),
     );
   }

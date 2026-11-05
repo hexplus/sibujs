@@ -63,6 +63,12 @@ export interface DirectiveTransition {
 export interface PhaseRun {
   /** End the phase now WITHOUT calling its completion (classes and listeners are removed). */
   cancel(): void;
+  /**
+   * Class-based phases only: elements that joined the branch while the phase
+   * runs (rows a caller-owned `each()` added). They get the class and the
+   * phase waits for their animations too, within its original deadline.
+   */
+  add?(elements: Element[]): void;
 }
 
 const HARD_CAP_MS = 5000;
@@ -212,38 +218,51 @@ export function runPhase(
   }
 
   for (let i = 0; i < elements.length; i++) elements[i].classList.add(cls);
+  // `elements` grows when late elements join (see `add`), so the class comes
+  // off every one of them however the phase ends.
   cleanups.push(() => {
     for (let i = 0; i < elements.length; i++) elements[i].classList.remove(cls);
   });
 
-  // Measured AFTER the class is applied: reading the computed style resolves
-  // the animation the class just started. An element is done when every
-  // transition and animation it runs has reported its end, so the first of
-  // several (a shared duration with different delays) cannot end the phase.
-  let longest = 0;
+  // The fallback deadline is absolute: `maxDuration` and the 5 s ceiling are
+  // measured from the phase start, so elements joining later can move the
+  // deadline out to cover their own animation, never past that cap.
+  const capAt = Date.now() + cap;
+  let deadline = 0;
+  const arm = (until: number): void => {
+    const at = Math.min(until, capAt);
+    if (timer !== null && at <= deadline) return;
+    if (timer !== null) clearTimeout(timer);
+    deadline = at;
+    timer = setTimeout(() => finish(true), Math.max(0, at - Date.now()));
+  };
+
+  // Enrolls `el` in the phase; returns how long its animations run (ms), or
+  // -1 when it runs none. Measured AFTER the class is applied: reading the
+  // computed style resolves the animation the class just started. An element
+  // is done when every transition and animation it runs has ended, so the
+  // first of several (a shared duration with different delays) cannot end
+  // the phase.
   let waiting = 0;
-  for (let i = 0; i < elements.length; i++) {
-    const el = elements[i];
+  const enroll = (el: Element): number => {
     const timing = measure(el);
-    if (timing === null) continue;
+    if (timing === null) return -1;
     // Where the engine exposes them (every supported browser), the animations
     // and transitions that actually started are known exactly: a listed
     // `transition-property` whose value did not change starts none, so it is
-    // not waited for. Each settles on finish or cancel; the timeout below
-    // still caps the phase. Reading them flushes the style change above.
+    // not waited for. Each settles on finish or cancel; the deadline still
+    // caps the phase. Reading them flushes the style change above.
     const running = typeof el.getAnimations === "function" ? el.getAnimations() : null;
     if (running !== null) {
-      if (running.length === 0) continue;
-      longest = Math.max(longest, timing.total);
+      if (running.length === 0) return -1;
       waiting++;
       let left = running.length;
       const settle = () => {
         if (--left === 0 && !finished && --waiting === 0) finish(true);
       };
       for (const animation of running) animation.finished.then(settle, settle);
-      continue;
+      return timing.total;
     }
-    longest = Math.max(longest, timing.total);
     waiting++;
     const onEnd = (event: Event) => {
       // Ends bubbling up from descendants are theirs, not the branch's.
@@ -264,12 +283,28 @@ export function runPhase(
     cleanups.push(() => {
       for (const type of END_EVENTS) el.removeEventListener(type, onEnd);
     });
-  }
+    return timing.total;
+  };
 
+  let longest = -1;
+  for (let i = 0; i < elements.length; i++) longest = Math.max(longest, enroll(elements[i]));
   if (waiting === 0) {
     finish(true);
     return null;
   }
-  timer = setTimeout(() => finish(true), Math.min(longest + SLACK_MS, cap));
-  return { cancel: () => finish(false) };
+  arm(Date.now() + longest + SLACK_MS);
+  return {
+    cancel: () => finish(false),
+    add: (late) => {
+      if (finished) return;
+      for (let i = 0; i < late.length; i++) {
+        const el = late[i];
+        if (elements.includes(el)) continue;
+        el.classList.add(cls);
+        elements.push(el);
+        const total = enroll(el);
+        if (total >= 0) arm(Date.now() + total + SLACK_MS);
+      }
+    },
+  };
 }
