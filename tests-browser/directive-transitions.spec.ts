@@ -285,3 +285,19 @@ test("a branch taken back mid-leave adopts the Suspense content that resolved wh
   await expect(page.locator("[data-reclaim]")).toHaveText("content");
   expect(await call("reclaimLog")).toEqual({ nodesCalls: 1 });
 });
+
+test("an enter a paused ancestor kept from starting replays once when it is taken back", async ({ page }) => {
+  await open(page);
+  const call = (name: string) =>
+    page.evaluate((n) => (window as never as { __t: Record<string, () => unknown> }).__t[n](), name);
+  await call("replayShowThenPause");
+  await expect(page.locator("[data-replay].slow-out[inert]")).toHaveCount(1);
+  await page.waitForTimeout(100);
+  expect(await call("replayEntered")).toEqual([]);
+  await call("replayShow");
+  await expect(page.locator("[data-replay]:not([inert])")).toHaveCount(1);
+  // The custom enter ran once, with the heading and both rows.
+  await expect.poll(() => call("replayEntered")).toEqual([3]);
+  await page.waitForTimeout(100);
+  expect(await call("replayEntered")).toEqual([3]);
+});

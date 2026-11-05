@@ -44,6 +44,7 @@
       <div id="suspense-host"></div>
       <div id="nested-host"></div>
       <div id="reclaim-host"></div>
+      <div id="replay-host"></div>
       <button id="after-rows">after</button>
     </main>
     <script type="module">
@@ -256,7 +257,48 @@
         ),
       );
 
+      // A nested enter kept from starting by a paused ancestor, replayed when
+      // the ancestor is taken back.
+      const replayEntered = [];
+      let replayShared = null;
+      const [replayOn, setReplayOn] = signal(false);
+      const [replayItems] = signal([1, 2]);
+      document.getElementById("replay-host").appendChild(
+        when(
+          () => replayOn(),
+          () =>
+            (replayShared ??= div({ "data-replay": "" }, [
+              when(
+                () => true,
+                () =>
+                  Fragment([
+                    span({ "data-replay-row": "" }, "heading"),
+                    each(replayItems, (item) => span({ "data-replay-row": "" }, String(item.peek())), {
+                      key: (item) => item,
+                    }),
+                  ]),
+                {
+                  transition: {
+                    appear: true,
+                    enterClass: "row-in",
+                    enter: (nodes) => {
+                      replayEntered.push(nodes.filter((n) => n.nodeType === 1).length);
+                    },
+                  },
+                },
+              ),
+            ])),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+
       window.__t = {
+        replayShowThenPause: () => {
+          setReplayOn(true);
+          queueMicrotask(() => setReplayOn(false));
+        },
+        replayShow: () => setReplayOn(true),
+        replayEntered: () => replayEntered.slice(),
         reclaimHide: () => setReclaimOn(false),
         reclaimShow: () => setReclaimOn(true),
         reclaimResolve: () => resolveReclaim(span({ "data-reclaimed": "" }, "content")),

@@ -582,7 +582,12 @@ export function each<T>(
   // Structural: rows are owned by this binding, so a flush that removes a row
   // reconciles first and the removed row's bindings never re-run against the
   // list that no longer contains their item.
-  const binding = structuralBinding(update);
+  // Owner-stamped with the anchor, like the directives: a failure on a later
+  // run is located there (and reaches an enclosing ErrorBoundary), and a held
+  // detached subtree containing the anchor (`holdSubtree`, a Suspense result
+  // kept while its branch is paused) holds this binding with the rest of it,
+  // keeping its pending work for the resume.
+  const binding = structuralBinding(update, anchor);
   const untrack = binding.stop;
 
   /**

@@ -15,8 +15,8 @@ import {
   getOwnerScope,
   type HeldCheck,
   holdSubtree,
+  reactiveBinding,
   runWithOwnerScope,
-  track,
   untracked,
 } from "../reactivity/track";
 import { prerenderWait } from "../utils/prerenderHook";
@@ -1154,15 +1154,6 @@ class ComponentLoader {
     }
 
     const factory = await this.resolveModuleFactory(plan, route, routePath);
-    // The module arrived while the outlet's branch is paused: the factory may
-    // read state that branch no longer owns, so it waits (the module stays
-    // cached) and runs once the branch resumes. If the branch ends instead,
-    // the instantiation is cancelled with an `AbortError` — not a failure of
-    // the component, and never shown as one.
-    // Resumed after a navigation made meanwhile superseded the outlet's pass:
-    // cancelled the same way, so an obsolete route is never built.
-    const gate = scope?.gate;
-    if (gate?.held() && (!(await gate.until()) || scope?.current?.() === false)) throw gate.cancellation();
     return this.instantiateFactory(factory, route, routePath, scope);
   }
 
@@ -1227,6 +1218,17 @@ class ComponentLoader {
     scope: RouteScope | undefined,
     depth = 0,
   ): Promise<Element> {
+    // Every user factory call passes the scope's gate first — a cached plan's
+    // factory, one a module just resolved to, one unwrapped from a module a
+    // factory returned. While the outlet's branch is paused the call waits
+    // (the module stays cached) and runs once the branch resumes; if it ends,
+    // or the outlet's pass was superseded meanwhile, the instantiation is
+    // cancelled with an `AbortError` — never shown as a component failure.
+    // With no wait, nothing is awaited: an active scope invokes synchronously.
+    const gate = scope?.gate;
+    if (gate?.held() && !(await gate.until())) throw gate.cancellation();
+    if (gate && scope?.current?.() === false) throw gate.cancellation();
+
     // The factory runs in the instance's route scope, so everything it creates
     // reads the route this instance was committed with (see `RouteScope`).
     const build = () => (scope ? runWithOwnerScope(scope, component) : component());
@@ -2565,17 +2567,29 @@ function pauseGate(frozen: HeldCheck): PauseGate {
 /**
  * Wait for the gate before committing `node`, built while the branch was (or
  * became) paused. The node is held meanwhile — its bindings do not react to
- * state the outgoing branch no longer owns — and released before the caller
- * decides. Resolves `true` when the caller may go on to commit.
+ * state the outgoing branch no longer owns. Resolves `true` when the caller
+ * may go on to commit (the hold is released first, so the node catches up).
+ * Otherwise `discard` disposes the node BEFORE the hold is released, so its
+ * skipped bindings are dropped, never replayed; the hold is released even if
+ * `discard` throws.
  */
-async function commitWhenActive(gate: PauseGate, node: Node | null): Promise<boolean> {
+async function commitWhenActive(gate: PauseGate, node: Node | null, discard: () => void): Promise<boolean> {
   if (!gate.held()) return true;
   const unhold = node ? holdSubtree(node) : null;
+  let active = false;
   try {
-    return await gate.until();
+    active = await gate.until();
   } finally {
-    unhold?.();
+    if (active) unhold?.();
+    else {
+      try {
+        discard();
+      } finally {
+        unhold?.();
+      }
+    }
   }
+  return active;
 }
 
 /** The route scope of whichever route instance owns the running code, if any. */
@@ -3163,10 +3177,7 @@ export function Route(): Node {
           // disposes it instead of dropping the reference. (OUT-003) A paused
           // branch holds the node until it resumes (then the check below runs)
           // or ends (then it is disposed, once).
-          if (!(await commitWhenActive(gate, node))) {
-            release(node);
-            return;
-          }
+          if (!(await commitWhenActive(gate, node, () => release(node)))) return;
           const parent = commitTarget(seq);
           if (!parent) {
             release(node);
@@ -3184,11 +3195,14 @@ export function Route(): Node {
         } catch (error) {
           // Cancelled with its branch: not a failure of the component.
           if (cancellations.has(error as object)) return;
-          // A genuine failure while paused is shown only if the branch resumes.
+          if (routeTorn || seq !== navSeq) return;
+          // Reported when observed, once. Only the presentation waits: a
+          // paused branch keeps its page and shows the error view if it
+          // resumes (still current); an ended one never shows it.
+          console.error("[Route] Component error:", error);
           if (gate.held() && !(await gate.until())) return;
           if (routeTorn || seq !== navSeq) return;
           hideLoading();
-          console.error("[Route] Component error:", error);
           fail(seq, error, routeDef);
         }
       }
@@ -3245,7 +3259,9 @@ export function Route(): Node {
   };
   // Before the first tracked pass, so no pass can reach it uninitialized.
   const attachWait = attachRetry(anchor, onAttached);
-  const routeTeardown = track(wrappedUpdate);
+  // Owner-stamped with the anchor: errors on a later run are located there,
+  // and a held subtree (see `holdSubtree`) holding the anchor holds this too.
+  const routeTeardown = reactiveBinding(wrappedUpdate, anchor);
   if (!routeInitialized) {
     // Not inside a branch that froze (began its leave) before this ran.
     queueMicrotask(
@@ -3465,9 +3481,8 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
           () => !kaTorn && seq === updateSeq,
         );
       } catch (error) {
-        if (cancellations.has(error as object)) return;
-        if (gate.held() && !(await gate.until())) return;
-        if (kaTorn || seq !== updateSeq) return;
+        // Reported when observed; a cancellation is not a failure.
+        if (cancellations.has(error as object) || kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
         return;
       }
@@ -3479,8 +3494,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       // The node exists and holds resources now, so losing ownership here
       // means disposing it — returning would leak every disposer it registered.
       // A paused branch holds the new node until it resumes, or ends.
-      if (!(await commitWhenActive(gate, node)) || kaTorn || seq !== updateSeq) {
-        disposeOwned(node);
+      const built = node;
+      if (!(await commitWhenActive(gate, built, () => disposeOwned(built)))) return;
+      if (kaTorn || seq !== updateSeq) {
+        disposeOwned(built);
         return;
       }
     }
@@ -3551,7 +3568,8 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         if (active) update();
       });
   });
-  const kaTeardown = track(wrappedUpdate);
+  // Anchored, as in `Route`.
+  const kaTeardown = reactiveBinding(wrappedUpdate, anchor);
   if (!initialized) {
     // In a paused branch the first pass waits for it to resume.
     queueMicrotask(
@@ -3933,8 +3951,14 @@ export function Suspense(props: {
     const kept = held;
     held = null;
     if (kept === null) return;
-    kept.unhold();
-    release(kept.element);
+    // Disposed BEFORE the hold is released: its skipped bindings are dropped
+    // with it, never replayed against state the branch no longer owns. The
+    // hold is released even if a teardown throws.
+    try {
+      release(kept.element);
+    } finally {
+      kept.unhold();
+    }
   };
 
   /**
@@ -4305,10 +4329,7 @@ export function Outlet(): Node {
       // re-reading the parent rather than trusting one captured earlier. The
       // node already exists and owns lifecycle resources by now, so a stale
       // pass disposes it instead of dropping the reference. (OUT-001)
-      if (!(await commitWhenActive(gate, node))) {
-        release(node);
-        return;
-      }
+      if (!(await commitWhenActive(gate, node, () => release(node)))) return;
       const parent = commitTarget(seq);
       if (!parent) {
         release(node);
@@ -4323,9 +4344,8 @@ export function Outlet(): Node {
       currentChild = childRoute;
       currentKey = key;
     } catch (error) {
-      if (cancellations.has(error as object)) return;
-      if (gate.held() && !(await gate.until())) return;
-      if (outletTorn || seq !== navSeq) return;
+      // Reported when observed; a cancellation is not a failure.
+      if (cancellations.has(error as object) || outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
     }
   };
@@ -4337,7 +4357,8 @@ export function Outlet(): Node {
         if (active) update();
       });
   });
-  const outletTeardown = track(update);
+  // Anchored, as in `Route`.
+  const outletTeardown = reactiveBinding(update, anchor);
   if (!anchor.parentNode) {
     // The deferred first pass must read the same route the binding does: the
     // enclosing instance's, carried by the owner scope.

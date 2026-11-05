@@ -536,44 +536,59 @@ function directive(
     const t = tr as DirectiveTransition;
     const entering = current;
     if (entering !== null && (!first || t.appear === true)) {
-      // A nested renderer in the branch (a top-level `each()`) renders its
-      // first rows a microtask later; the enter waits for them, so they enter
-      // with the branch. A switch, a disposal or a reclaim in the meantime
-      // cancels the wait through the placeholder phase.
-      if (anyPending(entering.nodes)) {
-        let cancelled = false;
-        let turns = 0;
-        entering.phase = {
-          cancel: () => {
-            cancelled = true;
-          },
-        };
-        const step = (): void => {
-          if (cancelled) return;
-          refreshNodes(entering);
-          if (anyPending(entering.nodes) && ++turns < ENTER_WAIT_TURNS) {
-            queueMicrotask(step);
-            return;
-          }
-          entering.phase = null;
-          startEnter(entering);
-        };
-        queueMicrotask(step);
-        return;
-      }
-      startEnter(entering);
-      // Still entering: the waiting leaves start from its completion.
+      enterWhenReady(entering);
+      // Still entering (or waiting to): the waiting leaves start from its
+      // completion, or from the switch that cancels it.
       if (entering.phase !== null) return;
     }
     if (t.mode === "in-out") startWaitingLeaves();
   };
 
+  /**
+   * Start `entering`'s enter once it can: after the first render of a nested
+   * renderer in it (a top-level `each()` renders its rows a microtask later,
+   * and they enter with the branch — bounded by `ENTER_WAIT_TURNS`), and while
+   * this directive's ancestors are active. An ancestor that is paused (its
+   * branch began a leave) defers the enter until it resumes — an enter that
+   * never started is replayed then, once — and drops it if it ends. A switch,
+   * a disposal or a reclaim cancels the wait through the placeholder phase.
+   */
+  const enterWhenReady = (entering: Branch): void => {
+    if (!frozen() && !anyPending(entering.nodes)) {
+      startEnter(entering);
+      return;
+    }
+    let cancelled = false;
+    let dropWait = NOOP;
+    let turns = 0;
+    const placeholder: PhaseRun = {
+      cancel: () => {
+        cancelled = true;
+        dropWait();
+      },
+    };
+    entering.phase = placeholder;
+    const step = (): void => {
+      if (cancelled || disposed || current !== entering || entering.phase !== placeholder) return;
+      if (frozen()) {
+        // Notified when the ancestors resume (or end), not polled.
+        dropWait = frozen.wait(step, NOOP);
+        return;
+      }
+      refreshNodes(entering);
+      if (anyPending(entering.nodes) && ++turns < ENTER_WAIT_TURNS) {
+        queueMicrotask(step);
+        return;
+      }
+      entering.phase = null;
+      startEnter(entering);
+    };
+    if (frozen()) step();
+    else queueMicrotask(step);
+  };
+
   /** Play the enter of `entering`, then start any `in-out` leave it held back. */
   const startEnter = (entering: Branch): void => {
-    // Nothing enters inside a subtree that is leaving: an ancestor that froze
-    // while a deferred enter waited (its placeholder is already cleared) wins,
-    // and no class or custom enter is applied. The branch is released with it.
-    if (frozen()) return;
     const t = tr as DirectiveTransition;
     entering.phase = runPhase(
       entering.nodes,

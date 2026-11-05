@@ -594,6 +594,17 @@ export interface HeldCheck {
    * driven by `thaw` and disposal. Returns a function that drops the wait.
    */
   wait(onActive: () => void, onEnd: () => void): () => void;
+  /**
+   * Call `onEnd` once the owner has ended (whatever its state now), exactly
+   * once. Returns a function that drops the watch.
+   */
+  onEnd(onEnd: () => void): () => void;
+  /**
+   * Run `fn` with the captured owner as the structural owner, so what it
+   * creates (an effect, a binding) is owned by it: skipped while it is
+   * paused, re-run when it resumes.
+   */
+  run<T>(fn: () => T): T;
 }
 
 interface Waiter {
@@ -619,12 +630,16 @@ function ownerState(tok: OwnerToken): OwnerState {
   return state;
 }
 
+const endWatchers = new Set<Waiter>();
+
 const ALWAYS_ACTIVE: HeldCheck = Object.assign(() => false, {
   state: () => ACTIVE,
   wait: (onActive: () => void) => {
     onActive();
     return NOOP;
   },
+  onEnd: () => NOOP,
+  run: <T>(fn: () => T): T => fn(),
 });
 
 /**
@@ -651,6 +666,26 @@ export function captureFrozen(): HeldCheck {
       return () => {
         waiters.delete(waiter);
       };
+    },
+    onEnd: (onEnd: () => void): (() => void) => {
+      if (state() === ENDED) {
+        onEnd();
+        return NOOP;
+      }
+      const watcher: Waiter = { check, onActive: NOOP, onEnd };
+      endWatchers.add(watcher);
+      return () => {
+        endWatchers.delete(watcher);
+      };
+    },
+    run: <T>(fn: () => T): T => {
+      const prev = currentStructOwner;
+      currentStructOwner = tok.sub === null ? null : tok;
+      try {
+        return fn();
+      } finally {
+        currentStructOwner = prev;
+      }
     },
   }) as HeldCheck;
   return check;
@@ -704,6 +739,11 @@ function settleHeld(): void {
     if (waiter.check.state() === PAUSED) continue;
     waiters.delete(waiter);
     (ready ??= []).push(waiter);
+  }
+  for (const watcher of endWatchers) {
+    if (watcher.check.state() !== ENDED) continue;
+    endWatchers.delete(watcher);
+    (ready ??= []).push(watcher);
   }
   if (ready !== null) {
     const settle = ready;
@@ -1081,7 +1121,7 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
     if (subscriber._tok != null) {
       subscriber._tok.sub = null;
       // Work waiting on this subtree to resume learns that it ended.
-      if (wasFrozen || waiters.size !== 0) settleHeld();
+      if (wasFrozen || waiters.size !== 0 || endWatchers.size !== 0) settleHeld();
     }
     cleanup(subscriber);
   };

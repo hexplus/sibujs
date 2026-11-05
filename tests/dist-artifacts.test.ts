@@ -354,6 +354,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // `HeldCheck.wait`), and a detached result can be held (`holdSubtree`).
     // Measured: raw ~101,780 B, gzip ~35,425 B (+~1,270 B raw, +~480 B gzip).
     //
+    // Raw 102,900 B, gzip baseline 35,100 B for the suspension follow-ups: the
+    // public `lifecycleScope()` (effects created after an `await` owned by the
+    // render's lifecycle), end watches and owner-scoped runs on `HeldCheck`,
+    // anchored `each` / `KeepAlive` bindings, and the replay of an enter a
+    // paused ancestor kept from starting. Measured: raw ~102,520 B, gzip
+    // ~35,720 B (+~740 B raw, +~300 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -361,8 +368,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(102_200);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(34_800 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(102_900);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(35_100 * 1.02));
   });
 });
 
