@@ -121,8 +121,10 @@ describe("island / enhancement entry points stay tree-shakeable", () => {
     `);
     // `each` is part of the same module as the helpers it delegates to, so it
     // cannot be shaken out independently; what matters is that the whole
-    // enhancement surface stays small enough to ship on any page.
-    expect(withEach.length).toBeLessThan(24 * 1024);
+    // enhancement surface stays small enough to ship on any page. (Raised from
+    // 24 KB in 4.15: the reactive core gained the frozen-owner check that leave
+    // transitions use, and `each` rows gained `peek()`, about 300 bytes.)
+    expect(withEach.length).toBeLessThan(25 * 1024);
     expect(subsystemsIn(withEach)).toEqual([]);
   });
 

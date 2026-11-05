@@ -1,8 +1,14 @@
 import { batch } from "../../reactivity/batch";
-import { bindOwnerScope, resumeTracking, structuralBinding, suspendTracking } from "../../reactivity/track";
-import { DEV, devAssert, devWarn } from "../dev";
+import {
+  bindOwnerScope,
+  isTrackingSuspended,
+  resumeTracking,
+  structuralBinding,
+  suspendTracking,
+} from "../../reactivity/track";
+import { DEV, devAssert, devWarn, devWarnLazy } from "../dev";
 import { reportError } from "../errors";
-import { signal } from "../signals/signal";
+import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
@@ -76,6 +82,43 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
 }
 
 /**
+ * The item getter `each()` passes to `render`: a reactive accessor for the
+ * row's CURRENT item, plus `peek()`.
+ *
+ * Calling it inside a binding (`() => item().name`) or an effect subscribes to
+ * the row, so the binding re-runs when reconciliation assigns the row's key a
+ * replacement item. Calling it directly in the body of `render` is a one-time
+ * read: `render` runs once per key, untracked, so what it read goes stale when
+ * the item behind the key is replaced (and dev builds warn when that happens).
+ */
+export type EachItem<T> = Accessor<T> & {
+  /**
+   * Read the current item WITHOUT subscribing and without the dev staleness
+   * warning: the explicit form of an intentional one-time read in `render`
+   * (an initial value, an id that is part of the key). `untracked(() => item())`
+   * does not serve here: `render` is already untracked, so that read is still
+   * reported as one that may go stale.
+   */
+  peek(): T;
+};
+
+/** The index getter `each()` passes to `render`; see {@link EachItem}. */
+export type EachIndex = Accessor<number> & {
+  /** Read the current index without subscribing and without the dev staleness warning. */
+  peek(): number;
+};
+
+/**
+ * Dev-only record of what a row's `render` read DIRECTLY (untracked, during
+ * the synchronous render call). Each slot holds the Error captured at the first
+ * such read (its stack names the call site), or null when there was none.
+ */
+interface RowReads {
+  item: Error | null;
+  index: Error | null;
+}
+
+/**
  * One reconciled keyed row.
  *
  * The renderer runs once, when the key first appears. Reconciliation keeps the
@@ -84,10 +127,30 @@ function longestIncreasingSubsequence(arr: number[], len: number): number[] {
  */
 interface Row<T> {
   node: Node;
-  item: () => T;
+  item: EachItem<T>;
   setItem: (next: T) => void;
-  index: () => number;
+  index: EachIndex;
   setIndex: (next: number) => void;
+  /** Dev only: direct reads made by `render`; always null in production. */
+  reads: RowReads | null;
+}
+
+// Dev-only: the row whose `render` call is on the stack right now, so a getter
+// can tell a direct read in the render body from a read anywhere else. Only
+// written under `DEV`.
+let renderingRow: RowReads | null = null;
+
+// Render call sites already warned about, so a list whose every row makes the
+// same direct read reports it once. Written only inside a `devWarnLazy`
+// callback, so in production this is an unreferenced empty Set.
+const warnedReadSites = new Set<string>();
+
+/** Attach `peek()` to a row cell's getter: a plain read of the signal's value. */
+function withPeek<V>(get: Accessor<V>): Accessor<V> & { peek(): V } {
+  const state = (get as unknown as { __signal: { value: V } }).__signal;
+  const cell = get as Accessor<V> & { peek(): V };
+  cell.peek = () => state.value;
+  return cell;
 }
 
 /**
@@ -123,6 +186,21 @@ interface Row<T> {
  * down (`Row({ item, index })`) or read them inside bindings
  * (`() => item().name`) and effects created by the row.
  *
+ * ```ts
+ * each(products, (p) => img({ src: p().url }), { key: (p) => p.name });        // ✗ src frozen per key
+ * each(products, (p) => img({ src: () => p().url }), { key: (p) => p.name });  // ✓ follows the item
+ * each(products, (p) => Row({ id: p.peek().id }), { key: (p) => p.id });       // ✓ deliberate one-time read
+ * ```
+ *
+ * In development, a row whose `render` read `item()` (or `index()`) directly
+ * warns once per call site when that read actually goes stale: when its key is
+ * handed a different item (`!Object.is`), or the row moves. A list whose items
+ * are never replaced never warns. `item.peek()` / `index.peek()` read the
+ * current value without subscribing and are never reported; use them to mark a
+ * one-time read as intentional. (`untracked(() => item())` is not an
+ * alternative here: `render` is already untracked.) The check and its message
+ * are compiled out of production builds.
+ *
  * A binding that reads `item()` subscribes to the ROW's cell, not to the
  * whole-array signal. `render` never re-runs for an existing key; only the
  * bindings and effects that read that row's `item()` / `index()` re-run, and
@@ -130,13 +208,13 @@ interface Row<T> {
  * row does not disturb it.
  *
  * @param getArray A reactive getter returning an array.
- * @param render A function that receives reactive item and index getters and returns a NodeChild.
+ * @param render Receives the row's reactive item and index getters ({@link EachItem}, {@link EachIndex}) and returns a NodeChild. Runs once per key.
  * @param options A key function for unique identity of items.
  * @returns A Comment node serving as the anchor for the list.
  */
 export function each<T>(
   getArray: () => T[],
-  render: (item: () => T, index: () => number) => NodeChild,
+  render: (item: EachItem<T>, index: EachIndex) => NodeChild,
   options: { key: (item: T) => string | number },
 ): Comment {
   devAssert(typeof getArray === "function", "each: first argument must be a function that returns an array.");
@@ -261,6 +339,41 @@ export function each<T>(
         // whole-array signal, so unrelated row mutations never disturb it.
         const [itemGetter, setItem] = signal<T>(arr[i]);
         const [indexGetter, setIndex] = signal<number>(i);
+        const item = withPeek(itemGetter);
+        const index = withPeek(indexGetter);
+        // Dev: `render` gets getters that record a direct read, so a row that
+        // goes stale when its key receives a new item can be reported.
+        let reads: RowReads | null = null;
+        let renderItem = item;
+        let renderIndex = index;
+        let outerRow: RowReads | null = null;
+        // Handed to `render` in place of the row getters: each records the
+        // first read made directly in the render body (untracked, while this
+        // row's render is running). Reads from bindings and effects the row
+        // creates run in their own tracking scope and are not recorded.
+        //
+        // Set up inside a `devWarnLazy` builder that returns "" (no warning):
+        // a production build drops the builder, and this bookkeeping with it.
+        devWarnLazy(() => {
+          const rowReads: RowReads = { item: null, index: null };
+          const recording = <V>(get: Accessor<V> & { peek(): V }, slot: keyof RowReads) => {
+            const read = (() => {
+              if (renderingRow === rowReads && rowReads[slot] === null && isTrackingSuspended()) {
+                rowReads[slot] = new Error();
+              }
+              return get();
+            }) as Accessor<V> & { peek(): V };
+            read.peek = get.peek;
+            (read as unknown as Record<string, unknown>).__signal = (
+              get as unknown as Record<string, unknown>
+            ).__signal;
+            return read;
+          };
+          reads = rowReads;
+          renderItem = recording(item, "item");
+          renderIndex = recording(index, "index");
+          return "";
+        });
         let node: Node;
         try {
           // The renderer runs UNTRACKED. A row created by a later update runs
@@ -271,10 +384,14 @@ export function each<T>(
           // paths behave the same. Reactivity inside a row belongs to the
           // bindings and effects it creates, which track in their own scopes.
           suspendTracking();
+          // `reads` is null in production, where nothing reads this.
+          outerRow = renderingRow;
+          renderingRow = reads;
           try {
-            node = resolveNodeChild(inScope(keyedScope(scope, key), () => render(itemGetter, indexGetter)));
+            node = resolveNodeChild(inScope(keyedScope(scope, key), () => render(renderItem, renderIndex)));
           } finally {
             resumeTracking();
+            renderingRow = outerRow;
           }
         } catch (err) {
           // The row is replaced by an inert placeholder so reconciliation can
@@ -298,7 +415,7 @@ export function each<T>(
             });
           });
         }
-        row = { node, item: itemGetter, setItem, index: indexGetter, setIndex };
+        row = { node, item, setItem, index, setIndex, reads };
       }
       workMap.set(key, row);
       newNodes[i] = row.node;
@@ -411,6 +528,7 @@ export function each<T>(
     batch(() => {
       for (let i = 0; i < count; i++) {
         const row = pendingRows[i];
+        if (row.reads !== null) warnStaleRead(row, pendingItems[i], pendingIndices[i]);
         row.setItem(pendingItems[i]);
         row.setIndex(pendingIndices[i]);
         // Drop the strong reference so a removed item is not retained by the
@@ -418,6 +536,40 @@ export function each<T>(
         pendingRows[i] = undefined as unknown as Row<T>;
         pendingItems[i] = undefined as unknown as T;
       }
+    });
+  }
+
+  /**
+   * Dev only: warn when a row whose `render` read `item()` / `index()` directly
+   * is about to receive a different item / position under the same key, the
+   * moment that direct read goes stale. Once per render call site.
+   */
+  function warnStaleRead(row: Row<T>, nextItem: T, nextIndex: number): void {
+    devWarnLazy(() => {
+      const reads = row.reads as RowReads;
+      let site: Error | null = null;
+      let which = "";
+      if (reads.item !== null && !Object.is(row.item.peek(), nextItem)) {
+        site = reads.item;
+        which = "item";
+        reads.item = null;
+      } else if (reads.index !== null && row.index.peek() !== nextIndex) {
+        site = reads.index;
+        which = "index";
+        reads.index = null;
+      }
+      if (site === null) return "";
+      // The first frame is the recording getter; the next one is whoever
+      // called `item()`: the render function, or a helper it called.
+      const frames = (site.stack ?? "").split("\n").filter((line) => /^\s*at\s|@/.test(line));
+      const at = (frames[1] ?? frames[0] ?? "").trim().replace(/^at\s+/, "") || "unknown location";
+      if (warnedReadSites.has(at)) return "";
+      if (warnedReadSites.size < 100) warnedReadSites.add(at);
+      return (
+        `each(): the row for key "${String(keyFn(nextItem))}" read ${which}() directly while rendering, so it will ` +
+        `not show the new value. Read it inside a binding (\`() => ${which}().x\`) or an effect, or include the ` +
+        `changing field in the key. For an intentional one-time read, use ${which}.peek(). (render at ${at})`
+      );
     });
   }
 
