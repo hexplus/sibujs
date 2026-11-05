@@ -97,12 +97,29 @@ canvas or a `requestAnimationFrame` loop can run until it has faded out.
 Several branches may be leaving at once; switching back to a bare element that
 is still leaving cancels its leave. The first render enters only with
 `appear: true`; an enter waits for the first render of a top-level `each()` (or
-nested directive), so its rows enter with the branch. A leaving branch is
-paused, not ended: inside it nothing starts — no queued first render, no
-pending enter, no route factory call (cached modules included) — and async
-work that settles (`Suspense` content, a lazy route module) is not committed;
-the fallback or page on screen stays, and a result is held, bindings and lists
-included, so it does not react meanwhile. A route failure is still reported
+nested directive), so its rows enter with the branch, and rows such a range adds
+while a class-based enter runs join it. Disposing the directive removes leaving
+branches at once. Server renders ignore transitions. Without `transition`, a
+switch removes and disposes the old branch at once, as before.
+
+`waitForContent` (ms, opt-in) lets content that loads asynchronously enter with
+the branch: the initial content (or error view) of the `Suspense` boundaries and
+route outlets anywhere in the entering branch, if it settles within that time
+(counted from the switch, at most 5 s). A class-based enter starts at once and
+stays open for it: each piece joins as it arrives, gets `enterClass`, and the
+enter ends with its animation. A custom `enter` is called once the content has
+settled, or at the deadline. Content settling later appears without an enter;
+an enter never replays, and nothing is loaded again for it. With `"in-out"`,
+the outgoing branch leaves when that enter ends.
+
+A leaving branch is paused, not ended: inside it nothing starts — no queued
+first render, no pending enter, no route factory call (cached modules included)
+— and async work that settles (`Suspense` content, a lazy route module) is not
+committed; the fallback or page on screen stays, and a result is held, bindings
+and lists included, so it does not react meanwhile. Its DOM is held too, so a
+binding an async continuation created in it after the build is paused as well.
+Every wait re-checks the branch when it is notified, so a branch paused again
+before the waiting work runs keeps it waiting. A route failure is still reported
 when it happens; only its error view waits. Taken back before its leave ends,
 the branch resumes: what it skipped re-runs once against the current state, an
 enter it kept from starting plays, a `Suspense` adopts the result it held (its
@@ -113,25 +130,33 @@ nothing renders. `router.instantiateComponent()` waits rather than rejects
 while its scope is paused, and rejects with an `AbortError` only when the scope
 ends or its pass is superseded.
 
-### Added — `lifecycleScope()`: effects created after an `await`
+### Added — `lifecycleScope()`: work created after an `await`
 
 ```ts
 const scope = lifecycleScope();      // during render
 await load();
 scope.effect(() => { … });           // owned by that render's lifecycle
+scope.watch(() => user.online(), (online) => notify(online));
 ```
 
-An `effect()` created after an `await` belongs to no lifecycle, and registering
-its disposer on a node gives teardown, not ownership: it keeps running while
-its component's branch is paused for a leave. `lifecycleScope()` captures the
-lifecycle synchronously; `scope.effect()` then waits while it is paused (a new
-effect's first run included), coalesces changes into one run on resume, and is
-disposed (cleanups once) when the lifecycle ends. `scope.state()` reports
-`"active"`, `"paused"` or `"ended"`. Nothing is installed globally across the
-`await`, so concurrent work never inherits another's lifecycle. Unscoped
-effects created after an `await` are not discovered automatically. Disposing the directive removes leaving branches at once.
-Server renders ignore transitions. Without `transition`, a switch removes and
-disposes the old branch at once, as before.
+An `effect()` or `watch()` created after an `await` belongs to no lifecycle, and
+registering its disposer on a node gives teardown, not ownership: it keeps
+running while its component's branch is paused for a leave. `lifecycleScope()`
+captures the lifecycle synchronously. What is created through it — `effect()`,
+`watch()`, or anything `own(register)` creates — waits while the lifecycle is
+paused (a new registration is created on resume), catches up once on resume
+against the current state (`watch` keeps its `(value, previous)` contract, so
+the values in between are not delivered), and is disposed, cleanups once, in
+the disposal that ends the lifecycle: nothing it owns runs after that, not even
+in the same task. `scope.state()` reports `"active"`, `"paused"` or `"ended"`.
+
+The lifecycle is the branch's in a `when()` / `match()` with a `transition`, the
+route instance's in a route component (paused with the branch holding the
+outlet, ended when the instance is replaced), and the boundary's in
+`Suspense`'s `nodes()` and `fallback()`. Nothing is installed globally across
+the `await`, so concurrent work never inherits another's lifecycle. Captured
+outside any render, a scope is always active. Unscoped work created after an
+`await` is not discovered automatically.
 
 ### Added — `each()`: a dev warning when a direct `item()` read goes stale, and `item.peek()`
 

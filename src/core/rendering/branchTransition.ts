@@ -57,6 +57,29 @@ export interface DirectiveTransition {
   maxDuration?: number;
   /** Also play the enter on the directive's first render. Default `false`. */
   appear?: boolean;
+  /**
+   * Opt-in, in ms: let content that loads asynchronously enter WITH the
+   * branch — the initial content (or error view) of every `Suspense` boundary
+   * and route outlet (`Route`, `Outlet`, `KeepAliveRoute`) in the entering
+   * branch, wherever it sits — if it settles within this time, counted from
+   * the switch and never more than 5000 ms. Default: not waited for.
+   *
+   * - A class-based enter starts at once and stays open for that content
+   *   until it has settled or the time is up: each piece joins the enter as
+   *   it arrives (it gets `enterClass`, and the enter ends when its animation
+   *   does, within the enter's own `maxDuration` / 5 s cap).
+   * - A custom `enter` is called once the content has settled, or when the
+   *   time is up, with the nodes present then.
+   * - Content settling later, or after the enter ended, appears without an
+   *   enter: an enter never replays, and nothing is loaded again for it.
+   *
+   * With `mode: "in-out"` the outgoing branch starts leaving when this enter
+   * ends, so it waits as long. The first render takes part only with
+   * `appear: true`. Whatever the setting, elements a top-level range of the
+   * branch (an `each()`, a nested directive) adds while a class-based enter
+   * runs join it.
+   */
+  waitForContent?: number;
 }
 
 /** A phase in progress. */
@@ -69,9 +92,15 @@ export interface PhaseRun {
    * phase waits for their animations too, within its original deadline.
    */
   add?(elements: Element[]): void;
+  /**
+   * Class-based phases started with an `open` window only: nothing more will
+   * join, so the phase may end as soon as its animations have.
+   */
+  close?(): void;
 }
 
-const HARD_CAP_MS = 5000;
+/** The ceiling of any phase, and of an enter's wait for content. @internal */
+export const HARD_CAP_MS = 5000;
 const SLACK_MS = 50;
 // A total at or below this is "no animation": a reduced-motion stylesheet
 // typically shortens durations to 0.01ms rather than 0.
@@ -162,6 +191,10 @@ function matchEntry(map: Map<string, number>, name: unknown): string | undefined
 /**
  * Play one phase on `nodes` and call `onDone` when it is over.
  *
+ * `open` (class-based phases): for that many ms the phase stays open for
+ * elements joining it through `add`, even with nothing animating, until
+ * `close()` — never past its cap.
+ *
  * @returns The running phase, or `null` when it finished synchronously (in
  * which case `onDone` has already been called).
  */
@@ -172,6 +205,7 @@ export function runPhase(
   maxDuration: number | undefined,
   onDone: () => void,
   name: string,
+  open = 0,
 ): PhaseRun | null {
   const cap = Math.min(typeof maxDuration === "number" && maxDuration >= 0 ? maxDuration : HARD_CAP_MS, HARD_CAP_MS);
   const elements: Element[] = [];
@@ -212,7 +246,8 @@ export function runPhase(
     return { cancel: () => finish(false) };
   }
 
-  if (!cls || elements.length === 0) {
+  let holding = open > 0;
+  if (!cls || (elements.length === 0 && !holding)) {
     onDone();
     return null;
   }
@@ -258,7 +293,7 @@ export function runPhase(
       waiting++;
       let left = running.length;
       const settle = () => {
-        if (--left === 0 && !finished && --waiting === 0) finish(true);
+        if (--left === 0 && !finished && --waiting === 0 && !holding) finish(true);
       };
       for (const animation of running) animation.finished.then(settle, settle);
       return timing.total;
@@ -277,7 +312,7 @@ export function runPhase(
       const left = (map.get(key) as number) - 1;
       if (left > 0) map.set(key, left);
       else map.delete(key);
-      if (--timing.pending === 0 && --waiting === 0) finish(true);
+      if (--timing.pending === 0 && --waiting === 0 && !holding) finish(true);
     };
     for (const type of END_EVENTS) el.addEventListener(type, onEnd);
     cleanups.push(() => {
@@ -288,13 +323,26 @@ export function runPhase(
 
   let longest = -1;
   for (let i = 0; i < elements.length; i++) longest = Math.max(longest, enroll(elements[i]));
-  if (waiting === 0) {
+  if (waiting === 0 && !holding) {
     finish(true);
     return null;
   }
-  arm(Date.now() + longest + SLACK_MS);
+  if (waiting > 0) arm(Date.now() + longest + SLACK_MS);
+  // The open window ends on its own at its deadline (never past the cap):
+  // from then on the phase ends with its animations, as any other.
+  const close = (): void => {
+    holding = false;
+    if (!finished && waiting === 0) finish(true);
+  };
+  if (holding) {
+    // The fallback deadline covers the window too; it only ever moves later.
+    arm(Date.now() + open);
+    const openTimer = setTimeout(close, Math.max(0, Math.min(Date.now() + open, capAt) - Date.now()));
+    cleanups.push(() => clearTimeout(openTimer));
+  }
   return {
     cancel: () => finish(false),
+    close,
     add: (late) => {
       if (finished) return;
       for (let i = 0; i < late.length; i++) {

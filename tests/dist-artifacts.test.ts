@@ -361,6 +361,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // paused ancestor kept from starting. Measured: raw ~102,520 B, gzip
     // ~35,720 B (+~740 B raw, +~300 B gzip).
     //
+    // Raw 104,700 B, gzip baseline 35,800 B for lifecycle ownership: the
+    // synchronous end of scoped work, `lifecycleScope().watch()` / `.own()`,
+    // a leaving branch holding its DOM, and `waitForContent` (initial async
+    // content joining a branch enter, with the enter's open window and
+    // late-element enrolment). Measured: raw ~104,430 B, gzip ~36,440 B
+    // (+~1,910 B raw, +~720 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -368,8 +375,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(102_900);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(35_100 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(104_700);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(35_800 * 1.02));
   });
 });
 

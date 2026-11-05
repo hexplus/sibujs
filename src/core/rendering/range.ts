@@ -81,6 +81,71 @@ export function anyPending(nodes: readonly Node[]): boolean {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Asynchronously loaded INITIAL content.
+//
+// A `Suspense` boundary and a route outlet render content that arrives later
+// (a network request, a lazy chunk). Until their first content (or error) is
+// on the page their anchor is LOADING. An enter that opted in with
+// `DirectiveTransition.waitForContent` lets the content of the loading anchors
+// inside the entering branch join it, within a bounded time. Only the initial
+// content counts: a later navigation in an outlet never makes it loading
+// again.
+//
+// A WeakSet, so an anchor dropped without settling is not retained; the count
+// only lets the common case (nothing loading) skip the search.
+// ---------------------------------------------------------------------------
+
+const loading = new WeakSet<Node>();
+let loadingCount = 0;
+const loadListeners = new Set<() => void>();
+
+/**
+ * Mark `anchor`'s initial content as loading. Returns `loaded`, to call once
+ * it has settled (shown, failed, or dropped with the anchor); idempotent.
+ *
+ * @internal
+ */
+export function beginLoading(anchor: Node): () => void {
+  loading.add(anchor);
+  loadingCount++;
+  return () => {
+    if (!loading.delete(anchor)) return;
+    loadingCount--;
+    // A microtask later: the caller settles BEFORE it inserts the content.
+    if (loadListeners.size !== 0)
+      queueMicrotask(() => {
+        for (const listener of [...loadListeners]) listener();
+      });
+  };
+}
+
+/** The loading anchors among `nodes` and inside them, in document order. @internal */
+export function loadingWithin(nodes: readonly Node[]): Node[] {
+  const found: Node[] = [];
+  if (loadingCount <= 0) return found;
+  for (const node of nodes) {
+    if (loading.has(node)) found.push(node);
+    if (node.nodeType !== 1) continue;
+    const walker = (node.ownerDocument as Document).createTreeWalker(node, 128 /* SHOW_COMMENT */);
+    for (let c = walker.nextNode(); c !== null; c = walker.nextNode()) if (loading.has(c)) found.push(c);
+  }
+  return found;
+}
+
+/** Whether `anchor`'s initial content is still loading. @internal */
+export function isLoading(anchor: Node): boolean {
+  return loading.has(anchor);
+}
+
+/** Call `listener` whenever some loading anchor settles. Returns the unsubscribe. @internal */
+export function onLoaded(listener: () => void): () => void {
+  loadListeners.add(listener);
+  return () => {
+    loadListeners.delete(listener);
+  };
+}
+
 /** Whether `node` renders a sibling range whose content can change. @internal */
 export function hasRange(node: Node): boolean {
   return ends.has(node);

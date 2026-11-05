@@ -1,13 +1,31 @@
-import { bindOwnerScope, captureFrozen, reactiveBinding, structuralBinding, untracked } from "../../reactivity/track";
+import {
+  bindOwnerScope,
+  captureFrozen,
+  holdSubtree,
+  reactiveBinding,
+  structuralBinding,
+  untracked,
+} from "../../reactivity/track";
 import type { StructuralBinding } from "../../reactivity/track-core";
 import { devWarnLazy } from "../dev";
 import { reportError } from "../errors";
 import { isServer } from "../ssr-context";
 import { captureScope, inScope } from "./adoptScope";
-import { type DirectiveTransition, type PhaseRun, runPhase } from "./branchTransition";
+import { type DirectiveTransition, HARD_CAP_MS, type PhaseRun, runPhase } from "./branchTransition";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, type FocusSnapshot, restoreFocusWithin } from "./focusPreservation";
-import { anyPending, collectRange, hasRange, queueFirstRender, rangeEnd, registerRange, resumePending } from "./range";
+import {
+  anyPending,
+  collectRange,
+  hasRange,
+  isLoading,
+  loadingWithin,
+  onLoaded,
+  queueFirstRender,
+  rangeEnd,
+  registerRange,
+  resumePending,
+} from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -108,9 +126,11 @@ export interface DirectiveOptions {
    * it. The first render plays no enter unless `appear: true`. An enter waits
    * for the first render of a top-level `each()` or nested directive (a few
    * microtask turns at most), so those rows enter with the branch; rows such a
-   * range adds while the branch leaves join the leave. Disposing the
-   * directive removes leaving branches at once. Server renders ignore
-   * transitions entirely.
+   * range adds while a class-based enter runs join it, and rows it adds while
+   * the branch leaves join the leave. Content that loads asynchronously (a
+   * `Suspense` boundary, a route outlet) is not waited for unless
+   * `waitForContent` says how long to wait. Disposing the directive removes
+   * leaving branches at once. Server renders ignore transitions entirely.
    */
   transition?: DirectiveTransition;
 }
@@ -149,6 +169,8 @@ interface Branch {
   phase: PhaseRun | null;
   /** Transitions only: undoes the `inert` / `aria-hidden` a leave applied. */
   restore: (() => void) | null;
+  /** Transitions only: releases the hold a leave put on the branch's DOM. */
+  unhold: (() => void) | null;
   /** Transitions only (`in-out`): leaving, but waiting for the new branch's enter. */
   waiting: boolean;
 }
@@ -239,7 +261,17 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
   // An empty fragment the directive built still has a lifetime: cleanup
   // registered on the fragment itself runs when the branch is released.
   if (nodes.length === 0 && !owned) return null;
-  return { source: node, starts, nodes, owned, owner: null, phase: null, restore: null, waiting: false };
+  return {
+    source: node,
+    starts,
+    nodes,
+    owned,
+    owner: null,
+    phase: null,
+    restore: null,
+    unhold: null,
+    waiting: false,
+  };
 }
 
 /**
@@ -323,6 +355,12 @@ function releaseBranch(branch: Branch): void {
     else branch.owner.thaw?.();
     branch.owner = null;
   }
+  // Released only now: an owned branch's bindings were disposed above, so
+  // the ones the hold skipped are dropped rather than woken.
+  if (branch.unhold !== null) {
+    branch.unhold();
+    branch.unhold = null;
+  }
 }
 
 /**
@@ -361,19 +399,13 @@ function makeInert(branch: Branch, onLate: (elements: Element[]) => void): () =>
       break;
     }
   }
-  let observer: MutationObserver | null = null;
-  const parent = branch.nodes[0]?.parentNode;
-  if (parent && typeof MutationObserver === "function" && branch.starts.some(hasRange)) {
-    observer = new MutationObserver(() => {
-      refreshNodes(branch);
-      const before = saved.length;
-      mark(branch.nodes);
-      if (saved.length > before) onLate(saved.slice(before).map((entry) => entry[0]));
-    });
-    observer.observe(parent, { childList: true });
-  }
+  const unwatch = watchRange(branch, (late) => {
+    const before = saved.length;
+    mark(late);
+    if (saved.length > before) onLate(saved.slice(before).map((entry) => entry[0]));
+  });
   return () => {
-    observer?.disconnect();
+    unwatch();
     for (let i = 0; i < saved.length; i++) {
       const [el, inert, hidden] = saved[i];
       if (inert === null) el.removeAttribute("inert");
@@ -382,6 +414,31 @@ function makeInert(branch: Branch, onLate: (elements: Element[]) => void): () =>
       else el.setAttribute("aria-hidden", hidden);
     }
   };
+}
+
+/**
+ * Watch a branch whose range can still grow (an `each()` or a directive at its
+ * top level): `onLate` receives the elements its range gained, once each.
+ * Nothing to watch for a branch without such a range.
+ *
+ * @returns A function ending the watch.
+ */
+function watchRange(branch: Branch, onLate: (elements: Element[]) => void): () => void {
+  const parent = branch.nodes[0]?.parentNode;
+  if (!parent || typeof MutationObserver !== "function" || !branch.starts.some(hasRange)) return NOOP;
+  const seen = new Set<Node>(branch.nodes);
+  const observer = new MutationObserver(() => {
+    refreshNodes(branch);
+    const late: Element[] = [];
+    for (const node of branch.nodes) {
+      if (seen.has(node)) continue;
+      seen.add(node);
+      if (node.nodeType === 1) late.push(node as Element);
+    }
+    if (late.length > 0) onLate(late);
+  });
+  observer.observe(parent, { childList: true });
+  return () => observer.disconnect();
 }
 
 /**
@@ -454,6 +511,7 @@ function directive(
               // the branch leaves again.
               resumed = prev.owner;
               resumed?.thaw?.();
+              prev.unhold?.();
               break;
             }
           }
@@ -506,7 +564,15 @@ function directive(
       branch.phase = null;
     }
     refreshNodes(branch);
-    branch.owner?.freeze?.();
+    if (branch.owner !== null) {
+      branch.owner.freeze?.();
+      // Its DOM is held too: a binding in it that its owner does not reach —
+      // one an async continuation created after the build — is paused all
+      // the same (see `holdSubtree`).
+      branch.unhold = holdSubtree({
+        contains: (node) => branch.nodes.some((n) => n === node || n.contains(node as Node)),
+      });
+    }
     // Late elements join the running class-based leave; an `in-out` branch
     // still waiting has none yet, and starts it over its refreshed range.
     branch.restore = makeInert(branch, (late) => branch.phase?.add?.(late));
@@ -552,19 +618,40 @@ function directive(
    * branch began a leave) defers the enter until it resumes — an enter that
    * never started is replayed then, once — and drops it if it ends. A switch,
    * a disposal or a reclaim cancels the wait through the placeholder phase.
+   *
+   * `waitForContent` fixes its deadline here, at the switch. A custom enter
+   * also waits for the content (see `loadingWithin`), notified as each piece
+   * settles and at the deadline; a class-based one does not wait, it stays
+   * open for the content instead (see `startEnter`). A paused ancestor defers
+   * either past that deadline, until it resumes.
    */
   const enterWhenReady = (entering: Branch): void => {
-    if (!frozen() && !anyPending(entering.nodes)) {
-      startEnter(entering);
+    const t = tr as DirectiveTransition;
+    const budget = typeof t.waitForContent === "number" && t.waitForContent > 0 ? t.waitForContent : 0;
+    const readyAt = budget > 0 ? Date.now() + Math.min(budget, HARD_CAP_MS) : 0;
+    const contentReady = (): boolean =>
+      t.enter === undefined || readyAt === 0 || Date.now() >= readyAt || loadingWithin(entering.nodes).length === 0;
+    if (!frozen() && !anyPending(entering.nodes) && contentReady()) {
+      startEnter(entering, readyAt);
       return;
     }
     let cancelled = false;
     let dropWait = NOOP;
+    let dropLoaded = NOOP;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let turns = 0;
+    const stopWaiting = (): void => {
+      dropWait();
+      dropWait = NOOP;
+      dropLoaded();
+      dropLoaded = NOOP;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+    };
     const placeholder: PhaseRun = {
       cancel: () => {
         cancelled = true;
-        dropWait();
+        stopWaiting();
       },
     };
     entering.phase = placeholder;
@@ -572,6 +659,7 @@ function directive(
       if (cancelled || disposed || current !== entering || entering.phase !== placeholder) return;
       if (frozen()) {
         // Notified when the ancestors resume (or end), not polled.
+        dropWait();
         dropWait = frozen.wait(step, NOOP);
         return;
       }
@@ -580,27 +668,84 @@ function directive(
         queueMicrotask(step);
         return;
       }
+      if (!contentReady()) {
+        // Woken when some content settles (it may hold renderers of its own,
+        // which get their turns), and at the deadline. Not restarted.
+        if (timer === null) {
+          dropLoaded = onLoaded(() => {
+            turns = 0;
+            step();
+          });
+          timer = setTimeout(step, Math.max(0, readyAt - Date.now()));
+        }
+        return;
+      }
+      stopWaiting();
       entering.phase = null;
-      startEnter(entering);
+      startEnter(entering, readyAt);
     };
     if (frozen()) step();
     else queueMicrotask(step);
   };
 
-  /** Play the enter of `entering`, then start any `in-out` leave it held back. */
-  const startEnter = (entering: Branch): void => {
+  /**
+   * Play the enter of `entering`, then start any `in-out` leave it held back.
+   *
+   * A class-based enter takes in the elements the branch's range adds while it
+   * runs (see `PhaseRun.add`). Until `readyAt` (`waitForContent`) it also
+   * stays open for the initial content of the loading boundaries and outlets
+   * in the branch: each one's content joins it when it settles, and the enter
+   * closes once none is left. Nothing joins once it has ended.
+   */
+  const startEnter = (entering: Branch, readyAt: number): void => {
     const t = tr as DirectiveTransition;
-    entering.phase = runPhase(
+    const loads = t.enter === undefined && readyAt > Date.now() ? loadingWithin(entering.nodes) : [];
+    let stopWatching = NOOP;
+    const run = runPhase(
       entering.nodes,
       t.enterClass,
       t.enter,
       t.maxDuration,
       () => {
+        stopWatching();
         entering.phase = null;
         if (t.mode === "in-out") startWaitingLeaves();
       },
       `${name}(enter)`,
+      loads.length > 0 ? readyAt - Date.now() : 0,
     );
+    const add = run?.add;
+    if (run === null || add === undefined) {
+      entering.phase = run;
+      return;
+    }
+    const unwatch = watchRange(entering, add);
+    let dropLoaded = NOOP;
+    if (loads.length > 0) {
+      dropLoaded = onLoaded(() => {
+        for (let i = loads.length - 1; i >= 0; i--) {
+          const anchor = loads[i];
+          if (isLoading(anchor)) continue;
+          loads.splice(i, 1);
+          // What it rendered after its anchor: its content or error view.
+          const content: Element[] = [];
+          for (const node of collectRange([anchor])) if (node.nodeType === 1) content.push(node as Element);
+          if (content.length > 0) add(content);
+        }
+        if (loads.length === 0) run.close?.();
+      });
+    }
+    stopWatching = () => {
+      unwatch();
+      dropLoaded();
+    };
+    entering.phase = {
+      cancel: () => {
+        stopWatching();
+        run.cancel();
+      },
+      add,
+    };
   };
 
   // An `out-in` build, run once the last leave ended (from an event or a

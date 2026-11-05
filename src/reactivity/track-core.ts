@@ -596,7 +596,9 @@ export interface HeldCheck {
   wait(onActive: () => void, onEnd: () => void): () => void;
   /**
    * Call `onEnd` once the owner has ended (whatever its state now), exactly
-   * once. Returns a function that drops the watch.
+   * once. Returns a function that drops the watch. Unlike `wait`, it is called
+   * SYNCHRONOUSLY, inside the disposal that ended the owner: by the time any
+   * other subscriber can run, what it tears down is gone.
    */
   onEnd(onEnd: () => void): () => void;
   /**
@@ -713,6 +715,35 @@ function isHeld(sub: SubWithList): boolean {
 }
 
 /**
+ * An owner ended: call, synchronously, every end watcher whose owner chain is
+ * now ended. Runs before `settleHeld` re-queues what the owner skipped, so work
+ * torn down here (a `lifecycleScope()` effect) is disposed before the drain
+ * could run it. Each callback is contained: one failing teardown does not
+ * strand the others.
+ */
+function notifyEnded(): void {
+  let ended: Waiter[] | null = null;
+  for (const watcher of endWatchers) {
+    if (watcher.check.state() !== ENDED) continue;
+    endWatchers.delete(watcher);
+    (ended ??= []).push(watcher);
+  }
+  if (ended === null) return;
+  for (const watcher of ended) {
+    try {
+      watcher.onEnd();
+    } catch (err) {
+      reportError(err, { phase: "cleanup" });
+    }
+  }
+}
+
+/** Number of pending lifecycle waits and end watches, for leak tests. @internal */
+export function heldListenerCount(): number {
+  return waiters.size + endWatchers.size;
+}
+
+/**
  * After a resume, an end or a released root: re-queue the subscribers that are
  * no longer held, settle the waiters, and run what was queued.
  */
@@ -739,11 +770,6 @@ function settleHeld(): void {
     if (waiter.check.state() === PAUSED) continue;
     waiters.delete(waiter);
     (ready ??= []).push(waiter);
-  }
-  for (const watcher of endWatchers) {
-    if (watcher.check.state() !== ENDED) continue;
-    endWatchers.delete(watcher);
-    (ready ??= []).push(watcher);
   }
   if (ready !== null) {
     const settle = ready;
@@ -1102,7 +1128,11 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
   } catch (err) {
     subscriber._disposed = true;
     subscriber._errorNode = undefined;
-    if (subscriber._tok != null) subscriber._tok.sub = null;
+    if (subscriber._tok != null) {
+      subscriber._tok.sub = null;
+      // Its run may have captured the lifecycle (`lifecycleScope()`) first.
+      if (endWatchers.size !== 0) notifyEnded();
+    }
     cleanup(subscriber);
     throw err;
   }
@@ -1120,8 +1150,11 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
     // Release every subscriber this one owned (see `OwnerToken`).
     if (subscriber._tok != null) {
       subscriber._tok.sub = null;
-      // Work waiting on this subtree to resume learns that it ended.
-      if (wasFrozen || waiters.size !== 0 || endWatchers.size !== 0) settleHeld();
+      // Work bound to this subtree's lifetime is torn down now, before
+      // anything it skipped is re-queued; work waiting on it to resume
+      // learns that it ended.
+      if (endWatchers.size !== 0) notifyEnded();
+      if (wasFrozen || waiters.size !== 0) settleHeld();
     }
     cleanup(subscriber);
   };
