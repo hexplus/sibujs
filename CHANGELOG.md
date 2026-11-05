@@ -6,7 +6,7 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
-## [4.15.0] — Unreleased
+## [4.15.0] — 2026-11-05
 
 ### Upgrade notes
 
