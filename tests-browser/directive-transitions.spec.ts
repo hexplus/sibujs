@@ -223,3 +223,65 @@ test("rows a top-level each() renders enter with their branch", async ({ page })
     );
   await expect(page.locator(".row-in")).toHaveCount(0, { timeout: 3000 });
 });
+
+type AsyncApi = {
+  suspHide: () => void;
+  suspResolve: () => void;
+  suspLog: () => { loadedSeen: boolean; fallbackCleanups: number; removedAt: number; text: string };
+  nestedSelectThenClear: () => void;
+  nestedSelect: () => void;
+  nestedEntered: () => string[];
+};
+const api = <K extends keyof AsyncApi>(page: Page, key: K) =>
+  page.evaluate((k) => (window as never as { __t: AsyncApi }).__t[k as K]() as ReturnType<AsyncApi[K]>, key);
+
+test("Suspense content resolving during the leave never replaces the fallback", async ({ page }) => {
+  await open(page);
+  await expect(page.locator("[data-fallback]")).toHaveCount(1);
+  await api(page, "suspHide");
+  await expect(page.locator("[data-susp].slow-out[inert]")).toHaveCount(1);
+  await api(page, "suspResolve");
+  await page.waitForTimeout(100);
+  let log = await api(page, "suspLog");
+  expect(log.text).toBe("loading");
+  expect(log.loadedSeen).toBe(false);
+  expect(log.fallbackCleanups).toBe(0);
+  // Released with the branch, once.
+  await expect(page.locator("[data-susp]")).toHaveCount(0, { timeout: 8000 });
+  log = await api(page, "suspLog");
+  expect(log.loadedSeen).toBe(false);
+  expect(log.fallbackCleanups).toBe(1);
+});
+
+test("a nested enter waiting on rows does not start once its ancestor froze", async ({ page }) => {
+  await open(page);
+  await api(page, "nestedSelectThenClear");
+  await expect(page.locator("[data-nested].slow-out[inert]")).toHaveCount(1);
+  await page.waitForTimeout(100);
+  expect(await api(page, "nestedEntered")).toEqual([]);
+  await expect(page.locator("[data-nested]")).toHaveCount(0, { timeout: 8000 });
+  expect(await api(page, "nestedEntered")).toEqual([]);
+  // A live one still enters, once.
+  await api(page, "nestedSelect");
+  await expect.poll(() => api(page, "nestedEntered")).toEqual(["Ada"]);
+});
+
+test("a branch taken back mid-leave adopts the Suspense content that resolved while it was paused", async ({ page }) => {
+  await open(page);
+  const call = (name: string) =>
+    page.evaluate((n) => (window as never as { __t: Record<string, () => unknown> }).__t[n](), name);
+  await expect(page.locator("[data-reclaim]")).toHaveText("waiting");
+  await call("reclaimHide");
+  await expect(page.locator("[data-reclaim].slow-out[inert]")).toHaveCount(1);
+  await call("reclaimResolve");
+  await page.waitForTimeout(100);
+  // Paused: the fallback stays, the content is not shown.
+  await expect(page.locator("[data-reclaim]")).toHaveText("waiting");
+  await expect(page.locator("[data-reclaimed]")).toHaveCount(0);
+  await call("reclaimShow");
+  // Taken back: interactive again, and the held content is adopted once.
+  await expect(page.locator("[data-reclaim]:not([inert]):not(.slow-out)")).toHaveCount(1);
+  await expect(page.locator("[data-reclaimed]")).toHaveCount(1);
+  await expect(page.locator("[data-reclaim]")).toHaveText("content");
+  expect(await call("reclaimLog")).toEqual({ nodesCalls: 1 });
+});

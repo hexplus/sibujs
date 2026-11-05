@@ -48,7 +48,10 @@ outlet's page and what a reactive child renders now are made inert, animated,
 removed and re-attached with it. Nodes such a range gains while the branch is
 leaving are made inert and join the running leave (the branch waits for their
 animation too, within the original deadline). A bare branch hidden by a switch
-is parked off the page and keeps reconciling, so it comes back current. Cleanup
+is parked off the page and keeps reconciling, so it comes back current. An
+anchor whose range has already rendered elsewhere (an `each()` built in another
+parent) moves with its whole range when it first becomes a branch, and one that
+had no parent for its first render renders once a directive attaches it. Cleanup
 registered on a fragment the branch factory built (`onCleanup(fn, fragment)`)
 runs when the branch is released, after its nodes, even if the fragment was
 empty. Several sibling nodes are a supported branch, and need no wrapper
@@ -94,8 +97,17 @@ canvas or a `requestAnimationFrame` loop can run until it has faded out.
 Several branches may be leaving at once; switching back to a bare element that
 is still leaving cancels its leave. The first render enters only with
 `appear: true`; an enter waits for the first render of a top-level `each()` (or
-nested directive), so its rows enter with the branch. A nested renderer whose
-branch has frozen does not run its queued first render. Disposing the directive removes leaving branches at once.
+nested directive), so its rows enter with the branch. A leaving branch is
+paused, not ended: inside it nothing starts — no queued first render, no
+pending enter — and async work that settles (`Suspense` content, a lazy route
+module, a route error) is not committed; the fallback or page on screen stays.
+Taken back before its leave ends, the branch resumes: what it skipped re-runs,
+a `Suspense` adopts the result it held (its `nodes()` still runs once) and a
+lazy route instantiates from the cached module, unless a navigation made
+meanwhile superseded it. Released instead, it ends: held results are disposed,
+once, and nothing renders. `router.instantiateComponent()` waits rather than
+rejects while its scope is paused, and rejects with an `AbortError` only when
+the scope ends. Disposing the directive removes leaving branches at once.
 Server renders ignore transitions. Without `transition`, a switch removes and
 disposes the old branch at once, as before.
 

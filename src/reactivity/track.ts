@@ -67,6 +67,7 @@ interface ReactiveApi {
   bindOwnerScope?: typeof core.bindOwnerScope;
   structuralBinding?: typeof core.structuralBinding;
   captureFrozen?: typeof core.captureFrozen;
+  holdSubtree?: typeof core.holdSubtree;
   version: string;
   __dupWarned?: boolean;
 }
@@ -120,6 +121,7 @@ function resolveReactiveApi(): ReactiveApi {
     bindOwnerScope: core.bindOwnerScope,
     structuralBinding: core.structuralBinding,
     captureFrozen: core.captureFrozen,
+    holdSubtree: core.holdSubtree,
     version: _runtimeVersion,
   };
   g[REGISTRY_KEY] = local;
@@ -167,4 +169,15 @@ export const structuralBinding: typeof core.structuralBinding =
 
 // Frozen-owner capture. Additive the same way. An older active copy has no
 // frozen owners at all, so "never frozen" is exactly its behaviour.
-export const captureFrozen: typeof core.captureFrozen = API.captureFrozen ?? (() => () => false);
+export const captureFrozen: typeof core.captureFrozen =
+  API.captureFrozen ??
+  (() =>
+    Object.assign(() => false, {
+      state: () => 0 as const,
+      wait: (onActive: () => void) => {
+        onActive();
+        return () => {};
+      },
+    }));
+export const holdSubtree: typeof core.holdSubtree = API.holdSubtree ?? (() => () => {});
+export type { HeldCheck } from "./track-core";

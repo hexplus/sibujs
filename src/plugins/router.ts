@@ -9,7 +9,16 @@ import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
 import { getRequestStore } from "../core/ssr-context";
 import { recordServerHead } from "../platform/serverHead";
-import { bindOwnerScope, captureFrozen, getOwnerScope, runWithOwnerScope, track, untracked } from "../reactivity/track";
+import {
+  bindOwnerScope,
+  captureFrozen,
+  getOwnerScope,
+  type HeldCheck,
+  holdSubtree,
+  runWithOwnerScope,
+  track,
+  untracked,
+} from "../reactivity/track";
 import { prerenderWait } from "../utils/prerenderHook";
 import { sanitizeUrl, stripControlChars } from "../utils/sanitize";
 import { setSafeAttribute } from "../utils/setSafeAttribute";
@@ -1145,6 +1154,15 @@ class ComponentLoader {
     }
 
     const factory = await this.resolveModuleFactory(plan, route, routePath);
+    // The module arrived while the outlet's branch is paused: the factory may
+    // read state that branch no longer owns, so it waits (the module stays
+    // cached) and runs once the branch resumes. If the branch ends instead,
+    // the instantiation is cancelled with an `AbortError` — not a failure of
+    // the component, and never shown as one.
+    // Resumed after a navigation made meanwhile superseded the outlet's pass:
+    // cancelled the same way, so an obsolete route is never built.
+    const gate = scope?.gate;
+    if (gate?.held() && (!(await gate.until()) || scope?.current?.() === false)) throw gate.cancellation();
     return this.instantiateFactory(factory, route, routePath, scope);
   }
 
@@ -2026,6 +2044,13 @@ export class SibuRouter {
   /**
    * Create exactly one real instance from an already-resolved plan. With a
    * `scope`, the factory runs in it (see `RouteScope`).
+   *
+   * When the scope belongs to an outlet whose branch is paused (playing a
+   * leave it may still be taken back from), a lazy module that resolves does
+   * not run its factory yet: the promise stays pending and continues once the
+   * branch resumes. If the branch ends, or the outlet's pass was superseded
+   * meanwhile, it rejects with a `DOMException` named `"AbortError"`. Genuine
+   * loader and component failures reject with their own error, as before.
    */
   async instantiateComponent(
     plan: RoutePlan,
@@ -2440,6 +2465,15 @@ export function setRoutes(routes: RouteDef[]): void {
 class RouteScope {
   /** Creation scope the instance is built in (adopting hydration); see `adoptScope`. */
   adopt: AdoptScope | null = null;
+  /**
+   * The outlet's pause gate: while the branch holding the outlet is paused (it
+   * began a leave and may still be taken back), a lazy module that resolves
+   * does not get its factory invoked yet; instantiation waits for the branch
+   * to resume, and is cancelled if it ends.
+   */
+  gate: PauseGate | null = null;
+  /** Whether the outlet pass this instance is for is still the current one. */
+  current: (() => boolean) | null = null;
   private readonly get: () => RouteContext | null;
   private readonly set: (route: RouteContext | null) => void;
   private released = false;
@@ -2471,6 +2505,76 @@ class RouteScope {
     if (this.released) return;
     this.released = true;
     queueMicrotask(() => this.set(null));
+  }
+}
+
+/**
+ * Async work an outlet does on behalf of the branch holding it, gated on that
+ * branch's lifecycle (see `captureFrozen`): `until()` resolves `true` once the
+ * branch is active, `false` once it ended or the outlet was torn down
+ * (`close`). Driven by the runtime's resume / end notifications — no polling.
+ */
+interface PauseGate {
+  /** The branch is paused or ended: gated work must not run now. */
+  held(): boolean;
+  until(): Promise<boolean>;
+  /** The error an instantiation cancelled by this gate rejects with. */
+  cancellation(): DOMException;
+  close(): void;
+}
+
+// Errors that cancel a gated instantiation, so outlets can tell them from a
+// component failure by identity.
+const cancellations = new WeakSet<object>();
+
+function pauseGate(frozen: HeldCheck): PauseGate {
+  let closed = false;
+  const pending = new Set<() => void>();
+  return {
+    held: () => closed || frozen(),
+    until: () => {
+      if (closed) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        const settle = (active: boolean) => {
+          pending.delete(cancel);
+          resolve(active && !closed);
+        };
+        const drop = frozen.wait(
+          () => settle(true),
+          () => settle(false),
+        );
+        const cancel = () => {
+          drop();
+          settle(false);
+        };
+        pending.add(cancel);
+      });
+    },
+    cancellation: () => {
+      const error = new DOMException("Route instantiation cancelled: its branch was released", "AbortError");
+      cancellations.add(error);
+      return error;
+    },
+    close: () => {
+      closed = true;
+      for (const cancel of [...pending]) cancel();
+    },
+  };
+}
+
+/**
+ * Wait for the gate before committing `node`, built while the branch was (or
+ * became) paused. The node is held meanwhile — its bindings do not react to
+ * state the outgoing branch no longer owns — and released before the caller
+ * decides. Resolves `true` when the caller may go on to commit.
+ */
+async function commitWhenActive(gate: PauseGate, node: Node | null): Promise<boolean> {
+  if (!gate.held()) return true;
+  const unhold = node ? holdSubtree(node) : null;
+  try {
+    return await gate.until();
+  } finally {
+    unhold?.();
   }
 }
 
@@ -2509,9 +2613,13 @@ async function instantiateScoped(
   routePath: string,
   route: RouteContext,
   adopt: AdoptScope | null = null,
+  gate: PauseGate | null = null,
+  current: (() => boolean) | null = null,
 ): Promise<Element> {
   const scope = new RouteScope(route);
   scope.adopt = adopt;
+  scope.gate = gate;
+  scope.current = current;
   const node = await router.instantiateComponent(plan, routeDef, routePath, scope);
   if (node) {
     instanceScopes.set(node, scope);
@@ -2785,6 +2893,12 @@ function instanceKey(owner: RouteDef, records: readonly RouteDef[], route: Route
 export function Route(): Node {
   const anchor = document.createComment("route-outlet");
   const adoptScope = captureScope();
+  // Captured while the outlet is created, in its structural context: whether
+  // the branch holding it has since frozen (begun its leave). Every async
+  // continuation re-checks it before running a component factory or
+  // committing, and leaves the outgoing content as it is when it has.
+  const frozen = captureFrozen();
+  const gate = pauseGate(frozen);
   let currentNode: Node | null = null;
   let loadingNode: Node | null = null;
   let errorNode: Node | null = null;
@@ -3012,6 +3126,13 @@ export function Route(): Node {
           // operations. (LOAD-001)
           const plan = await _routerRef.current.loadPlan(routeDef, route.path);
 
+          // Its branch is paused (playing a leave): no factory runs, and the
+          // current page or loading view stays. The pass resumes if the branch
+          // is taken back — revalidated below, so a navigation made meanwhile
+          // (whose pass re-runs on the resume) supersedes it — and ends here
+          // if the branch is released.
+          if (gate.held() && !(await gate.until())) return;
+
           // A newer navigation superseded us while loading, or the outlet was
           // disposed — drop this result. The newer update() owns the DOM and
           // will (or already did) render. Checked *before* instantiation so
@@ -3032,12 +3153,20 @@ export function Route(): Node {
             route.path,
             route,
             keyedScope(adoptScope, routeDef.path),
+            gate,
+            () => commitTarget(seq) !== null,
           );
 
           // Second ownership check, immediately before the synchronous commit,
           // re-reading the parent rather than trusting one captured earlier.
           // The node already owns lifecycle resources by now, so a stale pass
-          // disposes it instead of dropping the reference. (OUT-003)
+          // disposes it instead of dropping the reference. (OUT-003) A paused
+          // branch holds the node until it resumes (then the check below runs)
+          // or ends (then it is disposed, once).
+          if (!(await commitWhenActive(gate, node))) {
+            release(node);
+            return;
+          }
           const parent = commitTarget(seq);
           if (!parent) {
             release(node);
@@ -3053,6 +3182,10 @@ export function Route(): Node {
             currentNode = node;
           }
         } catch (error) {
+          // Cancelled with its branch: not a failure of the component.
+          if (cancellations.has(error as object)) return;
+          // A genuine failure while paused is shown only if the branch resumes.
+          if (gate.held() && !(await gate.until())) return;
           if (routeTorn || seq !== navSeq) return;
           hideLoading();
           console.error("[Route] Component error:", error);
@@ -3091,7 +3224,11 @@ export function Route(): Node {
    * than loading again — a reload inside `errorRetryDelay` would only report
    * "failed recently" in place of the real error. Otherwise re-run the pass.
    */
-  const onAttached = () => {
+  const onAttached = (): void => {
+    if (gate.held()) {
+      void gate.until().then((active) => active && onAttached());
+      return;
+    }
     const failure = unshownFailure;
     unshownFailure = null;
     if (failure && failure.seq === navSeq) showError(failure.error, failure.routeDef);
@@ -3111,10 +3248,13 @@ export function Route(): Node {
   const routeTeardown = track(wrappedUpdate);
   if (!routeInitialized) {
     // Not inside a branch that froze (began its leave) before this ran.
-    const frozen = captureFrozen();
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!routeInitialized && anchor.parentNode && !frozen()) wrappedUpdate();
+        const first = bindOwnerScope(() => {
+          if (!routeInitialized && anchor.parentNode) wrappedUpdate();
+        });
+        if (!gate.held()) first();
+        else void gate.until().then((active) => active && first());
       }),
     );
   }
@@ -3126,6 +3266,7 @@ export function Route(): Node {
     // released.
     routeTorn = true;
     navSeq++;
+    gate.close();
     routeTeardown();
     attachWait.cancel();
     unshownFailure = null;
@@ -3203,6 +3344,12 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   const anchor = document.createComment("keep-alive-route");
   const cache = new Map<string, Node>();
   const lruOrder: string[] = [];
+  // Captured while the outlet is created, in its structural context: whether
+  // the branch holding it has since frozen (begun its leave). Every async
+  // continuation re-checks it before running a component factory or
+  // committing, and leaves the outgoing content as it is when it has.
+  const frozen = captureFrozen();
+  const gate = pauseGate(frozen);
 
   // Resolve options from router config or explicit args
   const routerOpts = _routerRef.current["options"];
@@ -3299,13 +3446,27 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         // Resolving the plan never invokes the component factory. (LOAD-001)
         const plan = await router.loadPlan(routeDef, route.path);
 
+        // A paused branch (playing a leave) builds nothing until it resumes.
+        if (gate.held() && !(await gate.until())) return;
+
         // Ownership check BEFORE building anything. A superseded generation
         // must not even *create* the node: creation runs user code that
         // registers effects and listeners, and none of it would ever be owned.
         if (kaTorn || seq !== updateSeq) return;
 
-        node = await instantiateScoped(router, plan, routeDef, route.path, route);
+        node = await instantiateScoped(
+          router,
+          plan,
+          routeDef,
+          route.path,
+          route,
+          null,
+          gate,
+          () => !kaTorn && seq === updateSeq,
+        );
       } catch (error) {
+        if (cancellations.has(error as object)) return;
+        if (gate.held() && !(await gate.until())) return;
         if (kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
         return;
@@ -3317,11 +3478,14 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       // navigate, or collapse the layout owning this outlet, synchronously.
       // The node exists and holds resources now, so losing ownership here
       // means disposing it — returning would leak every disposer it registered.
-      if (kaTorn || seq !== updateSeq) {
+      // A paused branch holds the new node until it resumes, or ends.
+      if (!(await commitWhenActive(gate, node)) || kaTorn || seq !== updateSeq) {
         disposeOwned(node);
         return;
       }
     }
+    // A cached page is not shown in a paused branch either, until it resumes.
+    if (fromCache && gate.held() && (!(await gate.until()) || kaTorn || seq !== updateSeq)) return;
 
     const parent = anchor.parentNode;
     if (!parent) {
@@ -3380,14 +3544,23 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     await update();
     initialized = true;
   };
-  const attachWait = attachRetry(anchor, update);
+  const attachWait = attachRetry(anchor, () => {
+    if (!gate.held()) update();
+    else
+      void gate.until().then((active) => {
+        if (active) update();
+      });
+  });
   const kaTeardown = track(wrappedUpdate);
   if (!initialized) {
-    // Not inside a branch that froze (began its leave) before this ran.
-    const frozen = captureFrozen();
+    // In a paused branch the first pass waits for it to resume.
     queueMicrotask(
       bindOwnerScope(() => {
-        if (!initialized && anchor.parentNode && !frozen()) wrappedUpdate();
+        const first = bindOwnerScope(() => {
+          if (!initialized && anchor.parentNode) wrappedUpdate();
+        });
+        if (!gate.held()) first();
+        else void gate.until().then((active) => active && first());
       }),
     );
   }
@@ -3395,6 +3568,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   const kaCleanup = () => {
     if (kaTorn) return;
     kaTorn = true;
+    gate.close();
     // Advance the generation as well as setting the flag. Both are checked at
     // every commit boundary, so an update parked on a lazy import is superseded
     // the moment the outlet dies — it cannot re-insert into the DOM, cannot
@@ -3636,6 +3810,11 @@ export function Suspense(props: {
   const anchor = document.createComment("suspense-boundary");
   let currentNode: Node | null = null;
   let fallbackNode: Node | null = null;
+  // Captured while the boundary is created, in its structural context: whether
+  // the branch holding it has since frozen (begun its leave). Every async
+  // continuation re-checks it before running a component factory or
+  // committing, and leaves the outgoing content as it is when it has.
+  const frozen = captureFrozen();
   let isLoading = false;
   let generation = 0;
   let tornDown = false;
@@ -3736,38 +3915,91 @@ export function Suspense(props: {
       } else {
         element = result as HTMLElement;
       }
-
-      // Re-checked *after* the await, immediately before the synchronous
-      // commit. Nothing runs between this check and the insertion below.
-      const parent = commitTarget(myGeneration);
-      if (!parent) {
-        // Stale: the Element already exists and owns lifecycle resources, so it
-        // must be disposed, not dropped. Anything this generation installed
-        // (the fallback) goes with it.
-        release(element);
-        cleanupNodes();
-        return;
-      }
-
-      cleanupNodes();
-      parent.insertBefore(element, anchor.nextSibling);
-      currentNode = element;
+      settle(myGeneration, true, element);
     } catch (error) {
       console.error("[Suspense] Nodes error:", error);
-
-      const parent = commitTarget(myGeneration);
-      cleanupNodes();
-      if (!parent) return;
-
-      // Show error in place of content
-      const errorElement = document.createElement("div");
-      errorElement.className = "suspense-error";
-      errorElement.textContent = error instanceof Error ? error.message : "Failed to load";
-      parent.insertBefore(errorElement, anchor.nextSibling);
-      currentNode = errorElement;
+      settle(myGeneration, false, error);
     } finally {
       isLoading = false;
     }
+  };
+
+  // A settled outcome waiting for the branch holding the boundary to resume
+  // (it began a leave and may still be taken back), and the wait itself.
+  let held: { element: HTMLElement; unhold: () => void } | null = null;
+  let dropWait: (() => void) | null = null;
+  /** Dispose a result that was kept for adoption and will never be adopted. Once. */
+  const discardHeld = () => {
+    const kept = held;
+    held = null;
+    if (kept === null) return;
+    kept.unhold();
+    release(kept.element);
+  };
+
+  /**
+   * Adopt the generation's outcome: the content (`ok`) or the error.
+   *
+   * The single-shot `nodes()` is never called again. While the branch holding
+   * the boundary is PAUSED, the fallback stays and the outcome waits: a result
+   * is kept detached, its bindings held (`holdSubtree`) so they do not react to
+   * state the outgoing branch no longer owns, and adopted once the branch
+   * resumes. If the branch ENDS instead, the kept result is disposed, once.
+   */
+  const settle = (myGeneration: number, ok: boolean, value: unknown): void => {
+    const element = value as HTMLElement;
+    if (!tornDown && myGeneration === generation) {
+      const state = frozen.state();
+      if (state === 1) {
+        if (ok) held = { element, unhold: holdSubtree(element) };
+        dropWait = frozen.wait(
+          () => {
+            dropWait = null;
+            const kept = held;
+            held = null;
+            // Released first: its bindings catch up with the current state
+            // before it is shown.
+            kept?.unhold();
+            settle(myGeneration, ok, ok ? kept?.element : value);
+          },
+          () => {
+            dropWait = null;
+            discardHeld();
+          },
+        );
+        return;
+      }
+      if (state === 2) {
+        if (ok) release(element);
+        return;
+      }
+    }
+
+    // Re-checked immediately before the synchronous commit. Nothing runs
+    // between this check and the insertion below.
+    const parent = commitTarget(myGeneration);
+    if (!ok) {
+      cleanupNodes();
+      if (!parent) return;
+      // Show error in place of content
+      const errorElement = document.createElement("div");
+      errorElement.className = "suspense-error";
+      errorElement.textContent = value instanceof Error ? value.message : "Failed to load";
+      parent.insertBefore(errorElement, anchor.nextSibling);
+      currentNode = errorElement;
+      return;
+    }
+    if (!parent) {
+      // Stale: the Element already exists and owns lifecycle resources, so it
+      // must be disposed, not dropped. Anything this generation installed
+      // (the fallback) goes with it.
+      release(element);
+      cleanupNodes();
+      return;
+    }
+    cleanupNodes();
+    parent.insertBefore(element, anchor.nextSibling);
+    currentNode = element;
   };
 
   // Teardown. Invalidating the generation *before* releasing nodes is what
@@ -3779,16 +4011,23 @@ export function Suspense(props: {
   registerDisposer(anchor, () => {
     tornDown = true;
     generation++;
+    dropWait?.();
+    dropWait = null;
+    discardHeld();
     cleanupNodes();
   });
 
   // Rendered in a microtask, in the owner scope the boundary was created in —
   // content built inside a route instance belongs to that instance's route.
-  // Not inside a branch that froze (began its leave) before this ran.
-  const frozen = captureFrozen();
+  // In a branch that froze (began its leave) before this ran, the render
+  // waits for it to resume, and never runs if it ends.
+  const renderInScope = bindOwnerScope(() => {
+    if (!tornDown) render();
+  });
   queueMicrotask(
     bindOwnerScope(() => {
-      if (!frozen()) render();
+      const stop = frozen.wait(renderInScope, () => {});
+      if (dropWait === null) dropWait = stop;
     }),
   );
 
@@ -3941,6 +4180,12 @@ export function __removeRouterPagehideHandler(): void {
 export function Outlet(): Node {
   const anchor = document.createComment("route-outlet-nested");
   const adoptScope = captureScope();
+  // Captured while the outlet is created, in its structural context: whether
+  // the branch holding it has since frozen (begun its leave). Every async
+  // continuation re-checks it before running a component factory or
+  // committing, and leaves the outgoing content as it is when it has.
+  const frozen = captureFrozen();
+  const gate = pauseGate(frozen);
   let currentNode: Node | null = null;
   let currentChild: RouteDef | null = null;
   // Instance key (see `RouteBase.key`) of the mounted child.
@@ -4030,6 +4275,10 @@ export function Outlet(): Node {
       // Resolving the plan never invokes the component factory. (LOAD-001)
       const plan = await _routerRef.current.loadPlan(childRoute, cacheKey);
 
+      // A paused branch (playing a leave) builds nothing until it resumes; the
+      // checks below then revalidate the pass.
+      if (gate.held() && !(await gate.until())) return;
+
       // First ownership check: a newer navigation superseded us while loading,
       // or the outlet was disposed. Deliberately *before* instantiation so
       // stale work never invokes user code at all. (OUT-002)
@@ -4048,12 +4297,18 @@ export function Outlet(): Node {
         cacheKey,
         route,
         keyedScope(adoptScope, childRoute.path),
+        gate,
+        () => commitTarget(seq) !== null,
       );
 
       // Second ownership check, immediately before the synchronous commit, and
       // re-reading the parent rather than trusting one captured earlier. The
       // node already exists and owns lifecycle resources by now, so a stale
       // pass disposes it instead of dropping the reference. (OUT-001)
+      if (!(await commitWhenActive(gate, node))) {
+        release(node);
+        return;
+      }
       const parent = commitTarget(seq);
       if (!parent) {
         release(node);
@@ -4068,21 +4323,32 @@ export function Outlet(): Node {
       currentChild = childRoute;
       currentKey = key;
     } catch (error) {
+      if (cancellations.has(error as object)) return;
+      if (gate.held() && !(await gate.until())) return;
       if (outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
     }
   };
 
-  const attachWait = attachRetry(anchor, update);
+  const attachWait = attachRetry(anchor, () => {
+    if (!gate.held()) update();
+    else
+      void gate.until().then((active) => {
+        if (active) update();
+      });
+  });
   const outletTeardown = track(update);
   if (!anchor.parentNode) {
     // The deferred first pass must read the same route the binding does: the
     // enclosing instance's, carried by the owner scope.
     // Not inside a branch that froze (began its leave) before this ran.
-    const frozen = captureFrozen();
     queueMicrotask(
       bindOwnerScope(() => {
-        if (anchor.parentNode && !frozen()) update();
+        const first = bindOwnerScope(() => {
+          if (anchor.parentNode) update();
+        });
+        if (!gate.held()) first();
+        else void gate.until().then((active) => active && first());
       }),
     );
   }
@@ -4093,6 +4359,7 @@ export function Outlet(): Node {
     // released.
     outletTorn = true;
     navSeq++;
+    gate.close();
     outletTeardown();
     attachWait.cancel();
     if (currentNode) {

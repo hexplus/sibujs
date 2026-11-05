@@ -41,10 +41,14 @@
       <div id="noop-host"></div>
       <div id="late-host"></div>
       <div id="enter-host"></div>
+      <div id="suspense-host"></div>
+      <div id="nested-host"></div>
+      <div id="reclaim-host"></div>
       <button id="after-rows">after</button>
     </main>
     <script type="module">
-      import { Fragment, button, div, each, input, onUnmount, signal, span, when } from "../dist/index.js";
+      import { Fragment, button, div, each, input, onUnmount, registerDisposer, signal, span, when } from "../dist/index.js";
+      import { Suspense } from "../dist/plugins.js";
 
       const unmounted = [];
 
@@ -176,7 +180,96 @@
         ),
       );
 
+      // Suspense whose content resolves while its branch is leaving.
+      const susp = { loadedSeen: false, fallbackCleanups: 0, removedAt: 0 };
+      let resolveContent;
+      const [suspOn, setSuspOn] = signal(true);
+      const suspHost = document.getElementById("suspense-host");
+      suspHost.appendChild(
+        when(
+          () => suspOn(),
+          () =>
+            div({ "data-susp": "" }, [
+              Suspense({
+                nodes: () => new Promise((r) => (resolveContent = r)),
+                fallback: () => {
+                  const f = span({ "data-fallback": "" }, "loading");
+                  registerDisposer(f, () => susp.fallbackCleanups++);
+                  return f;
+                },
+              }),
+            ]),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+      new MutationObserver((records) => {
+        for (const r of records) {
+          for (const n of r.addedNodes) if (n.dataset?.loaded !== undefined) susp.loadedSeen = true;
+          for (const n of r.removedNodes) if (n.dataset?.susp !== undefined) susp.removedAt = performance.now();
+        }
+      }).observe(suspHost, { childList: true, subtree: true });
+
+      // A nested pending enter whose ancestor freezes before it starts.
+      const nestedEntered = [];
+      const [selected, setSelected] = signal(null);
+      const [nestedItems] = signal([1]);
+      document.getElementById("nested-host").appendChild(
+        when(
+          () => selected(),
+          () =>
+            div({ "data-nested": "" }, [
+              when(
+                () => true,
+                () =>
+                  Fragment([
+                    span("heading"),
+                    each(nestedItems, (item) => span(String(item.peek())), { key: (item) => item }),
+                  ]),
+                { transition: { appear: true, enter: () => nestedEntered.push(selected()?.name ?? "invalid") } },
+              ),
+            ]),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+
+      // A branch taken back while it leaves, with a Suspense that resolves
+      // while it is paused.
+      const reclaim = { nodesCalls: 0 };
+      let resolveReclaim;
+      let reclaimShared = null;
+      const [reclaimOn, setReclaimOn] = signal(true);
+      document.getElementById("reclaim-host").appendChild(
+        when(
+          () => reclaimOn(),
+          () =>
+            (reclaimShared ??= div({ "data-reclaim": "" }, [
+              Suspense({
+                nodes: () => {
+                  reclaim.nodesCalls++;
+                  return new Promise((r) => (resolveReclaim = r));
+                },
+                fallback: () => span("waiting"),
+              }),
+            ])),
+          () => span({ "data-reclaim-off": "" }, "off"),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+
       window.__t = {
+        reclaimHide: () => setReclaimOn(false),
+        reclaimShow: () => setReclaimOn(true),
+        reclaimResolve: () => resolveReclaim(span({ "data-reclaimed": "" }, "content")),
+        reclaimLog: () => ({ ...reclaim }),
+        suspHide: () => setSuspOn(false),
+        suspResolve: () => resolveContent(span({ "data-loaded": "" }, "loaded")),
+        suspLog: () => ({ ...susp, text: suspHost.textContent }),
+        nestedSelectThenClear: () => {
+          setSelected({ name: "Ada" });
+          queueMicrotask(() => setSelected(null));
+        },
+        nestedSelect: () => setSelected({ name: "Ada" }),
+        nestedEntered: () => nestedEntered.slice(),
         // Hide, then add the row 300 ms into the leave, timed inside the page.
         hideThenAddLate: () => {
           late.hidden = performance.now();

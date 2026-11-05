@@ -13,7 +13,7 @@ import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
 import { dispose, registerDisposer } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
-import { registerRange, setPending } from "./range";
+import { queueFirstRender, registerRange } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -635,14 +635,12 @@ export function each<T>(
     // state that branch no longer owns. A later write retries through the
     // scheduler, which holds frozen subscribers the same way.
     const frozen = captureFrozen();
-    setPending(anchor, true);
-    queueMicrotask(
+    queueFirstRender(
+      anchor,
       bindOwnerScope(() => {
-        setPending(anchor, false);
-        if (!initialized && !rangeDisposed && anchor.parentNode && !frozen()) {
-          binding.run(update);
-        }
+        if (!initialized && !rangeDisposed && anchor.parentNode) binding.run(update);
       }),
+      frozen,
     );
   }
 

@@ -1,7 +1,7 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { registerNodesRange, setPending } from "./range";
+import { queueFirstRender, registerNodesRange } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -141,12 +141,12 @@ export function KeepAlive(
   if (!initialized) {
     // Not in a subtree that froze before the first render could run.
     const frozen = captureFrozen();
-    setPending(anchor, true);
-    queueMicrotask(
+    queueFirstRender(
+      anchor,
       bindOwnerScope(() => {
-        setPending(anchor, false);
-        if (!initialized && anchor.parentNode && !frozen()) binding.run(update);
+        if (!initialized && anchor.parentNode) binding.run(update);
       }),
+      frozen,
     );
   }
 

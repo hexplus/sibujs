@@ -340,6 +340,20 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // turns) for nested first renders. Measured: raw ~100,290 B, gzip
     // ~34,850 B (+~1,060 B raw, +~365 B gzip).
     //
+    // Gzip baseline 34,300 B (raw cap unchanged) for the fourth round: a
+    // renderer's first render waits for its anchor to be attached when it had
+    // none (`queueFirstRender` / `resumePending`), an already-rendered anchor
+    // moves with its whole range on first attachment, and a deferred enter does
+    // not start inside a frozen ancestor. Measured: raw ~100,510 B, gzip
+    // ~34,945 B (+~220 B raw, +~90 B gzip).
+    //
+    // Raw 102,200 B, gzip baseline 34,800 B for paused-vs-ended ownership: a
+    // frozen branch can be taken back, so the scheduler records the
+    // subscribers it skipped and re-runs them on `thaw`, deferred work waits on
+    // resume / end notifications instead of being dropped (`captureFrozen` →
+    // `HeldCheck.wait`), and a detached result can be held (`holdSubtree`).
+    // Measured: raw ~101,780 B, gzip ~35,425 B (+~1,270 B raw, +~480 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -347,8 +361,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(100_700);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(34_250 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(102_200);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(34_800 * 1.02));
   });
 });
 

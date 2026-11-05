@@ -7,7 +7,7 @@ import { captureScope, inScope } from "./adoptScope";
 import { type DirectiveTransition, type PhaseRun, runPhase } from "./branchTransition";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, type FocusSnapshot, restoreFocusWithin } from "./focusPreservation";
-import { anyPending, collectRange, hasRange, rangeEnd, registerRange, setPending } from "./range";
+import { anyPending, collectRange, hasRange, queueFirstRender, rangeEnd, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
 
@@ -233,11 +233,25 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     starts = [node];
   }
   const park = owned ? undefined : parked.get(node);
-  const nodes = park?.firstChild ? Array.from(park.childNodes) : (!owned && detachedRanges.get(node)) || starts;
+  const nodes = park?.firstChild
+    ? Array.from(park.childNodes)
+    : (!owned && detachedRanges.get(node)) || attachedRanges(starts);
   // An empty fragment the directive built still has a lifetime: cleanup
   // registered on the fragment itself runs when the branch is released.
   if (nodes.length === 0 && !owned) return null;
   return { source: node, starts, nodes, owned, owner: null, phase: null, restore: null, waiting: false };
+}
+
+/**
+ * The nodes `starts` bring along on their first attachment: a start that is
+ * already rendering its range somewhere else (an `each()` built in another
+ * parent, a nested directive that has rendered) moves with that range, read
+ * BEFORE the move — once the anchor has left, its old range is no longer its
+ * sibling and cannot be found.
+ */
+function attachedRanges(starts: Node[]): Node[] {
+  if (!starts.some(hasRange)) return starts;
+  return [...new Set(starts.flatMap((start) => (start.parentNode === null ? [start] : collectRange([start]))))];
 }
 
 /**
@@ -301,8 +315,12 @@ function releaseBranch(branch: Branch): void {
   // fragment object (`onCleanup(fn, fragment)`) runs after its nodes', once.
   // The fragment is empty by now, so this reaches only its own registrations.
   if (branch.owned && branch.source.nodeType === 11) dispose(branch.source);
+  // An owned branch ENDS here: its owner is disposed, and work waiting on it
+  // learns it will never resume. A branch the caller holds (a bare element
+  // re-attached after a reclaim) lives on, so its owner only resumes.
   if (branch.owner !== null) {
-    branch.owner.stop();
+    if (branch.owned) branch.owner.stop();
+    else branch.owner.thaw?.();
     branch.owner = null;
   }
 }
@@ -420,6 +438,7 @@ function directive(
         inScope(scope, () => {
           const built = resolveBranch(branch, attachedOnce, name);
           if (built === null) return null;
+          let resumed: StructuralBinding | null = null;
           if (tr) {
             // Back to a branch that is still leaving (a bare element or
             // fragment re-attached): cancel its leave and take it back as is.
@@ -429,12 +448,19 @@ function directive(
               leaving.splice(i, 1);
               if (prev.phase !== null) prev.phase.cancel();
               if (prev.restore !== null) prev.restore();
-              // Lifts the freeze; the node is no longer this directive's to own.
-              if (prev.owner !== null) prev.owner.stop();
+              // Taken back before it finished leaving: its owner RESUMES (it is
+              // not ended), so what it skipped re-runs and work waiting on it
+              // continues. It keeps owning the subtree, and freezes again if
+              // the branch leaves again.
+              resumed = prev.owner;
+              resumed?.thaw?.();
               break;
             }
           }
           insertBranch(parent, anchor, built.nodes);
+          // A renderer in the branch that was waiting to be attached renders now.
+          resumePending(built.nodes);
+          if (resumed !== null) built.owner = resumed;
           return built;
         }),
       );
@@ -447,6 +473,7 @@ function directive(
     }
     if (owner !== null) {
       if (built?.owned) built.owner = owner;
+      // Owns nothing: a bare branch (or a reclaimed one, which keeps its own).
       else owner.stop();
     }
     return built;
@@ -543,6 +570,10 @@ function directive(
 
   /** Play the enter of `entering`, then start any `in-out` leave it held back. */
   const startEnter = (entering: Branch): void => {
+    // Nothing enters inside a subtree that is leaving: an ancestor that froze
+    // while a deferred enter waited (its placeholder is already cleared) wins,
+    // and no class or custom enter is applied. The branch is released with it.
+    if (frozen()) return;
     const t = tr as DirectiveTransition;
     entering.phase = runPhase(
       entering.nodes,
@@ -562,8 +593,15 @@ function directive(
   // the directive was created in, and runs as the branch's structural owner,
   // as every rebuild does.
   const buildDeferred = bindOwnerScope((): void => {
+    // Inside a paused ancestor the build waits for it to resume (and is
+    // dropped if it ends); `deferred` stays set until then.
+    if (frozen()) {
+      frozen.wait(() => {
+        if (deferred && !disposed) buildDeferred();
+      }, NOOP);
+      return;
+    }
     deferred = false;
-    if (frozen()) return;
     const focused = deferredFocus;
     deferredFocus = null;
     const parent = anchor.parentNode;
@@ -683,12 +721,12 @@ function directive(
     // The deferred first render builds the branch outside any reactive run, so
     // it carries the owner scope the directive was created in, and runs as the
     // branch's structural owner, as every later rebuild does.
-    setPending(anchor, true);
-    queueMicrotask(
+    queueFirstRender(
+      anchor,
       bindOwnerScope(() => {
-        setPending(anchor, false);
-        if (!disposed && !initialized && anchor.parentNode && !frozen()) binding.run(update);
+        if (!disposed && !initialized && anchor.parentNode) binding.run(update);
       }),
+      frozen,
     );
   }
 

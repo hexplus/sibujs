@@ -1,3 +1,5 @@
+import type { HeldCheck } from "../../reactivity/track";
+
 // ---------------------------------------------------------------------------
 // Sibling ranges rendered after an anchor.
 //
@@ -26,15 +28,51 @@ export function registerRange(start: Node, last: () => Node | null): void {
   ends.set(start, last);
 }
 
-// Anchors whose first render is still queued (a renderer created where it had
-// no parent yet renders in a microtask). An enter waits for them, so the rows
-// a top-level `each()` renders are part of what enters.
-const pending = new WeakSet<Node>();
+// Anchors whose first render has not run yet: queued (`true`), or waiting for
+// the anchor to be attached (the render itself). An enter waits for them, so
+// the rows a top-level `each()` renders are part of what enters.
+const pending = new WeakMap<Node, true | (() => void)>();
 
-/** Mark `anchor`'s first render as queued (`true`) or done / abandoned (`false`). @internal */
-export function setPending(anchor: Node, queued: boolean): void {
-  if (queued) pending.add(anchor);
-  else pending.delete(anchor);
+const NOTHING = (): void => {};
+
+/**
+ * Queue a renderer's first render (a renderer created where it had no parent
+ * yet). It runs in a microtask when `anchor` is attached by then; otherwise it
+ * waits until a directive inserts the anchor as (part of) a branch — see
+ * {@link resumePending} — so an anchor built on its own and attached later
+ * still renders. In a subtree that is paused (`held`: its branch is playing a
+ * leave) the render waits for it to resume, and never runs if it ends.
+ * `render` carries its own guards (disposed, already initialized).
+ *
+ * @internal
+ */
+export function queueFirstRender(anchor: Node, render: () => void, held?: HeldCheck): void {
+  if (held) {
+    const unguarded = render;
+    render = () => {
+      held.wait(unguarded, NOTHING);
+    };
+  }
+  pending.set(anchor, true);
+  queueMicrotask(() => {
+    if (pending.get(anchor) !== true) return;
+    if (anchor.parentNode === null) {
+      pending.set(anchor, render);
+      return;
+    }
+    pending.delete(anchor);
+    render();
+  });
+}
+
+/** Run the first render of every one of `nodes` that was waiting to be attached. @internal */
+export function resumePending(nodes: readonly Node[]): void {
+  for (const node of nodes) {
+    const render = pending.get(node);
+    if (typeof render !== "function") continue;
+    pending.delete(node);
+    render();
+  }
 }
 
 /** Whether any of `nodes` still has its first render queued. @internal */
