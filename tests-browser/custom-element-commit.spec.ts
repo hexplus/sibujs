@@ -183,3 +183,46 @@ test("when(): a nested range emptied while its branch leaves is taken back empty
   expect(r.refilled).toBe(1);
   expect(r.anchored).toBe(true);
 });
+
+for (const kind of ["when", "match"]) {
+  test(`${kind}(): an out-in build whose factory selects nothing is never inserted`, async ({ page }) => {
+    const r = await callWith<{ connected: number; cleanups: number; elements: number; text: string }>(
+      page,
+      "directiveObsoleteBuild",
+      kind,
+    );
+    expect(r.connected).toBe(0);
+    expect(r.cleanups).toBe(1);
+    expect(r.elements).toBe(0);
+    expect(r.text).toBe("");
+  });
+
+  for (const mode of ["in-out", "both"]) {
+    test(`${kind}(): an enter that switches from its own callback is obsolete (mode ${mode})`, async ({ page }) => {
+      const r = await callWith<{
+        enters: string[];
+        leavesWhileBEnters: number;
+        leavesAfterBEntered: number;
+        timersRunning: number;
+        timersAfterDispose: number;
+        leavesAtEnd: number;
+        elements: number;
+      }>(page, "directiveEnterSwitches", `${kind}:${mode}`);
+      expect(r.enters).toEqual(["a", "b"]);
+      if (mode === "in-out") {
+        // B's enter alone runs; A's leave waits for it, then starts once.
+        expect(r.leavesWhileBEnters).toBe(0);
+        expect(r.timersRunning).toBe(1);
+      } else {
+        // B's enter and A's leave run side by side.
+        expect(r.leavesWhileBEnters).toBe(1);
+        expect(r.timersRunning).toBe(2);
+      }
+      expect(r.leavesAfterBEntered).toBe(1);
+      // Disposal cancelled the phase still running: no timer is left.
+      expect(r.timersAfterDispose).toBe(0);
+      expect(r.leavesAtEnd).toBe(1);
+      expect(r.elements).toBe(0);
+    });
+  }
+}

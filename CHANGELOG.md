@@ -135,6 +135,15 @@ leaves brings what its range renders at that moment, read from the DOM: a
 caller-owned nested directive that removed its content meanwhile comes back
 with only its anchor, never with what it disposed.
 
+A switch that application code superseded does nothing more. A branch factory
+that selects another value, including one that renders nothing, makes its own
+result obsolete: that result is disposed once and never inserted, and an
+`out-in` build that waited for the leaves is held to the switch that deferred
+it. An enter whose callback switched the directive is obsolete too. Its
+completion, synchronous or later, starts no `in-out` leave while the newer
+enter runs and never clears the leave the branch plays by then, so disposing
+the directive still cancels every running phase.
+
 `waitForContent` (ms, opt-in) lets content that arrives later enter with the
 branch, if it is committed within that time (counted from the switch, at most
 5 s): the pending content anywhere in the entering branch — the initial content

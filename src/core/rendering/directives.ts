@@ -636,8 +636,16 @@ function directive(
    * whole branch, inserted or not yet, and the insertion stops there. The
    * caller has set `current` to `null`; the result is `current` again, or
    * `null` when nothing was built or it was released meanwhile.
+   *
+   * `owns()` says whether the switch this build belongs to is still the
+   * latest one (see `generation`). The factory is application code, and may
+   * switch the directive itself — to an empty outcome too, which leaves
+   * `current` at `null` — so it is asked again once the factory has returned,
+   * before anything is published, taken back or inserted: a result the switch
+   * no longer owns is released (disposed, if the directive built it) and
+   * never inserted.
    */
-  const build = (branch: NodeChild): Branch | null => {
+  const build = (branch: NodeChild, owns: () => boolean): Branch | null => {
     const owner = structuralBinding(NOOP, anchor);
     // Untracked, like `each()` rows: the factory's own reads belong to the
     // bindings it creates, not to this directive. Tracked, every eager read in
@@ -660,8 +668,8 @@ function directive(
     const ownsOwner = built.owned;
     if (ownsOwner) built.owner = owner;
     // The factory is application code: it may have disposed the directive,
-    // or switched it (a newer branch is current).
-    if (disposed || current !== null) {
+    // or switched it — whatever the newer switch rendered, nothing included.
+    if (disposed || !owns() || current !== null) {
       releaseBranch(built);
       if (!ownsOwner) owner.stop();
       return null;
@@ -703,7 +711,7 @@ function directive(
         // what it rendered, in this very task, before any observer ran.
         if (!built.released) refreshNodes(built);
       }
-      const live = (): boolean => !disposed && current === built && !(built as Branch).released;
+      const live = (): boolean => !disposed && owns() && current === built && !(built as Branch).released;
       complete = live() && inBranch(() => insertBranch(anchor, (built as Branch).nodes, live));
     } catch (err) {
       built.inserting = false;
@@ -716,26 +724,64 @@ function directive(
     // A renderer in the branch that was waiting to be attached renders now.
     if (complete) inBranch(() => resumePending((built as Branch).nodes));
     if (!ownsOwner) owner.stop();
-    return current === built && !built.released ? built : null;
+    return current === built && !built.released && owns() ? built : null;
   };
 
   /**
-   * Run a phase on `branch`. A placeholder is installed first: the phase's
-   * own callback is application code, and may dispose the directive, take the
-   * branch back or switch again — any of which cancels the branch's phase.
-   * A phase that comes back after that is cancelled at once (its timers
-   * cleared) and never installed on a branch that was released.
+   * Play a phase on `branch` under a handle of its own: installed as
+   * `branch.phase` BEFORE the phase starts, and kept there — the same object —
+   * until it ends. The phase's callback is application code, and may dispose
+   * the directive, take the branch back or switch again; each of these cancels
+   * the branch's phase (or replaces it), which invalidates the handle.
+   *
+   * The completion checks the handle before it touches anything: only while
+   * it is still valid AND still the branch's phase does it clear
+   * `branch.phase` and run `onEnd`. Completing synchronously (from inside
+   * `start`) or settling later, an obsolete phase changes nothing — never the
+   * newer phase the branch holds by then, never the leaves an enter would
+   * start. A phase that comes back invalidated is cancelled at once (its
+   * timers cleared), and never installed on a branch that was released.
+   *
+   * @param onCancel Runs when the phase is cancelled or invalidated, once.
+   * @returns The installed handle, or `null` when the phase already ended
+   * (completed or invalidated).
    */
-  const installPhase = (branch: Branch, start: () => PhaseRun | null): PhaseRun | null => {
-    const placeholder: PhaseRun = { cancel: NOOP };
-    branch.phase = placeholder;
-    const run = start();
-    if (branch.phase !== placeholder || branch.released || disposed) {
-      run?.cancel();
-      return null;
+  const playPhase = (
+    branch: Branch,
+    start: (done: () => void) => PhaseRun | null,
+    onEnd: () => void,
+    onCancel: () => void = NOOP,
+  ): PhaseRun | null => {
+    let valid = true;
+    let run: PhaseRun | null = null;
+    const invalidate = (): void => {
+      if (!valid) return;
+      valid = false;
+      onCancel();
+    };
+    const handle: PhaseRun = {
+      cancel: () => {
+        invalidate();
+        run?.cancel();
+      },
+    };
+    branch.phase = handle;
+    run = start(() => {
+      if (!valid || branch.phase !== handle) return;
+      valid = false;
+      branch.phase = null;
+      onEnd();
+    });
+    if (valid && branch.phase === handle && !branch.released && !disposed && run !== null) {
+      handle.add = run.add;
+      handle.close = run.close;
+      return handle;
     }
-    branch.phase = run;
-    return run;
+    // Ended (completed), or invalidated while it started.
+    invalidate();
+    if (branch.phase === handle) branch.phase = null;
+    run?.cancel();
+    return null;
   };
 
   /** Play the leave of a branch already marked as leaving. */
@@ -743,8 +789,10 @@ function directive(
     branch.waiting = false;
     if (branch.released || disposed) return;
     const t = tr as DirectiveTransition;
-    installPhase(branch, () =>
-      runPhase(branch.nodes, t.leaveClass, t.leave, t.maxDuration, () => finishLeave(branch), `${name}(leave)`),
+    playPhase(
+      branch,
+      (done) => runPhase(branch.nodes, t.leaveClass, t.leave, t.maxDuration, done, `${name}(leave)`),
+      () => finishLeave(branch),
     );
   };
 
@@ -800,7 +848,7 @@ function directive(
 
   /** A leave ended: remove and dispose the branch, then run a waiting `out-in` build. */
   const finishLeave = (branch: Branch): void => {
-    branch.phase = null;
+    // Its phase was cleared by the completion (see `playPhase`).
     const index = leaving.indexOf(branch);
     if (index !== -1) leaving.splice(index, 1);
     releaseBranch(branch);
@@ -808,13 +856,15 @@ function directive(
   };
 
   /** Enter the branch just inserted, and sequence `in-out` leaves after it. */
-  const afterInsert = (first: boolean): void => {
-    if (disposed) return;
+  const afterInsert = (first: boolean, superseded: () => boolean): void => {
+    if (superseded()) return;
     const t = tr as DirectiveTransition;
     const entering = current;
     if (entering !== null && (!first || t.appear === true)) {
       enterWhenReady(entering);
-      if (disposed) return;
+      // The enter ran application code, which may have switched again: the
+      // newer switch sequences the leaves then, after its own enter.
+      if (superseded()) return;
       // Still entering (or waiting to): the waiting leaves start from its
       // completion, or from the switch that cancels it.
       if (entering.phase !== null) return;
@@ -938,35 +988,34 @@ function directive(
     // Nothing to stay open for: the budget is not needed any more.
     if (waitingFor.length === 0) ready?.stop();
     let stopWatching = NOOP;
-    // A placeholder until the phase is running: the custom `enter` is
-    // application code, and may dispose the directive or switch it, which
-    // cancels the branch's phase — this one, before `runPhase` has returned.
-    const placeholder: PhaseRun = { cancel: NOOP };
-    entering.phase = placeholder;
-    const run = runPhase(
-      entering.nodes,
-      t.enterClass,
-      t.enter,
-      t.maxDuration,
+    // Under a handle of its own (see `playPhase`): the custom `enter` is
+    // application code, and may dispose the directive or switch it — which
+    // cancels this phase before `runPhase` has returned, and may start
+    // another on the branch (its leave). The completion of an enter that was
+    // cancelled, replaced or released starts no leave, and clears no phase.
+    const run = playPhase(
+      entering,
+      (done) =>
+        runPhase(
+          entering.nodes,
+          t.enterClass,
+          t.enter,
+          t.maxDuration,
+          done,
+          `${name}(enter)`,
+          waitingFor.length > 0 ? open : 0,
+        ),
       () => {
         stopWatching();
-        entering.phase = null;
         if (t.mode === "in-out" && !disposed) startWaitingLeaves();
       },
-      `${name}(enter)`,
-      waitingFor.length > 0 ? open : 0,
+      () => stopWatching(),
     );
-    // Ended already (the completion ran), or invalidated while it started: a
-    // phase that came back is cancelled — its timers with it — not installed.
-    if (entering.phase !== placeholder || entering.released || disposed) {
-      run?.cancel();
-      ready?.stop();
-      return;
-    }
+    // Ended already (the completion ran), invalidated while it started, or
+    // nothing joins it.
     const add = run?.add;
     if (run === null || add === undefined) {
       ready?.stop();
-      entering.phase = run;
       return;
     }
     const unwatch = watchRange(entering, add);
@@ -1012,13 +1061,6 @@ function directive(
       unwatch();
       stopLoading();
     };
-    entering.phase = {
-      cancel: () => {
-        stopWatching();
-        run.cancel();
-      },
-      add,
-    };
   };
 
   // An `out-in` build, run once the last leave ended (from an event or a
@@ -1041,25 +1083,31 @@ function directive(
     deferred = false;
     const focused = deferredFocus;
     deferredFocus = null;
-    if (!anchor.parentNode || current !== null) return;
+    // Built for the switch that deferred it, as long as that switch is the
+    // latest one; see `generation`.
+    const gen = deferredGen;
+    const superseded = (): boolean => disposed || gen !== generation;
+    if (superseded() || !anchor.parentNode || current !== null) return;
     let built: Branch | null;
     try {
-      built = binding.run(() => build(pick(last)));
+      built = binding.run(() => build(pick(last), () => !superseded()));
     } catch (err) {
       reportError(err, { phase: "render", name, node: anchor });
       return;
     }
     // The factory, the insertion and the focus restore run application
-    // code: nothing more once the directive is disposed.
-    if (disposed) return;
+    // code: nothing more once the directive is disposed or switched again.
+    if (superseded()) return;
     restoreFocusWithin(focused, built !== null ? built.nodes : [], name, focusPolicy);
-    if (disposed) return;
-    afterInsert(false);
+    afterInsert(false, superseded);
   });
 
   // Bumped by every switch: a switch that application code superseded (a
-  // nested write switched the directive again) stops where it is.
+  // nested write switched the directive again, whatever it rendered) stops
+  // where it is — its build publishes nothing, its enter sequences nothing.
   let generation = 0;
+  // The switch an `out-in` build waiting for the leaves belongs to.
+  let deferredGen = 0;
 
   const update = () => {
     if (disposed) return;
@@ -1116,16 +1164,17 @@ function directive(
       for (let i = 0; i < leaving.length && !reclaim; i++) reclaim = leaving[i].source === branch;
       if (!reclaim) {
         deferred = true;
+        deferredGen = gen;
         deferredFocus ??= focused;
         return;
       }
     }
     deferred = false;
 
-    build(branch);
+    build(branch, () => !superseded());
     if (superseded()) return;
     restoreFocusWithin(focused, current !== null ? current.nodes : [], name, focusPolicy);
-    if (tr && !superseded()) afterInsert(first);
+    if (tr) afterInsert(first, superseded);
   };
 
   // Tie the reactive subscription to the anchor's lifetime. When the anchor is
