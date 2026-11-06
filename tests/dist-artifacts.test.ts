@@ -384,6 +384,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // animation fallback. Measured: raw ~108,950 B, gzip ~37,960 B
     // (+~2,410 B raw, +~840 B gzip).
     //
+    // Raw 110,600 B, gzip baseline 37,750 B for the third round: commits that
+    // re-check after every step running application code (the held result's
+    // catch-up, the outgoing teardown), a staged replacement for them, a
+    // lifecycle for every `lazy()` instance (cached ones included) and for the
+    // core `Suspense` fallback. Measured: raw ~110,270 B, gzip ~38,410 B
+    // (+~1,330 B raw, +~450 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -391,8 +398,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(109_200);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_300 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(110_600);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_750 * 1.02));
   });
 });
 

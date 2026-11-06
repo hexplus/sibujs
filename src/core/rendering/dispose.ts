@@ -363,6 +363,59 @@ export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void
 }
 
 /**
+ * {@link replaceChildrenSafely} in two stages, for a commit that must check
+ * again between the outgoing teardown — application code — and the
+ * insertion (see `commitWhenActive`). `teardown()` disposes the outgoing
+ * children not disposed yet (incoming nodes protected, and kept in place when
+ * hydration adopted them, exactly as there) and returns whether it disposed
+ * any; `insert()` then completes the replacement with DOM operations only,
+ * reading `parent`'s children fresh. Nothing is disposed twice.
+ *
+ * @internal
+ */
+export function stageReplaceChildren(
+  parent: ParentNode,
+  next: readonly Node[],
+): { teardown: () => boolean; insert: () => void } {
+  const done = new Set<Node>();
+  // Adopted by hydration: `next` already leads `parent`, contiguously.
+  const adopted = (): boolean => {
+    if (!isHydrating() || next.length === 0 || next[0] !== parent.firstChild) return false;
+    for (let i = 1; i < next.length; i++) if (next[i - 1].nextSibling !== next[i]) return false;
+    return true;
+  };
+  const outgoing = (): Node[] => {
+    if (adopted()) {
+      const out: Node[] = [];
+      for (let n = next[next.length - 1].nextSibling; n !== null; n = n.nextSibling) out.push(n);
+      return out;
+    }
+    for (let i = 0; i < next.length; i++) next[i].parentNode?.removeChild(next[i]);
+    return Array.from(parent.childNodes);
+  };
+  return {
+    teardown: () => {
+      let ran = false;
+      for (const node of outgoing()) {
+        if (done.has(node)) continue;
+        done.add(node);
+        ran = true;
+        dispose(node);
+      }
+      return ran;
+    },
+    insert: () => {
+      if (!adopted()) {
+        parent.replaceChildren(...next);
+        return;
+      }
+      const last = next[next.length - 1];
+      while (last.nextSibling) parent.removeChild(last.nextSibling);
+    },
+  };
+}
+
+/**
  * Check for potential binding leaks. Returns the number of active DOM bindings.
  * In dev mode, logs a warning if the count exceeds the threshold.
  * In production, DEV is false so the counter is always 0.

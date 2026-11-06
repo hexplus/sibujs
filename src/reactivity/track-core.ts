@@ -805,6 +805,11 @@ export function heldListenerCount(): number {
   return waiters.size + endWatchers.size + stateWatchers.size;
 }
 
+/** Number of detached subtrees currently held (`holdSubtree`), for leak tests. @internal */
+export function heldRootCount(): number {
+  return heldRoots.size;
+}
+
 /**
  * After a resume, an end or a released root: re-queue the subscribers that are
  * no longer held, settle the waiters, and run what was queued.

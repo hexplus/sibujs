@@ -1,9 +1,16 @@
-import { bindOwnerScope, captureFrozen, type HeldCheck, holdSubtree, structuralBinding } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import type { StructuralBinding } from "../../reactivity/track-core";
 import { reportError } from "../errors";
 import { trackPending } from "../ssr-context";
 import { captureScope, inAdoptScope, inScope } from "./adoptScope";
-import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
+import {
+  dispose,
+  registerDisposer,
+  replaceChildrenSafely,
+  stageReplaceChildren,
+  withDisposerRollback,
+} from "./dispose";
+import { type CommitSlot, commitWhenActive } from "./heldCommit";
 import { div, span } from "./html";
 import { isHydrating } from "./hydrationHooks";
 import { beginLoading } from "./range";
@@ -95,61 +102,6 @@ export function takePendingError(node: Element): Error | undefined {
  */
 const NOOP = (): void => {};
 
-/** The wait a renderer has in progress for its lifecycle to resume; see {@link whenActive}. */
-interface Waiting {
-  cancel: () => void;
-}
-
-/**
- * Run `commit` once the lifecycle `held` is active: now, or after it resumes.
- * Every notification is checked again when it arrives — the lifecycle may
- * have paused again in between, and then the wait goes on — so a
- * notification alone is never permission to run. `node` (built, not yet
- * committed) is held meanwhile (`holdSubtree`): its bindings do not react to
- * state while the lifecycle is paused, and catch up once, when it is
- * released just before `commit`. If the lifecycle ends first, or
- * `slot.cancel()` is called (the renderer was disposed), `discard` runs
- * instead — before the hold is released, so what the node skipped is
- * dropped, never replayed. `slot.cancel` is the wait in progress, if any.
- */
-function whenActive(slot: Waiting, held: HeldCheck, node: Node | null, discard: () => void, commit: () => void): void {
-  let over = false;
-  let unhold: (() => void) | null = null;
-  let drop = NOOP;
-  const cancel = (): void => end(false);
-  const end = (active: boolean): void => {
-    if (over) return;
-    over = true;
-    if (slot.cancel === cancel) slot.cancel = NOOP;
-    drop();
-    drop = NOOP;
-    const release = unhold;
-    unhold = null;
-    if (active) {
-      release?.();
-      commit();
-      return;
-    }
-    try {
-      discard();
-    } finally {
-      release?.();
-    }
-  };
-  const check = (): void => {
-    if (over) return;
-    const state = held.state();
-    if (state !== 1) {
-      end(state === 0);
-      return;
-    }
-    if (node !== null && unhold === null) unhold = holdSubtree(node);
-    slot.cancel = cancel;
-    drop = held.wait(check, check);
-  };
-  check();
-}
-
 /**
  * lazy() enables code-splitting by deferring the import of a component
  * until it is first rendered. Returns a wrapper component that shows a
@@ -171,19 +123,28 @@ function whenActive(slot: Waiting, held: HeldCheck, node: Node | null, discard: 
  *
  * The returned component renders either the loading container (a `div`) or,
  * once loaded, the component's own root — its return type is the union, so an
- * SVG component stays usable without a cast.
+ * SVG component stays usable without a cast. A component returning a
+ * `DocumentFragment` is rendered in the container either way: a fragment is
+ * no root its instance could be disposed with.
  *
  * The loaded component belongs to the lifecycle the placeholder was rendered
  * in (a `when()` branch, a route instance, a `Suspense`'s content): while that
  * lifecycle is paused — a branch playing its leave, a
  * `KeepAliveRoute({ suspendInactive: true })` page that is hidden — the module
  * is kept and nothing is built or committed until it resumes; if it ends,
- * nothing is. The component is built under its own lifecycle, nested in that
- * one: a `lifecycleScope()` it captures pauses with the page, and ends when
- * the container is disposed. The loaded module is cached either way.
+ * nothing is. The loaded module is cached either way.
+ *
+ * Every instance has the same lifetime, whether its module was loaded already
+ * or not: the component is built under its own lifecycle, nested in the one
+ * it renders in. A `lifecycleScope()` it captures pauses with that one, and
+ * ends — its scoped effects and watches disposed — when the instance is
+ * disposed: the container, or the component's own root when a cached module
+ * renders it directly.
  *
  * A synchronous throw from `importFn` propagates to the caller; nothing is
- * left registered for the container that was never returned.
+ * left registered for the container that was never returned. So does a throw
+ * from a cached component, rendered synchronously: what it registered is
+ * rolled back and its lifecycle ended.
  *
  * @param importFn Dynamic import function returning `{ default: Component }`
  * @returns A component function that lazy-loads on first call
@@ -193,12 +154,36 @@ export function lazy<R extends Node = HTMLElement>(
 ): Component<void, R | HTMLDivElement> {
   let cached: Component<void, R> | null = null;
 
+  /**
+   * Run `component` as a new instance's lifecycle, nested in the current
+   * one; nothing of it is kept if it throws. Returns the root and the
+   * instance's lifecycle, which the caller ties to what it disposes.
+   */
+  const instance = (component: () => R): [R, StructuralBinding] => {
+    const own = structuralBinding(NOOP);
+    try {
+      return [withDisposerRollback(() => own.run(component)), own];
+    } catch (err) {
+      own.stop();
+      throw err;
+    }
+  };
+
   return function LazyComponent(): R | HTMLDivElement {
     // If already loaded, render immediately — except when adoption markers are
     // in play, where the shape must not depend on whether this process (or
     // this page) has loaded the chunk before: always the container.
     if (cached && !inAdoptScope()) {
-      return cached();
+      const [root, own] = instance(cached);
+      const type = (root as Node | null)?.nodeType;
+      if (type === 11) {
+        const box = div({ class: "sibu-lazy" });
+        registerDisposer(box, own.stop);
+        box.appendChild(root);
+        return box;
+      }
+      if (typeof type === "number") registerDisposer(root, own.stop);
+      return root;
     }
 
     const container = div({ class: "sibu-lazy" });
@@ -210,7 +195,16 @@ export function lazy<R extends Node = HTMLElement>(
     const loading = inScope(null, () => span("sibu-lazy-loading", "Loading..."));
     if (cached) {
       const loaded = cached;
-      replaceChildrenSafely(container, inScope(scope, () => loaded()) as Node);
+      let rendered: R;
+      try {
+        const [root, own] = instance(() => inScope(scope, () => loaded()));
+        registerDisposer(container, own.stop);
+        rendered = root;
+      } catch (err) {
+        dispose(container);
+        throw err;
+      }
+      replaceChildrenSafely(container, rendered);
       return container;
     }
 
@@ -223,13 +217,14 @@ export function lazy<R extends Node = HTMLElement>(
     // container, for an enter that waits for it (`waitForContent`).
     const ready = beginLoading(container);
     let disposed = false;
+    const live = (): boolean => !disposed;
     // The loaded component's own lifecycle, once committed.
     let owner: StructuralBinding | null = null;
-    const waiting: Waiting = { cancel: NOOP };
+    const waiting: CommitSlot = { cancel: NOOP };
 
     // Installed BEFORE any user code runs (`importFn` below): from here on,
-    // disposing the container releases the readiness registration, a wait
-    // for the lifecycle (and what it holds) and the component's lifecycle.
+    // disposing the container releases the readiness registration, a commit
+    // in progress (and what it holds) and the component's lifecycle.
     // Guards stale loads too: covers when/match/each/dispose paths.
     registerDisposer(container, () => {
       disposed = true;
@@ -244,48 +239,65 @@ export function lazy<R extends Node = HTMLElement>(
     // still showing the server's loaded content until the chunk arrives.
     if (!(isHydrating() && container.firstChild)) container.appendChild(loading);
 
+    /** Swap the container's content for `view` once the lifecycle is active (see `commitWhenActive`). */
+    const show = (view: Node, discard: () => void, shown: () => void): void => {
+      const swap = stageReplaceChildren(container, [view]);
+      commitWhenActive(waiting, {
+        held,
+        node: view,
+        owned: live,
+        teardown: swap.teardown,
+        insert: () => {
+          swap.insert();
+          shown();
+        },
+        discard: () => {
+          discard();
+          ready.cancel();
+        },
+      });
+    };
+
+    /** Run `fn` in the owner scope once the lifecycle is active; never if it ends first. */
+    const later = (fn: () => void): void =>
+      commitWhenActive(waiting, { held, node: null, owned: live, insert: () => inOwner(fn), discard: ready.cancel });
+
     const fail = (err: unknown): void => {
       if (disposed) return;
-      const errorObj = err instanceof Error ? err : new Error(String(err));
-      replaceChildrenSafely(
-        container,
-        div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`),
+      const error = err instanceof Error ? err : new Error(String(err));
+      const view = div({ class: "sibu-lazy-error" }, `Failed to load component: ${error.message}`);
+      show(
+        view,
+        () => dispose(view),
+        () => {
+          ready.done();
+          dispatchPropagate(container, error);
+        },
       );
-      ready.done();
-      dispatchPropagate(container, errorObj);
     };
 
     const build = (component: Component<void, R>): void => {
       if (disposed) return;
-      const own = held.run(() => structuralBinding(NOOP));
       let rendered: R;
+      let own: StructuralBinding;
       try {
-        const render = () => own.run(() => inScope(scope, () => component()));
-        rendered = boundary ? boundary.enter(render) : render();
+        const render = () => held.run(() => instance(() => inScope(scope, () => component())));
+        [rendered, own] = boundary ? boundary.enter(render) : render();
       } catch (err) {
-        own.stop();
         fail(err);
         return;
       }
       // The component is user code: it may have disposed the container, or
-      // paused or ended the lifecycle. Re-checked right before the commit.
-      if (disposed) {
-        own.stop();
-        dispose(rendered);
-        return;
-      }
-      whenActive(
-        waiting,
-        held,
+      // paused or ended the lifecycle — and so may the catch-up and the
+      // teardown before the commit. Each is checked (`commitWhenActive`).
+      show(
         rendered,
         () => {
           own.stop();
           dispose(rendered);
-          ready.cancel();
         },
         () => {
           owner = own;
-          replaceChildrenSafely(container, rendered);
           ready.done();
         },
       );
@@ -307,23 +319,10 @@ export function lazy<R extends Node = HTMLElement>(
         // Cached whatever the lifecycle does: another instance may use it.
         cached = mod.default;
         const component = cached;
-        whenActive(
-          waiting,
-          held,
-          null,
-          () => ready.cancel(),
-          () => inOwner(() => build(component)),
-        );
+        later(() => build(component));
       },
       (err: unknown) => {
-        if (disposed) return;
-        whenActive(
-          waiting,
-          held,
-          null,
-          () => ready.cancel(),
-          () => inOwner(() => fail(err)),
-        );
+        if (!disposed) later(() => fail(err));
       },
     );
 
@@ -357,6 +356,13 @@ export interface SuspenseProps {
  * Render `fallback` until the async `nodes` factory resolves, then swap it for
  * the resolved content.
  *
+ * `fallback()` and `nodes()` each run under their own lifecycle, nested in the
+ * one the boundary renders in: a `lifecycleScope()` captured in the fallback
+ * ends — its scoped effects and watches disposed — when the content replaces
+ * the fallback, or with the boundary; one captured in the content ends with
+ * the boundary. A throwing `fallback()` propagates, with what it registered
+ * rolled back.
+ *
  * @param props `nodes` is the async content factory; `fallback` builds the
  * placeholder shown while it is pending.
  * @returns The live container element, already holding the fallback.
@@ -379,6 +385,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   // that waits for it (`waitForContent`).
   const ready = beginLoading(container);
   let suspenseDisposed = false;
+  const live = (): boolean => !suspenseDisposed;
   let observer: MutationObserver | null = null;
   // The child is created in a microtask and only attached to `container` once
   // loaded. If Suspense is disposed mid-load, the child is an orphan that the
@@ -389,7 +396,16 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   // so what it creates — a `lazy()` placeholder, a `lifecycleScope()` —
   // pauses with the boundary's lifecycle and ends with the boundary.
   let contentOwner: StructuralBinding | null = null;
-  const waiting: Waiting = { cancel: NOOP };
+  // The fallback's lifecycle, nested in the boundary's too and separate from
+  // the content's: it ends when the fallback is replaced, or with the boundary.
+  const fallbackOwn = structuralBinding(NOOP);
+  let fallbackOwner: StructuralBinding | null = fallbackOwn;
+  const endFallback = (): void => {
+    const own = fallbackOwner;
+    fallbackOwner = null;
+    own?.stop();
+  };
+  const waiting: CommitSlot = { cancel: NOOP };
 
   // Installed BEFORE any user code runs (`fallback` below).
   registerDisposer(container, () => {
@@ -401,6 +417,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       observer = null;
     }
     if (childEl && !container.contains(childEl)) dispose(childEl);
+    endFallback();
     const own = contentOwner;
     contentOwner = null;
     own?.stop();
@@ -410,7 +427,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   // server replaced must not shift the ids of what follows.
   let fallbackEl: Node;
   try {
-    fallbackEl = inScope(null, fallback);
+    fallbackEl = inScope(null, () => withDisposerRollback(() => fallbackOwn.run(fallback)));
   } catch (err) {
     // Never returned: release what was set up for it (a streaming render
     // must not wait for this boundary), then propagate.
@@ -420,31 +437,40 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   }
   // An adopted boundary keeps the server's content on screen instead of
   // flashing the fallback while its content builds.
-  if (isHydrating() && container.firstChild) dispose(fallbackEl);
-  else container.appendChild(fallbackEl);
+  if (isHydrating() && container.firstChild) {
+    dispose(fallbackEl);
+    endFallback();
+  } else container.appendChild(fallbackEl);
 
   /** Swap the fallback for `el` once the lifecycle is active; dropped if it ends. */
   const commit = (el: Element): void => {
-    whenActive(
-      waiting,
+    // The fallback is user-authored and may hold reactive bindings, lifecycle
+    // hooks, and listeners, so it is disposed as it is detached — a bare
+    // replaceChildren() would leave it re-rendering off-screen forever — and
+    // its lifecycle ended. Both are application code, checked after
+    // (`commitWhenActive`). The incoming `el` is never disposed by the swap.
+    const swap = stageReplaceChildren(container, [el]);
+    commitWhenActive(waiting, {
       held,
-      el,
-      () => {
+      node: el,
+      owned: live,
+      teardown: () => {
+        if (swap.teardown()) return true;
+        if (fallbackOwner === null) return false;
+        endFallback();
+        return true;
+      },
+      insert: () => {
+        swap.insert();
+        boundary?.done();
+        ready.done();
+      },
+      discard: () => {
         if (childEl === el) childEl = null;
         dispose(el);
         ready.cancel();
       },
-      () => {
-        // Committing swaps the fallback out for `el`. The fallback is
-        // user-authored and may hold reactive bindings, lifecycle hooks, and
-        // listeners, so it must be disposed as it is detached — a bare
-        // replaceChildren() would leave it re-rendering off-screen forever.
-        // `replaceChildrenSafely` never disposes the incoming `el`.
-        replaceChildrenSafely(container, el);
-        boundary?.done();
-        ready.done();
-      },
-    );
+    });
   };
 
   const renderContent = (): void => {
@@ -453,7 +479,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
     contentOwner = own;
     let el: Element;
     try {
-      const build = () => own.run(() => inScope(scope, nodes));
+      const build = () => withDisposerRollback(() => own.run(() => inScope(scope, nodes)));
       el = boundary ? boundary.enter(build) : build();
     } catch (err) {
       contentOwner = null;
@@ -496,13 +522,13 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   // The content is built in a microtask, in the owner scope Suspense was
   // created in — once the lifecycle it was created in is active.
   queueMicrotask(() => {
-    whenActive(
-      waiting,
+    commitWhenActive(waiting, {
       held,
-      null,
-      () => ready.cancel(),
-      () => inOwner(renderContent),
-    );
+      node: null,
+      owned: live,
+      insert: () => inOwner(renderContent),
+      discard: ready.cancel,
+    });
   });
 
   return container;

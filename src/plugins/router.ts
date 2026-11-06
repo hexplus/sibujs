@@ -1,6 +1,7 @@
 import { devWarn, isDev } from "../core/dev";
 import { type AdoptScope, captureScope, inScope, keyedScope } from "../core/rendering/adoptScope";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
+import { type CommitSlot, commitWhenActive, type HeldCommit } from "../core/rendering/heldCommit";
 import { isHydrating } from "../core/rendering/hydrationHooks";
 import { beginLoading, registerNodesRange, type Settle } from "../core/rendering/range";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
@@ -2577,6 +2578,12 @@ interface PauseGate {
   close(): void;
   /** Run `fn` as the branch's structural owner (see `HeldCheck.run`). */
   run<T>(fn: () => T): T;
+  /** The branch's lifecycle. */
+  frozen: HeldCheck;
+  /** Whether `close()` was called. */
+  closed(): boolean;
+  /** Call `fn` on `close()`, unless the returned function was called first. */
+  onClose(fn: () => void): () => void;
 }
 
 const NOOP = (): void => {};
@@ -2647,6 +2654,14 @@ function pauseGate(frozen: HeldCheck): PauseGate {
       for (const cancel of [...pending]) cancel();
     },
     run: frozen.run,
+    frozen,
+    closed: () => closed,
+    onClose: (fn) => {
+      pending.add(fn);
+      return () => {
+        pending.delete(fn);
+      };
+    },
   };
 }
 
@@ -2664,41 +2679,58 @@ function whenActive(gate: PauseGate, fn: () => unknown): void {
 }
 
 /**
- * Run `commit` once the branch is active — synchronously when it is now —
- * holding `node` (built while the branch was, or became, paused) until then:
- * its bindings do not react to state the outgoing branch no longer owns, and
- * it stays held through any number of pauses, since every resume notification
- * is checked again when it arrives. Active: the hold is released (the node
- * catches up), then `commit` runs in the same turn. Ended or closed: `discard`
- * disposes the node BEFORE the hold is released, so its skipped bindings are
- * dropped, never replayed; the hold is released even if `discard` throws.
+ * `commitWhenActive` (see core/rendering/heldCommit.ts) for an outlet's pass:
+ * the result is inserted once the branch is active, the pass still `owned`,
+ * the result caught up and the outgoing content torn down — everything
+ * checked again after each step that runs application code. The gate closing
+ * (the outlet torn down) discards it at any point before the insertion.
+ * Resolves once it was inserted or discarded; rejects with what `insert` or
+ * `discard` threw.
+ *
+ * A resume (or end) notification is looked at one microtask after it is
+ * delivered, as every other continuation of an outlet's pass is (they await
+ * `gate.until()`): work queued in the turn the branch resumed — pausing it
+ * again, say — is seen by then.
  */
-async function commitWhenActive(
-  gate: PauseGate,
-  node: Node | null,
-  discard: () => void,
-  commit: () => void,
-): Promise<void> {
-  if (!gate.held()) {
-    commit();
-    return;
-  }
-  const unhold = node ? holdSubtree(node) : null;
-  let active = false;
-  try {
-    do active = await gate.until();
-    while (active && gate.held());
-  } finally {
-    if (active) unhold?.();
-    else {
+function commitPass(gate: PauseGate, c: Omit<HeldCommit, "held" | "owned"> & { owned: () => boolean }): Promise<void> {
+  const frozen = gate.frozen;
+  const held: HeldCommit["held"] = {
+    state: frozen.state,
+    wait: (onActive, onEnd) => {
+      let live = true;
+      const later = (fn: () => void) => () => {
+        void Promise.resolve().then(() => {
+          if (live) fn();
+        });
+      };
+      const drop = frozen.wait(later(onActive), later(onEnd));
+      return () => {
+        live = false;
+        drop();
+      };
+    },
+  };
+  return new Promise<void>((resolve, reject) => {
+    const slot: CommitSlot = { cancel: NOOP };
+    const untrack = gate.onClose(() => slot.cancel());
+    const settle = (fn: () => void) => () => {
+      untrack();
       try {
-        discard();
-      } finally {
-        unhold?.();
+        fn();
+        resolve();
+      } catch (error) {
+        reject(error);
       }
-    }
-  }
-  if (active) commit();
+    };
+    commitWhenActive(slot, {
+      held,
+      node: c.node,
+      owned: () => !gate.closed() && c.owned(),
+      teardown: c.teardown,
+      insert: settle(c.insert),
+      discard: settle(c.discard),
+    });
+  });
 }
 
 /** The route scope of whichever route instance owns the running code, if any. */
@@ -3132,15 +3164,46 @@ export function Route(): Node {
     }
   };
 
-  const showError = (error: Error, routeDef?: RouteDef) => {
+  /**
+   * Show `seq`'s failure in place of the outgoing views. Their teardown is
+   * application code: ownership is checked again after it, and the parent
+   * re-read (see `commitPass`). A view that lost its parent meanwhile is
+   * held for the next attach, as `fail` does.
+   */
+  const showError = (seq: number, error: Error, routeDef?: RouteDef) => {
     if (!anchor.parentNode) return;
+    const view = errorView(error, routeDef);
+    void commitPass(gate, {
+      node: view,
+      owned: () => !routeTorn && seq === navSeq,
+      discard: () => dispose(view),
+      teardown: () => {
+        if (!anchor.parentNode || !(currentNode || loadingNode || errorNode)) return false;
+        cleanupNodes();
+        return true;
+      },
+      insert: () => {
+        const parent = anchor.parentNode;
+        if (!parent) {
+          dispose(view);
+          unshownFailure = { seq, error, routeDef };
+          attachWait.request();
+          return;
+        }
+        errorNode = view;
+        parent.insertBefore(view, anchor.nextSibling);
+        // The error view is the outcome that stands for the content.
+        loaded.done();
+      },
+    }).catch((err) => console.error("[Route] Error view failed:", err));
+  };
 
-    cleanupNodes();
-
-    errorNode = document.createElement("div");
-    (errorNode as HTMLElement).className = "route-error";
-    (errorNode as HTMLElement).setAttribute("role", "alert");
-    (errorNode as HTMLElement).setAttribute("aria-live", "assertive");
+  /** The error view for a failed pass. Builds DOM only: no application code runs. */
+  const errorView = (error: Error, routeDef?: RouteDef): HTMLElement => {
+    const errorNode = document.createElement("div");
+    errorNode.className = "route-error";
+    errorNode.setAttribute("role", "alert");
+    errorNode.setAttribute("aria-live", "assertive");
 
     // Attach component source info so the app layer can display it: best-effort
     // extraction of an import path from the function's source, e.g.
@@ -3154,10 +3217,10 @@ export function Route(): Node {
       const src = routeDef.component.toString();
       const importMatch = src.match(/import\(["']([^"']+)["']\)/);
       if (importMatch) {
-        (errorNode as HTMLElement).setAttribute("data-component-source", importMatch[1]);
+        errorNode.setAttribute("data-component-source", importMatch[1]);
       }
       if (routeDef.component.name) {
-        (errorNode as HTMLElement).setAttribute("data-component-name", routeDef.component.name);
+        errorNode.setAttribute("data-component-name", routeDef.component.name);
       }
     }
 
@@ -3190,13 +3253,10 @@ export function Route(): Node {
     // _routerRef.current/update.
     registerDisposer(retryButton, () => retryButton.removeEventListener("click", onRetryClick));
 
-    (errorNode as HTMLElement).appendChild(title);
-    (errorNode as HTMLElement).appendChild(message);
-    (errorNode as HTMLElement).appendChild(retryButton);
-
-    anchor.parentNode.insertBefore(errorNode, anchor.nextSibling);
-    // The error view is the outcome that stands for the content.
-    loaded.done();
+    errorNode.appendChild(title);
+    errorNode.appendChild(message);
+    errorNode.appendChild(retryButton);
+    return errorNode;
   };
 
   const update = async () => {
@@ -3304,17 +3364,25 @@ export function Route(): Node {
             () => commitTarget(seq) !== null,
           );
 
-          // Second ownership check, immediately before the synchronous commit,
-          // re-reading the parent rather than trusting one captured earlier.
-          // The node already owns lifecycle resources by now, so a stale pass
+          // Ownership is checked again at every step before the insertion —
+          // the node's catch-up and the outgoing page's teardown run
+          // application code — and the parent re-read right before it. The
+          // node already owns lifecycle resources by now, so a stale pass
           // disposes it instead of dropping the reference. (OUT-003) A paused
-          // branch holds the node until it resumes (then the check below runs)
-          // or ends (then it is disposed, once).
-          await commitWhenActive(
-            gate,
+          // branch holds the node until it resumes, or ends (then it is
+          // disposed, once).
+          await commitPass(gate, {
             node,
-            () => release(node),
-            () => {
+            owned: () => !routeTorn && seq === navSeq,
+            discard: () => release(node),
+            // The outgoing views go first — only when there is a page to
+            // show, and a parent to show it in.
+            teardown: () => {
+              if (!node || !anchor.parentNode || !(currentNode || loadingNode || errorNode)) return false;
+              cleanupNodes();
+              return true;
+            },
+            insert: () => {
               const parent = commitTarget(seq);
               if (!parent) {
                 release(node);
@@ -3322,17 +3390,15 @@ export function Route(): Node {
                 return;
               }
               if (node) {
-                // Commit only now that we know we are the latest resolution.
                 currentTopRoute = routeDef;
                 currentKey = key;
-                cleanupNodes();
                 parent.insertBefore(node, anchor.nextSibling);
                 currentNode = node;
               }
               // The current pass committed (or has nothing to show): settled.
               loaded.done();
             },
-          );
+          });
         } catch (error) {
           // Cancelled with its branch: not a failure of the component.
           if (cancellations.has(error as object)) return;
@@ -3367,7 +3433,7 @@ export function Route(): Node {
   const fail = (seq: number, error: unknown, routeDef?: RouteDef) => {
     const err = error instanceof Error ? error : new Error(String(error));
     if (anchor.parentNode) {
-      showError(err, routeDef);
+      showError(seq, err, routeDef);
       return;
     }
     unshownFailure = { seq, error: err, routeDef };
@@ -3386,7 +3452,7 @@ export function Route(): Node {
     }
     const failure = unshownFailure;
     unshownFailure = null;
-    if (failure && failure.seq === navSeq) showError(failure.error, failure.routeDef);
+    if (failure && failure.seq === navSeq) showError(failure.seq, failure.error, failure.routeDef);
     else update();
   };
 
@@ -3721,25 +3787,17 @@ export function KeepAliveRoute(options?: {
         return;
       }
     }
-    // Re-check at the commit boundary. `component()` is user code: it can
-    // navigate, or collapse the layout owning this outlet, synchronously. A
-    // new node exists and holds resources now, so losing ownership here means
+    // Re-checked at every step of the commit. `component()` is user code: it
+    // can navigate, or collapse the layout owning this outlet, synchronously
+    // — and so can the new node's catch-up and the outgoing view's teardown.
+    // A new node exists and holds resources now, so losing ownership means
     // disposing it — returning would leak every disposer it registered. A
     // paused branch holds a new node until it resumes, or ends; a cached page
     // is not shown in a paused branch either.
-    const view = node as Node;
-    const cached = fromCache;
-    await commitWhenActive(
-      gate,
-      cached ? null : view,
-      () => {
-        if (!cached) disposeOwned(view);
-      },
-      () => commit(seq, view, cached, cacheKey, shouldCache, route),
-    );
+    await commit(seq, node as Node, fromCache, cacheKey, shouldCache, route);
   };
 
-  /** The synchronous commit of a resolved view, once its pass may still commit. */
+  /** Commit a resolved view, once its pass may still commit (see `commitPass`). */
   const commit = (
     seq: number,
     node: Node,
@@ -3747,67 +3805,76 @@ export function KeepAliveRoute(options?: {
     cacheKey: string,
     shouldCache: boolean,
     route: RouteContext,
-  ): void => {
-    if (kaTorn || seq !== updateSeq) {
-      if (!fromCache) disposeOwned(node);
-      return;
-    }
-    const parent = anchor.parentNode;
-    if (!parent) {
-      if (!fromCache) disposeOwned(node);
-      attachWait.request();
-      return;
-    }
-
-    // ── Synchronous commit ─────────────────────────────────────────────────
-    // From here down there is no await, so ownership cannot lapse mid-commit.
-
-    // Detach the outgoing view — dispose it only if it isn't cached.
-    if (currentNode && currentNode !== node) {
-      if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
-      if (!currentCached) disposeOwned(currentNode);
-      else suspend(currentNode);
-    }
-
-    if (fromCache) {
-      // A cached view shown again follows the navigation that shows it; while
-      // it was cached it kept its own route.
-      updateInstanceRoute(node, route);
-      // Touch LRU order.
-      const idx = lruOrder.indexOf(cacheKey);
-      if (idx !== -1) lruOrder.splice(idx, 1);
-      lruOrder.push(cacheKey);
-    } else if (shouldCache) {
-      cache.set(cacheKey, node);
-      lruOrder.push(cacheKey);
-
-      // Evict oldest if over max.
-      while (lruOrder.length > maxCache) {
-        const evictKey = lruOrder.shift()!;
-        // Never evict the view being committed — disposing it here would mount
-        // a dead node. Only reachable with a pathological `max` (< 1).
-        if (evictKey === cacheKey) {
-          lruOrder.push(evictKey);
-          break;
+  ): Promise<void> =>
+    commitPass(gate, {
+      node: fromCache ? null : node,
+      owned: () => !kaTorn && seq === updateSeq,
+      discard: () => {
+        if (!fromCache) disposeOwned(node);
+      },
+      // The outgoing view goes first: detached, and disposed unless it is
+      // cached (then paused, with `suspendInactive`). Once only: it is no
+      // longer the current view afterwards.
+      teardown: () => {
+        const outgoing = currentNode;
+        if (outgoing === null || outgoing === node || !anchor.parentNode) return false;
+        const wasCached = currentCached;
+        currentNode = null;
+        currentKey = "";
+        currentCached = false;
+        outgoing.parentNode?.removeChild(outgoing);
+        if (!wasCached) disposeOwned(outgoing);
+        else suspend(outgoing);
+        return true;
+      },
+      insert: () => {
+        const parent = anchor.parentNode;
+        if (!parent) {
+          if (!fromCache) disposeOwned(node);
+          attachWait.request();
+          return;
         }
-        const evictNode = cache.get(evictKey);
-        if (evictNode) {
-          disposeCached(evictNode);
-          if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
+        if (fromCache) {
+          // A cached view shown again follows the navigation that shows it;
+          // while it was cached it kept its own route.
+          updateInstanceRoute(node, route);
+          // Touch LRU order.
+          const idx = lruOrder.indexOf(cacheKey);
+          if (idx !== -1) lruOrder.splice(idx, 1);
+          lruOrder.push(cacheKey);
+        } else if (shouldCache) {
+          cache.set(cacheKey, node);
+          lruOrder.push(cacheKey);
+        }
+        currentNode = node;
+        currentCached = fromCache || shouldCache;
+        currentKey = cacheKey;
+        parent.insertBefore(node, anchor.nextSibling);
+        loaded.done();
+        // Resumed only now, with the route it is shown for already in place:
+        // its catch-up runs once, against the current state — after the
+        // insertion, which nothing it does can undo except through this
+        // outlet's own teardown.
+        if (fromCache) activate(node);
+        // Evict the oldest past `max`: application code too, so after the
+        // view is in place. Stops if the outlet was torn down meanwhile.
+        while (!kaTorn && lruOrder.length > maxCache) {
+          const evictKey = lruOrder.shift()!;
+          // Never evict the view just committed — disposing it would leave a
+          // dead node mounted. Only reachable with a pathological `max` (< 1).
+          if (evictKey === cacheKey) {
+            lruOrder.push(evictKey);
+            break;
+          }
+          const evictNode = cache.get(evictKey);
           cache.delete(evictKey);
+          if (evictNode) {
+            disposeCached(evictNode);
+            evictNode.parentNode?.removeChild(evictNode);
+          }
         }
-      }
-    }
-
-    currentNode = node;
-    currentCached = fromCache || shouldCache;
-    currentKey = cacheKey;
-    parent.insertBefore(node, anchor.nextSibling);
-    // Resumed only now, with the route it is shown for already in place: its
-    // catch-up runs once, against the current state.
-    if (fromCache) activate(node);
-    loaded.done();
-  };
+      },
+    });
 
   let initialized = false;
   const wrappedUpdate = async () => {
@@ -4218,90 +4285,59 @@ export function Suspense(props: {
     }
   };
 
-  // A settled outcome waiting for the branch holding the boundary to resume
-  // (it began a leave and may still be taken back), and the wait itself.
-  let held: { element: HTMLElement; unhold: () => void } | null = null;
+  // The commit of the settled outcome in progress, if any (see `settle`), and
+  // the wait for the first render.
+  const committing: CommitSlot = { cancel: NOOP };
   let dropWait: (() => void) | null = null;
-  /** Dispose a result that was kept for adoption and will never be adopted. Once. */
-  const discardHeld = () => {
-    const kept = held;
-    held = null;
-    if (kept === null) return;
-    // Disposed BEFORE the hold is released: its skipped bindings are dropped
-    // with it, never replayed against state the branch no longer owns. The
-    // hold is released even if a teardown throws.
-    try {
-      release(kept.element);
-    } finally {
-      kept.unhold();
-    }
-  };
 
   /**
-   * Adopt the generation's outcome: the content (`ok`) or the error.
+   * Adopt the generation's outcome: the content (`ok`) or the error view.
    *
    * The single-shot `nodes()` is never called again. While the branch holding
-   * the boundary is PAUSED, the fallback stays and the outcome waits: a result
-   * is kept detached, its bindings held (`holdSubtree`) so they do not react to
-   * state the outgoing branch no longer owns, and adopted once the branch
-   * resumes. If the branch ENDS instead, the kept result is disposed, once.
+   * the boundary is PAUSED, the fallback stays and the outcome waits: kept
+   * detached, its bindings held so they do not react to state the outgoing
+   * branch no longer owns, and adopted once the branch resumes. If the branch
+   * ENDS instead, or the boundary is torn down, it is disposed, once. The
+   * outcome's catch-up and the fallback's teardown run application code:
+   * everything is checked again after each (see `commitWhenActive`), and the
+   * parent re-read right before the insertion.
    */
   const settle = (myGeneration: number, ok: boolean, value: unknown): void => {
-    const element = value as HTMLElement;
-    if (!tornDown && myGeneration === generation) {
-      const state = frozen.state();
-      if (state === 1) {
-        if (ok) held = { element, unhold: holdSubtree(element) };
-        dropWait = frozen.wait(
-          () => {
-            dropWait = null;
-            const kept = held;
-            held = null;
-            // Released first: its bindings catch up with the current state
-            // before it is shown.
-            kept?.unhold();
-            settle(myGeneration, ok, ok ? kept?.element : value);
-          },
-          () => {
-            dropWait = null;
-            discardHeld();
-          },
-        );
-        return;
-      }
-      if (state === 2) {
-        if (ok) release(element);
+    let view: HTMLElement;
+    if (ok) view = value as HTMLElement;
+    else {
+      view = document.createElement("div");
+      view.className = "suspense-error";
+      view.textContent = value instanceof Error ? value.message : "Failed to load";
+    }
+    commitWhenActive(committing, {
+      held: frozen,
+      node: view,
+      owned: () => !tornDown && myGeneration === generation,
+      discard: () => {
+        release(view);
         loaded.cancel();
-        return;
-      }
-    }
-    loaded.done();
-
-    // Re-checked immediately before the synchronous commit. Nothing runs
-    // between this check and the insertion below.
-    const parent = commitTarget(myGeneration);
-    if (!ok) {
-      cleanupNodes();
-      if (!parent) return;
-      // Show error in place of content
-      const errorElement = document.createElement("div");
-      errorElement.className = "suspense-error";
-      errorElement.textContent = value instanceof Error ? value.message : "Failed to load";
-      parent.insertBefore(errorElement, anchor.nextSibling);
-      currentNode = errorElement;
-      return;
-    }
-    if (!parent) {
-      // Stale: the Element already exists and owns lifecycle resources, so it
-      // must be disposed, not dropped. Anything this generation installed
-      // (the fallback) goes with it.
-      release(element);
-      cleanupNodes();
-      return;
-    }
-    cleanupNodes();
-    parent.insertBefore(element, anchor.nextSibling);
-    currentNode = element;
+      },
+      teardown: () => {
+        if (!anchor.parentNode || !(currentNode || fallbackNode || fallbackOwner)) return false;
+        cleanupNodes();
+        return true;
+      },
+      insert: () => {
+        const parent = commitTarget(myGeneration);
+        if (!parent) {
+          // Nowhere to show it: disposed, not dropped. Anything this
+          // generation installed (the fallback) goes with it.
+          release(view);
+          cleanupNodes();
+          loaded.cancel();
+          return;
+        }
+        parent.insertBefore(view, anchor.nextSibling);
+        currentNode = view;
+        loaded.done();
+      },
+    });
   };
 
   // Teardown. Invalidating the generation *before* releasing nodes is what
@@ -4315,7 +4351,7 @@ export function Suspense(props: {
     generation++;
     dropWait?.();
     dropWait = null;
-    discardHeld();
+    committing.cancel();
     cleanupNodes();
     contentOwner.stop();
     loaded.cancel();
@@ -4330,8 +4366,7 @@ export function Suspense(props: {
   });
   queueMicrotask(
     bindOwnerScope(() => {
-      const stop = frozen.wait(renderInScope, () => {});
-      if (dropWait === null) dropWait = stop;
+      dropWait = frozen.wait(renderInScope, NOOP);
     }),
   );
 
@@ -4611,15 +4646,21 @@ export function Outlet(): Node {
         () => commitTarget(seq) !== null,
       );
 
-      // Second ownership check, immediately before the synchronous commit, and
-      // re-reading the parent rather than trusting one captured earlier. The
-      // node already exists and owns lifecycle resources by now, so a stale
-      // pass disposes it instead of dropping the reference. (OUT-001)
-      await commitWhenActive(
-        gate,
+      // Ownership is checked again at every step before the insertion (the
+      // node's catch-up, the outgoing child's teardown), and the parent
+      // re-read right before it. The node already exists and owns lifecycle
+      // resources by now, so a stale pass disposes it instead of dropping
+      // the reference. (OUT-001)
+      await commitPass(gate, {
         node,
-        () => release(node),
-        () => {
+        owned: () => !outletTorn && seq === navSeq,
+        discard: () => release(node),
+        teardown: () => {
+          if (!node || !anchor.parentNode || !currentNode) return false;
+          clearCurrent();
+          return true;
+        },
+        insert: () => {
           const parent = commitTarget(seq);
           if (!parent) {
             release(node);
@@ -4627,7 +4668,6 @@ export function Outlet(): Node {
             return;
           }
           if (node) {
-            clearCurrent();
             parent.insertBefore(node, anchor.nextSibling);
             currentNode = node;
             currentChild = childRoute;
@@ -4635,7 +4675,7 @@ export function Outlet(): Node {
           }
           loaded.done();
         },
-      );
+      });
     } catch (error) {
       // Reported when observed; a cancellation is not a failure.
       if (cancellations.has(error as object) || outletTorn || seq !== navSeq) return;

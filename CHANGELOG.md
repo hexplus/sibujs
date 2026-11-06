@@ -151,7 +151,14 @@ committed; the fallback or page on screen stays, and a result is held, bindings
 and lists included, so it does not react meanwhile. Its DOM is held too, so a
 binding an async continuation created in it after the build is paused as well.
 Every wait re-checks the branch when it is notified, so a branch paused again
-before the waiting work runs keeps it waiting. A route failure is still reported
+before the waiting work runs keeps it waiting. A commit re-checks again after
+each of its steps that runs application code — the held result catching up,
+then the outgoing content's teardown — and reads its destination right before
+the insertion: a binding or disposer that pauses the branch again keeps the
+result waiting (the steps already done are not repeated); one that ends it,
+disposes the outlet or boundary, or supersedes its pass gets the result
+disposed once, nothing inserted and no readiness settled as committed. A route
+failure is still reported
 when it happens; only its error view waits. Taken back before its leave ends,
 the branch resumes: what it skipped re-runs once against the current state, an
 enter it kept from starting plays, a `Suspense` adopts the result it held (its
@@ -167,11 +174,16 @@ were rendered in. A module that resolves (or rejects) while it is paused is kept
 — and cached — but its component is not called and nothing is committed until
 it resumes, re-checked at every notification and again after the component
 ran; if it ends, nothing is. `Suspense` builds its `nodes()` only while it is
-active. The component and `nodes()` run in their own lifecycle, nested in that
-one, so a `lifecycleScope()` captured in them pauses with the page and ends
-with the container. A `lazy()` whose `importFn` throws synchronously, or a
-`Suspense` whose `fallback` throws, still propagates the error, and leaves
-nothing registered for the container it never returned.
+active. The component, `nodes()` and `fallback()` each run in their own
+lifecycle, nested in that one, so a `lifecycleScope()` captured in them pauses
+with the page. The component's ends when its instance is disposed — the
+container, or the root a cached module renders directly: every instance has
+the same lifetime whether or not its module was loaded before. The content's
+ends with the boundary; the fallback's when the content replaces it, when
+hydration discards it, or with the boundary. A `lazy()` whose `importFn`
+throws synchronously, a cached component that throws, or a `Suspense` whose
+`fallback` throws, still propagates the error, with what it registered rolled
+back and nothing left registered for a container it never returned.
 
 ### Added — `lifecycleScope()`: work created after an `await`
 
