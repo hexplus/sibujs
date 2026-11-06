@@ -132,3 +132,54 @@ test("router Suspense: a connectedCallback disposing the boundary releases the c
   expect(r.rootCleanups).toBe(1);
   expect(r.children).toBe(1);
 });
+
+const callWith = <R = unknown>(page: Page, name: string, arg: string) =>
+  page.evaluate(
+    ([n, a]) => (window as never as { __t: Record<string, (x: string) => unknown> }).__t[n](a),
+    [name, arg] as const,
+  ) as Promise<R>;
+
+for (const kind of ["when", "match"]) {
+  test(`${kind}(): a connectedCallback disposing the directive releases the whole incoming fragment once`, async ({
+    page,
+  }) => {
+    const r = await callWith<{
+      headCleanups: number;
+      tailCleanups: number;
+      counts: Counts;
+      elements: number;
+      reacted: boolean;
+      text: string;
+    }>(page, "directiveFragmentConnectedDispose", kind);
+    expect(r.counts.connected).toBe(1);
+    expect(r.headCleanups).toBe(1);
+    expect(r.tailCleanups).toBe(1);
+    expect(r.elements).toBe(0);
+    expect(r.reacted).toBe(false);
+    expect(r.text).not.toContain("tail-1");
+  });
+}
+
+for (const mode of ["both", "out-in"]) {
+  test(`when(): a leave disposing the directive builds no replacement (mode ${mode})`, async ({ page }) => {
+    const r = await callWith<{ replacements: number; initialCleanups: number; elements: number }>(
+      page,
+      "directiveLeaveDisposes",
+      mode,
+    );
+    expect(r.replacements).toBe(0);
+    expect(r.initialCleanups).toBe(1);
+    expect(r.elements).toBe(0);
+  });
+}
+
+test("when(): a nested range emptied while its branch leaves is taken back empty", async ({ page }) => {
+  const r = await call<{ before: number; after: number; refilled: number; anchored: boolean }>(
+    page,
+    "directiveReclaimEmptiedRange",
+  );
+  expect(r.before).toBe(1);
+  expect(r.after).toBe(0);
+  expect(r.refilled).toBe(1);
+  expect(r.anchored).toBe(true);
+});

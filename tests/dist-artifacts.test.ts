@@ -398,6 +398,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // cleanup of a `lazy()` component's fragment root. Measured: raw ~110,910
     // B, gzip ~38,650 B (+~640 B raw, +~240 B gzip).
     //
+    // Raw 112,500 B, gzip baseline 38,400 B for the fifth round: `when()` /
+    // `match()` publish the incoming branch (and its lifecycle) before its
+    // first insertion and re-check liveness between insertions, a disposal
+    // from any transition callback, cleanup, blur or factory is terminal (a
+    // phase that comes back after it is cancelled through a placeholder), and
+    // a leaving bare branch is taken back from its live range. Measured: raw
+    // ~112,130 B, gzip ~39,100 B (+~1,220 B raw, +~450 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -405,8 +413,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(111_200);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_950 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_400 * 1.02));
   });
 });
 

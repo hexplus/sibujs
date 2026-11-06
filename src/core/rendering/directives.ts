@@ -23,7 +23,6 @@ import {
   type Pending,
   pendingWithin,
   queueFirstRender,
-  rangeEnd,
   registerRange,
   resumePending,
   settledContent,
@@ -186,6 +185,19 @@ interface Branch {
   unhold: (() => void) | null;
   /** Transitions only (`in-out`): leaving, but waiting for the new branch's enter. */
   waiting: boolean;
+  /**
+   * Released (see `releaseBranch`): terminal. Application code a switch runs
+   * (a factory, a transition callback, a `connectedCallback`, a cleanup) may
+   * dispose the directive, whose teardown releases every branch it holds;
+   * the switch that was running finds this set and does nothing more to it.
+   */
+  released: boolean;
+  /**
+   * Being inserted: `nodes` is the complete list it is inserted as, some of
+   * it possibly not inserted yet. A teardown during the insertion releases
+   * all of it (see `refreshNodes`).
+   */
+  inserting: boolean;
 }
 
 // A fragment's child nodes, recorded when it was first inserted: insertion
@@ -268,9 +280,15 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     starts = [node];
   }
   const park = owned ? undefined : parked.get(node);
+  // Read live wherever the starts are: a bare branch still leaving (or
+  // attached anywhere else) brings what its range renders NOW — a nested
+  // renderer may have removed and disposed what it rendered before. The
+  // recorded list is only for starts that are detached, whose range can no
+  // longer be read.
   const nodes = park?.firstChild
     ? Array.from(park.childNodes)
-    : (!owned && detachedRanges.get(node)) || attachedRanges(starts);
+    : (!owned && starts.every((start) => start.parentNode === null) && detachedRanges.get(node)) ||
+      attachedRanges(starts);
   // An empty fragment the directive built still has a lifetime: cleanup
   // registered on the fragment itself runs when the branch is released.
   if (nodes.length === 0 && !owned) return null;
@@ -284,6 +302,8 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     restore: null,
     unhold: null,
     waiting: false,
+    released: false,
+    inserting: false,
   };
 }
 
@@ -306,25 +326,47 @@ function attachedRanges(starts: Node[]): Node[] {
  * function child renders now — so the list recorded at insertion goes stale.
  * The range of every start is read again (DOM order, deduplicated); nodes a
  * renderer already removed (and disposed) are dropped.
+ *
+ * A start that renders a range is read again even when that range is empty
+ * now (only the start itself): a nested directive that removed its content
+ * no longer brings it. A start that is detached is left as recorded: its
+ * range is no longer its sibling, and cannot be read.
+ *
+ * While an owned branch is being inserted, nothing is dropped: the list it is
+ * inserted as is all its own, inserted or not yet (see `Branch.inserting`).
  */
 function refreshNodes(branch: Branch): void {
   const starts = branch.starts;
   // The common case: one node that renders no sibling range.
-  if (starts.length === 1 && rangeEnd(starts[0]) === starts[0]) return;
-  branch.nodes = collectRange(starts);
+  if (starts.length === 1 && (!hasRange(starts[0]) || starts[0].parentNode === null)) return;
+  const live = collectRange(starts);
+  branch.nodes = branch.owned && branch.inserting ? [...new Set([...branch.nodes, ...live])] : live;
   // A bare branch is re-attached from this list (see `resolveBranch`).
   if (!branch.owned) detachedRanges.set(branch.source, branch.nodes);
 }
 
-/** Put a branch's nodes, in order, right after the anchor. */
-function insertBranch(parent: Node, anchor: Comment, nodes: Node[]): void {
+/**
+ * Put a branch's nodes, in order, right after the anchor — while `live()`
+ * holds. Inserting a node runs application code (a custom element's
+ * `connectedCallback`), which may dispose the directive, switch it, or move
+ * the anchor: liveness and the parent are read again before every insertion.
+ *
+ * @returns Whether every node was inserted.
+ */
+function insertBranch(anchor: Comment, nodes: Node[], live: () => boolean): boolean {
   let prev: Node = anchor;
   for (let i = 0; i < nodes.length; i++) {
+    if (!live()) return false;
+    const parent = anchor.parentNode;
+    if (parent === null) return false;
     const node = nodes[i];
+    // After the anchor when the previous node was moved away meanwhile.
+    if (prev.parentNode !== parent) prev = anchor;
     // Already in place: an adopted branch the server rendered after the anchor.
     if (prev.nextSibling !== node) parent.insertBefore(node, prev.nextSibling);
     prev = node;
   }
+  return live();
 }
 
 /**
@@ -332,8 +374,14 @@ function insertBranch(parent: Node, anchor: Comment, nodes: Node[]): void {
  * text node), detached either way. A bare element the caller handed in is
  * never disposed — its bindings belong to whoever created it. Shared by the
  * branch switch, the end of a leave, and the anchor teardown.
+ *
+ * Once only: a teardown that runs while a switch is retiring, leaving or
+ * inserting the branch (application code disposed the directive) releases it,
+ * and the switch's own release then does nothing.
  */
 function releaseBranch(branch: Branch): void {
+  if (branch.released) return;
+  branch.released = true;
   refreshNodes(branch);
   if (branch.phase !== null) {
     branch.phase.cancel();
@@ -569,6 +617,8 @@ function directive(
   const leaving: Branch[] = [];
   let deferred = false;
   let deferredFocus: FocusSnapshot | null = null;
+  // An `out-in` build waiting for a paused ancestor to resume; dropped on disposal.
+  let dropDeferredWait = NOOP;
 
   /**
    * Build `branch` and insert it after the anchor. The build runs under its
@@ -578,79 +628,138 @@ function directive(
    * and with a transition freezing it stops exactly this branch's bindings
    * and effects. A branch the directive does not own (a bare node, an empty
    * result) gives the owner back at once.
+   *
+   * The branch becomes `current` — with its lifecycle — as soon as the factory
+   * has returned, BEFORE anything else runs application code: taking back a
+   * leaving branch resumes its effects, and inserting a node runs a custom
+   * element's `connectedCallback`. A teardown from any of them reaches the
+   * whole branch, inserted or not yet, and the insertion stops there. The
+   * caller has set `current` to `null`; the result is `current` again, or
+   * `null` when nothing was built or it was released meanwhile.
    */
-  const build = (parent: Node, branch: NodeChild): Branch | null => {
+  const build = (branch: NodeChild): Branch | null => {
     const owner = structuralBinding(NOOP, anchor);
     // Untracked, like `each()` rows: the factory's own reads belong to the
     // bindings it creates, not to this directive. Tracked, every eager read in
     // the branch body became a dependency of the condition binding, so an
     // unrelated signal change re-ran the condition for nothing.
-    const attach = () =>
-      untracked(() =>
-        inScope(scope, () => {
-          const built = resolveBranch(branch, attachedOnce, name);
-          if (built === null) return null;
-          let resumed: StructuralBinding | null = null;
-          if (tr) {
-            // Back to a branch that is still leaving (a bare element or
-            // fragment re-attached): cancel its leave and take it back as is.
-            for (let i = 0; i < leaving.length; i++) {
-              const prev = leaving[i];
-              if (prev.source !== built.source) continue;
-              leaving.splice(i, 1);
-              if (prev.phase !== null) prev.phase.cancel();
-              if (prev.restore !== null) prev.restore();
-              // Taken back before it finished leaving: its owner RESUMES (it is
-              // not ended), so what it skipped re-runs and work waiting on it
-              // continues. It keeps owning the subtree, and freezes again if
-              // the branch leaves again.
-              resumed = prev.owner;
-              resumed?.thaw?.();
-              prev.unhold?.();
-              break;
-            }
-          }
-          insertBranch(parent, anchor, built.nodes);
-          // A renderer in the branch that was waiting to be attached renders now.
-          resumePending(built.nodes);
-          if (resumed !== null) built.owner = resumed;
-          return built;
-        }),
-      );
+    const inBranch = <T>(fn: () => T): T => owner.run(() => untracked(() => inScope(scope, fn)));
     let built: Branch | null;
     try {
-      built = owner.run(attach);
+      built = inBranch(() => resolveBranch(branch, attachedOnce, name));
     } catch (err) {
       owner.stop();
       throw err;
     }
-    if (built?.owned) built.owner = owner;
-    // Owns nothing: a bare branch (or a reclaimed one, which keeps its own).
-    else owner.stop();
-    return built;
+    if (built === null) {
+      owner.stop();
+      return null;
+    }
+    // A bare branch owns nothing: the owner is given back once it is in
+    // place (a reclaimed one keeps its own, below).
+    const ownsOwner = built.owned;
+    if (ownsOwner) built.owner = owner;
+    // The factory is application code: it may have disposed the directive,
+    // or switched it (a newer branch is current).
+    if (disposed || current !== null) {
+      releaseBranch(built);
+      if (!ownsOwner) owner.stop();
+      return null;
+    }
+    let reclaimed: Branch | null = null;
+    if (tr) {
+      // Back to a branch that is still leaving (a bare element or fragment
+      // re-attached): cancel its leave and take it back as is.
+      for (let i = 0; i < leaving.length; i++) {
+        if (leaving[i].source !== built.source) continue;
+        reclaimed = leaving.splice(i, 1)[0];
+        // Taken back before it finished leaving: its owner RESUMES (it is
+        // not ended), so what it skipped re-runs and work waiting on it
+        // continues. It keeps owning the subtree, and freezes again if the
+        // branch leaves again.
+        built.owner = reclaimed.owner;
+        reclaimed.owner = null;
+        break;
+      }
+    }
+    // Published: from here on the directive's teardown releases it.
+    current = built;
+    built.inserting = true;
+    let complete = false;
+    try {
+      if (reclaimed !== null) {
+        const prev = reclaimed;
+        if (prev.phase !== null) prev.phase.cancel();
+        prev.phase = null;
+        if (prev.restore !== null) prev.restore();
+        prev.restore = null;
+        const unhold = prev.unhold;
+        prev.unhold = null;
+        // Resuming runs what the owner skipped: application code.
+        built.owner?.thaw?.();
+        unhold?.();
+        // Its range as it is NOW, read synchronously: a nested directive that
+        // stayed live while the branch left may have removed (and disposed)
+        // what it rendered, in this very task, before any observer ran.
+        if (!built.released) refreshNodes(built);
+      }
+      const live = (): boolean => !disposed && current === built && !(built as Branch).released;
+      complete = live() && inBranch(() => insertBranch(anchor, (built as Branch).nodes, live));
+    } catch (err) {
+      built.inserting = false;
+      if (current === built) current = null;
+      releaseBranch(built);
+      if (!ownsOwner) owner.stop();
+      throw err;
+    }
+    built.inserting = false;
+    // A renderer in the branch that was waiting to be attached renders now.
+    if (complete) inBranch(() => resumePending((built as Branch).nodes));
+    if (!ownsOwner) owner.stop();
+    return current === built && !built.released ? built : null;
+  };
+
+  /**
+   * Run a phase on `branch`. A placeholder is installed first: the phase's
+   * own callback is application code, and may dispose the directive, take the
+   * branch back or switch again — any of which cancels the branch's phase.
+   * A phase that comes back after that is cancelled at once (its timers
+   * cleared) and never installed on a branch that was released.
+   */
+  const installPhase = (branch: Branch, start: () => PhaseRun | null): PhaseRun | null => {
+    const placeholder: PhaseRun = { cancel: NOOP };
+    branch.phase = placeholder;
+    const run = start();
+    if (branch.phase !== placeholder || branch.released || disposed) {
+      run?.cancel();
+      return null;
+    }
+    branch.phase = run;
+    return run;
   };
 
   /** Play the leave of a branch already marked as leaving. */
   const startLeave = (branch: Branch): void => {
     branch.waiting = false;
+    if (branch.released || disposed) return;
     const t = tr as DirectiveTransition;
-    branch.phase = runPhase(
-      branch.nodes,
-      t.leaveClass,
-      t.leave,
-      t.maxDuration,
-      () => finishLeave(branch),
-      `${name}(leave)`,
+    installPhase(branch, () =>
+      runPhase(branch.nodes, t.leaveClass, t.leave, t.maxDuration, () => finishLeave(branch), `${name}(leave)`),
     );
   };
 
   /** Start every `in-out` leave that was waiting for an enter. */
   const startWaitingLeaves = (): void => {
-    for (let i = 0; i < leaving.length; i++) if (leaving[i].waiting) startLeave(leaving[i]);
+    // A copy: a leave that ends at once leaves the list.
+    for (const branch of [...leaving]) {
+      if (disposed) return;
+      if (branch.waiting) startLeave(branch);
+    }
   };
 
   /** The outgoing branch at a switch: freeze it, make it inert, let it leave. */
   const beginLeave = (branch: Branch): void => {
+    if (branch.released) return;
     const t = tr as DirectiveTransition;
     if (branch.phase !== null) {
       branch.phase.cancel();
@@ -668,7 +777,15 @@ function directive(
     }
     // Late elements join the running class-based leave; an `in-out` branch
     // still waiting has none yet, and starts it over its refreshed range.
-    branch.restore = makeInert(branch, (late) => branch.phase?.add?.(late));
+    const restore = makeInert(branch, (late) => branch.phase?.add?.(late));
+    // Releasing focus from it ran application code (`blur` / `focusout`),
+    // which may have disposed the directive: the teardown released the
+    // branch then, without these attributes, which are undone here.
+    if (branch.released) {
+      restore();
+      return;
+    }
+    branch.restore = restore;
     if (t.mode === "in-out") {
       // An older branch still waiting for the enter this switch interrupted
       // has nothing left to wait for.
@@ -692,10 +809,12 @@ function directive(
 
   /** Enter the branch just inserted, and sequence `in-out` leaves after it. */
   const afterInsert = (first: boolean): void => {
+    if (disposed) return;
     const t = tr as DirectiveTransition;
     const entering = current;
     if (entering !== null && (!first || t.appear === true)) {
       enterWhenReady(entering);
+      if (disposed) return;
       // Still entering (or waiting to): the waiting leaves start from its
       // completion, or from the switch that cancels it.
       if (entering.phase !== null) return;
@@ -819,6 +938,11 @@ function directive(
     // Nothing to stay open for: the budget is not needed any more.
     if (waitingFor.length === 0) ready?.stop();
     let stopWatching = NOOP;
+    // A placeholder until the phase is running: the custom `enter` is
+    // application code, and may dispose the directive or switch it, which
+    // cancels the branch's phase — this one, before `runPhase` has returned.
+    const placeholder: PhaseRun = { cancel: NOOP };
+    entering.phase = placeholder;
     const run = runPhase(
       entering.nodes,
       t.enterClass,
@@ -827,11 +951,18 @@ function directive(
       () => {
         stopWatching();
         entering.phase = null;
-        if (t.mode === "in-out") startWaitingLeaves();
+        if (t.mode === "in-out" && !disposed) startWaitingLeaves();
       },
       `${name}(enter)`,
       waitingFor.length > 0 ? open : 0,
     );
+    // Ended already (the completion ran), or invalidated while it started: a
+    // phase that came back is cancelled — its timers with it — not installed.
+    if (entering.phase !== placeholder || entering.released || disposed) {
+      run?.cancel();
+      ready?.stop();
+      return;
+    }
     const add = run?.add;
     if (run === null || add === undefined) {
       ready?.stop();
@@ -895,10 +1026,14 @@ function directive(
   // the directive was created in, and runs as the branch's structural owner,
   // as every rebuild does.
   const buildDeferred = bindOwnerScope((): void => {
+    if (disposed || !deferred) return;
     // Inside a paused ancestor the build waits for it to resume (and is
-    // dropped if it ends); `deferred` stays set until then.
+    // dropped if it ends); `deferred` stays set until then. Disposal drops
+    // the wait.
     if (frozen()) {
-      frozen.wait(() => {
+      dropDeferredWait();
+      dropDeferredWait = frozen.wait(() => {
+        dropDeferredWait = NOOP;
         if (deferred && !disposed) buildDeferred();
       }, NOOP);
       return;
@@ -906,27 +1041,32 @@ function directive(
     deferred = false;
     const focused = deferredFocus;
     deferredFocus = null;
-    const parent = anchor.parentNode;
-    if (!parent) return;
+    if (!anchor.parentNode || current !== null) return;
+    let built: Branch | null;
     try {
-      binding.run(() => {
-        current = build(parent, pick(last));
-      });
+      built = binding.run(() => build(pick(last)));
     } catch (err) {
       reportError(err, { phase: "render", name, node: anchor });
       return;
     }
-    restoreFocusWithin(focused, current ? current.nodes : [], name, focusPolicy);
+    // The factory, the insertion and the focus restore run application
+    // code: nothing more once the directive is disposed.
+    if (disposed) return;
+    restoreFocusWithin(focused, built !== null ? built.nodes : [], name, focusPolicy);
+    if (disposed) return;
     afterInsert(false);
   });
+
+  // Bumped by every switch: a switch that application code superseded (a
+  // nested write switched the directive again) stops where it is.
+  let generation = 0;
 
   const update = () => {
     if (disposed) return;
     // Always evaluate the value to register reactive dependencies.
     const value = read();
 
-    const parent = anchor.parentNode;
-    if (!parent) return;
+    if (!anchor.parentNode) return;
 
     // Skip DOM work if the value hasn't changed. Compared by identity, not
     // truthiness: a different truthy value (another record) is a different
@@ -934,6 +1074,11 @@ function directive(
     if (initialized && Object.is(value, last)) return;
     last = value;
     const first = !initialized;
+    initialized = true;
+    const gen = ++generation;
+    // Whether application code run by this switch disposed the directive or
+    // switched it again: either way, this switch does nothing more.
+    const superseded = (): boolean => disposed || gen !== generation;
 
     // Snapshot focus before the outgoing branch is detached (or made inert) —
     // afterwards `document.activeElement` has already fallen back to <body>.
@@ -950,10 +1095,16 @@ function directive(
     // element came back inert — its reactive class/style/text silently stopped
     // updating, with nothing logged. Detaching is enough; teardown belongs to
     // whoever created it.
+    //
+    // The outgoing branch stays `current` while it is retired — the teardown
+    // must still find it if a cleanup or a `leave` disposes the directive —
+    // and is a leaving branch (or released) by the time it stops being so.
     if (current !== null) {
-      if (tr) beginLeave(current);
-      else releaseBranch(current);
-      current = null;
+      const outgoing = current;
+      if (tr) beginLeave(outgoing);
+      else releaseBranch(outgoing);
+      if (current === outgoing) current = null;
+      if (superseded()) return;
     }
 
     const branch = pick(value);
@@ -966,16 +1117,15 @@ function directive(
       if (!reclaim) {
         deferred = true;
         deferredFocus ??= focused;
-        initialized = true;
         return;
       }
     }
     deferred = false;
 
-    current = build(parent, branch);
+    build(branch);
+    if (superseded()) return;
     restoreFocusWithin(focused, current !== null ? current.nodes : [], name, focusPolicy);
-    if (tr) afterInsert(first);
-    initialized = true;
+    if (tr && !superseded()) afterInsert(first);
   };
 
   // Tie the reactive subscription to the anchor's lifetime. When the anchor is
@@ -1004,6 +1154,9 @@ function directive(
   registerDisposer(anchor, () => {
     disposed = true;
     deferred = false;
+    deferredFocus = null;
+    dropDeferredWait();
+    dropDeferredWait = NOOP;
     binding.stop();
     // The branch is a SIBLING of the anchor, not a child, so no ancestor
     // `dispose()` walk and no removal of the anchor alone reaches it. The

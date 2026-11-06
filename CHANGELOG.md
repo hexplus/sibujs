@@ -122,6 +122,19 @@ while a class-based enter runs join it. Disposing the directive removes leaving
 branches at once. Server renders ignore transitions. Without `transition`, a
 switch removes and disposes the old branch at once, as before.
 
+A switch runs application code — the branch factory, a `leave` or `enter`
+callback, the outgoing branch's cleanups, a `blur` handler, a custom element's
+`connectedCallback` — and any of it may dispose the directive. That disposal is
+final: every branch the directive holds is released once, including one being
+inserted (what is inserted and what is not yet, its lifecycle ended, the
+insertion stopped there), and no replacement is built, no `out-in` build waits,
+no focus is restored and no enter or leave starts. A phase whose own callback
+disposed the directive is cancelled as it returns, so no timer is left, and a
+promise settling later restarts nothing. A bare branch taken back while it
+leaves brings what its range renders at that moment, read from the DOM: a
+caller-owned nested directive that removed its content meanwhile comes back
+with only its anchor, never with what it disposed.
+
 `waitForContent` (ms, opt-in) lets content that arrives later enter with the
 branch, if it is committed within that time (counted from the switch, at most
 5 s): the pending content anywhere in the entering branch — the initial content

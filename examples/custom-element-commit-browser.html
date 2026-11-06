@@ -7,7 +7,19 @@
   <body>
     <main id="host"></main>
     <script type="module">
-      import { div, dispose, lazy, lifecycleScope, registerDisposer, signal, span, Suspense } from "../dist/index.js";
+      import {
+        div,
+        dispose,
+        Fragment,
+        lazy,
+        lifecycleScope,
+        match,
+        registerDisposer,
+        signal,
+        span,
+        Suspense,
+        when,
+      } from "../dist/index.js";
       import {
         createRouter,
         destroyRouter,
@@ -276,6 +288,107 @@
           box.appendChild(anchor);
           await flush();
           return { rootCleanups, counts: ce.counts, children: box.childNodes.length };
+        },
+
+        /**
+         * A `when()` / `match()` whose incoming fragment starts with a custom
+         * element disposing the directive on connection, followed by a node
+         * with a reactive binding: both released once, the insertion stopped.
+         */
+        async directiveFragmentConnectedDispose(kind) {
+          let anchor;
+          const ce = customElement({ connected: () => dispose(anchor) });
+          const [n, setN] = signal(0);
+          const [on, setOn] = signal(false);
+          const stats = { headCleanups: 0, tailCleanups: 0, tailRuns: 0 };
+          const content = () => {
+            const head = ce.make();
+            registerDisposer(head, () => stats.headCleanups++);
+            const tail = div({ class: "tail" }, () => {
+              stats.tailRuns++;
+              return `tail-${n()}`;
+            });
+            registerDisposer(tail, () => stats.tailCleanups++);
+            return Fragment([head, tail]);
+          };
+          const box = div();
+          host.appendChild(box);
+          anchor = kind === "when" ? when(on, content) : match(() => (on() ? "on" : "off"), { on: content });
+          box.appendChild(anchor);
+          await flush();
+          setOn(true);
+          await flush();
+          const runs = stats.tailRuns;
+          setN(1);
+          await flush();
+          return {
+            ...stats,
+            counts: ce.counts,
+            elements: box.children.length,
+            reacted: stats.tailRuns !== runs,
+            text: box.textContent,
+          };
+        },
+
+        /**
+         * A leave callback disposing the `when()` (pending, or synchronous with
+         * `out-in`): no replacement is built, nothing is left.
+         */
+        async directiveLeaveDisposes(mode) {
+          let anchor;
+          const [visible, setVisible] = signal(true);
+          const stats = { replacements: 0, initialCleanups: 0 };
+          const box = div();
+          host.appendChild(box);
+          anchor = when(
+            visible,
+            () => {
+              const el = div({ class: "initial" }, "initial");
+              registerDisposer(el, () => stats.initialCleanups++);
+              return el;
+            },
+            () => {
+              stats.replacements++;
+              return div({ class: "replacement" }, "replacement");
+            },
+            {
+              transition: {
+                mode,
+                leave: () => {
+                  dispose(anchor);
+                  return mode === "out-in" ? undefined : new Promise(() => {});
+                },
+              },
+            },
+          );
+          box.appendChild(anchor);
+          await flush();
+          setVisible(false);
+          await flush();
+          return { ...stats, elements: box.children.length };
+        },
+
+        /**
+         * A caller-owned nested `when()` taken back while its outer branch
+         * leaves, after it emptied its range in the same task: no stale content.
+         */
+        async directiveReclaimEmptiedRange() {
+          const [outer, setOuter] = signal(true);
+          const [inner, setInner] = signal(true);
+          const box = div();
+          host.appendChild(box);
+          const nested = when(inner, () => div({ class: "inner" }, "inner"));
+          box.appendChild(when(outer, nested, { transition: { leave: () => new Promise(() => {}) } }));
+          await flush();
+          const before = box.querySelectorAll(".inner").length;
+          setOuter(false);
+          setInner(false);
+          setOuter(true);
+          await flush();
+          const after = box.querySelectorAll(".inner").length;
+          setInner(true);
+          await flush();
+          return { before, after, refilled: box.querySelectorAll(".inner").length, anchored: nested.parentNode === box };
         },
       };
       window.__ready = true;
