@@ -65,6 +65,12 @@ export interface LifecycleScope {
    * own; this is for what does not — timers, sockets, media, requests — so it
    * can be suspended explicitly. Dropped when the lifecycle ends; returns a
    * function that drops it sooner.
+   *
+   * The callback runs in the context the scope captured — `route()` is the
+   * route of the page that is pausing, not of the page navigated to — and
+   * with the captured lifecycle as owner of what it creates. A pause and a
+   * resume in the same task deliver neither. A callback that throws is
+   * reported; the others still run.
    */
   onPause(callback: () => void): () => void;
   /** Call `callback` each time the lifecycle resumes after a pause; see {@link onPause}. */
@@ -139,7 +145,7 @@ export function scopeOwner(scope: LifecycleScope): HeldCheck | undefined {
 export function lifecycleScope(): LifecycleScope {
   const held = captureFrozen();
   // The route scope (and any other owner scope) the render ran in, too.
-  const inOwnerScope = bindOwnerScope((create: () => () => void) => create());
+  const inOwnerScope = bindOwnerScope((fn: () => unknown) => fn());
   const ended = (): boolean => held.state() === ENDED;
 
   const own = (register: () => () => void): (() => void) => {
@@ -165,7 +171,7 @@ export function lifecycleScope(): LifecycleScope {
       if (disposed) return;
       let created: () => void;
       try {
-        created = held.run(() => inOwnerScope(register));
+        created = held.run(() => inOwnerScope(register) as () => void);
       } catch (err) {
         // Nothing was created that this registration could dispose: roll it
         // back, so no listener outlives it.
@@ -184,9 +190,13 @@ export function lifecycleScope(): LifecycleScope {
     return dispose;
   };
 
+  // Delivered in the captured context, entered for the call only: the route
+  // scope (`route()` reads the instance's own route, not the one navigated
+  // to) and the captured lifecycle as the structural owner, so what the hook
+  // creates synchronously belongs to it. Nothing stays installed afterwards.
   const onState = (want: number, callback: () => void): (() => void) =>
     held.onChange((state) => {
-      if (state === want) callback();
+      if (state === want) held.run(() => inOwnerScope(callback));
     });
 
   const scope: LifecycleScope = {

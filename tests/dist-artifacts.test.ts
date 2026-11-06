@@ -376,6 +376,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // branch, `onPause()` / `onResume()`, exception-safe registration.
     // Measured: raw ~106,540 B, gzip ~37,120 B (+~2,100 B raw, +~690 B gzip).
     //
+    // Raw 109,200 B, gzip baseline 37,300 B for the second round: cancelled
+    // readiness kept apart from committed content, branch-local membership
+    // observation while an enter waits, a timer-driven readiness budget, the
+    // lifecycle gates of core `lazy()` / `Suspense()`, hooks delivered in the
+    // captured context, the router's bootstrap outcome, and the per-element
+    // animation fallback. Measured: raw ~108,950 B, gzip ~37,960 B
+    // (+~2,410 B raw, +~840 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -383,8 +391,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(106_800);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(36_500 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(109_200);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_300 * 1.02));
   });
 });
 

@@ -9,9 +9,10 @@ import { reportError } from "../errors";
 //   - the custom `enter` / `leave` callback's promise settling (or the callback
 //     returning synchronously);
 //   - every animation and transition each element of the branch actually
-//     started having finished (`getAnimations()`); where that API is missing,
-//     an `animationend` / `transitionend` on the element itself for every
-//     `animation-name` / `transition-property` entry;
+//     started having finished or been cancelled (`getAnimations()`); where
+//     that API is missing, an end or cancel event on the element itself for
+//     every `animation-name` / `transition-property` entry, or the element's
+//     own estimated end (its computed timing + 50 ms), whichever comes first;
 //   - a timeout derived from the computed styles (+ 50 ms of slack), capped by
 //     `maxDuration` and by a hard 5 s ceiling, so a phase can never hang: an
 //     infinite animation, an end event that never fires, or a promise that
@@ -78,9 +79,16 @@ export interface DirectiveTransition {
    * - A custom `enter` is called once the content has settled — the content
    *   it revealed included — or when the time is up, with the nodes present
    *   then.
-   * - Nothing moves the deadline. Content committed after it, or after the
-   *   enter ended, appears without an enter: an enter never replays, and
-   *   nothing is loaded again for it.
+   * - What is pending is taken from the branch as it is: again whenever a
+   *   registration begins or settles, and whenever a node moves into or out
+   *   of the branch while the enter waits. Content joins only if it is inside
+   *   the branch when it settles, and only if it was committed — a cancelled
+   *   registration (or one dropped with its location) enrolls nothing.
+   * - Nothing moves the deadline; it ends when its own timer fires, whatever
+   *   the wall clock does. Content committed after it, or after the enter
+   *   ended, appears without an enter: an enter never replays, and nothing is
+   *   loaded again for it. An enclosing branch that is paused when it ends
+   *   still holds a custom `enter` until it resumes.
    *
    * What joins a class-based enter, automatically: elements a top-level range
    * of the branch (an `each()`, a nested directive) adds while it runs —
@@ -123,11 +131,22 @@ export interface PhaseRun {
 
 /** The ceiling of any phase, and of an enter's wait for content. @internal */
 export const HARD_CAP_MS = 5000;
+
+/**
+ * A monotonic clock (ms) for the deadlines of phases and waits: unlike
+ * `Date.now()`, a wall clock moved back or forward does not stretch or cut
+ * them. @internal
+ */
+export function now(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
 const SLACK_MS = 50;
 // A total at or below this is "no animation": a reduced-motion stylesheet
 // typically shortens durations to 0.01ms rather than 0.
 const INSTANT_MS = 1;
-const END_EVENTS = ["transitionend", "animationend"] as const;
+// What ends one entry where `getAnimations()` is missing: it finished, or it
+// was cancelled (its class or element removed, `display: none`).
+const FALLBACK_EVENTS = ["transitionend", "transitioncancel", "animationend", "animationcancel"] as const;
 
 /** A comma-separated computed list, trimmed; `fallback` when the engine reports nothing. */
 function parseList(list: string | undefined, fallback: string): string[] {
@@ -290,14 +309,14 @@ export function runPhase(
   // The fallback deadline is absolute: `maxDuration` and the 5 s ceiling are
   // measured from the phase start, so elements joining later can move the
   // deadline out to cover their own animation, never past that cap.
-  const capAt = Date.now() + cap;
+  const capAt = now() + cap;
   let deadline = 0;
   const arm = (until: number): void => {
     const at = Math.min(until, capAt);
     if (timer !== null && at <= deadline) return;
     if (timer !== null) clearTimeout(timer);
     deadline = at;
-    timer = setTimeout(() => finish(true), Math.max(0, at - Date.now()));
+    timer = setTimeout(() => finish(true), Math.max(0, at - now()));
   };
 
   // Enrolls `el` in the phase; returns how long its animations run (ms), or
@@ -326,19 +345,31 @@ export function runPhase(
       animating.add(el);
       let left = running.length;
       const settle = () => {
-        if (--left !== 0) return;
+        if (left === 0 || --left !== 0) return;
         animating.delete(el);
         if (!finished && --waiting === 0 && !holding) finish(true);
       };
       for (const animation of running) animation.finished.then(settle, settle);
       return timing.total;
     }
+    // Without the API, the element is done when every entry it runs has
+    // reported an end or a cancel event, or at its own estimated end —
+    // whichever comes first, once.
     waiting++;
     animating.add(el);
+    let done = false;
+    let estimate: ReturnType<typeof setTimeout> | null = null;
+    const settle = (): void => {
+      if (done) return;
+      done = true;
+      if (estimate !== null) clearTimeout(estimate);
+      animating.delete(el);
+      if (!finished && --waiting === 0 && !holding) finish(true);
+    };
     const onEnd = (event: Event) => {
       // Ends bubbling up from descendants are theirs, not the branch's.
-      if (event.target !== el || timing.pending === 0) return;
-      const transition = event.type === "transitionend";
+      if (event.target !== el || done || timing.pending === 0) return;
+      const transition = event.type === "transitionend" || event.type === "transitioncancel";
       const map = transition ? timing.transitions : timing.animations;
       const key = matchEntry(
         map,
@@ -348,13 +379,18 @@ export function runPhase(
       const left = (map.get(key) as number) - 1;
       if (left > 0) map.set(key, left);
       else map.delete(key);
-      if (--timing.pending !== 0) return;
-      animating.delete(el);
-      if (--waiting === 0 && !holding) finish(true);
+      if (--timing.pending === 0) settle();
     };
-    for (const type of END_EVENTS) el.addEventListener(type, onEnd);
+    for (const type of FALLBACK_EVENTS) el.addEventListener(type, onEnd);
+    // A missed event must not keep the element counted as animating — which
+    // decides what joins inside it (see `add`) — for the rest of the phase.
+    // The computed timing is an estimate, not proof that it stopped: it ends
+    // the element's wait, never sooner than its own events would. An
+    // infinite animation has no end, and keeps it animating until the cap.
+    if (Number.isFinite(timing.total)) estimate = setTimeout(settle, timing.total + SLACK_MS);
     cleanups.push(() => {
-      for (const type of END_EVENTS) el.removeEventListener(type, onEnd);
+      if (estimate !== null) clearTimeout(estimate);
+      for (const type of FALLBACK_EVENTS) el.removeEventListener(type, onEnd);
     });
     return timing.total;
   };
@@ -365,7 +401,7 @@ export function runPhase(
     finish(true);
     return null;
   }
-  if (waiting > 0) arm(Date.now() + longest + SLACK_MS);
+  if (waiting > 0) arm(now() + longest + SLACK_MS);
   // The open window ends on its own at its deadline (never past the cap):
   // from then on the phase ends with its animations, as any other.
   const close = (): void => {
@@ -374,8 +410,8 @@ export function runPhase(
   };
   if (holding) {
     // The fallback deadline covers the window too; it only ever moves later.
-    arm(Date.now() + open);
-    const openTimer = setTimeout(close, Math.max(0, Math.min(Date.now() + open, capAt) - Date.now()));
+    arm(now() + open);
+    const openTimer = setTimeout(close, Math.max(0, Math.min(now() + open, capAt) - now()));
     cleanups.push(() => clearTimeout(openTimer));
   }
   return {
@@ -389,7 +425,7 @@ export function runPhase(
         el.classList.add(cls);
         elements.push(el);
         const total = enroll(el);
-        if (total >= 0) arm(Date.now() + total + SLACK_MS);
+        if (total >= 0) arm(now() + total + SLACK_MS);
       }
     },
   };

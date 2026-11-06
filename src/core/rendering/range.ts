@@ -99,6 +99,12 @@ export function anyPending(nodes: readonly Node[]): boolean {
 // is), or at a captured lifecycle (inside the branch when that lifecycle lies
 // below the branch's). Entries are held until settled; every registration
 // path settles them on disposal of what they are attached to.
+//
+// An entry settles in one of two ways, and an enter it takes part in tells
+// them apart: DONE (its outcome is committed — content, an error view, a
+// terminal empty result — and that content joins the enter) or CANCELLED
+// (abandoned, superseded, or dropped with its location: nothing was committed
+// for it, so nothing it renders now — a loading placeholder, say — joins).
 // ---------------------------------------------------------------------------
 
 /** One pending registration. @internal */
@@ -107,96 +113,120 @@ export interface Pending {
   readonly at: Node | null;
   /** The lifecycle it belongs to, when located by one. */
   readonly held: HeldCheck | null;
-  /** Settled (committed, failed, cancelled or dropped). */
+  /** Settled: done or cancelled. */
   settled: boolean;
-  /** What was committed, when the settler said so. */
+  /** Settled by cancellation: nothing was committed for it. */
+  cancelled: boolean;
+  /** What was committed, when its settler named it (done only). */
   committed: Node[] | null;
 }
 
+/** How a registration settles. Idempotent together: the first call wins. @internal */
+export interface Settle {
+  /** Committed: what joins is `committed`, else what the location renders then. */
+  done(committed?: Node[] | null): void;
+  /** Abandoned, superseded or dropped: settles without content. */
+  cancel(): void;
+}
+
 const registrations = new Set<Pending>();
-const loadListeners = new Set<() => void>();
+const loadListeners = new Set<(settled: readonly Pending[]) => void>();
 let notifyQueued = false;
+// Entries settled since the last notification, delivered with it. Kept only
+// while someone listens, and only until that delivery. An enter whose branch
+// gained a registration's location in the same task the registration settled
+// still gets the completion, though the entry has left `registrations`.
+let settledBatch: Pending[] = [];
 
 /** Tell the listeners, a microtask later (coalesced), that the registrations changed. */
-function notifyLoad(): void {
-  if (notifyQueued || loadListeners.size === 0) return;
+function notifyLoad(settled: Pending | null): void {
+  if (loadListeners.size === 0) return;
+  if (settled !== null) settledBatch.push(settled);
+  if (notifyQueued) return;
   notifyQueued = true;
   // A microtask later: a settler settles BEFORE or AFTER it inserts the
   // content, and either way the content is in place by then.
   queueMicrotask(() => {
     notifyQueued = false;
-    for (const listener of [...loadListeners]) listener();
+    const batch = settledBatch;
+    settledBatch = [];
+    for (const listener of [...loadListeners]) listener(batch);
   });
 }
 
 /**
  * Register pending content at `at` (a node) or `held` (a lifecycle). Returns
- * the entry and its settle function — idempotent, first call wins.
+ * the entry and how it settles.
  *
  * @internal
  */
-export function beginPending(
-  at: Node | null,
-  held: HeldCheck | null,
-): { entry: Pending; settle: (committed?: Node[] | null) => void } {
-  const entry: Pending = { at, held, settled: false, committed: null };
+export function beginPending(at: Node | null, held: HeldCheck | null): Settle & { entry: Pending } {
+  const entry: Pending = { at, held, settled: false, cancelled: false, committed: null };
   registrations.add(entry);
-  notifyLoad();
+  notifyLoad(null);
+  const settle = (cancelled: boolean, committed: Node[] | null): void => {
+    if (entry.settled) return;
+    entry.settled = true;
+    entry.cancelled = cancelled;
+    entry.committed = committed;
+    registrations.delete(entry);
+    notifyLoad(entry);
+  };
   return {
     entry,
-    settle: (committed) => {
-      if (entry.settled) return;
-      entry.settled = true;
-      entry.committed = committed ?? null;
-      registrations.delete(entry);
-      notifyLoad();
-    },
+    done: (committed) => settle(false, committed ?? null),
+    cancel: () => settle(true, null),
   };
 }
 
+const INERT: Settle = { done: NOTHING, cancel: NOTHING };
+
 /**
  * Mark `anchor`'s initial content as pending (a `Suspense` boundary, a route
- * outlet). Returns `loaded`, to call once that content is committed, or the
- * outcome that stands for it (an error view, a terminal empty result); and on
- * teardown. Idempotent. Client only: a server render plays no transition,
- * and must not retain anything per request.
+ * outlet, a `lazy()` container): `done` once that content is committed, or
+ * the outcome that stands for it (an error view, a terminal empty result);
+ * `cancel` on teardown, or when the outcome is dropped. Client only: a server
+ * render plays no transition, and must not retain anything per request.
  *
  * @internal
  */
-export function beginLoading(anchor: Node): () => void {
-  if (isServer()) return NOTHING;
-  const { settle } = beginPending(anchor, null);
-  return () => settle();
+export function beginLoading(anchor: Node): Settle {
+  if (isServer()) return INERT;
+  const { done, cancel } = beginPending(anchor, null);
+  return { done: () => done(), cancel };
 }
 
 /**
- * The pending registrations inside a branch: located at one of `nodes` or a
- * descendant of one, or at a lifecycle below `owner`. Document order is not
- * guaranteed. @internal
+ * Whether `entry` lies inside a branch: at one of `nodes` or a descendant of
+ * one, or at a lifecycle below `owner`. Read at the time of the call. @internal
+ */
+export function pendingWithin(entry: Pending, nodes: readonly Node[], owner: StructuralBinding | null): boolean {
+  const at = entry.at;
+  if (at !== null) {
+    for (let i = 0; i < nodes.length; i++) if (nodes[i] === at || nodes[i].contains(at)) return true;
+    return false;
+  }
+  return owner !== null && entry.held?.within(owner) === true;
+}
+
+/**
+ * The pending registrations inside a branch (see {@link pendingWithin}).
+ * Document order is not guaranteed. @internal
  */
 export function loadingWithin(nodes: readonly Node[], owner: StructuralBinding | null): Pending[] {
   const found: Pending[] = [];
   if (registrations.size === 0) return found;
-  for (const entry of registrations) {
-    const at = entry.at;
-    if (at !== null) {
-      for (let i = 0; i < nodes.length; i++) {
-        if (nodes[i] === at || nodes[i].contains(at)) {
-          found.push(entry);
-          break;
-        }
-      }
-    } else if (owner !== null && entry.held?.within(owner)) found.push(entry);
-  }
+  for (const entry of registrations) if (pendingWithin(entry, nodes, owner)) found.push(entry);
   return found;
 }
 
 /**
- * What a settled registration committed, as elements: what its settler named,
- * else what its location renders now — the range after an anchor, the
- * children of an element. @internal
+ * What a settled registration committed, as elements: nothing when it was
+ * cancelled; what its settler named; else what its location renders now —
+ * the range after an anchor, the children of an element. @internal
  */
 export function settledContent(entry: Pending): Element[] {
+  if (!entry.settled || entry.cancelled) return [];
   let nodes: readonly Node[];
   if (entry.committed !== null) nodes = entry.committed;
   else if (entry.at === null) return [];
@@ -207,12 +237,20 @@ export function settledContent(entry: Pending): Element[] {
   return out;
 }
 
-/** Call `listener` whenever pending content is registered or settles. Returns the unsubscribe. @internal */
-export function onLoaded(listener: () => void): () => void {
+/**
+ * Call `listener` whenever pending content is registered or settles, with the
+ * entries settled since the previous call. Returns the unsubscribe. @internal
+ */
+export function onLoaded(listener: (settled: readonly Pending[]) => void): () => void {
   loadListeners.add(listener);
   return () => {
     loadListeners.delete(listener);
   };
+}
+
+/** The entries settled since the last notification, not delivered yet. @internal */
+export function settledSinceNotify(): readonly Pending[] {
+  return settledBatch;
 }
 
 /** Number of unsettled registrations and readiness listeners, for leak tests. @internal */

@@ -11,7 +11,7 @@ import { devWarnLazy } from "../dev";
 import { reportError } from "../errors";
 import { isServer } from "../ssr-context";
 import { captureScope, inScope } from "./adoptScope";
-import { type DirectiveTransition, HARD_CAP_MS, type PhaseRun, runPhase } from "./branchTransition";
+import { type DirectiveTransition, HARD_CAP_MS, now, type PhaseRun, runPhase } from "./branchTransition";
 import { dispose, registerDisposer } from "./dispose";
 import { captureFocusWithin, type FocusPolicy, type FocusSnapshot, restoreFocusWithin } from "./focusPreservation";
 import {
@@ -21,11 +21,13 @@ import {
   loadingWithin,
   onLoaded,
   type Pending,
+  pendingWithin,
   queueFirstRender,
   rangeEnd,
   registerRange,
   resumePending,
   settledContent,
+  settledSinceNotify,
 } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
@@ -453,6 +455,84 @@ function watchRange(branch: Branch, onLate: (elements: Element[]) => void): () =
 }
 
 /**
+ * The time an enter waits for content (`waitForContent`), fixed at the switch.
+ * It ends when its own timer fires — not when a clock read says it is over —
+ * so a wall clock moved back cannot strand the wait, and a timer delivered
+ * early cannot leave it pending: the timer firing IS the end. Nothing extends
+ * it: neither settling content, nor discoveries, nor nodes moving.
+ */
+interface ReadyWindow {
+  expired: boolean;
+  /** About how long is left (ms, monotonic clock), for the enter's own open window. */
+  remaining(): number;
+  /** Called once when it expires; the stage waiting on it sets it. */
+  onExpire: (() => void) | null;
+  /** Cancel the timer (and the callback): the wait is over, or dropped. */
+  stop(): void;
+}
+
+function readyWindow(ms: number): ReadyWindow {
+  const endAt = now() + ms;
+  const win: ReadyWindow = {
+    expired: false,
+    remaining: () => (win.expired ? 0 : Math.max(0, Math.min(ms, endAt - now()))),
+    onExpire: null,
+    stop: () => {
+      clearTimeout(timer);
+      win.onExpire = null;
+    },
+  };
+  const timer = setTimeout(() => {
+    win.expired = true;
+    const expire = win.onExpire;
+    win.onExpire = null;
+    expire?.();
+  }, ms);
+  return win;
+}
+
+/** A watch on where pending content can join or leave a branch; see {@link watchMembership}. */
+interface Membership {
+  /** Also watch the elements the branch's range gained since. */
+  refresh(): void;
+  stop(): void;
+}
+
+/**
+ * While an enter waits for content, watch where a registered node can move
+ * into or out of the entering branch: the branch's top-level range (its
+ * parent, children only — a range adds and removes siblings there) and the
+ * subtree of each of its elements. Branch-local: nothing above that parent,
+ * no other subtree of it. `onChange` runs a microtask after a change
+ * (coalesced), until `stop()`. Nothing to watch without `MutationObserver`.
+ */
+function watchMembership(branch: Branch, onChange: () => void): Membership | null {
+  if (typeof MutationObserver !== "function") return null;
+  const observer = new MutationObserver(onChange);
+  const watched = new Set<Node>();
+  const refresh = (): void => {
+    const parent = branch.nodes[0]?.parentNode;
+    if (parent && !watched.has(parent)) {
+      watched.add(parent);
+      observer.observe(parent, { childList: true });
+    }
+    for (const node of branch.nodes) {
+      if (node.nodeType !== 1 || watched.has(node)) continue;
+      watched.add(node);
+      observer.observe(node, { childList: true, subtree: true });
+    }
+  };
+  refresh();
+  return {
+    refresh,
+    stop: () => {
+      observer.disconnect();
+      watched.clear();
+    },
+  };
+}
+
+/**
  * The shared body of `when` and `match`: render the branch `pick(value)` for
  * the current `read()` value after a comment anchor, and rebuild it whenever
  * that value changes (`Object.is`).
@@ -632,51 +712,59 @@ function directive(
    * never started is replayed then, once — and drops it if it ends. A switch,
    * a disposal or a reclaim cancels the wait through the placeholder phase.
    *
-   * `waitForContent` fixes its deadline here, at the switch. A custom enter
-   * also waits for the pending content in the branch (see `loadingWithin`),
-   * taken again from the branch each time a registration begins or settles,
-   * so content revealed by content is waited for too, and at the deadline; a
-   * class-based one does not wait, it stays open for the content instead
-   * (see `startEnter`). A paused ancestor defers either past that deadline,
-   * until it resumes.
+   * `waitForContent` starts its budget here, at the switch (see
+   * `ReadyWindow`). A custom enter also waits for the pending content in the
+   * branch (see `loadingWithin`), taken again from the branch each time a
+   * registration begins or settles and each time a node moves into or out of
+   * the branch, so content revealed by content is waited for too, and a
+   * pending node removed from the branch no longer is; it starts when none is
+   * left, or when the budget runs out. A class-based one does not wait, it
+   * stays open for the content instead (see `startEnter`). A paused ancestor
+   * defers either past the budget, until it resumes.
    */
   const enterWhenReady = (entering: Branch): void => {
     const t = tr as DirectiveTransition;
     const budget = typeof t.waitForContent === "number" && t.waitForContent > 0 ? t.waitForContent : 0;
-    const readyAt = budget > 0 ? Date.now() + Math.min(budget, HARD_CAP_MS) : 0;
+    // Fixed now, at the switch; it ends when its own timer fires.
+    const ready = budget > 0 ? readyWindow(Math.min(budget, HARD_CAP_MS)) : null;
     const contentReady = (): boolean =>
       t.enter === undefined ||
-      readyAt === 0 ||
-      Date.now() >= readyAt ||
+      ready === null ||
+      ready.expired ||
       loadingWithin(entering.nodes, entering.owner).length === 0;
     if (!frozen() && !anyPending(entering.nodes) && contentReady()) {
-      startEnter(entering, readyAt);
+      startEnter(entering, ready);
       return;
     }
     let cancelled = false;
+    let waiting = false;
     let dropWait = NOOP;
     let dropLoaded = NOOP;
-    let timer: ReturnType<typeof setTimeout> | null = null;
+    let membership: Membership | null = null;
     let turns = 0;
     const stopWaiting = (): void => {
       dropWait();
       dropWait = NOOP;
       dropLoaded();
       dropLoaded = NOOP;
-      if (timer !== null) clearTimeout(timer);
-      timer = null;
+      membership?.stop();
+      membership = null;
+      if (ready !== null) ready.onExpire = null;
     };
     const placeholder: PhaseRun = {
       cancel: () => {
         cancelled = true;
         stopWaiting();
+        ready?.stop();
       },
     };
     entering.phase = placeholder;
     const step = (): void => {
       if (cancelled || disposed || current !== entering || entering.phase !== placeholder) return;
       if (frozen()) {
-        // Notified when the ancestors resume (or end), not polled.
+        // Notified when the ancestors resume (or end), not polled. The
+        // budget may run out meanwhile: the enter still waits for the
+        // resume, and runs no user code before it.
         dropWait();
         dropWait = frozen.wait(step, NOOP);
         return;
@@ -688,19 +776,22 @@ function directive(
       }
       if (!contentReady()) {
         // Woken when some content settles (it may hold renderers of its own,
-        // which get their turns), and at the deadline. Not restarted.
-        if (timer === null) {
+        // which get their turns), when a node moves into or out of the
+        // branch, and when the budget runs out — whichever comes first.
+        if (!waiting) {
+          waiting = true;
           dropLoaded = onLoaded(() => {
             turns = 0;
             step();
           });
-          timer = setTimeout(step, Math.max(0, readyAt - Date.now()));
-        }
+          membership = watchMembership(entering, step);
+          (ready as ReadyWindow).onExpire = step;
+        } else membership?.refresh();
         return;
       }
       stopWaiting();
       entering.phase = null;
-      startEnter(entering, readyAt);
+      startEnter(entering, ready);
     };
     if (frozen()) step();
     else queueMicrotask(step);
@@ -710,19 +801,23 @@ function directive(
    * Play the enter of `entering`, then start any `in-out` leave it held back.
    *
    * A class-based enter takes in the elements the branch's range adds while it
-   * runs (see `PhaseRun.add`). Until `readyAt` (`waitForContent`) it also
-   * stays open for the pending content in the branch (see `loadingWithin`):
-   * whenever a registration settles, what it committed joins, and the
-   * dependencies are taken again from the branch as it is now — content that
+   * runs (see `PhaseRun.add`). Until its `waitForContent` budget runs out it
+   * also stays open for the pending content in the branch (see
+   * `loadingWithin`): whenever a registration settles DONE inside the branch
+   * (checked then), what it committed joins — a cancelled one enrolls
+   * nothing — and the dependencies are taken again from the branch as it is
+   * now, as they are whenever a node moves into or out of it. Content that
    * revealed a pending boundary or outlet of its own keeps the enter open for
-   * that one too, and one that left the branch is no longer waited for. The
-   * enter closes once none is left, or at `readyAt`, which nothing moves.
-   * Nothing joins once it has ended, or after `readyAt`.
+   * that one too; one that left the branch is no longer waited for. The enter
+   * closes once none is left, or when the budget runs out, which nothing
+   * moves. Nothing joins once it has ended, or after that.
    */
-  const startEnter = (entering: Branch, readyAt: number): void => {
+  const startEnter = (entering: Branch, ready: ReadyWindow | null): void => {
     const t = tr as DirectiveTransition;
-    let waitingFor: Pending[] =
-      t.enter === undefined && readyAt > Date.now() ? loadingWithin(entering.nodes, entering.owner) : [];
+    const open = t.enter === undefined && ready !== null && !ready.expired ? ready.remaining() : 0;
+    const waitingFor = open > 0 ? loadingWithin(entering.nodes, entering.owner) : [];
+    // Nothing to stay open for: the budget is not needed any more.
+    if (waitingFor.length === 0) ready?.stop();
     let stopWatching = NOOP;
     const run = runPhase(
       entering.nodes,
@@ -735,38 +830,52 @@ function directive(
         if (t.mode === "in-out") startWaitingLeaves();
       },
       `${name}(enter)`,
-      waitingFor.length > 0 ? readyAt - Date.now() : 0,
+      waitingFor.length > 0 ? open : 0,
     );
     const add = run?.add;
     if (run === null || add === undefined) {
+      ready?.stop();
       entering.phase = run;
       return;
     }
     const unwatch = watchRange(entering, add);
     let dropLoaded = NOOP;
+    let membership: Membership | null = null;
     const stopLoading = (): void => {
       dropLoaded();
       dropLoaded = NOOP;
+      membership?.stop();
+      membership = null;
+      ready?.stop();
     };
     if (waitingFor.length > 0) {
-      dropLoaded = onLoaded(() => {
-        if (Date.now() >= readyAt) {
+      const win = ready as ReadyWindow;
+      // Taken again from the branch as it is NOW, each time a registration
+      // settles or a node moves into or out of the branch: containment is
+      // checked before anything joins, so content that left the branch never
+      // does, and a registration whose location joined the branch in the
+      // same task it settled still does.
+      const reconcile = (settled: readonly Pending[]): void => {
+        if (win.expired || dropLoaded === NOOP) {
           stopLoading();
           return;
         }
         refreshNodes(entering);
         const inBranch = (el: Element): boolean => entering.nodes.some((n) => n === el || n.contains(el));
-        for (const entry of waitingFor) {
-          if (!entry.settled) continue;
+        for (const entry of settled) {
+          if (entry.cancelled || !pendingWithin(entry, entering.nodes, entering.owner)) continue;
           const content = settledContent(entry).filter(inBranch);
           if (content.length > 0) add(content);
         }
-        waitingFor = loadingWithin(entering.nodes, entering.owner);
-        if (waitingFor.length === 0) {
+        if (loadingWithin(entering.nodes, entering.owner).length === 0) {
           stopLoading();
           run.close?.();
-        }
-      });
+        } else membership?.refresh();
+      };
+      dropLoaded = onLoaded(reconcile);
+      membership = watchMembership(entering, () => reconcile(settledSinceNotify()));
+      // The phase's own open window closes it at the same time.
+      win.onExpire = stopLoading;
     }
     stopWatching = () => {
       unwatch();

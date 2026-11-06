@@ -14,7 +14,12 @@ export interface PendingContent {
    * way, with that view.
    */
   done(committed?: Node | readonly Node[]): void;
-  /** The operation was cancelled or superseded: settle without content. */
+  /**
+   * The operation was cancelled or superseded: settle WITHOUT content.
+   * Nothing joins a running enter for it — not even what its location shows
+   * now (a loading placeholder). Disposing the location, or the end of the
+   * lifecycle it was registered on, cancels it the same way.
+   */
   cancel(): void;
   /** Whether it has settled (done, cancelled, or dropped with its location). */
   readonly settled: boolean;
@@ -31,17 +36,25 @@ const INERT: PendingContent = { done: () => {}, cancel: () => {}, settled: true 
  * (a stale request completing late) never settles another.
  *
  * `at` places it:
- * - a node (an element, or a range anchor): it takes part in an enter when
- *   the node lies inside the entering branch. Disposing the node settles it;
+ * - a node (an element, or a range anchor): it takes part in an enter while
+ *   the node lies inside the entering branch. Moving it into the branch, or
+ *   out of it, while the enter waits is noticed when it happens: attached, it
+ *   holds the enter (and its content joins when it is done); removed, it no
+ *   longer does. Disposing the node cancels it;
  * - a {@link LifecycleScope}: it takes part when that lifecycle lies inside
  *   the entering branch (captured in it, or in a route instance or `Suspense`
- *   below it). The lifecycle ending settles it. A scope captured outside any
- *   render belongs to no branch and never ends: a registration on it holds
- *   no enter, and stays until it is settled.
+ *   below it). The lifecycle ending cancels it. This is the form to use when
+ *   the content is pending BEFORE the node it will render into exists — a
+ *   component that starts a request, then builds its DOM when it returns:
+ *   capture the scope while rendering and register on it. A scope captured
+ *   outside any render belongs to no branch and never ends: a registration
+ *   on it holds no enter, and stays until it is settled.
  *
  * Settle it exactly when the outcome is committed: `done()` after inserting
  * the content (or an error view), `cancel()` when the operation is abandoned
- * or superseded. Both are idempotent; the first call wins. A registration
+ * or superseded — a cancelled registration enrolls nothing in the enter. Both
+ * are idempotent; the first call wins, so a stale `done()` after a
+ * `cancel()` (or after the location was disposed) does nothing. A registration
  * made while an enter is waiting is picked up by it, but the enter's
  * deadline, fixed at the switch, never moves: content committed later
  * appears without an enter.
@@ -93,14 +106,15 @@ export function pendingContent(at: Node | LifecycleScope): PendingContent {
   const isNode = typeof (at as Node).nodeType === "number";
   const held = isNode ? null : (scopeOwner(at as LifecycleScope) ?? null);
   if (!isNode && (held === null || held.state() === 2)) return INERT;
-  const { entry, settle } = beginPending(isNode ? (at as Node) : null, held);
+  const { entry, done, cancel: cancelEntry } = beginPending(isNode ? (at as Node) : null, held);
   let drop = (): void => {};
-  const release = (committed?: Node[] | null): void => {
+  // Cancellation — explicit, or the location going away — enrolls nothing:
+  // what the location renders then is not the outcome.
+  const cancel = (): void => {
     if (entry.settled) return;
     drop();
-    settle(committed);
+    cancelEntry();
   };
-  const cancel = (): void => release(null);
   if (isNode) {
     registerDisposer(at as Node, cancel);
     drop = () => {
@@ -108,14 +122,17 @@ export function pendingContent(at: Node | LifecycleScope): PendingContent {
     };
   } else drop = (held as NonNullable<typeof held>).onEnd(cancel);
   return {
-    done: (committed) =>
-      release(
+    done: (committed) => {
+      if (entry.settled) return;
+      drop();
+      done(
         committed === undefined
           ? null
           : typeof (committed as Node).nodeType === "number"
             ? [committed as Node]
             : [...(committed as readonly Node[])],
-      ),
+      );
+    },
     cancel,
     get settled() {
       return entry.settled;

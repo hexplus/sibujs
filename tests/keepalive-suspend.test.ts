@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { when } from "../src/core/rendering/directives";
-import { dispose } from "../src/core/rendering/dispose";
+import { dispose, registerDisposer } from "../src/core/rendering/dispose";
 import { div, input, span } from "../src/core/rendering/html";
+import { effect } from "../src/core/signals/effect";
 import { type LifecycleScope, lifecycleScope } from "../src/core/signals/lifecycleScope";
 import { signal } from "../src/core/signals/signal";
 import { createRouter, destroyRouter, KeepAliveRoute, navigate, route, Suspense } from "../src/plugins/router";
@@ -222,5 +223,53 @@ describe("default: cached pages stay live", () => {
     expect(a.log.effect).toBe(2);
     expect(a.scope().state()).toBe("active");
     expect(a.log.hooks).toEqual([]);
+  });
+});
+
+describe("eviction: what the page owns ends; a plain effect is owned by nothing", () => {
+  it("scoped and node-owned effects end without a catch-up; a plain effect catches up once and stays subscribed", async () => {
+    const runs = { plain: 0, scoped: 0, nodeOwned: 0 };
+    setup(
+      { suspendInactive: true, max: 2 },
+      {
+        "/a": () => {
+          const scope = lifecycleScope();
+          effect(() => {
+            label();
+            runs.plain++;
+          });
+          scope.effect(() => {
+            label();
+            runs.scoped++;
+          });
+          const root = div({ class: "page-a" }, "a");
+          const stop = effect(() => {
+            label();
+            runs.nodeOwned++;
+          });
+          registerDisposer(root, stop);
+          return root;
+        },
+        "/b": () => div("b"),
+        "/c": () => div("c"),
+      },
+    );
+    await flush();
+    expect(runs).toEqual({ plain: 1, scoped: 1, nodeOwned: 1 });
+    await navigate("/b");
+    await flush();
+    setLabel(`s${Math.random()}`);
+    await flush();
+    // Hidden: everything the page created is paused.
+    expect(runs).toEqual({ plain: 1, scoped: 1, nodeOwned: 1 });
+    await navigate("/c");
+    await flush();
+    // Evicted (max 2). The owned effects ended; the plain one is no longer
+    // paused and catches up once ...
+    expect(runs).toEqual({ plain: 2, scoped: 1, nodeOwned: 1 });
+    setLabel(`t${Math.random()}`);
+    await flush();
+    // ... and keeps reacting afterwards, as any unowned effect does.
+    expect(runs).toEqual({ plain: 3, scoped: 1, nodeOwned: 1 });
   });
 });

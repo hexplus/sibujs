@@ -2,7 +2,7 @@ import { devWarn, isDev } from "../core/dev";
 import { type AdoptScope, captureScope, inScope, keyedScope } from "../core/rendering/adoptScope";
 import { dispose, registerDisposer } from "../core/rendering/dispose";
 import { isHydrating } from "../core/rendering/hydrationHooks";
-import { beginLoading, registerNodesRange } from "../core/rendering/range";
+import { beginLoading, registerNodesRange, type Settle } from "../core/rendering/range";
 import { appendChildren, resolveClassValue, type TagProps } from "../core/rendering/tagFactory";
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
@@ -1616,10 +1616,38 @@ export class SibuRouter {
     };
   }
 
+  /**
+   * Once no navigation is in flight: if the route is still the placeholder
+   * the router started with — every navigation that could have replaced it
+   * was cancelled by a guard, failed, or was a duplicate — that IS the
+   * outcome, and the outlets that rendered nothing for it settle (see
+   * `settleEmpty`). Checked when a navigation has definitively completed,
+   * never from `isReady` (set before the guards run). A navigation still
+   * pending — a newer one, or a guard that never resolves — keeps them
+   * pending; an outlet's enter is bounded by its own deadline then.
+   */
+  private settleBootstrap(): void {
+    if (this.destroyed || this.navigator.isNavigating) return;
+    const current = untracked(() => this.currentRouteGetter());
+    if (!bootstrapRoutes.delete(current)) return;
+    const waiting = bootstrapWaiters.get(current);
+    bootstrapWaiters.delete(current);
+    if (waiting) for (const settle of waiting) settle();
+  }
+
   // Public API
   async navigate(
     to: NavigationTarget,
     options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean } = {},
+  ): Promise<NavigationResult> {
+    const result = await this.attemptNavigation(to, options);
+    this.settleBootstrap();
+    return result;
+  }
+
+  private async attemptNavigation(
+    to: NavigationTarget,
+    options: { replace?: boolean; state?: unknown; skipHistory?: boolean; initialResolution?: boolean },
   ): Promise<NavigationResult> {
     try {
       await this.navigator.navigate(async (signal) => {
@@ -2555,8 +2583,32 @@ const NOOP = (): void => {};
 
 // The placeholder route a router holds until its initial location resolves.
 // An outlet rendering nothing for it has not reached an outcome yet: the
-// initial navigation re-runs it.
+// initial navigation re-runs it — unless that navigation (and every one after
+// it) ends leaving the placeholder in place, see `SibuRouter.settleBootstrap`.
 const bootstrapRoutes = new WeakSet<RouteContext>();
+// Outlet passes that rendered nothing for a placeholder route, waiting for
+// the router's navigations to be over.
+const bootstrapWaiters = new WeakMap<RouteContext, Set<() => void>>();
+
+/**
+ * An outlet pass found nothing to render for `route`: a terminal empty
+ * outcome, settled now — unless `route` is the placeholder a router holds
+ * until its navigation completes. That is no outcome yet: the pass settles
+ * once the router has no navigation in flight and the placeholder is still in
+ * place (a guard cancelled the initial navigation), and only if it is still
+ * `current()` then. Never while a navigation is pending: a newer one decides.
+ */
+function settleEmpty(route: RouteContext, loaded: Settle, current: () => boolean): void {
+  if (!bootstrapRoutes.has(route)) {
+    loaded.done();
+    return;
+  }
+  let waiting = bootstrapWaiters.get(route);
+  if (waiting === undefined) bootstrapWaiters.set(route, (waiting = new Set()));
+  waiting.add(() => {
+    if (current()) loaded.done();
+  });
+}
 
 // Errors that cancel a gated instantiation, so outlets can tell them from a
 // component failure by identity.
@@ -3144,7 +3196,7 @@ export function Route(): Node {
 
     anchor.parentNode.insertBefore(errorNode, anchor.nextSibling);
     // The error view is the outcome that stands for the content.
-    loaded();
+    loaded.done();
   };
 
   const update = async () => {
@@ -3167,7 +3219,7 @@ export function Route(): Node {
         currentKey = null;
         cleanupNodes();
         // A terminal empty outcome: nothing will render.
-        if (!bootstrapRoutes.has(route)) loaded();
+        settleEmpty(route, loaded, () => !routeTorn && seq === navSeq);
         return;
       }
 
@@ -3183,7 +3235,7 @@ export function Route(): Node {
       if (routeDef === currentTopRoute && key === currentKey && currentNode) {
         // Kept across this navigation: the instance follows it.
         updateInstanceRoute(currentNode, route);
-        loaded();
+        loaded.done();
         return;
       }
 
@@ -3278,7 +3330,7 @@ export function Route(): Node {
                 currentNode = node;
               }
               // The current pass committed (or has nothing to show): settled.
-              loaded();
+              loaded.done();
             },
           );
         } catch (error) {
@@ -3294,7 +3346,7 @@ export function Route(): Node {
           hideLoading();
           fail(seq, error, routeDef);
         }
-      } else if (!bootstrapRoutes.has(route)) loaded();
+      } else settleEmpty(route, loaded, () => !routeTorn && seq === navSeq);
     } catch (error) {
       if (seq !== navSeq) return;
       if (routeTorn) return;
@@ -3373,7 +3425,7 @@ export function Route(): Node {
     routeTorn = true;
     navSeq++;
     gate.close();
-    loaded();
+    loaded.cancel();
     routeTeardown();
     attachWait.cancel();
     unshownFailure = null;
@@ -3434,16 +3486,28 @@ export function Route(): Node {
  * - its bindings, effects created while it rendered, and `lifecycleScope()`
  *   work do not run; what changed meanwhile is caught up in ONE run when it
  *   is shown, against the current state and the route it is shown for;
- * - async work it owns (a `Suspense` result, a nested outlet's page) is held,
- *   not committed, until then;
+ * - async work it owns (a `Suspense` result, a nested outlet's page, a core
+ *   `lazy()` component) is held, not committed, until then;
  * - a page shown inside a branch that is itself paused stays paused until
  *   that branch resumes;
- * - eviction and outlet disposal end a suspended page without a catch-up run.
+ * - eviction and outlet disposal end a suspended page without a catch-up run
+ *   for what the page owns: its DOM bindings, `lifecycleScope()` work, and
+ *   effects whose disposal is tied to the page (`scope.effect()`, an effect
+ *   whose stop is registered on one of its nodes).
+ *
+ * A plain `effect()` created while the page rendered pauses with it, but
+ * nothing disposes it: the page never returned its stop function to anyone.
+ * When the page is evicted it is no longer paused, so it runs ONE catch-up
+ * against the current state and stays subscribed, re-running on later
+ * changes like any unowned effect (as it would have kept doing without
+ * `suspendInactive`). Create such work with `scope.effect()`, or register its
+ * stop on a node of the page, when eviction must end it.
  *
  * Only the framework's reactive work pauses. Timers, sockets, media and
  * requests keep going unless the page stops them: capture a
  * `lifecycleScope()` while it renders and use `scope.onPause()` /
- * `scope.onResume()`. Pages that are not cached are disposed as before.
+ * `scope.onResume()` (called in the page's own route context). Pages that
+ * are not cached are disposed as before.
  *
  * ## Cache identity is not async ownership
  *
@@ -3559,7 +3623,7 @@ export function KeepAliveRoute(options?: {
     const route = scopedRoute(router);
     const match = router["matcher"].match(route.path);
     if (!match) {
-      if (!bootstrapRoutes.has(route)) loaded();
+      settleEmpty(route, loaded, () => !kaTorn && seq === updateSeq);
       return;
     }
 
@@ -3575,7 +3639,7 @@ export function KeepAliveRoute(options?: {
     }
 
     if (!("component" in routeDef)) {
-      if (!bootstrapRoutes.has(route)) loaded();
+      settleEmpty(route, loaded, () => !kaTorn && seq === updateSeq);
       return;
     }
 
@@ -3592,7 +3656,7 @@ export function KeepAliveRoute(options?: {
     // Same route — skip
     if (cacheKey === currentKey && currentNode) {
       updateInstanceRoute(currentNode, route);
-      loaded();
+      loaded.done();
       return;
     }
 
@@ -3644,12 +3708,16 @@ export function KeepAliveRoute(options?: {
         if (cancellations.has(error as object) || kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
         // No error view: the failure is the current pass's terminal outcome.
-        loaded();
+        // Nothing was committed for it, so it releases the readiness without
+        // content.
+        // Nothing was committed for it, so it releases the readiness without
+        // content.
+        loaded.cancel();
         return;
       }
 
       if (!node) {
-        if (!kaTorn && seq === updateSeq) loaded();
+        if (!kaTorn && seq === updateSeq) loaded.done();
         return;
       }
     }
@@ -3738,7 +3806,7 @@ export function KeepAliveRoute(options?: {
     // Resumed only now, with the route it is shown for already in place: its
     // catch-up runs once, against the current state.
     if (fromCache) activate(node);
-    loaded();
+    loaded.done();
   };
 
   let initialized = false;
@@ -3767,7 +3835,7 @@ export function KeepAliveRoute(options?: {
     if (kaTorn) return;
     kaTorn = true;
     gate.close();
-    loaded();
+    loaded.cancel();
     // Advance the generation as well as setting the flag. Both are checked at
     // every commit boundary, so an update parked on a lazy import is superseded
     // the moment the outlet dies — it cannot re-insert into the DOM, cannot
@@ -4203,11 +4271,11 @@ export function Suspense(props: {
       }
       if (state === 2) {
         if (ok) release(element);
-        loaded();
+        loaded.cancel();
         return;
       }
     }
-    loaded();
+    loaded.done();
 
     // Re-checked immediately before the synchronous commit. Nothing runs
     // between this check and the insertion below.
@@ -4250,7 +4318,7 @@ export function Suspense(props: {
     discardHeld();
     cleanupNodes();
     contentOwner.stop();
-    loaded();
+    loaded.cancel();
   });
 
   // Rendered in a microtask, in the owner scope the boundary was created in —
@@ -4483,7 +4551,7 @@ export function Outlet(): Node {
     // the layout doesn't keep rendering the previous page's content.
     if (route.matched.length < 2) {
       clearCurrent();
-      if (!bootstrapRoutes.has(route)) loaded();
+      settleEmpty(route, loaded, () => !outletTorn && seq === navSeq);
       return;
     }
 
@@ -4491,7 +4559,7 @@ export function Outlet(): Node {
     const childRoute = route.matched[route.matched.length - 1];
     if (!childRoute || !("component" in childRoute)) {
       clearCurrent();
-      loaded();
+      loaded.done();
       return;
     }
 
@@ -4506,7 +4574,7 @@ export function Outlet(): Node {
     if (childRoute === currentChild && key === currentKey && currentNode) {
       // Kept across this navigation: the child follows it.
       updateInstanceRoute(currentNode, route);
-      loaded();
+      loaded.done();
       return;
     }
 
@@ -4565,7 +4633,7 @@ export function Outlet(): Node {
             currentChild = childRoute;
             currentKey = key;
           }
-          loaded();
+          loaded.done();
         },
       );
     } catch (error) {
@@ -4573,7 +4641,9 @@ export function Outlet(): Node {
       if (cancellations.has(error as object) || outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
       // No error view: the failure is the current pass's terminal outcome.
-      loaded();
+      // Nothing was committed for it, so it releases the readiness without
+      // content.
+      loaded.cancel();
     }
   };
 
@@ -4605,7 +4675,7 @@ export function Outlet(): Node {
     outletTorn = true;
     navSeq++;
     gate.close();
-    loaded();
+    loaded.cancel();
     outletTeardown();
     attachWait.cancel();
     if (currentNode) {
