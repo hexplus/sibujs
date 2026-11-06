@@ -800,6 +800,24 @@ function notifyEnded(): void {
   }
 }
 
+/**
+ * Drop the skipped subscribers that were disposed since they were skipped:
+ * a disposed binding, or a subscriber whose edges were torn down (a disposed
+ * effect). A live one cannot have lost its edges — it was skipped because one
+ * of them notified it, and it has not run since — so nothing that is still
+ * owed a catch-up run is dropped.
+ */
+function dropReleasedSkipped(): void {
+  for (const sub of skippedWhileHeld) {
+    if ((sub as { _disposed?: boolean })._disposed === true || sub.depsHead == null) skippedWhileHeld.delete(sub);
+  }
+}
+
+/** Number of subscribers skipped while held and kept for a resume, for leak tests. @internal */
+export function heldSkippedCount(): number {
+  return skippedWhileHeld.size;
+}
+
 /** Number of pending lifecycle waits and end watches, for leak tests. @internal */
 export function heldListenerCount(): number {
   return waiters.size + endWatchers.size + stateWatchers.size;
@@ -1230,6 +1248,9 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
       // anything it skipped is re-queued; work waiting on it to resume
       // learns that it ended.
       if (endWatchers.size !== 0 || stateWatchers.size !== 0) notifyEnded();
+      // What that teardown disposed while it was skipped (a paused branch's
+      // `lifecycleScope()` effect) is dropped now, not kept for a resume.
+      if (skippedWhileHeld.size !== 0) dropReleasedSkipped();
       if (wasFrozen || waiters.size !== 0) settleHeld();
     }
     cleanup(subscriber);

@@ -416,8 +416,10 @@ export interface SuspenseProps {
  * one the boundary renders in: a `lifecycleScope()` captured in the fallback
  * ends — its scoped effects and watches disposed — when the content replaces
  * the fallback, or with the boundary; one captured in the content ends with
- * the boundary. A throwing `fallback()` propagates, with what it registered
- * rolled back.
+ * the boundary — or as soon as the content is abandoned: `nodes()` threw, or
+ * the content it built could not be inserted (the boundary and its fallback
+ * stay). A throwing `fallback()` propagates, with what it registered rolled
+ * back.
  *
  * @param props `nodes` is the async content factory; `fallback` builds the
  * placeholder shown while it is pending.
@@ -452,6 +454,20 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   // so what it creates — a `lazy()` placeholder, a `lifecycleScope()` —
   // pauses with the boundary's lifecycle and ends with the boundary.
   let contentOwner: StructuralBinding | null = null;
+  /**
+   * End the content's lifecycle: with the boundary, or as soon as the content
+   * is abandoned for good — `nodes()` threw, or what it built was never
+   * inserted (the insertion failed, or the commit was dropped). What it
+   * registered through a captured `lifecycleScope()` is disposed then, once,
+   * and a registration still waiting for a paused lifecycle never starts.
+   * Cleared before it runs: a teardown it runs may dispose the boundary, which
+   * then finds nothing left to end.
+   */
+  const endContent = (): void => {
+    const own = contentOwner;
+    contentOwner = null;
+    own?.stop();
+  };
   // The fallback's lifecycle, nested in the boundary's too and separate from
   // the content's: it ends when the fallback is replaced, or with the boundary.
   const fallbackOwn = structuralBinding(NOOP);
@@ -474,9 +490,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
     }
     if (childEl && !container.contains(childEl)) dispose(childEl);
     endFallback();
-    const own = contentOwner;
-    contentOwner = null;
-    own?.stop();
+    endContent();
   });
 
   // Outside any adoption scope, like lazy()'s placeholder: a fallback the
@@ -523,10 +537,11 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
         try {
           swap.insert();
         } catch (err) {
-          // Nothing was inserted: released here, reported like a throwing
-          // `nodes()`. The fallback is gone already.
+          // Nothing was inserted: released here, its lifecycle ended, and
+          // reported like a throwing `nodes()`. The fallback is gone already.
           if (childEl === el) childEl = null;
           dispose(el);
+          endContent();
           ready.cancel();
           boundary?.done();
           dispatchPropagate(container, err instanceof Error ? err : new Error(String(err)));
@@ -538,6 +553,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       discard: () => {
         if (childEl === el) childEl = null;
         dispose(el);
+        endContent();
         ready.cancel();
       },
     });
@@ -552,8 +568,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       const build = () => withDisposerRollback(() => own.run(() => inScope(scope, nodes)));
       el = boundary ? boundary.enter(build) : build();
     } catch (err) {
-      contentOwner = null;
-      own.stop();
+      endContent();
       const errorObj = err instanceof Error ? err : new Error(String(err));
       // No content and no error view: the readiness is released, nothing
       // joins an enter for it. The fallback stays; the error goes to the

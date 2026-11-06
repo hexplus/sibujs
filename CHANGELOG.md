@@ -76,9 +76,11 @@ outlet's teardown, and an enter with `waitForContent` ran before the content
 arrived. That bookkeeping is now shared by every copy of the same version on
 the page, the way the reactive runtime already is, so a directive finds the
 range, waits for the pending content, and runs the teardown — once — whichever
-entry point rendered it. The ES module entry points share their chunks and were
-not affected. Copies of different versions on one page are not guaranteed to
-coordinate.
+entry point rendered it. A `lifecycleScope()` is recognised the same way: one
+captured through one copy and passed to `pendingContent()` from another still
+holds the enter of the branch it was captured in. The ES module entry points
+share their chunks and were not affected. Copies of different versions on one
+page are not guaranteed to coordinate.
 
 ### Added — exit and enter transitions for `when()` and `match()`
 
@@ -206,7 +208,12 @@ returning a `DocumentFragment` is rendered in the container, and cleanup
 registered on the fragment itself runs with the instance, after its
 children's, once. The content's
 ends with the boundary; the fallback's when the content replaces it, when
-hydration discards it, or with the boundary. A `lazy()` whose `importFn`
+hydration discards it, or with the boundary. Content that is abandoned ends at
+once, in both `Suspense` components: a `nodes()` that throws or rejects, or
+content whose insertion fails, has what it registered through a captured
+`lifecycleScope()` disposed then — once, even while its page is paused, so
+nothing is caught up when it resumes — while the boundary keeps its fallback or
+error view. A `lazy()` whose `importFn`
 throws synchronously, a cached component that throws, or a `Suspense` whose
 `fallback` throws, still propagates the error, with what it registered rolled
 back and nothing left registered for a container it never returned.

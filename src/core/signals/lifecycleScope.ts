@@ -1,4 +1,5 @@
 import { bindOwnerScope, captureFrozen, type HeldCheck } from "../../reactivity/track";
+import { globalSingleton } from "../../utils/globalSingleton";
 import { type EffectBody, type EffectOptions, effect } from "./effect";
 import { watch } from "./watch";
 
@@ -81,8 +82,18 @@ const STATES: readonly LifecycleState[] = ["active", "paused", "ended"];
 const ENDED = 2;
 const NOOP = (): void => {};
 
-// The captured owner behind each scope, for `pendingContent(scope)`.
-const scopeOwners = new WeakMap<LifecycleScope, HeldCheck>();
+// The captured owner behind each scope, for `pendingContent(scope)`. Shared
+// through a global registry (see `globalSingleton`), as the range and disposer
+// state are: a scope captured through one copy of this module — another entry
+// point's bundle, a bundler's duplicate — and registered on through another is
+// still recognised for what it is. The owner checks themselves come from the
+// one shared reactive runtime (see reactivity/track.ts), so any copy can use
+// them. Weak on both sides: neither a scope nor what its owner check reaches
+// is kept alive by being registered here.
+const scopeOwners = globalSingleton(
+  Symbol.for("sibujs.lifecycleScope.owners.v1"),
+  () => new WeakMap<LifecycleScope, HeldCheck>(),
+);
 
 /** The owner check a scope captured. @internal */
 export function scopeOwner(scope: LifecycleScope): HeldCheck | undefined {
@@ -130,7 +141,9 @@ export function scopeOwner(scope: LifecycleScope): HeldCheck | undefined {
  *   with the branch holding the outlet — and, with
  *   `KeepAliveRoute({ suspendInactive: true })`, while the page is cached;
  * - in `Suspense`'s `nodes()` (or `fallback`), the boundary's content (or
- *   fallback): it ends with the boundary (or when the fallback is replaced);
+ *   fallback): it ends with the boundary (or when the fallback is replaced),
+ *   and the content's as soon as that content is abandoned — `nodes()` threw
+ *   or rejected, or what it returned could not be inserted;
  * - outside any render: none. The scope is always active and never ends; its
  *   registrations behave like the plain primitives.
  *

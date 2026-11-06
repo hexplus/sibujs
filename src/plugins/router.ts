@@ -4208,8 +4208,24 @@ export function Suspense(props: {
   // that branch, and ends with the boundary (the content) or when the
   // fallback is replaced (the fallback). Entered around the synchronous calls
   // only; nothing stays installed across the `await`.
-  const contentOwner = structuralBinding(NOOP);
+  let contentOwner: StructuralBinding | null = structuralBinding(NOOP);
   let fallbackOwner: StructuralBinding | null = null;
+  /**
+   * End the content's lifecycle: the boundary is torn down, or its content was
+   * permanently abandoned — `nodes()` threw or rejected, or what it returned
+   * was never inserted (`nodes()` is never called again). What it registered
+   * through a captured `lifecycleScope()` is disposed then, once: its effects
+   * and watches stop, a registration still waiting for a paused lifecycle to
+   * resume never starts, and a `pendingContent()` on it is cancelled. The
+   * boundary itself, its fallback and its error view are not affected. Cleared
+   * before it runs: a teardown it runs may tear the boundary down, and that
+   * finds nothing left to end.
+   */
+  const endContent = () => {
+    const owner = contentOwner;
+    contentOwner = null;
+    owner?.stop();
+  };
   // Settled once the outcome is shown, or dropped (see `settle`, teardown).
   const loaded = beginLoading(anchor);
   let isLoading = false;
@@ -4303,7 +4319,10 @@ export function Suspense(props: {
     const myGeneration = ++generation;
 
     try {
-      const result = contentOwner.run(props.nodes);
+      const owner = contentOwner;
+      // Ended before the render: the boundary is gone (see the guard above).
+      if (owner === null) return;
+      const result = owner.run(props.nodes);
       let element: HTMLElement;
       // Thenable by SHAPE, not `instanceof Promise`.
       //
@@ -4331,6 +4350,10 @@ export function Suspense(props: {
       settle(myGeneration, true, element);
     } catch (error) {
       console.error("[Suspense] Nodes error:", error);
+      // A failed `nodes()` is final: the content's lifecycle ends now — not
+      // when the error view is shown, which waits for a paused branch to
+      // resume — so nothing it registered is caught up on that resume.
+      endContent();
       settle(myGeneration, false, error);
     } finally {
       isLoading = false;
@@ -4366,8 +4389,10 @@ export function Suspense(props: {
       held: frozen,
       node: view,
       owned: () => !tornDown && myGeneration === generation,
+      // Never shown: the content (or what is left of it) is abandoned.
       discard: () => {
         release(view);
+        endContent();
         loaded.cancel();
       },
       teardown: () => {
@@ -4382,6 +4407,7 @@ export function Suspense(props: {
           // generation installed (the fallback) goes with it.
           release(view);
           cleanupNodes();
+          endContent();
           loaded.cancel();
           return;
         }
@@ -4391,10 +4417,11 @@ export function Suspense(props: {
         try {
           parent.insertBefore(view, anchor.nextSibling);
         } catch (error) {
-          // Nothing was inserted: released, and the outcome is the error
-          // view, as for a failing `nodes()`.
+          // Nothing was inserted: released, its lifecycle ended, and the
+          // outcome is the error view, as for a failing `nodes()`.
           if (currentNode === view) currentNode = null;
           release(view);
+          endContent();
           console.error("[Suspense] Nodes error:", error);
           if (ok) settle(myGeneration, false, error);
           else loaded.cancel();
@@ -4418,7 +4445,7 @@ export function Suspense(props: {
     dropWait = null;
     committing.cancel();
     cleanupNodes();
-    contentOwner.stop();
+    endContent();
     loaded.cancel();
   });
 
