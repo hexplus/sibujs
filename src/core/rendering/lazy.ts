@@ -5,6 +5,7 @@ import { captureScope, inAdoptScope, inScope } from "./adoptScope";
 import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
 import { div, span } from "./html";
 import { isHydrating } from "./hydrationHooks";
+import { beginLoading } from "./range";
 import { currentBoundary, openBoundary } from "./streamBoundary";
 import type { Component } from "./types";
 
@@ -118,6 +119,9 @@ export function lazy<R extends Node = HTMLElement>(
       return container;
     }
 
+    // Pending content until the chunk's component (or the error) is in the
+    // container, for an enter that waits for it (`waitForContent`).
+    const loaded = beginLoading(container);
     // A server render waits for the chunk (and, through the settle loop, for
     // whatever the loaded component starts).
     trackPending(importFn(), "lazy")
@@ -131,6 +135,7 @@ export function lazy<R extends Node = HTMLElement>(
           const build = () => inScope(scope, () => component());
           const rendered = boundary ? boundary.enter(build) : build();
           replaceChildrenSafely(container, rendered);
+          loaded();
         }),
       )
       .catch((err) => {
@@ -140,6 +145,7 @@ export function lazy<R extends Node = HTMLElement>(
           container,
           div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`),
         );
+        loaded();
         dispatchPropagate(container, errorObj);
       });
 
@@ -152,6 +158,7 @@ export function lazy<R extends Node = HTMLElement>(
     // the standard disposer chain, which covers when/match/each/dispose paths.
     registerDisposer(container, () => {
       disposed = true;
+      loaded();
     });
 
     return container;
@@ -197,9 +204,13 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   const scope = captureScope();
   // A streaming server render streams this boundary's content on its own.
   const boundary = openBoundary(container);
+  // Pending content until the content is committed (or fails), for an enter
+  // that waits for it (`waitForContent`).
+  const loaded = beginLoading(container);
   const commit = (el: Element) => {
     replaceChildrenSafely(container, el);
     boundary?.done();
+    loaded();
   };
 
   // Outside any adoption scope, like lazy()'s placeholder: a fallback the
@@ -220,6 +231,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
 
   registerDisposer(container, () => {
     suspenseDisposed = true;
+    loaded();
     if (observer) {
       observer.disconnect();
       observer = null;
@@ -259,6 +271,7 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
       }
     } catch (err) {
       const errorObj = err instanceof Error ? err : new Error(String(err));
+      loaded();
       dispatchPropagate(container, errorObj);
     }
   });

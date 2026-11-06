@@ -126,8 +126,11 @@ describe("island / enhancement entry points stay tree-shakeable", () => {
     // transitions use, and `each` rows gained `peek()`, about 300 bytes; then
     // to 26 KB for paused / ended ownership in the core — skipped subscribers
     // re-run on resume, and deferred work waits on resume / end notifications —
-    // about 550 bytes more.)
-    expect(withEach.length).toBeLessThan(26 * 1024);
+    // about 550 bytes more; then to 27 KB for lifecycle state notifications —
+    // `lifecycleScope().onPause()` / `onResume()`, `HeldCheck.within()` for
+    // lifecycle-located `pendingContent()`, and contained deferred
+    // registrations — about 700 bytes more.)
+    expect(withEach.length).toBeLessThan(27 * 1024);
     expect(subsystemsIn(withEach)).toEqual([]);
   });
 

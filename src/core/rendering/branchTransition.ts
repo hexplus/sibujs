@@ -58,26 +58,43 @@ export interface DirectiveTransition {
   /** Also play the enter on the directive's first render. Default `false`. */
   appear?: boolean;
   /**
-   * Opt-in, in ms: let content that loads asynchronously enter WITH the
-   * branch — the initial content (or error view) of every `Suspense` boundary
-   * and route outlet (`Route`, `Outlet`, `KeepAliveRoute`) in the entering
-   * branch, wherever it sits — if it settles within this time, counted from
-   * the switch and never more than 5000 ms. Default: not waited for.
+   * Opt-in, in ms: let content that arrives later enter WITH the branch, if
+   * it is committed within this time, counted from the switch and never more
+   * than 5000 ms. Default: not waited for. The content waited for is the
+   * PENDING content inside the entering branch, wherever it sits: the initial
+   * content (or error view) of every `Suspense` boundary (the router's and
+   * the core one), `lazy()` component and route outlet (`Route`, `Outlet`,
+   * `KeepAliveRoute`), and what the application registers with
+   * `pendingContent()`. An outlet is pending until its CURRENT navigation
+   * commits a page, an error view or nothing at all — a superseded pass, or
+   * one waiting for its anchor to be attached, settles nothing.
    *
    * - A class-based enter starts at once and stays open for that content
-   *   until it has settled or the time is up: each piece joins the enter as
-   *   it arrives (it gets `enterClass`, and the enter ends when its animation
-   *   does, within the enter's own `maxDuration` / 5 s cap).
-   * - A custom `enter` is called once the content has settled, or when the
-   *   time is up, with the nodes present then.
-   * - Content settling later, or after the enter ended, appears without an
-   *   enter: an enter never replays, and nothing is loaded again for it.
+   *   until it has settled or the time is up: each piece joins the enter when
+   *   it is committed, and the enter ends when the animations do, within the
+   *   enter's own `maxDuration` / 5 s cap. Content that reveals more pending
+   *   content (an outer boundary whose result holds an inner one, a layout
+   *   holding an outlet) keeps the enter open for that too.
+   * - A custom `enter` is called once the content has settled — the content
+   *   it revealed included — or when the time is up, with the nodes present
+   *   then.
+   * - Nothing moves the deadline. Content committed after it, or after the
+   *   enter ended, appears without an enter: an enter never replays, and
+   *   nothing is loaded again for it.
+   *
+   * What joins a class-based enter, automatically: elements a top-level range
+   * of the branch (an `each()`, a nested directive) adds while it runs —
+   * whatever this setting — and the content committed for a pending
+   * registration. Either is skipped when it lies inside an element of the
+   * enter whose own animation is still running: it already moves with that
+   * element, and a second copy of the animation would compound (twice the
+   * offset, the opacity squared). Once that animation has finished, content
+   * arriving inside it enters on its own. A nested directive's own
+   * `transition` is never affected.
    *
    * With `mode: "in-out"` the outgoing branch starts leaving when this enter
    * ends, so it waits as long. The first render takes part only with
-   * `appear: true`. Whatever the setting, elements a top-level range of the
-   * branch (an `each()`, a nested directive) adds while a class-based enter
-   * runs join it.
+   * `appear: true`.
    */
   waitForContent?: number;
 }
@@ -88,8 +105,13 @@ export interface PhaseRun {
   cancel(): void;
   /**
    * Class-based phases only: elements that joined the branch while the phase
-   * runs (rows a caller-owned `each()` added). They get the class and the
-   * phase waits for their animations too, within its original deadline.
+   * runs (rows a caller-owned `each()` added, content committed while an
+   * enter waits for it). They get the class and the phase waits for their
+   * animations too, within its original deadline. An element inside one of
+   * the phase's elements whose own animation is still RUNNING is skipped: it
+   * is already moving with that ancestor, and a second copy of the same
+   * animation on it would compound (twice the offset, the opacity squared).
+   * Once the ancestor's animation has finished, it enters on its own.
    */
   add?(elements: Element[]): void;
   /**
@@ -188,6 +210,12 @@ function matchEntry(map: Map<string, number>, name: unknown): string | undefined
   return map.has("all") ? "all" : undefined;
 }
 
+/** Whether `el` lies inside an element of `animating` (not counting itself). */
+function insideAnimating(animating: Set<Element>, el: Element): boolean {
+  for (const a of animating) if (a !== el && a.contains(el)) return true;
+  return false;
+}
+
 /**
  * Play one phase on `nodes` and call `onDone` when it is over.
  *
@@ -279,6 +307,10 @@ export function runPhase(
   // first of several (a shared duration with different delays) cannot end
   // the phase.
   let waiting = 0;
+  // Enrolled elements whose animations have not all finished yet. The class
+  // stays on every enrolled element until the phase ends, so its presence
+  // says nothing about whether an element is still moving.
+  const animating = new Set<Element>();
   const enroll = (el: Element): number => {
     const timing = measure(el);
     if (timing === null) return -1;
@@ -291,14 +323,18 @@ export function runPhase(
     if (running !== null) {
       if (running.length === 0) return -1;
       waiting++;
+      animating.add(el);
       let left = running.length;
       const settle = () => {
-        if (--left === 0 && !finished && --waiting === 0 && !holding) finish(true);
+        if (--left !== 0) return;
+        animating.delete(el);
+        if (!finished && --waiting === 0 && !holding) finish(true);
       };
       for (const animation of running) animation.finished.then(settle, settle);
       return timing.total;
     }
     waiting++;
+    animating.add(el);
     const onEnd = (event: Event) => {
       // Ends bubbling up from descendants are theirs, not the branch's.
       if (event.target !== el || timing.pending === 0) return;
@@ -312,7 +348,9 @@ export function runPhase(
       const left = (map.get(key) as number) - 1;
       if (left > 0) map.set(key, left);
       else map.delete(key);
-      if (--timing.pending === 0 && --waiting === 0 && !holding) finish(true);
+      if (--timing.pending !== 0) return;
+      animating.delete(el);
+      if (--waiting === 0 && !holding) finish(true);
     };
     for (const type of END_EVENTS) el.addEventListener(type, onEnd);
     cleanups.push(() => {
@@ -347,7 +385,7 @@ export function runPhase(
       if (finished) return;
       for (let i = 0; i < late.length; i++) {
         const el = late[i];
-        if (elements.includes(el)) continue;
+        if (elements.includes(el) || insideAnimating(animating, el)) continue;
         el.classList.add(cls);
         elements.push(el);
         const total = enroll(el);

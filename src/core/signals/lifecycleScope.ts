@@ -1,4 +1,4 @@
-import { bindOwnerScope, captureFrozen } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, type HeldCheck } from "../../reactivity/track";
 import { type EffectBody, type EffectOptions, effect } from "./effect";
 import { watch } from "./watch";
 
@@ -50,12 +50,38 @@ export interface LifecycleScope {
    * binding `register` creates synchronously is paused and resumed with the
    * lifecycle; the disposer it returns is called once — at the end, or by the
    * disposer this returns. Paused, `register` itself waits for the resume.
+   *
+   * If `register` throws, nothing is kept for it: the registration is rolled
+   * back (its lifecycle listeners dropped) and the error is rethrown — or,
+   * for a registration deferred to a resume, reported like an effect error.
+   * Resources `register` acquired before throwing are its own to release:
+   * it never returned the disposer that would have done it.
    */
   own(register: () => () => void): () => void;
+  /**
+   * Call `callback` each time the lifecycle pauses (a branch begins its leave,
+   * a `KeepAliveRoute({ suspendInactive: true })` page is cached), a
+   * microtask after it does. Reactive work owned by the scope pauses on its
+   * own; this is for what does not — timers, sockets, media, requests — so it
+   * can be suspended explicitly. Dropped when the lifecycle ends; returns a
+   * function that drops it sooner.
+   */
+  onPause(callback: () => void): () => void;
+  /** Call `callback` each time the lifecycle resumes after a pause; see {@link onPause}. */
+  onResume(callback: () => void): () => void;
 }
 
 const STATES: readonly LifecycleState[] = ["active", "paused", "ended"];
 const ENDED = 2;
+const NOOP = (): void => {};
+
+// The captured owner behind each scope, for `pendingContent(scope)`.
+const scopeOwners = new WeakMap<LifecycleScope, HeldCheck>();
+
+/** The owner check a scope captured. @internal */
+export function scopeOwner(scope: LifecycleScope): HeldCheck | undefined {
+  return scopeOwners.get(scope);
+}
 
 /**
  * Capture the current lifecycle — the structural owner and route scope the
@@ -88,18 +114,25 @@ const ENDED = 2;
  * object, so concurrent work never inherits another's lifecycle.
  *
  * Which lifecycle is captured:
- * - in a `when()` / `match()` branch with a `transition`, the branch's: it
- *   pauses while the branch leaves and ends when the branch is released;
+ * - in a `when()` / `match()` branch the directive built, the branch's: it
+ *   ends when the branch is replaced — at the switch, or with a `transition`
+ *   when its leave ends; it pauses while the branch leaves and resumes if the
+ *   branch is taken back. A bare node handed to the directive is the
+ *   caller's, so the scope is that of the code that built it;
  * - in a route component (cached, lazy, unwrapped from a module), the route
  *   instance's: it ends when the instance is replaced or disposed, and pauses
- *   with the branch holding the outlet;
+ *   with the branch holding the outlet — and, with
+ *   `KeepAliveRoute({ suspendInactive: true })`, while the page is cached;
  * - in `Suspense`'s `nodes()` (or `fallback`), the boundary's content (or
  *   fallback): it ends with the boundary (or when the fallback is replaced);
- * - in a branch without a transition, the directive's own, which does not
- *   end when the branch switches: tie such work to the DOM it serves with
- *   `registerDisposer(node, scope.effect(…))` when it must stop with it;
  * - outside any render: none. The scope is always active and never ends; its
  *   registrations behave like the plain primitives.
+ *
+ * Only what goes through the scope is owned. An `effect()` created after an
+ * `await` without it is unowned, and stays so: nothing is installed across
+ * the `await`, and ownership is never inferred from what rendered last.
+ * `registerDisposer(node, stop)` gives such work teardown with that node, not
+ * pause and resume.
  *
  * @returns The captured {@link LifecycleScope}.
  */
@@ -112,8 +145,8 @@ export function lifecycleScope(): LifecycleScope {
   const own = (register: () => () => void): (() => void) => {
     let disposed = false;
     let stop: (() => void) | null = null;
-    let dropWait = (): void => {};
-    let dropEnd = (): void => {};
+    let dropWait = NOOP;
+    let dropEnd = NOOP;
     const dispose = (): void => {
       if (disposed) return;
       disposed = true;
@@ -124,12 +157,23 @@ export function lifecycleScope(): LifecycleScope {
       running?.();
     };
     const start = (): void => {
+      dropWait = NOOP;
       if (disposed) return;
       // Watched FIRST: an end during `register` (its first run may switch the
       // branch away) disposes what it created as soon as it returns.
       dropEnd = held.onEnd(dispose);
       if (disposed) return;
-      const created = held.run(() => inOwnerScope(register));
+      let created: () => void;
+      try {
+        created = held.run(() => inOwnerScope(register));
+      } catch (err) {
+        // Nothing was created that this registration could dispose: roll it
+        // back, so no listener outlives it.
+        disposed = true;
+        dropEnd();
+        dropEnd = NOOP;
+        throw err;
+      }
       if (disposed) created();
       else stop = created;
     };
@@ -140,9 +184,16 @@ export function lifecycleScope(): LifecycleScope {
     return dispose;
   };
 
-  return {
+  const onState = (want: number, callback: () => void): (() => void) =>
+    held.onChange((state) => {
+      if (state === want) callback();
+    });
+
+  const scope: LifecycleScope = {
     state: () => STATES[held.state()],
     own,
+    onPause: (callback) => onState(1, callback),
+    onResume: (callback) => onState(0, callback),
     // The guards are the liveness check of a registration whose owner ended
     // while its own run was in progress (a body that ends its branch and
     // re-runs itself); `own` disposes it as soon as that run returns.
@@ -159,4 +210,6 @@ export function lifecycleScope(): LifecycleScope {
         }),
       ),
   };
+  scopeOwners.set(scope, held);
+  return scope;
 }

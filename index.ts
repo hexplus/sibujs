@@ -58,6 +58,8 @@ export { lazy, Suspense, takePendingError } from "./src/core/rendering/lazy";
 export * from "./src/core/rendering/lifecycle";
 // Mounting & rendering
 export * from "./src/core/rendering/mount";
+// Readiness of content that arrives later, for `waitForContent`
+export { type PendingContent, pendingContent } from "./src/core/rendering/pendingContent";
 export * from "./src/core/rendering/portal";
 export * from "./src/core/rendering/slots";
 export type {

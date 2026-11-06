@@ -102,15 +102,29 @@ while a class-based enter runs join it. Disposing the directive removes leaving
 branches at once. Server renders ignore transitions. Without `transition`, a
 switch removes and disposes the old branch at once, as before.
 
-`waitForContent` (ms, opt-in) lets content that loads asynchronously enter with
-the branch: the initial content (or error view) of the `Suspense` boundaries and
-route outlets anywhere in the entering branch, if it settles within that time
-(counted from the switch, at most 5 s). A class-based enter starts at once and
-stays open for it: each piece joins as it arrives, gets `enterClass`, and the
-enter ends with its animation. A custom `enter` is called once the content has
-settled, or at the deadline. Content settling later appears without an enter;
-an enter never replays, and nothing is loaded again for it. With `"in-out"`,
-the outgoing branch leaves when that enter ends.
+`waitForContent` (ms, opt-in) lets content that arrives later enter with the
+branch, if it is committed within that time (counted from the switch, at most
+5 s): the pending content anywhere in the entering branch — the initial content
+(or error view) of `Suspense` boundaries (the router's and the core one),
+`lazy()` components and route outlets, and what the application registers with
+`pendingContent()` (below). An outlet's initial content is pending until its
+current navigation commits a page, an error view or a terminal empty outcome; a
+pass that only returns (superseded, waiting for its anchor to be attached,
+cancelled) settles nothing. A class-based enter starts at once and stays open:
+each piece joins when it is committed, and content that reveals more pending
+content (an outer boundary whose result holds an inner one, a layout holding an
+`Outlet`) keeps it open for that too, under the same deadline. A custom `enter`
+is called once all of it has settled, or at the deadline. Content committed
+later appears without an enter; an enter never replays, and nothing is loaded
+again for it. With `"in-out"`, the outgoing branch leaves when that enter ends.
+
+What joins a running class-based enter is content committed for a pending
+registration and elements a top-level range adds, except inside an element of
+the enter whose own animation is still running: that content already moves with
+its ancestor, and a second copy of the animation would compound (twice the
+offset, the opacity squared). Content arriving after the ancestor's animation
+finished enters on its own. A nested directive's own `transition` is not
+affected.
 
 A leaving branch is paused, not ended: inside it nothing starts — no queued
 first render, no pending enter, no route factory call (cached modules included)
@@ -150,13 +164,59 @@ the values in between are not delivered), and is disposed, cleanups once, in
 the disposal that ends the lifecycle: nothing it owns runs after that, not even
 in the same task. `scope.state()` reports `"active"`, `"paused"` or `"ended"`.
 
-The lifecycle is the branch's in a `when()` / `match()` with a `transition`, the
-route instance's in a route component (paused with the branch holding the
-outlet, ended when the instance is replaced), and the boundary's in
-`Suspense`'s `nodes()` and `fallback()`. Nothing is installed globally across
-the `await`, so concurrent work never inherits another's lifecycle. Captured
-outside any render, a scope is always active. Unscoped work created after an
-`await` is not discovered automatically.
+The lifecycle is the branch's in a `when()` / `match()` branch the directive
+built — with or without a `transition`: without one it ends at the switch, with
+one it pauses for the leave and ends when the branch is released — the route
+instance's in a route component (paused with the branch holding the outlet,
+ended when the instance is replaced), and the boundary's in `Suspense`'s
+`nodes()` and `fallback()`. Nothing is installed globally across the `await`,
+and ownership is never inferred from what rendered last, so concurrent work
+never inherits another's lifecycle. Captured outside any render, a scope is
+always active. Work created after an `await` without the scope stays unowned:
+`registerDisposer(node, stop)` gives it teardown with that node, not pause and
+resume.
+
+A registration whose `register` (or whose effect's or watch's first run) throws
+keeps nothing: its lifecycle listeners are dropped and the error is rethrown; one
+deferred to a resume is reported instead, and the other waiting registrations
+still start. What `register` acquired before throwing is its own to release.
+`scope.onPause(fn)` / `scope.onResume(fn)` are called as the lifecycle pauses and
+resumes (a microtask later; a pause and resume in the same task deliver nothing),
+for what does not pause on its own: timers, sockets, media, requests.
+
+### Added — `pendingContent()`: readiness for application content
+
+```ts
+const list = ul(li("Loading…"));
+const pending = pendingContent(list);
+const rows = await fetchRows();
+list.replaceChildren(...rows.map((r) => li(r.title)));
+pending.done();                       // committed: an enter waiting for it proceeds
+```
+
+Content the application loads itself takes part in `waitForContent` only when
+registered: nothing becomes pending on its own. A registration is located at a
+node or range anchor (it counts for an enter when that node is inside the
+entering branch; disposing the node settles it) or at a captured
+`lifecycleScope()` (it counts when that lifecycle lies inside the branch; its
+end settles it). Each call is independent — several at one location stay
+pending until each settles, and settling one never settles another — and
+`done(committed?)` / `cancel()` are idempotent. Call `done()` after the content
+(or an error view) is in the DOM. A registration made while an enter waits is
+picked up, under the enter's original deadline. On the server it registers
+nothing and returns a settled handle.
+
+### Added — `KeepAliveRoute({ suspendInactive: true })`
+
+A cached page is paused while it is hidden, instead of staying live (still the
+default): its DOM, local state, form values and route context are kept; its
+bindings, effects and `lifecycleScope()` work do not run, and catch up once
+when it is shown again, against the current state and the route it is shown
+for; async work it owns (a `Suspense` result, a nested outlet's page) is held
+until then. Shown inside a branch that is itself paused, it resumes only with
+that branch. Eviction and outlet disposal end a suspended page without a
+catch-up run. Timers, sockets and requests do not pause by themselves: stop them
+in `scope.onPause()` and restart them in `scope.onResume()`.
 
 ### Added — `each()`: a dev warning when a direct `item()` read goes stale, and `item.peek()`
 

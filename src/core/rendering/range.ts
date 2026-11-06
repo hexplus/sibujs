@@ -1,4 +1,6 @@
 import type { HeldCheck } from "../../reactivity/track";
+import type { StructuralBinding } from "../../reactivity/track-core";
+import { isServer } from "../ssr-context";
 
 // ---------------------------------------------------------------------------
 // Sibling ranges rendered after an anchor.
@@ -82,68 +84,140 @@ export function anyPending(nodes: readonly Node[]): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Asynchronously loaded INITIAL content.
+// Pending content (readiness).
 //
-// A `Suspense` boundary and a route outlet render content that arrives later
-// (a network request, a lazy chunk). Until their first content (or error) is
-// on the page their anchor is LOADING. An enter that opted in with
-// `DirectiveTransition.waitForContent` lets the content of the loading anchors
-// inside the entering branch join it, within a bounded time. Only the initial
-// content counts: a later navigation in an outlet never makes it loading
-// again.
+// Content that arrives later — a `Suspense` boundary's or a route outlet's
+// initial content, or anything the application registers with
+// `pendingContent()` — is PENDING until it has been committed (or deliberately
+// settled). An enter that opted in with `DirectiveTransition.waitForContent`
+// waits for the pending content inside the entering branch, within a bounded
+// time, and lets it join when it is committed.
 //
-// A WeakSet, so an anchor dropped without settling is not retained; the count
-// only lets the common case (nothing loading) skip the search.
+// Each registration is its own entry: several independent operations at the
+// same location stay pending independently, and settling one never settles
+// another. An entry is located at a node (inside the branch when the node
+// is), or at a captured lifecycle (inside the branch when that lifecycle lies
+// below the branch's). Entries are held until settled; every registration
+// path settles them on disposal of what they are attached to.
 // ---------------------------------------------------------------------------
 
-const loading = new WeakSet<Node>();
-let loadingCount = 0;
+/** One pending registration. @internal */
+export interface Pending {
+  /** Where it renders: a range anchor, an element, or `null` (a lifecycle). */
+  readonly at: Node | null;
+  /** The lifecycle it belongs to, when located by one. */
+  readonly held: HeldCheck | null;
+  /** Settled (committed, failed, cancelled or dropped). */
+  settled: boolean;
+  /** What was committed, when the settler said so. */
+  committed: Node[] | null;
+}
+
+const registrations = new Set<Pending>();
 const loadListeners = new Set<() => void>();
+let notifyQueued = false;
+
+/** Tell the listeners, a microtask later (coalesced), that the registrations changed. */
+function notifyLoad(): void {
+  if (notifyQueued || loadListeners.size === 0) return;
+  notifyQueued = true;
+  // A microtask later: a settler settles BEFORE or AFTER it inserts the
+  // content, and either way the content is in place by then.
+  queueMicrotask(() => {
+    notifyQueued = false;
+    for (const listener of [...loadListeners]) listener();
+  });
+}
 
 /**
- * Mark `anchor`'s initial content as loading. Returns `loaded`, to call once
- * it has settled (shown, failed, or dropped with the anchor); idempotent.
+ * Register pending content at `at` (a node) or `held` (a lifecycle). Returns
+ * the entry and its settle function — idempotent, first call wins.
+ *
+ * @internal
+ */
+export function beginPending(
+  at: Node | null,
+  held: HeldCheck | null,
+): { entry: Pending; settle: (committed?: Node[] | null) => void } {
+  const entry: Pending = { at, held, settled: false, committed: null };
+  registrations.add(entry);
+  notifyLoad();
+  return {
+    entry,
+    settle: (committed) => {
+      if (entry.settled) return;
+      entry.settled = true;
+      entry.committed = committed ?? null;
+      registrations.delete(entry);
+      notifyLoad();
+    },
+  };
+}
+
+/**
+ * Mark `anchor`'s initial content as pending (a `Suspense` boundary, a route
+ * outlet). Returns `loaded`, to call once that content is committed, or the
+ * outcome that stands for it (an error view, a terminal empty result); and on
+ * teardown. Idempotent. Client only: a server render plays no transition,
+ * and must not retain anything per request.
  *
  * @internal
  */
 export function beginLoading(anchor: Node): () => void {
-  loading.add(anchor);
-  loadingCount++;
-  return () => {
-    if (!loading.delete(anchor)) return;
-    loadingCount--;
-    // A microtask later: the caller settles BEFORE it inserts the content.
-    if (loadListeners.size !== 0)
-      queueMicrotask(() => {
-        for (const listener of [...loadListeners]) listener();
-      });
-  };
+  if (isServer()) return NOTHING;
+  const { settle } = beginPending(anchor, null);
+  return () => settle();
 }
 
-/** The loading anchors among `nodes` and inside them, in document order. @internal */
-export function loadingWithin(nodes: readonly Node[]): Node[] {
-  const found: Node[] = [];
-  if (loadingCount <= 0) return found;
-  for (const node of nodes) {
-    if (loading.has(node)) found.push(node);
-    if (node.nodeType !== 1) continue;
-    const walker = (node.ownerDocument as Document).createTreeWalker(node, 128 /* SHOW_COMMENT */);
-    for (let c = walker.nextNode(); c !== null; c = walker.nextNode()) if (loading.has(c)) found.push(c);
+/**
+ * The pending registrations inside a branch: located at one of `nodes` or a
+ * descendant of one, or at a lifecycle below `owner`. Document order is not
+ * guaranteed. @internal
+ */
+export function loadingWithin(nodes: readonly Node[], owner: StructuralBinding | null): Pending[] {
+  const found: Pending[] = [];
+  if (registrations.size === 0) return found;
+  for (const entry of registrations) {
+    const at = entry.at;
+    if (at !== null) {
+      for (let i = 0; i < nodes.length; i++) {
+        if (nodes[i] === at || nodes[i].contains(at)) {
+          found.push(entry);
+          break;
+        }
+      }
+    } else if (owner !== null && entry.held?.within(owner)) found.push(entry);
   }
   return found;
 }
 
-/** Whether `anchor`'s initial content is still loading. @internal */
-export function isLoading(anchor: Node): boolean {
-  return loading.has(anchor);
+/**
+ * What a settled registration committed, as elements: what its settler named,
+ * else what its location renders now — the range after an anchor, the
+ * children of an element. @internal
+ */
+export function settledContent(entry: Pending): Element[] {
+  let nodes: readonly Node[];
+  if (entry.committed !== null) nodes = entry.committed;
+  else if (entry.at === null) return [];
+  else if (entry.at.nodeType === 1) nodes = Array.from(entry.at.childNodes);
+  else nodes = collectRange([entry.at]);
+  const out: Element[] = [];
+  for (let i = 0; i < nodes.length; i++) if (nodes[i].nodeType === 1) out.push(nodes[i] as Element);
+  return out;
 }
 
-/** Call `listener` whenever some loading anchor settles. Returns the unsubscribe. @internal */
+/** Call `listener` whenever pending content is registered or settles. Returns the unsubscribe. @internal */
 export function onLoaded(listener: () => void): () => void {
   loadListeners.add(listener);
   return () => {
     loadListeners.delete(listener);
   };
+}
+
+/** Number of unsettled registrations and readiness listeners, for leak tests. @internal */
+export function pendingCount(): number {
+  return registrations.size + loadListeners.size;
 }
 
 /** Whether `node` renders a sibling range whose content can change. @internal */

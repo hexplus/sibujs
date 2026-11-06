@@ -18,13 +18,14 @@ import {
   anyPending,
   collectRange,
   hasRange,
-  isLoading,
   loadingWithin,
   onLoaded,
+  type Pending,
   queueFirstRender,
   rangeEnd,
   registerRange,
   resumePending,
+  settledContent,
 } from "./range";
 import { requireDocument } from "./requireDocument";
 import type { NodeChild } from "./types";
@@ -127,10 +128,15 @@ export interface DirectiveOptions {
    * for the first render of a top-level `each()` or nested directive (a few
    * microtask turns at most), so those rows enter with the branch; rows such a
    * range adds while a class-based enter runs join it, and rows it adds while
-   * the branch leaves join the leave. Content that loads asynchronously (a
-   * `Suspense` boundary, a route outlet) is not waited for unless
-   * `waitForContent` says how long to wait. Disposing the directive removes
-   * leaving branches at once. Server renders ignore transitions entirely.
+   * the branch leaves join the leave. Content that arrives later (a
+   * `Suspense` boundary, a route outlet, a `pendingContent()` registration)
+   * is not waited for unless `waitForContent` says how long to wait.
+   * Disposing the directive removes leaving branches at once. Server renders
+   * ignore transitions entirely.
+   *
+   * A branch the directive built has its own lifecycle either way (see
+   * `lifecycleScope`): without a transition it ends at the switch, with one it
+   * pauses for the leave and ends when the branch is released.
    */
   transition?: DirectiveTransition;
 }
@@ -163,7 +169,12 @@ interface Branch {
   nodes: Node[];
   /** Whether the directive produced it (and so disposes it). See `resolveBranch`. */
   owned: boolean;
-  /** Transitions only: the structural owner its subscribers were created under. */
+  /**
+   * The structural owner its subscribers were created under: the branch's
+   * lifecycle (see `lifecycleScope`). Every branch the directive built has
+   * one, with or without a transition; a bare branch has one only while it is
+   * leaving after it was taken back (it keeps the one it was reclaimed with).
+   */
   owner: StructuralBinding | null;
   /** Transitions only: the enter or leave in progress. */
   phase: PhaseRun | null;
@@ -480,12 +491,16 @@ function directive(
   let deferredFocus: FocusSnapshot | null = null;
 
   /**
-   * Build `branch` and insert it after the anchor. With transitions, the build
-   * runs under its own structural owner, so freezing that owner at the next
-   * switch stops exactly this branch's bindings and effects.
+   * Build `branch` and insert it after the anchor. The build runs under its
+   * own structural owner — the branch's lifecycle, whatever the animation
+   * settings (and on the server) — so ending that owner at the switch ends
+   * exactly this branch's work, `lifecycleScope()` registrations included,
+   * and with a transition freezing it stops exactly this branch's bindings
+   * and effects. A branch the directive does not own (a bare node, an empty
+   * result) gives the owner back at once.
    */
   const build = (parent: Node, branch: NodeChild): Branch | null => {
-    const owner = tr ? structuralBinding(NOOP, anchor) : null;
+    const owner = structuralBinding(NOOP, anchor);
     // Untracked, like `each()` rows: the factory's own reads belong to the
     // bindings it creates, not to this directive. Tracked, every eager read in
     // the branch body became a dependency of the condition binding, so an
@@ -524,16 +539,14 @@ function directive(
       );
     let built: Branch | null;
     try {
-      built = owner !== null ? owner.run(attach) : attach();
+      built = owner.run(attach);
     } catch (err) {
-      owner?.stop();
+      owner.stop();
       throw err;
     }
-    if (owner !== null) {
-      if (built?.owned) built.owner = owner;
-      // Owns nothing: a bare branch (or a reclaimed one, which keeps its own).
-      else owner.stop();
-    }
+    if (built?.owned) built.owner = owner;
+    // Owns nothing: a bare branch (or a reclaimed one, which keeps its own).
+    else owner.stop();
     return built;
   };
 
@@ -620,17 +633,22 @@ function directive(
    * a disposal or a reclaim cancels the wait through the placeholder phase.
    *
    * `waitForContent` fixes its deadline here, at the switch. A custom enter
-   * also waits for the content (see `loadingWithin`), notified as each piece
-   * settles and at the deadline; a class-based one does not wait, it stays
-   * open for the content instead (see `startEnter`). A paused ancestor defers
-   * either past that deadline, until it resumes.
+   * also waits for the pending content in the branch (see `loadingWithin`),
+   * taken again from the branch each time a registration begins or settles,
+   * so content revealed by content is waited for too, and at the deadline; a
+   * class-based one does not wait, it stays open for the content instead
+   * (see `startEnter`). A paused ancestor defers either past that deadline,
+   * until it resumes.
    */
   const enterWhenReady = (entering: Branch): void => {
     const t = tr as DirectiveTransition;
     const budget = typeof t.waitForContent === "number" && t.waitForContent > 0 ? t.waitForContent : 0;
     const readyAt = budget > 0 ? Date.now() + Math.min(budget, HARD_CAP_MS) : 0;
     const contentReady = (): boolean =>
-      t.enter === undefined || readyAt === 0 || Date.now() >= readyAt || loadingWithin(entering.nodes).length === 0;
+      t.enter === undefined ||
+      readyAt === 0 ||
+      Date.now() >= readyAt ||
+      loadingWithin(entering.nodes, entering.owner).length === 0;
     if (!frozen() && !anyPending(entering.nodes) && contentReady()) {
       startEnter(entering, readyAt);
       return;
@@ -693,13 +711,18 @@ function directive(
    *
    * A class-based enter takes in the elements the branch's range adds while it
    * runs (see `PhaseRun.add`). Until `readyAt` (`waitForContent`) it also
-   * stays open for the initial content of the loading boundaries and outlets
-   * in the branch: each one's content joins it when it settles, and the enter
-   * closes once none is left. Nothing joins once it has ended.
+   * stays open for the pending content in the branch (see `loadingWithin`):
+   * whenever a registration settles, what it committed joins, and the
+   * dependencies are taken again from the branch as it is now — content that
+   * revealed a pending boundary or outlet of its own keeps the enter open for
+   * that one too, and one that left the branch is no longer waited for. The
+   * enter closes once none is left, or at `readyAt`, which nothing moves.
+   * Nothing joins once it has ended, or after `readyAt`.
    */
   const startEnter = (entering: Branch, readyAt: number): void => {
     const t = tr as DirectiveTransition;
-    const loads = t.enter === undefined && readyAt > Date.now() ? loadingWithin(entering.nodes) : [];
+    let waitingFor: Pending[] =
+      t.enter === undefined && readyAt > Date.now() ? loadingWithin(entering.nodes, entering.owner) : [];
     let stopWatching = NOOP;
     const run = runPhase(
       entering.nodes,
@@ -712,7 +735,7 @@ function directive(
         if (t.mode === "in-out") startWaitingLeaves();
       },
       `${name}(enter)`,
-      loads.length > 0 ? readyAt - Date.now() : 0,
+      waitingFor.length > 0 ? readyAt - Date.now() : 0,
     );
     const add = run?.add;
     if (run === null || add === undefined) {
@@ -721,23 +744,33 @@ function directive(
     }
     const unwatch = watchRange(entering, add);
     let dropLoaded = NOOP;
-    if (loads.length > 0) {
+    const stopLoading = (): void => {
+      dropLoaded();
+      dropLoaded = NOOP;
+    };
+    if (waitingFor.length > 0) {
       dropLoaded = onLoaded(() => {
-        for (let i = loads.length - 1; i >= 0; i--) {
-          const anchor = loads[i];
-          if (isLoading(anchor)) continue;
-          loads.splice(i, 1);
-          // What it rendered after its anchor: its content or error view.
-          const content: Element[] = [];
-          for (const node of collectRange([anchor])) if (node.nodeType === 1) content.push(node as Element);
+        if (Date.now() >= readyAt) {
+          stopLoading();
+          return;
+        }
+        refreshNodes(entering);
+        const inBranch = (el: Element): boolean => entering.nodes.some((n) => n === el || n.contains(el));
+        for (const entry of waitingFor) {
+          if (!entry.settled) continue;
+          const content = settledContent(entry).filter(inBranch);
           if (content.length > 0) add(content);
         }
-        if (loads.length === 0) run.close?.();
+        waitingFor = loadingWithin(entering.nodes, entering.owner);
+        if (waitingFor.length === 0) {
+          stopLoading();
+          run.close?.();
+        }
       });
     }
     stopWatching = () => {
       unwatch();
-      dropLoaded();
+      stopLoading();
     };
     entering.phase = {
       cancel: () => {

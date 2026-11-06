@@ -607,6 +607,15 @@ export interface HeldCheck {
    * paused, re-run when it resumes.
    */
   run<T>(fn: () => T): T;
+  /**
+   * Call `listener` with the owner's new state whenever it switches between
+   * active and paused, a microtask after the switch (a pause and resume in
+   * the same task are coalesced: nothing is delivered). Never called once it
+   * ended; the listener is dropped then. Returns a function that drops it.
+   */
+  onChange(listener: (state: OwnerState) => void): () => void;
+  /** Whether the captured owner is `owner`, or lies below it. */
+  within(owner: StructuralBinding): boolean;
 }
 
 interface Waiter {
@@ -634,6 +643,35 @@ function ownerState(tok: OwnerToken): OwnerState {
 
 const endWatchers = new Set<Waiter>();
 
+interface StateWatcher {
+  check: HeldCheck;
+  last: OwnerState;
+  listener: (state: OwnerState) => void;
+}
+const stateWatchers = new Set<StateWatcher>();
+let stateCheckQueued = false;
+
+/** After a freeze, thaw or end: deliver state changes a microtask later. */
+function queueStateCheck(): void {
+  if (stateCheckQueued || stateWatchers.size === 0) return;
+  stateCheckQueued = true;
+  queueMicrotask(() => {
+    stateCheckQueued = false;
+    for (const watcher of [...stateWatchers]) {
+      if (!stateWatchers.has(watcher)) continue;
+      const state = watcher.check.state();
+      if (state === ENDED) stateWatchers.delete(watcher);
+      if (state === ENDED || state === watcher.last) continue;
+      watcher.last = state;
+      try {
+        watcher.listener(state);
+      } catch (err) {
+        reportError(err, { phase: "effect" });
+      }
+    }
+  });
+}
+
 const ALWAYS_ACTIVE: HeldCheck = Object.assign(() => false, {
   state: () => ACTIVE,
   wait: (onActive: () => void) => {
@@ -642,6 +680,8 @@ const ALWAYS_ACTIVE: HeldCheck = Object.assign(() => false, {
   },
   onEnd: () => NOOP,
   run: <T>(fn: () => T): T => fn(),
+  onChange: () => NOOP,
+  within: () => false,
 });
 
 /**
@@ -689,6 +729,27 @@ export function captureFrozen(): HeldCheck {
         currentStructOwner = prev;
       }
     },
+    onChange: (listener: (state: OwnerState) => void): (() => void) => {
+      const last = state();
+      if (last === ENDED) return NOOP;
+      const watcher: StateWatcher = { check, last, listener };
+      stateWatchers.add(watcher);
+      return () => {
+        stateWatchers.delete(watcher);
+      };
+    },
+    within: (owner: StructuralBinding): boolean => {
+      // The binding's token is what it installs as the structural owner.
+      const target = owner.run(() => currentStructOwner);
+      if (target === null) return false;
+      for (let t: OwnerToken | null = tok; t !== null; ) {
+        if (t === target) return true;
+        const o: SubWithList | null = t.sub;
+        if (o === null) return false;
+        t = o._owner ?? null;
+      }
+      return false;
+    },
   }) as HeldCheck;
   return check;
 }
@@ -722,6 +783,7 @@ function isHeld(sub: SubWithList): boolean {
  * strand the others.
  */
 function notifyEnded(): void {
+  for (const watcher of stateWatchers) if (watcher.check.state() === ENDED) stateWatchers.delete(watcher);
   let ended: Waiter[] | null = null;
   for (const watcher of endWatchers) {
     if (watcher.check.state() !== ENDED) continue;
@@ -740,7 +802,7 @@ function notifyEnded(): void {
 
 /** Number of pending lifecycle waits and end watches, for leak tests. @internal */
 export function heldListenerCount(): number {
-  return waiters.size + endWatchers.size;
+  return waiters.size + endWatchers.size + stateWatchers.size;
 }
 
 /**
@@ -774,10 +836,17 @@ function settleHeld(): void {
   if (ready !== null) {
     const settle = ready;
     queueMicrotask(() => {
+      // Each contained: one failing continuation (a deferred registration
+      // that throws) does not strand the others.
       for (const waiter of settle) {
         const state = waiter.check.state();
         if (state === PAUSED) waiters.add(waiter);
-        else (state === ACTIVE ? waiter.onActive : waiter.onEnd)();
+        else
+          try {
+            (state === ACTIVE ? waiter.onActive : waiter.onEnd)();
+          } catch (err) {
+            reportError(err, { phase: "effect" });
+          }
       }
     });
   }
@@ -1054,11 +1123,13 @@ export function structuralBinding(commit: () => void, ownerNode?: unknown): Stru
       if (s._disposed || s._frozen) return;
       s._frozen = true;
       frozenOwners++;
+      queueStateCheck();
     },
     thaw: () => {
       if (!sub._frozen) return;
       sub._frozen = false;
       frozenOwners--;
+      queueStateCheck();
       settleHeld();
     },
   };
@@ -1131,7 +1202,7 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
     if (subscriber._tok != null) {
       subscriber._tok.sub = null;
       // Its run may have captured the lifecycle (`lifecycleScope()`) first.
-      if (endWatchers.size !== 0) notifyEnded();
+      if (endWatchers.size !== 0 || stateWatchers.size !== 0) notifyEnded();
     }
     cleanup(subscriber);
     throw err;
@@ -1153,7 +1224,7 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
       // Work bound to this subtree's lifetime is torn down now, before
       // anything it skipped is re-queued; work waiting on it to resume
       // learns that it ended.
-      if (endWatchers.size !== 0) notifyEnded();
+      if (endWatchers.size !== 0 || stateWatchers.size !== 0) notifyEnded();
       if (wasFrozen || waiters.size !== 0) settleHeld();
     }
     cleanup(subscriber);

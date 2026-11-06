@@ -7,7 +7,7 @@ import { appendChildren, resolveClassValue, type TagProps } from "../core/render
 import type { NodeChildren, Component as PublicComponent } from "../core/rendering/types";
 import { effect } from "../core/signals/effect";
 import { signal } from "../core/signals/signal";
-import { getRequestStore, isServer } from "../core/ssr-context";
+import { getRequestStore } from "../core/ssr-context";
 import { recordServerHead } from "../platform/serverHead";
 import {
   bindOwnerScope,
@@ -1543,7 +1543,7 @@ export class SibuRouter {
   }
 
   private createInitialRoute(): RouteContext {
-    return {
+    const route: RouteContext = {
       path: "/",
       params: {},
       query: {},
@@ -1552,6 +1552,8 @@ export class SibuRouter {
       meta: {},
       matched: [],
     };
+    bootstrapRoutes.add(route);
+    return route;
   }
 
   private handleLocationChange(skipHistory = true, initialResolution = false): Promise<unknown> {
@@ -2551,14 +2553,10 @@ interface PauseGate {
 
 const NOOP = (): void => {};
 
-/**
- * Mark an outlet's or boundary's initial content as loading (see
- * `beginLoading`), for an enter that waits for it. Client only: a server
- * render plays no transition, and must not retain anything per request.
- */
-function initialContent(anchor: Node): () => void {
-  return isServer() ? NOOP : beginLoading(anchor);
-}
+// The placeholder route a router holds until its initial location resolves.
+// An outlet rendering nothing for it has not reached an outcome yet: the
+// initial navigation re-runs it.
+const bootstrapRoutes = new WeakSet<RouteContext>();
 
 // Errors that cancel a gated instantiation, so outlets can tell them from a
 // component failure by identity.
@@ -3005,6 +3003,11 @@ export function Route(): Node {
   // load that resolves after teardown must lose ownership permanently,
   // including the right to run user component code. (OUT-003)
   let routeTorn = false;
+  // The initial content is pending until the CURRENT pass commits its page,
+  // its error view or a terminal empty outcome — never when a pass merely
+  // returns (superseded, detached and waiting to be attached, cancelled) — or
+  // until teardown. Later navigations never make it pending again.
+  const loaded = beginLoading(anchor);
 
   /**
    * The parent this `seq` may still commit into, or `null` if it has lost
@@ -3140,6 +3143,8 @@ export function Route(): Node {
     (errorNode as HTMLElement).appendChild(retryButton);
 
     anchor.parentNode.insertBefore(errorNode, anchor.nextSibling);
+    // The error view is the outcome that stands for the content.
+    loaded();
   };
 
   const update = async () => {
@@ -3161,6 +3166,8 @@ export function Route(): Node {
         currentTopRoute = null;
         currentKey = null;
         cleanupNodes();
+        // A terminal empty outcome: nothing will render.
+        if (!bootstrapRoutes.has(route)) loaded();
         return;
       }
 
@@ -3176,6 +3183,7 @@ export function Route(): Node {
       if (routeDef === currentTopRoute && key === currentKey && currentNode) {
         // Kept across this navigation: the instance follows it.
         updateInstanceRoute(currentNode, route);
+        loaded();
         return;
       }
 
@@ -3269,6 +3277,8 @@ export function Route(): Node {
                 parent.insertBefore(node, anchor.nextSibling);
                 currentNode = node;
               }
+              // The current pass committed (or has nothing to show): settled.
+              loaded();
             },
           );
         } catch (error) {
@@ -3284,7 +3294,7 @@ export function Route(): Node {
           hideLoading();
           fail(seq, error, routeDef);
         }
-      }
+      } else if (!bootstrapRoutes.has(route)) loaded();
     } catch (error) {
       if (seq !== navSeq) return;
       if (routeTorn) return;
@@ -3331,13 +3341,10 @@ export function Route(): Node {
   // Set up reactive tracking — track synchronously to register deps,
   // with microtask fallback if anchor isn't connected yet.
   let routeInitialized = false;
-  // Settled with the first pass: its page, error or empty outcome is shown.
-  const loaded = initialContent(anchor);
   const originalUpdate = update;
   const wrappedUpdate = async () => {
     await originalUpdate();
     routeInitialized = true;
-    loaded();
   };
   // Before the first tracked pass, so no pass can reach it uninitialized.
   const attachWait = attachRetry(anchor, onAttached);
@@ -3415,6 +3422,29 @@ export function Route(): Node {
  * | excluded by `include` | never cached; disposed on navigation away |
  * | outlet disposed | whole cache disposed and cleared |
  *
+ * ## Inactive pages: live by default, suspended on request
+ *
+ * By default a cached page stays live while it is hidden: its bindings,
+ * effects and async work keep running against the current state. With
+ * `suspendInactive: true` a page is PAUSED when it is cached and resumed when
+ * it is shown again — the same pause a leaving `when()` branch gets:
+ *
+ * - its DOM, local state, form values and route context are kept as they are
+ *   (nothing is disposed or rebuilt);
+ * - its bindings, effects created while it rendered, and `lifecycleScope()`
+ *   work do not run; what changed meanwhile is caught up in ONE run when it
+ *   is shown, against the current state and the route it is shown for;
+ * - async work it owns (a `Suspense` result, a nested outlet's page) is held,
+ *   not committed, until then;
+ * - a page shown inside a branch that is itself paused stays paused until
+ *   that branch resumes;
+ * - eviction and outlet disposal end a suspended page without a catch-up run.
+ *
+ * Only the framework's reactive work pauses. Timers, sockets, media and
+ * requests keep going unless the page stops them: capture a
+ * `lifecycleScope()` while it renders and use `scope.onPause()` /
+ * `scope.onResume()`. Pages that are not cached are disposed as before.
+ *
  * ## Cache identity is not async ownership
  *
  * The cache key answers *"which cached view is this?"*. It never answers *"may
@@ -3438,7 +3468,12 @@ export function Route(): Node {
  * KeepAliveRoute({ max: 5, include: ["dashboard"] })
  * ```
  */
-export function KeepAliveRoute(options?: { max?: number; include?: string[] }): Node {
+export function KeepAliveRoute(options?: {
+  max?: number;
+  include?: string[];
+  /** Pause a cached page while it is hidden (see above). Default `false`. */
+  suspendInactive?: boolean;
+}): Node {
   if (!_routerRef.current) throw new Error("Router not initialized. Call createRouter() first.");
 
   const anchor = document.createComment("keep-alive-route");
@@ -3456,6 +3491,37 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   const keepAliveOpt = routerOpts.keepAlive;
   const maxCache = options?.max ?? (typeof keepAliveOpt === "number" ? keepAliveOpt : 20);
   const includeNames = options?.include ?? (Array.isArray(keepAliveOpt) ? keepAliveOpt : undefined);
+
+  // `suspendInactive`: the cached pages that are paused, with what pauses them
+  // (the instance's own lifecycle, and a hold on its DOM for bindings created
+  // outside it — by an async continuation, say).
+  const suspendInactive = options?.suspendInactive === true;
+  const suspended = new Map<Node, { owner: StructuralBinding | null; unhold: () => void }>();
+  const suspend = (node: Node): void => {
+    if (!suspendInactive || suspended.has(node)) return;
+    const owner = instanceScopes.get(node)?.owner ?? null;
+    owner?.freeze?.();
+    suspended.set(node, { owner, unhold: holdSubtree(node) });
+  };
+  /** Shown again: resume it (an enclosing paused branch still holds it). */
+  const activate = (node: Node): void => {
+    const paused = suspended.get(node);
+    if (paused === undefined) return;
+    suspended.delete(node);
+    paused.unhold();
+    paused.owner?.thaw?.();
+  };
+  /** Dispose a cached page; a paused one ends without catching up. */
+  const disposeCached = (node: Node): void => {
+    const paused = suspended.get(node);
+    suspended.delete(node);
+    try {
+      disposeOwned(node);
+    } finally {
+      // Released only after the disposal: what it skipped is dropped.
+      paused?.unhold();
+    }
+  };
 
   let currentNode: Node | null = null;
   let currentKey = "";
@@ -3478,6 +3544,8 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
   let updateSeq = 0;
   /** Set once the outlet is disposed; no generation may commit afterwards. */
   let kaTorn = false;
+  // Pending until the current pass commits (see `Route`).
+  const loaded = beginLoading(anchor);
 
   const update = async () => {
     routerRevision();
@@ -3490,7 +3558,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
 
     const route = scopedRoute(router);
     const match = router["matcher"].match(route.path);
-    if (!match) return;
+    if (!match) {
+      if (!bootstrapRoutes.has(route)) loaded();
+      return;
+    }
 
     const { route: routeDef } = match;
     if ("redirect" in routeDef) {
@@ -3503,7 +3574,10 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
       return;
     }
 
-    if (!("component" in routeDef)) return;
+    if (!("component" in routeDef)) {
+      if (!bootstrapRoutes.has(route)) loaded();
+      return;
+    }
 
     // Key the cached view by the full location, not just `route.path`.
     // `route.path` strips the query/hash, so "/search?q=a" and "/search?q=b"
@@ -3518,6 +3592,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     // Same route — skip
     if (cacheKey === currentKey && currentNode) {
       updateInstanceRoute(currentNode, route);
+      loaded();
       return;
     }
 
@@ -3568,10 +3643,15 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         // Reported when observed; a cancellation is not a failure.
         if (cancellations.has(error as object) || kaTorn || seq !== updateSeq) return;
         console.error("[KeepAliveRoute] Component error:", error);
+        // No error view: the failure is the current pass's terminal outcome.
+        loaded();
         return;
       }
 
-      if (!node) return;
+      if (!node) {
+        if (!kaTorn && seq === updateSeq) loaded();
+        return;
+      }
     }
     // Re-check at the commit boundary. `component()` is user code: it can
     // navigate, or collapse the layout owning this outlet, synchronously. A
@@ -3618,6 +3698,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     if (currentNode && currentNode !== node) {
       if (currentNode.parentNode) currentNode.parentNode.removeChild(currentNode);
       if (!currentCached) disposeOwned(currentNode);
+      else suspend(currentNode);
     }
 
     if (fromCache) {
@@ -3643,7 +3724,7 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
         }
         const evictNode = cache.get(evictKey);
         if (evictNode) {
-          disposeOwned(evictNode);
+          disposeCached(evictNode);
           if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
           cache.delete(evictKey);
         }
@@ -3654,15 +3735,16 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     currentCached = fromCache || shouldCache;
     currentKey = cacheKey;
     parent.insertBefore(node, anchor.nextSibling);
+    // Resumed only now, with the route it is shown for already in place: its
+    // catch-up runs once, against the current state.
+    if (fromCache) activate(node);
+    loaded();
   };
 
   let initialized = false;
-  // Settled with the first pass (see `Route`).
-  const loaded = initialContent(anchor);
   const wrappedUpdate = async () => {
     await update();
     initialized = true;
-    loaded();
   };
   const attachWait = attachRetry(anchor, () => whenActive(gate, update));
   // Anchored, as in `Route`.
@@ -3694,10 +3776,11 @@ export function KeepAliveRoute(options?: { max?: number; include?: string[] }): 
     kaTeardown();
     attachWait.cancel();
     for (const node of cache.values()) {
-      disposeOwned(node);
+      disposeCached(node);
       if (node.parentNode) node.parentNode.removeChild(node);
     }
     cache.clear();
+    suspended.clear();
     lruOrder.length = 0;
     if (currentNode?.parentNode) currentNode.parentNode.removeChild(currentNode);
     // An uncached current view is not in `cache`, so it would otherwise be
@@ -3941,7 +4024,7 @@ export function Suspense(props: {
   const contentOwner = structuralBinding(NOOP);
   let fallbackOwner: StructuralBinding | null = null;
   // Settled once the outcome is shown, or dropped (see `settle`, teardown).
-  const loaded = initialContent(anchor);
+  const loaded = beginLoading(anchor);
   let isLoading = false;
   let generation = 0;
   let tornDown = false;
@@ -4350,6 +4433,8 @@ export function Outlet(): Node {
   // pending child load that resolves after teardown must lose ownership
   // permanently — including the right to run user component code. (OUT-002)
   let outletTorn = false;
+  // Pending until the current pass commits (see `Route`).
+  const loaded = beginLoading(anchor);
 
   const clearCurrent = () => {
     if (currentNode) {
@@ -4398,6 +4483,7 @@ export function Outlet(): Node {
     // the layout doesn't keep rendering the previous page's content.
     if (route.matched.length < 2) {
       clearCurrent();
+      if (!bootstrapRoutes.has(route)) loaded();
       return;
     }
 
@@ -4405,6 +4491,7 @@ export function Outlet(): Node {
     const childRoute = route.matched[route.matched.length - 1];
     if (!childRoute || !("component" in childRoute)) {
       clearCurrent();
+      loaded();
       return;
     }
 
@@ -4419,6 +4506,7 @@ export function Outlet(): Node {
     if (childRoute === currentChild && key === currentKey && currentNode) {
       // Kept across this navigation: the child follows it.
       updateInstanceRoute(currentNode, route);
+      loaded();
       return;
     }
 
@@ -4470,28 +4558,29 @@ export function Outlet(): Node {
             retryIfDetached(seq);
             return;
           }
-          if (!node) return;
-
-          clearCurrent();
-          parent.insertBefore(node, anchor.nextSibling);
-          currentNode = node;
-          currentChild = childRoute;
-          currentKey = key;
+          if (node) {
+            clearCurrent();
+            parent.insertBefore(node, anchor.nextSibling);
+            currentNode = node;
+            currentChild = childRoute;
+            currentKey = key;
+          }
+          loaded();
         },
       );
     } catch (error) {
       // Reported when observed; a cancellation is not a failure.
       if (cancellations.has(error as object) || outletTorn || seq !== navSeq) return;
       console.error("[Outlet] Failed to render child route:", error);
+      // No error view: the failure is the current pass's terminal outcome.
+      loaded();
     }
   };
 
   const attachWait = attachRetry(anchor, () => whenActive(gate, update));
-  // Settled with the first pass (see `Route`).
-  const loaded = initialContent(anchor);
   // Anchored, as in `Route`.
   const outletTeardown = reactiveBinding(() => {
-    void update().then(loaded);
+    void update();
   }, anchor);
   if (!anchor.parentNode) {
     // The deferred first pass must read the same route the binding does: the

@@ -368,6 +368,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // late-element enrolment). Measured: raw ~104,430 B, gzip ~36,440 B
     // (+~1,910 B raw, +~720 B gzip).
     //
+    // Raw 106,800 B, gzip baseline 36,500 B for the readiness and lifecycle
+    // follow-ups: counted readiness registrations and the public
+    // `pendingContent()`, dependencies re-taken as content reveals more,
+    // no compounded enter on content inside an element still animating,
+    // core `Suspense` / `lazy()` readiness, a lifecycle for every owned
+    // branch, `onPause()` / `onResume()`, exception-safe registration.
+    // Measured: raw ~106,540 B, gzip ~37,120 B (+~2,100 B raw, +~690 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -375,8 +383,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(104_700);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(35_800 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(106_800);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(36_500 * 1.02));
   });
 });
 

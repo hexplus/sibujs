@@ -180,6 +180,8 @@ export const captureFrozen: typeof core.captureFrozen =
       },
       onEnd: () => () => {},
       run: <T>(fn: () => T): T => fn(),
+      onChange: () => () => {},
+      within: () => false,
     }));
 export const holdSubtree: typeof core.holdSubtree = API.holdSubtree ?? (() => () => {});
 export type { HeldCheck } from "./track-core";
