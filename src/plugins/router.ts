@@ -3190,10 +3190,17 @@ export function Route(): Node {
           attachWait.request();
           return;
         }
+        // Recorded before the insertion, as a page is (see `update`).
         errorNode = view;
-        parent.insertBefore(view, anchor.nextSibling);
+        try {
+          parent.insertBefore(view, anchor.nextSibling);
+        } catch (err) {
+          if (errorNode === view) errorNode = null;
+          release(view);
+          throw err;
+        }
         // The error view is the outcome that stands for the content.
-        loaded.done();
+        if (!routeTorn && seq === navSeq) loaded.done();
       },
     }).catch((err) => console.error("[Route] Error view failed:", err));
   };
@@ -3390,13 +3397,28 @@ export function Route(): Node {
                 return;
               }
               if (node) {
+                // Recorded BEFORE the insertion, which runs the node's
+                // `connectedCallback` when it is a custom element: a teardown
+                // from there (`routeCleanup`, a navigation's) must reach it.
                 currentTopRoute = routeDef;
                 currentKey = key;
-                parent.insertBefore(node, anchor.nextSibling);
                 currentNode = node;
+                try {
+                  parent.insertBefore(node, anchor.nextSibling);
+                } catch (error) {
+                  // Nothing was inserted: the pass fails, its node released.
+                  if (currentNode === node) {
+                    currentNode = null;
+                    currentTopRoute = null;
+                    currentKey = null;
+                  }
+                  release(node);
+                  throw error;
+                }
               }
-              // The current pass committed (or has nothing to show): settled.
-              loaded.done();
+              // The current pass committed (or has nothing to show): settled —
+              // unless the insertion ended or superseded it.
+              if (!routeTorn && seq === navSeq) loaded.done();
             },
           });
         } catch (error) {
@@ -3822,9 +3844,12 @@ export function KeepAliveRoute(options?: {
         currentNode = null;
         currentKey = "";
         currentCached = false;
+        // The removal runs a custom element's `disconnectedCallback`: if that
+        // tore the outlet down, a cached page went with the cache — it is
+        // not suspended (held) again.
         outgoing.parentNode?.removeChild(outgoing);
         if (!wasCached) disposeOwned(outgoing);
-        else suspend(outgoing);
+        else if (!kaTorn) suspend(outgoing);
         return true;
       },
       insert: () => {
@@ -3846,15 +3871,42 @@ export function KeepAliveRoute(options?: {
           cache.set(cacheKey, node);
           lruOrder.push(cacheKey);
         }
+        // Recorded (and cached) before the insertion, which runs a custom
+        // element's `connectedCallback`: a teardown from there reaches it.
         currentNode = node;
         currentCached = fromCache || shouldCache;
         currentKey = cacheKey;
-        parent.insertBefore(node, anchor.nextSibling);
-        loaded.done();
+        try {
+          parent.insertBefore(node, anchor.nextSibling);
+        } catch (error) {
+          // Nothing was inserted. A cached page stays cached; a new one is
+          // dropped from the cache and disposed.
+          if (currentNode === node) {
+            currentNode = null;
+            currentKey = "";
+            currentCached = false;
+          }
+          if (!fromCache) {
+            if (cache.get(cacheKey) === node) {
+              cache.delete(cacheKey);
+              const at = lruOrder.lastIndexOf(cacheKey);
+              if (at !== -1) lruOrder.splice(at, 1);
+            }
+            disposeOwned(node);
+          }
+          // The pass's terminal outcome, as a throwing component's is.
+          console.error("[KeepAliveRoute] Component error:", error);
+          if (!kaTorn && seq === updateSeq) loaded.cancel();
+          return;
+        }
+        // Torn down from inside the insertion: the node went with the outlet.
+        if (kaTorn) return;
+        if (seq === updateSeq) loaded.done();
         // Resumed only now, with the route it is shown for already in place:
         // its catch-up runs once, against the current state — after the
         // insertion, which nothing it does can undo except through this
-        // outlet's own teardown.
+        // outlet's own teardown. Shown, so resumed even if the insertion
+        // started a newer pass: that pass tears it down when it commits.
         if (fromCache) activate(node);
         // Evict the oldest past `max`: application code too, so after the
         // view is in place. Stops if the outlet was torn down meanwhile.
@@ -4333,9 +4385,22 @@ export function Suspense(props: {
           loaded.cancel();
           return;
         }
-        parent.insertBefore(view, anchor.nextSibling);
+        // Recorded before the insertion, which runs a custom element's
+        // `connectedCallback`: the boundary's teardown from there reaches it.
         currentNode = view;
-        loaded.done();
+        try {
+          parent.insertBefore(view, anchor.nextSibling);
+        } catch (error) {
+          // Nothing was inserted: released, and the outcome is the error
+          // view, as for a failing `nodes()`.
+          if (currentNode === view) currentNode = null;
+          release(view);
+          console.error("[Suspense] Nodes error:", error);
+          if (ok) settle(myGeneration, false, error);
+          else loaded.cancel();
+          return;
+        }
+        if (!tornDown && myGeneration === generation) loaded.done();
       },
     });
   };
@@ -4668,12 +4733,24 @@ export function Outlet(): Node {
             return;
           }
           if (node) {
-            parent.insertBefore(node, anchor.nextSibling);
+            // Recorded before the insertion, as in `Route`: a custom
+            // element's `connectedCallback` may tear the outlet down.
             currentNode = node;
             currentChild = childRoute;
             currentKey = key;
+            try {
+              parent.insertBefore(node, anchor.nextSibling);
+            } catch (error) {
+              if (currentNode === node) {
+                currentNode = null;
+                currentChild = null;
+                currentKey = null;
+              }
+              release(node);
+              throw error;
+            }
           }
-          loaded.done();
+          if (!outletTorn && seq === navSeq) loaded.done();
         },
       });
     } catch (error) {

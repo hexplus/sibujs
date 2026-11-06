@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS commits and custom-element reactions — browser test fixture</title>
+  </head>
+  <body>
+    <main id="host"></main>
+    <script type="module">
+      import { div, dispose, lazy, lifecycleScope, registerDisposer, signal, span, Suspense } from "../dist/index.js";
+      import {
+        createRouter,
+        destroyRouter,
+        KeepAliveRoute,
+        navigate,
+        Outlet,
+        Route,
+        Suspense as RouterSuspense,
+      } from "../dist/plugins.js";
+
+      const host = document.getElementById("host");
+      const flush = async (turns = 8) => {
+        for (let i = 0; i < turns; i++) await new Promise((r) => setTimeout(r, 0));
+      };
+
+      let tags = 0;
+      /** A fresh custom element type whose reactions call `hooks`, with reaction counts. */
+      function customElement(hooks) {
+        const tag = `x-commit-probe-${++tags}`;
+        const counts = { connected: 0, disconnected: 0 };
+        customElements.define(
+          tag,
+          class extends HTMLElement {
+            connectedCallback() {
+              counts.connected++;
+              hooks.connected?.(this);
+            }
+            disconnectedCallback() {
+              counts.disconnected++;
+              hooks.disconnected?.(this);
+            }
+          },
+        );
+        return { make: () => document.createElement(tag), counts };
+      }
+
+      /** User work captured in a lifecycle scope: an effect, a watch and an owned cleanup. */
+      function scopedWork() {
+        const [tick, setTick] = signal(0);
+        const rec = { scope: null, effectRuns: 0, watchRuns: 0, cleanups: 0 };
+        const capture = () => {
+          const scope = lifecycleScope();
+          rec.scope = scope;
+          scope.effect(() => {
+            tick();
+            rec.effectRuns++;
+          });
+          scope.watch(tick, () => {
+            rec.watchRuns++;
+          });
+          scope.own(() => () => rec.cleanups++);
+        };
+        /** Poke the signal; report whether anything reacted, and the scope's state. */
+        const report = async () => {
+          const effects = rec.effectRuns;
+          const watches = rec.watchRuns;
+          setTick((n) => n + 1);
+          await flush();
+          return {
+            state: rec.scope?.state() ?? null,
+            reacted: rec.effectRuns !== effects || rec.watchRuns !== watches,
+            cleanups: rec.cleanups,
+          };
+        };
+        return { rec, capture, report };
+      }
+
+      /** A route page: a custom element capturing scoped work, its root's disposals counted. */
+      function page(hooks) {
+        const ce = customElement(hooks);
+        const work = scopedWork();
+        const stats = { rootCleanups: 0 };
+        const component = () => {
+          work.capture();
+          const el = ce.make();
+          registerDisposer(el, () => stats.rootCleanups++);
+          return el;
+        };
+        return { component, work, stats, counts: ce.counts };
+      }
+
+      window.__t = {
+        async lazyConnectedDispose() {
+          const work = scopedWork();
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          let rootCleanups = 0;
+          const Lazy = lazy(() =>
+            Promise.resolve({
+              default: () => {
+                work.capture();
+                const el = ce.make();
+                registerDisposer(el, () => rootCleanups++);
+                return el;
+              },
+            }),
+          );
+          container = Lazy();
+          host.appendChild(container);
+          await flush();
+          const first = await work.report();
+          dispose(container);
+          return { ...first, rootCleanups, counts: ce.counts, cleanupsAfter: work.rec.cleanups };
+        },
+
+        async lazyRepeated() {
+          const work = scopedWork();
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          const Lazy = lazy(() =>
+            Promise.resolve({
+              default: () => {
+                work.capture();
+                return ce.make();
+              },
+            }),
+          );
+          const states = [];
+          for (let i = 0; i < 4; i++) {
+            container = Lazy();
+            host.appendChild(container);
+            await flush();
+            states.push(work.rec.scope?.state() ?? null);
+          }
+          return { states, cleanups: work.rec.cleanups, counts: ce.counts };
+        },
+
+        async suspenseSharedRoot() {
+          let container;
+          let fired = false;
+          const ce = customElement({
+            disconnected: () => {
+              if (fired) return;
+              fired = true;
+              dispose(container);
+            },
+          });
+          const shared = ce.make();
+          let rootCleanups = 0;
+          registerDisposer(shared, () => rootCleanups++);
+          const work = scopedWork();
+          container = Suspense({
+            nodes: () => shared,
+            fallback: () => {
+              work.capture();
+              return shared;
+            },
+          });
+          host.appendChild(container);
+          const initial = container.firstChild === shared;
+          await flush();
+          return {
+            initial,
+            children: container.childNodes.length,
+            connected: shared.isConnected,
+            rootCleanups,
+            counts: ce.counts,
+            ...(await work.report()),
+          };
+        },
+
+        async suspenseConnectedDispose() {
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          const work = scopedWork();
+          const fallback = scopedWork();
+          let rootCleanups = 0;
+          container = Suspense({
+            nodes: () => {
+              work.capture();
+              const el = ce.make();
+              registerDisposer(el, () => rootCleanups++);
+              return el;
+            },
+            fallback: () => {
+              fallback.capture();
+              return span("…");
+            },
+          });
+          host.appendChild(container);
+          await flush();
+          dispose(container);
+          return { rootCleanups, content: await work.report(), fallback: await fallback.report() };
+        },
+
+        async routeConnectedDispose() {
+          destroyRouter();
+          let anchor;
+          const p = page({ connected: () => dispose(anchor) });
+          createRouter([{ path: "/a", component: p.component }], { mode: "memory", url: "/a" });
+          const box = div();
+          host.appendChild(box);
+          anchor = Route();
+          box.appendChild(anchor);
+          await flush();
+          return { ...p.stats, counts: p.counts, children: box.childNodes.length, ...(await p.work.report()) };
+        },
+
+        async outletConnectedDispose() {
+          destroyRouter();
+          let outlet;
+          const child = page({ connected: () => dispose(outlet) });
+          createRouter(
+            [
+              {
+                path: "/p",
+                component: () => {
+                  outlet = Outlet();
+                  return div({ class: "layout" }, outlet);
+                },
+                children: [{ path: "/c", component: child.component }],
+              },
+            ],
+            { mode: "memory", url: "/p/c" },
+          );
+          const box = div();
+          host.appendChild(box);
+          box.appendChild(Route());
+          await flush();
+          return {
+            ...child.stats,
+            counts: child.counts,
+            layoutChildren: box.querySelector(".layout")?.childNodes.length ?? -1,
+            ...(await child.work.report()),
+          };
+        },
+
+        async keepAliveDisconnectDispose() {
+          destroyRouter();
+          let anchor;
+          let armed = false;
+          const p = page({ disconnected: () => armed && dispose(anchor) });
+          createRouter(
+            [
+              { path: "/a", name: "a", component: p.component },
+              { path: "/b", name: "b", component: () => div({ class: "b" }, "b") },
+            ],
+            { mode: "memory", url: "/a" },
+          );
+          const box = div();
+          host.appendChild(box);
+          anchor = KeepAliveRoute({ suspendInactive: true });
+          box.appendChild(anchor);
+          await flush();
+          armed = true;
+          await navigate("/b");
+          await flush();
+          return { ...p.stats, b: box.querySelector(".b") !== null, ...(await p.work.report()) };
+        },
+
+        async routerSuspenseConnectedDispose() {
+          let anchor;
+          const ce = customElement({ connected: () => dispose(anchor) });
+          let rootCleanups = 0;
+          const box = div();
+          host.appendChild(box);
+          anchor = RouterSuspense({
+            nodes: () =>
+              Promise.resolve().then(() => {
+                const el = ce.make();
+                registerDisposer(el, () => rootCleanups++);
+                return el;
+              }),
+            fallback: () => span({ class: "fb" }, "…"),
+          });
+          box.appendChild(anchor);
+          await flush();
+          return { rootCleanups, counts: ce.counts, children: box.childNodes.length };
+        },
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

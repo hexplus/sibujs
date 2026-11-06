@@ -368,8 +368,14 @@ export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void
  * insertion (see `commitWhenActive`). `teardown()` disposes the outgoing
  * children not disposed yet (incoming nodes protected, and kept in place when
  * hydration adopted them, exactly as there) and returns whether it disposed
- * any; `insert()` then completes the replacement with DOM operations only,
- * reading `parent`'s children fresh. Nothing is disposed twice.
+ * any; `insert()` then completes the replacement, reading `parent`'s children
+ * fresh. Nothing is disposed twice.
+ *
+ * Neither stage is free of application code, whatever `teardown()` returns:
+ * protecting the incoming nodes detaches them, and the removal and insertion
+ * of a custom element run its `disconnectedCallback` / `connectedCallback`
+ * synchronously. The caller checks again after every `teardown()` call, and
+ * makes the incoming nodes reachable from its cleanup before `insert()`.
  *
  * @internal
  */

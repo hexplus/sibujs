@@ -239,8 +239,22 @@ export function lazy<R extends Node = HTMLElement>(
     // still showing the server's loaded content until the chunk arrives.
     if (!(isHydrating() && container.firstChild)) container.appendChild(loading);
 
-    /** Swap the container's content for `view` once the lifecycle is active (see `commitWhenActive`). */
-    const show = (view: Node, discard: () => void, shown: () => void): void => {
+    /**
+     * Swap the container's content for `view` once the lifecycle is active
+     * (see `commitWhenActive`). `release` disposes `view` and what it owns,
+     * once; `claim` makes that reachable from the container's cleanup, and
+     * runs BEFORE the insertion: inserting a custom element runs its
+     * `connectedCallback`, which may dispose the container. `shown` runs after
+     * it, unless that happened; `failed` if the insertion threw (`view` was
+     * released by then).
+     */
+    const show = (
+      view: Node,
+      release: () => void,
+      claim: () => void,
+      shown: () => void,
+      failed: (err: unknown) => void,
+    ): void => {
       const swap = stageReplaceChildren(container, [view]);
       commitWhenActive(waiting, {
         held,
@@ -248,11 +262,19 @@ export function lazy<R extends Node = HTMLElement>(
         owned: live,
         teardown: swap.teardown,
         insert: () => {
-          swap.insert();
-          shown();
+          claim();
+          try {
+            swap.insert();
+          } catch (err) {
+            // Nothing was inserted (a DOM insertion fails before it mutates).
+            release();
+            failed(err);
+            return;
+          }
+          if (!disposed) shown();
         },
         discard: () => {
-          discard();
+          release();
           ready.cancel();
         },
       });
@@ -269,9 +291,14 @@ export function lazy<R extends Node = HTMLElement>(
       show(
         view,
         () => dispose(view),
+        NOOP,
         () => {
           ready.done();
           dispatchPropagate(container, error);
+        },
+        (insertError) => {
+          ready.cancel();
+          reportError(insertError, { phase: "render", name: "lazy" });
         },
       );
     };
@@ -290,16 +317,21 @@ export function lazy<R extends Node = HTMLElement>(
       // The component is user code: it may have disposed the container, or
       // paused or ended the lifecycle — and so may the catch-up and the
       // teardown before the commit. Each is checked (`commitWhenActive`).
+      // The instance's lifecycle is the container's to end from the moment
+      // the insertion starts: its `connectedCallback` may dispose the
+      // container. An insertion that throws shows the error view instead.
       show(
         rendered,
         () => {
+          if (owner === own) owner = null;
           own.stop();
           dispose(rendered);
         },
         () => {
           owner = own;
-          ready.done();
         },
+        () => ready.done(),
+        fail,
       );
     };
 
@@ -460,8 +492,22 @@ export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
         endFallback();
         return true;
       },
+      // `el` is the container's content already (`childEl`): disposing the
+      // container from its `connectedCallback`, during the insertion,
+      // disposes it — in the container, or as the orphan `childEl` is.
       insert: () => {
-        swap.insert();
+        try {
+          swap.insert();
+        } catch (err) {
+          // Nothing was inserted: released here, reported like a throwing
+          // `nodes()`. The fallback is gone already.
+          if (childEl === el) childEl = null;
+          dispose(el);
+          ready.cancel();
+          boundary?.done();
+          dispatchPropagate(container, err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
         boundary?.done();
         ready.done();
       },

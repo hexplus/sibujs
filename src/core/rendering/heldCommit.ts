@@ -3,13 +3,15 @@ import { type HeldCheck, holdSubtree } from "../../reactivity/track";
 // ---------------------------------------------------------------------------
 // Committing a built result into a renderer, gated on a lifecycle.
 //
-// Between "the lifecycle is active and the renderer still owns this" and the
-// insertion, two steps run application code: releasing the hold on the result
-// (its skipped bindings catch up, synchronously) and tearing down the outgoing
-// content (its disposers). Either can pause or end the lifecycle, dispose the
-// renderer, or supersede its pass. So neither is a passive step: everything is
-// checked again after each one, and the insertion itself runs nothing but DOM
-// operations, right after the last check.
+// No DOM operation here is passive. Releasing the hold on the result runs its
+// skipped bindings (they catch up, synchronously); tearing down the outgoing
+// content runs its disposers; and removing or inserting a custom element runs
+// its `disconnectedCallback` / `connectedCallback` synchronously, before the
+// operation returns. Any of these can pause or end the lifecycle, dispose the
+// renderer, supersede its pass, or cancel the commit. So everything is checked
+// again after each step before the insertion. The insertion can run such a
+// callback too, so a renderer records what it inserts as its content *before*
+// the DOM operation: a disposal running inside the insertion reaches it.
 // ---------------------------------------------------------------------------
 
 const NOOP = (): void => {};
@@ -28,12 +30,22 @@ export interface HeldCommit {
   /** Whether the renderer still owns this commit: alive, its pass still current. */
   owned?: () => boolean;
   /**
-   * One step of the outgoing teardown: returns `true` when it ran one (it is
-   * application code: everything is checked again), `false` when nothing is
-   * left. A step that ran is never repeated.
+   * One step of the outgoing teardown: returns `true` when it ran one, `false`
+   * when nothing is left. Either way it may have run application code (a
+   * step that only detaches the incoming nodes runs their
+   * `disconnectedCallback`), so everything is checked again after every call;
+   * a call returning `false` is not repeated unless the commit waits for a
+   * resume meanwhile. A step that ran is never repeated.
    */
   teardown?: () => boolean;
-  /** The insertion: DOM operations and bookkeeping only. Reads its destination fresh. */
+  /**
+   * The insertion. Reads its destination fresh, and records the result as the
+   * renderer's content BEFORE the DOM operation: inserting a custom element
+   * runs its `connectedCallback`, which may dispose the renderer, and that
+   * disposal must reach the result. The commit is over by then: a `cancel`
+   * from inside it is a no-op, and it is the renderer's cleanup that releases
+   * the result.
+   */
   insert: () => void;
   /** Dispose the result: ownership was lost or the lifecycle ended. Runs before the hold is released. */
   discard: () => void;
@@ -42,7 +54,8 @@ export interface HeldCommit {
 /**
  * Insert `c.node` once `c.held` is active, the renderer owns the commit, the
  * result has caught up and the outgoing content is torn down — re-checked
- * after every step that can run application code:
+ * after every step that can run application code, each teardown call
+ * included, whatever it returns:
  *
  * - paused (now, or again after a step): the result is held (its bindings do
  *   not react) and the commit waits for the next resume — event-driven, no
@@ -79,6 +92,10 @@ export function commitWhenActive(slot: CommitSlot, c: HeldCommit): void {
   };
   const attempt = (): void => {
     drop = NOOP;
+    // Set once a teardown call reported nothing left: the checks then run once
+    // more — that call may have run application code too — and the insertion
+    // follows. Reset by a wait: a resume tears down again.
+    let clean = false;
     while (!over) {
       const state = c.held.state();
       if (state === 2 || (c.owned !== undefined && !c.owned())) {
@@ -99,7 +116,10 @@ export function commitWhenActive(slot: CommitSlot, c: HeldCommit): void {
         release();
         continue;
       }
-      if (c.teardown?.() === true) continue;
+      if (!clean) {
+        clean = c.teardown?.() !== true;
+        continue;
+      }
       finish();
       c.insert();
       return;

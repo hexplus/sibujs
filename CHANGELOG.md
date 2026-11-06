@@ -157,7 +157,14 @@ then the outgoing content's teardown — and reads its destination right before
 the insertion: a binding or disposer that pauses the branch again keeps the
 result waiting (the steps already done are not repeated); one that ends it,
 disposes the outlet or boundary, or supersedes its pass gets the result
-disposed once, nothing inserted and no readiness settled as committed. A route
+disposed once, nothing inserted and no readiness settled as committed. Removing
+and inserting a custom element run its `disconnectedCallback` /
+`connectedCallback` synchronously, so they count as such steps too: a teardown
+that only detached the incoming content is checked after just the same, and
+what is inserted is already the outlet's or boundary's content when its
+`connectedCallback` runs — disposing the outlet, boundary or `lazy()`
+container from there releases it, and ends its lifecycle, once. An insertion
+that throws releases what it was inserting. A route
 failure is still reported
 when it happens; only its error view waits. Taken back before its leave ends,
 the branch resumes: what it skipped re-runs once against the current state, an
