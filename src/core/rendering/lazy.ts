@@ -5,6 +5,7 @@ import { trackPending } from "../ssr-context";
 import { captureScope, inAdoptScope, inScope } from "./adoptScope";
 import {
   dispose,
+  disposeNodeOwn,
   registerDisposer,
   replaceChildrenSafely,
   stageReplaceChildren,
@@ -125,7 +126,9 @@ const NOOP = (): void => {};
  * once loaded, the component's own root — its return type is the union, so an
  * SVG component stays usable without a cast. A component returning a
  * `DocumentFragment` is rendered in the container either way: a fragment is
- * no root its instance could be disposed with.
+ * no root its instance could be disposed with. Cleanup registered on the
+ * fragment itself still runs, once, when the instance is disposed — after its
+ * children's.
  *
  * The loaded component belongs to the lifecycle the placeholder was rendered
  * in (a `when()` branch, a route instance, a `Suspense`'s content): while that
@@ -169,6 +172,22 @@ export function lazy<R extends Node = HTMLElement>(
     }
   };
 
+  /**
+   * How an instance rendered in a container ends: its lifecycle, and — when
+   * its root is a `DocumentFragment` — the cleanup registered on the fragment
+   * itself. The fragment's children are moved into the container, so the
+   * container's disposal reaches them (descendants first) but no longer the
+   * emptied fragment object: its own teardowns run here, after them. Only the
+   * root the component returned is the instance's to dispose this way.
+   */
+  const ending = (root: Node, own: StructuralBinding): (() => void) =>
+    root.nodeType === 11
+      ? () => {
+          disposeNodeOwn(root);
+          own.stop();
+        }
+      : own.stop;
+
   return function LazyComponent(): R | HTMLDivElement {
     // If already loaded, render immediately — except when adoption markers are
     // in play, where the shape must not depend on whether this process (or
@@ -178,7 +197,7 @@ export function lazy<R extends Node = HTMLElement>(
       const type = (root as Node | null)?.nodeType;
       if (type === 11) {
         const box = div({ class: "sibu-lazy" });
-        registerDisposer(box, own.stop);
+        registerDisposer(box, ending(root, own));
         box.appendChild(root);
         return box;
       }
@@ -198,7 +217,7 @@ export function lazy<R extends Node = HTMLElement>(
       let rendered: R;
       try {
         const [root, own] = instance(() => inScope(scope, () => loaded()));
-        registerDisposer(container, own.stop);
+        registerDisposer(container, ending(root, own));
         rendered = root;
       } catch (err) {
         dispose(container);
@@ -218,8 +237,9 @@ export function lazy<R extends Node = HTMLElement>(
     const ready = beginLoading(container);
     let disposed = false;
     const live = (): boolean => !disposed;
-    // The loaded component's own lifecycle, once committed.
-    let owner: StructuralBinding | null = null;
+    // How the loaded component's instance ends (see `ending`), from the moment
+    // its insertion starts.
+    let owner: (() => void) | null = null;
     const waiting: CommitSlot = { cancel: NOOP };
 
     // Installed BEFORE any user code runs (`importFn` below): from here on,
@@ -230,9 +250,9 @@ export function lazy<R extends Node = HTMLElement>(
       disposed = true;
       waiting.cancel();
       ready.cancel();
-      const own = owner;
+      const end = owner;
       owner = null;
-      own?.stop();
+      end?.();
     });
 
     // Show loading placeholder initially — unless this is an adopted container
@@ -320,15 +340,19 @@ export function lazy<R extends Node = HTMLElement>(
       // The instance's lifecycle is the container's to end from the moment
       // the insertion starts: its `connectedCallback` may dispose the
       // container. An insertion that throws shows the error view instead.
+      // Never inserted (cancelled, ended, held and then dropped, or a failed
+      // insertion): the root is disposed whole — a fragment still holds its
+      // children then, so they go first and its own cleanup after them.
+      const end = ending(rendered, own);
       show(
         rendered,
         () => {
-          if (owner === own) owner = null;
+          if (owner === end) owner = null;
           own.stop();
           dispose(rendered);
         },
         () => {
-          owner = own;
+          owner = end;
         },
         () => ready.done(),
         fail,

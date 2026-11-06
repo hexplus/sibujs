@@ -391,6 +391,13 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // core `Suspense` fallback. Measured: raw ~110,270 B, gzip ~38,410 B
     // (+~1,330 B raw, +~450 B gzip).
     //
+    // Raw 111,200 B, gzip baseline 37,950 B for the fourth round: commits that
+    // re-check after every teardown call and record what they insert before a
+    // custom element's reactions can run, the range / readiness / disposer
+    // bookkeeping shared between separately bundled entry points, and the
+    // cleanup of a `lazy()` component's fragment root. Measured: raw ~110,910
+    // B, gzip ~38,650 B (+~640 B raw, +~240 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -398,8 +405,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(110_600);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_750 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(111_200);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(37_950 * 1.02));
   });
 });
 

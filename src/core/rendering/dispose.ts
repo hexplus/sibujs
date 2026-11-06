@@ -1,8 +1,37 @@
+import { globalSingleton } from "../../utils/globalSingleton";
 import { DEV, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { isHydrating } from "./hydrationHooks";
 
-const elementDisposers = new WeakMap<Node, Array<() => void>>();
+// ---------------------------------------------------------------------------
+// The disposer registry, shared by every copy of this module on the page: the
+// published entry points are bundled separately (each CommonJS entry point
+// carries its own copy), and a bundler can load a copy twice. A node a router
+// outlet registered its teardown on must still be torn down when a core
+// directive disposes it. So the state lives in one first-copy-wins object
+// (see `globalSingleton`), the way the reactive runtime is shared (see
+// reactivity/track.ts) — which also drives the render-transaction captures
+// below, from whichever copy runs it. Bump the key's version only on an
+// incompatible change to its shape; copies of the same version always share
+// it.
+// ---------------------------------------------------------------------------
+
+interface DisposerState {
+  /** Each node's registered teardowns. */
+  disposers: WeakMap<Node, Array<() => void>>;
+  /** Open render-transaction captures, innermost last (see `withDisposerRollback`). */
+  captures: (DisposerCapture | null)[];
+  /** Dev only: registered teardowns not run yet (see `checkLeaks`). */
+  bindings: { count: number };
+}
+
+const state = globalSingleton<DisposerState>(Symbol.for("sibujs.disposers.v1"), () => ({
+  disposers: new WeakMap(),
+  captures: [],
+  bindings: { count: 0 },
+}));
+
+const elementDisposers = state.disposers;
 
 /**
  * Safety ceiling on the **total number of teardowns a single drain may execute**.
@@ -42,7 +71,7 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 }
 
 // Dev-mode only: track active bindings to detect orphans.
-let activeBindingCount = 0;
+const bindings = state.bindings;
 
 /**
  * One open render transaction's registration record. Frames are identities, not
@@ -72,7 +101,7 @@ function resolveCapture(capture: DisposerCapture | null | undefined): DisposerCa
 }
 
 // Open captures, innermost last. A `null` frame suppresses capturing entirely.
-const registrationCaptures: (DisposerCapture | null)[] = [];
+const registrationCaptures = state.captures;
 
 /** The capture a subscriber created right now belongs to. @internal */
 export function currentDisposerCapture(): DisposerCapture | null {
@@ -114,7 +143,7 @@ export function registerDisposer(node: Node, teardown: () => void): void {
     elementDisposers.set(node, disposers);
   }
   disposers.push(teardown);
-  if (DEV) activeBindingCount++;
+  if (DEV) bindings.count++;
   const capture = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
   if (capture) capture.entries.push([node, teardown]);
 }
@@ -211,7 +240,7 @@ export function unregisterDisposer(node: Node, teardown: () => void): boolean {
   const index = disposers.indexOf(teardown);
   if (index === -1) return false;
   disposers.splice(index, 1);
-  if (DEV) activeBindingCount--;
+  if (DEV) bindings.count--;
   if (disposers.length === 0) elementDisposers.delete(node);
   return true;
 }
@@ -276,7 +305,7 @@ export function disposeNodeOwn(node: Node): void {
     // re-run these or land in an infinite cycle.
     const snapshot = pending.slice();
     elementDisposers.delete(node);
-    if (DEV) activeBindingCount -= snapshot.length;
+    if (DEV) bindings.count -= snapshot.length;
 
     for (let i = 0; i < snapshot.length; i++) {
       if (executed >= MAX_DRAIN_TEARDOWNS) {
@@ -288,7 +317,7 @@ export function disposeNodeOwn(node: Node): void {
         const rest = snapshot.slice(i);
         const added = elementDisposers.get(node);
         elementDisposers.set(node, added ? rest.concat(added) : rest);
-        if (DEV) activeBindingCount += rest.length;
+        if (DEV) bindings.count += rest.length;
         reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
         runaway = true;
         break;
@@ -430,11 +459,11 @@ export function stageReplaceChildren(
  */
 export function checkLeaks(warnThreshold = 0): number {
   if (!DEV) return 0;
-  if (warnThreshold > 0 && activeBindingCount > warnThreshold) {
+  if (warnThreshold > 0 && bindings.count > warnThreshold) {
     devWarn(
-      `checkLeaks: ${activeBindingCount} active DOM bindings detected. ` +
+      `checkLeaks: ${bindings.count} active DOM bindings detected. ` +
         `Expected ≤${warnThreshold}. This may indicate a component was removed from the DOM without calling dispose().`,
     );
   }
-  return activeBindingCount;
+  return bindings.count;
 }

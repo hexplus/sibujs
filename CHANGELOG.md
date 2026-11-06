@@ -64,6 +64,22 @@ when(() => confirming(), () => Fragment([button("Yes"), button("No")]));
 A bare fragment handed in instead of a factory is re-attached, like a bare
 element.
 
+### Fixed — directives from `sibujs` and router components from `sibujs/plugins` in CommonJS
+
+Each CommonJS entry point is bundled on its own, so `require("sibujs")` and
+`require("sibujs/plugins")` each carried a private copy of the bookkeeping for
+the sibling ranges a renderer draws after its anchor, for pending content, and
+for the teardowns registered on nodes. A core `when()` or `match()` therefore
+did not see what a router outlet or a plugin `Suspense` rendered or was still
+loading: switching the branch away left the page on screen, without running the
+outlet's teardown, and an enter with `waitForContent` ran before the content
+arrived. That bookkeeping is now shared by every copy of the same version on
+the page, the way the reactive runtime already is, so a directive finds the
+range, waits for the pending content, and runs the teardown — once — whichever
+entry point rendered it. The ES module entry points share their chunks and were
+not affected. Copies of different versions on one page are not guaranteed to
+coordinate.
+
 ### Added — exit and enter transitions for `when()` and `match()`
 
 ```ts
@@ -185,7 +201,10 @@ active. The component, `nodes()` and `fallback()` each run in their own
 lifecycle, nested in that one, so a `lifecycleScope()` captured in them pauses
 with the page. The component's ends when its instance is disposed — the
 container, or the root a cached module renders directly: every instance has
-the same lifetime whether or not its module was loaded before. The content's
+the same lifetime whether or not its module was loaded before. A component
+returning a `DocumentFragment` is rendered in the container, and cleanup
+registered on the fragment itself runs with the instance, after its
+children's, once. The content's
 ends with the boundary; the fallback's when the content replaces it, when
 hydration discards it, or with the boundary. A `lazy()` whose `importFn`
 throws synchronously, a cached component that throws, or a `Suspense` whose

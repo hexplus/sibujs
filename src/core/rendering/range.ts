@@ -1,5 +1,6 @@
 import type { HeldCheck } from "../../reactivity/track";
 import type { StructuralBinding } from "../../reactivity/track-core";
+import { globalSingleton } from "../../utils/globalSingleton";
 import { isServer } from "../ssr-context";
 
 // ---------------------------------------------------------------------------
@@ -16,9 +17,39 @@ import { isServer } from "../ssr-context";
 // Each renderer registers how to find the LAST node of its range right now;
 // `rangeEnd()` follows those links, since that last node may itself be the
 // anchor of a nested range.
+//
+// Shared by every copy of this module on the page. The published entry points
+// are bundled separately (each CommonJS entry point carries its own copy), and
+// a bundler can load a copy twice; a core `when()` must still find the range a
+// router outlet renders, and the pending content a plugin `Suspense`
+// registers. So the bookkeeping below lives in one first-copy-wins object (see
+// `globalSingleton`), the way the reactive runtime is shared (see
+// reactivity/track.ts). Bump the key's version only on an incompatible change
+// to its shape; copies of the same version always share it.
 // ---------------------------------------------------------------------------
 
-const ends = new WeakMap<Node, () => Node | null>();
+interface RangeState {
+  /** Range starts and how to find their last node. */
+  ends: WeakMap<Node, () => Node | null>;
+  /** First renders not run yet (see `queueFirstRender`). */
+  pending: WeakMap<Node, true | (() => void)>;
+  /** Unsettled pending-content registrations. */
+  registrations: Set<Pending>;
+  /** Readiness listeners (see `onLoaded`). */
+  listeners: Set<(settled: readonly Pending[]) => void>;
+  /** Whether a notification is queued, and the entries settled since the last one. */
+  notice: { queued: boolean; batch: Pending[] };
+}
+
+const state = globalSingleton<RangeState>(Symbol.for("sibujs.ranges.v1"), () => ({
+  ends: new WeakMap(),
+  pending: new WeakMap(),
+  registrations: new Set(),
+  listeners: new Set(),
+  notice: { queued: false, batch: [] },
+}));
+
+const ends = state.ends;
 
 /**
  * Declare that `start` renders a sibling range, and how to find its last node.
@@ -33,7 +64,7 @@ export function registerRange(start: Node, last: () => Node | null): void {
 // Anchors whose first render has not run yet: queued (`true`), or waiting for
 // the anchor to be attached (the render itself). An enter waits for them, so
 // the rows a top-level `each()` renders are part of what enters.
-const pending = new WeakMap<Node, true | (() => void)>();
+const pending = state.pending;
 
 const NOTHING = (): void => {};
 
@@ -129,27 +160,28 @@ export interface Settle {
   cancel(): void;
 }
 
-const registrations = new Set<Pending>();
-const loadListeners = new Set<(settled: readonly Pending[]) => void>();
-let notifyQueued = false;
-// Entries settled since the last notification, delivered with it. Kept only
-// while someone listens, and only until that delivery. An enter whose branch
-// gained a registration's location in the same task the registration settled
-// still gets the completion, though the entry has left `registrations`.
-let settledBatch: Pending[] = [];
+const registrations = state.registrations;
+const loadListeners = state.listeners;
+// `notice.batch`: the entries settled since the last notification, delivered
+// with it. Kept only while someone listens, and only until that delivery. An
+// enter whose branch gained a registration's location in the same task the
+// registration settled still gets the completion, though the entry has left
+// `registrations`. One notification is queued at a time, whichever copy of
+// this module queued it, so every listener gets each entry once.
+const notice = state.notice;
 
 /** Tell the listeners, a microtask later (coalesced), that the registrations changed. */
 function notifyLoad(settled: Pending | null): void {
   if (loadListeners.size === 0) return;
-  if (settled !== null) settledBatch.push(settled);
-  if (notifyQueued) return;
-  notifyQueued = true;
+  if (settled !== null) notice.batch.push(settled);
+  if (notice.queued) return;
+  notice.queued = true;
   // A microtask later: a settler settles BEFORE or AFTER it inserts the
   // content, and either way the content is in place by then.
   queueMicrotask(() => {
-    notifyQueued = false;
-    const batch = settledBatch;
-    settledBatch = [];
+    notice.queued = false;
+    const batch = notice.batch;
+    notice.batch = [];
     for (const listener of [...loadListeners]) listener(batch);
   });
 }
@@ -250,7 +282,7 @@ export function onLoaded(listener: (settled: readonly Pending[]) => void): () =>
 
 /** The entries settled since the last notification, not delivered yet. @internal */
 export function settledSinceNotify(): readonly Pending[] {
-  return settledBatch;
+  return notice.batch;
 }
 
 /** Number of unsettled registrations and readiness listeners, for leak tests. @internal */
