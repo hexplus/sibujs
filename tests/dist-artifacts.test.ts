@@ -412,6 +412,16 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // before touching the branch. Measured: raw ~112,230 B, gzip ~39,200 B
     // (+~100 B raw, +~105 B gzip).
     //
+    // Gzip baseline 38,550 B (raw unchanged) for reactive-child fragment
+    // ownership: a reactive child owns a returned fragment's children and the
+    // ranges they render (`rangeStarts` / `liveRange`, now shared with
+    // `KeepAlive` and `when` / `match`, which shrank them), a commit is
+    // current before its outgoing cleanup runs and stops adopting once that
+    // cleanup — or an inserted custom element — disposes the binding, and a
+    // `Fragment` function child releases its children before the fragment's
+    // own cleanup. Measured: raw ~112,250 B, gzip ~39,310 B (−~140 B raw,
+    // +~60 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -420,7 +430,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_500 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_550 * 1.02));
   });
 });
 

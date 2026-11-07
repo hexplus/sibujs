@@ -26,15 +26,21 @@ export function bindChildNode(
   getter: () => NodeChild | NodeChild[],
   exposeNodes?: boolean,
 ): () => void {
-  // The STARTS the last run inserted, not just what it returned: a fragment
+  // The STARTS of the current run, not just what it returned: a fragment
   // empties itself on insertion, so it is recorded as its children, and a start
   // may render a sibling range of its own (an `each()` / directive anchor, a
-  // `Fragment` function child) that grows after insertion. What the last run
+  // `Fragment` function child) that grows after insertion. What the run
   // occupies is always read live from them (see `liveRange`).
   let lastNodes: Node[] = [];
-  // The fragments the last run resolved: emptied, but each is a lifetime of
+  // The fragments the current run resolved: emptied, but each is a lifetime of
   // its own (cleanup registered on the fragment object), released with it.
   let lastFragments: Node[] = [];
+  // A run is current from the moment it is built, BEFORE any outgoing cleanup
+  // (or a custom element's reaction to an insertion) can run application code
+  // that disposes this binding: the teardown then releases it, not yet placed.
+  let committing = false;
+  // Torn down: a commit that resumes after that adopts nothing.
+  let stopped = false;
   // Every run builds its nodes in this child's own scope (adopting hydration).
   const scope = captureScope();
 
@@ -98,6 +104,12 @@ export function bindChildNode(
     // rendered again keeps its live range, a fragment's starts bring what they
     // render inside it, and a start already rendering elsewhere brings that.
     const incoming = liveRange(newNodes);
+    // The getter disposed this binding: nothing is adopted.
+    if (stopped) return release(newNodes, fragments);
+    const oldFragments = lastFragments;
+    lastNodes = newNodes;
+    lastFragments = fragments;
+    committing = true;
 
     // Remove and DISPOSE old nodes that are not rendered again (Set
     // membership keeps this O(n+m)). Once detached they are no longer
@@ -112,8 +124,7 @@ export function bindChildNode(
     }
     // Then the fragments not rendered again, once: emptied by now, so this
     // reaches only their own registrations.
-    for (const frag of lastFragments) if (!fragments.includes(frag)) dispose(frag);
-    lastFragments = fragments;
+    for (const frag of oldFragments) if (!fragments.includes(frag)) dispose(frag);
 
     // Place new nodes in order using a moving cursor anchored at the
     // placeholder. Each node is positioned immediately after the previously
@@ -122,13 +133,17 @@ export function bindChildNode(
     // (already between the placeholder and the following sibling), inserting
     // every node before that fixed anchor reverses the tail ([A,B] -> [B,A]).
     // Something is placed only when there is a parent (checked above).
+    // Each step runs application code (a cleanup above, a custom element's
+    // `connectedCallback` here) that may dispose this binding, which released
+    // the candidate: liveness is read again before every insertion.
     let prev: Node = placeholder;
     for (const node of incoming) {
+      if (stopped) return;
       if (prev.nextSibling !== node) (parent as Node).insertBefore(node, prev.nextSibling);
       prev = node;
     }
-
-    lastNodes = newNodes;
+    if (stopped) return;
+    committing = false;
 
     // Placement is finished, so the rebuilt counterpart (if any) exists and can
     // be focused. A no-op unless the focused node was actually discarded —
@@ -154,11 +169,23 @@ export function bindChildNode(
     });
   }
   const stop = reactiveBinding(commit, placeholder, true);
-  // Torn down with its owner, whose dispose-walk has reached the rendered
-  // nodes by now: the fragments rendered last end here too.
+  // Torn down with its owner. A tag factory owns the binding on the parent
+  // element, whose dispose-walk has reached the rendered nodes by now. A
+  // `Fragment` function child owns it on the placeholder, which a walk (or a
+  // directive releasing its range) reaches BEFORE the siblings it renders:
+  // those are released here first. Either way, children before the fragments'
+  // own cleanup, and a commit in progress releases its candidate. Once only.
   return () => {
+    if (stopped) return;
+    stopped = true;
     stop();
-    for (const frag of lastFragments) dispose(frag);
-    lastFragments = [];
+    release(exposeNodes || committing ? lastNodes : [], lastFragments);
+    lastNodes = lastFragments = [];
   };
+}
+
+/** Dispose what `starts` render now, then the fragments' own cleanup. */
+function release(starts: Node[], fragments: Node[]): void {
+  for (const node of liveRange(starts)) dispose(node);
+  for (const frag of fragments) dispose(frag);
 }

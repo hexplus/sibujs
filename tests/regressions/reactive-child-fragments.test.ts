@@ -130,22 +130,43 @@ describe("reactive child replacing a fragment", () => {
     expect(order).toEqual(["child", "fragment"]);
   });
 
-  it("releases the fragment's own cleanup when a Fragment function child is torn down", () => {
-    let cleanups = 0;
-    const host = mount(
-      div([
-        Fragment([
-          () => {
-            const frag = Fragment([span("A")]);
-            registerDisposer(frag, () => cleanups++);
-            return frag;
-          },
-        ]),
-      ]),
-    );
+  /** A Fragment function child returning a fragment, logging cleanup order. */
+  function nestedFragment(log: string[]) {
+    return Fragment([
+      () => {
+        const child = span("A");
+        registerDisposer(child, () => log.push("child"));
+        const frag = Fragment([child]);
+        registerDisposer(frag, () => log.push("fragment"));
+        return frag;
+      },
+    ]);
+  }
+
+  it("a Fragment function child releases its children before the fragment's own cleanup on host disposal", () => {
+    // The binding is owned by the placeholder, which the host's walk reaches
+    // BEFORE the siblings it renders.
+    const log: string[] = [];
+    const host = mount(div([nestedFragment(log)]));
     expect(host.textContent).toBe("A");
     dispose(host);
-    expect(cleanups).toBe(1);
+    expect(log).toEqual(["child", "fragment"]);
+    dispose(host);
+    expect(log).toEqual(["child", "fragment"]);
+  });
+
+  it("a Fragment function child releases its children before the fragment's own cleanup on when removal", async () => {
+    const log: string[] = [];
+    const [show, setShow] = signal(true);
+    const host = mount(div([when(show, () => nestedFragment(log))]));
+    await tick();
+    expect(host.textContent).toBe("A");
+    setShow(false);
+    await tick();
+    expect(host.textContent).toBe("");
+    expect(log).toEqual(["child", "fragment"]);
+    dispose(host);
+    expect(log).toEqual(["child", "fragment"]);
   });
 
   it("removes the rows a fragment's each() rendered and added after insertion", async () => {
@@ -283,5 +304,110 @@ describe("reactive child replacing a fragment", () => {
     setOn(false);
     await tick();
     expect(host.textContent).toBe("");
+  });
+});
+
+describe("reactive child disposed while it commits", () => {
+  /** A reactive span counting its runs. */
+  function live(value: () => number, stats: { runs: number }) {
+    return span(() => {
+      stats.runs++;
+      return `B${value()}`;
+    });
+  }
+
+  it("adopts nothing after an outgoing fragment's cleanup disposes the host", () => {
+    const [show, setShow] = signal(true);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0 };
+    let incomingCleanups = 0;
+    const host: HTMLElement = mount(
+      div(() => {
+        if (show()) {
+          const frag = Fragment([span("A")]);
+          registerDisposer(frag, () => dispose(host));
+          return frag;
+        }
+        const frag = Fragment([live(value, stats)]);
+        registerDisposer(frag, () => incomingCleanups++);
+        return frag;
+      }),
+    );
+    setShow(false);
+    expect(host.textContent).toBe("");
+    // The candidate is released once: its own cleanup ran, its bindings ended.
+    expect(incomingCleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+    dispose(host);
+    expect(incomingCleanups).toBe(1);
+  });
+
+  it("adopts nothing after an outgoing child's cleanup disposes the host", () => {
+    const [show, setShow] = signal(true);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0 };
+    const host: HTMLElement = mount(
+      div(() => {
+        if (!show()) return [live(value, stats), span("C")];
+        const a = span("A");
+        registerDisposer(a, () => dispose(host));
+        return a;
+      }),
+    );
+    setShow(false);
+    expect(host.textContent).toBe("");
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+  });
+
+  it("releases the result of a getter that disposed its own host", () => {
+    const [show, setShow] = signal(true);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0 };
+    let cleanups = 0;
+    const host: HTMLElement = mount(
+      div(() => {
+        if (show()) return span("A");
+        dispose(host);
+        const frag = Fragment([live(value, stats)]);
+        registerDisposer(frag, () => cleanups++);
+        return frag;
+      }),
+    );
+    setShow(false);
+    expect(host.textContent).toBe("A");
+    expect(cleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+  });
+
+  it("stops inserting when an inserted custom element disposes the host", () => {
+    const [show, setShow] = signal(true);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0 };
+    let host: HTMLElement | null = null;
+    const tag = "f2-dispose-on-connect";
+    if (!customElements.get(tag)) {
+      customElements.define(
+        tag,
+        class extends HTMLElement {
+          connectedCallback() {
+            if (host) dispose(host);
+          }
+        },
+      );
+    }
+    host = mount(div(() => (show() ? span("A") : Fragment([document.createElement(tag), live(value, stats)]))));
+    setShow(false);
+    // The custom element went in and disposed the host; what follows it did not.
+    expect(host.querySelector(tag)).not.toBeNull();
+    expect(host.textContent).toBe("");
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
   });
 });
