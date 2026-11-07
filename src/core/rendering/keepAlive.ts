@@ -103,9 +103,11 @@ export function KeepAlive(
       // it registered, even when it disposed the anchor first (the teardown
       // could not reach a case that was never returned).
       entry = cacheCase(withDisposerRollback(factory));
-      // The factory disposed the anchor: the case never reached the cache, so
-      // the teardown could not release it.
-      if (disposed) return releaseCase(entry);
+      // Not cached, so released here: the factory disposed the anchor (the
+      // case never reached the cache, so the teardown could not release it),
+      // or a switch it started already cached a newer case for this key
+      // (`a → b → a`), which is the one shown and owned.
+      if (disposed || cache.has(key)) return releaseCase(entry);
       cache.set(key, entry);
       // Superseded by a switch the factory started: cached, but least
       // recently used, so a bounded cache evicts it rather than the case

@@ -11,7 +11,7 @@ import { DEV, devAssert, devWarn, devWarnLazy } from "../dev";
 import { reportError } from "../errors";
 import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
 import { queueFirstRender, registerRange } from "./range";
 import { requireDocument } from "./requireDocument";
@@ -390,7 +390,12 @@ export function each<T>(
           outerRow = renderingRow;
           renderingRow = reads;
           try {
-            node = resolveNodeChild(inScope(keyedScope(scope, key), () => render(renderItem, renderIndex)));
+            // A transaction: a render that throws after allocating (a reactive
+            // element, a cleanup) releases what it registered; only the inert
+            // placeholder below takes its place.
+            node = resolveNodeChild(
+              inScope(keyedScope(scope, key), () => withDisposerRollback(() => render(renderItem, renderIndex))),
+            );
           } finally {
             resumeTracking();
             renderingRow = outerRow;
@@ -444,6 +449,10 @@ export function each<T>(
       const tmp = nodeMap;
       nodeMap = workMap;
       workMap = tmp;
+      // Outside a pass the scratch map holds nothing: what it held were the
+      // previous pass's rows, some already released — a teardown must never
+      // reach them (it disposes `workMap` as the rows a pass in progress built).
+      workMap.clear();
       initialized = true;
       // No rows remain, so there is nothing queued — but keep the buffer clean
       // rather than leaving a stale count for the next pass.
@@ -514,6 +523,7 @@ export function each<T>(
     const tmp = nodeMap;
     nodeMap = workMap;
     workMap = tmp;
+    workMap.clear();
     initialized = true;
 
     flushRowCells();
@@ -612,7 +622,8 @@ export function each<T>(
     untrack();
 
     // The committed rows, and those a pass in progress already built (a
-    // render that disposed this list): the new ones are only in `workMap`.
+    // render that disposed this list): the new ones are only in `workMap`,
+    // which is empty outside a pass.
     for (const map of [nodeMap, workMap]) {
       for (const row of map.values()) {
         dispose(row.node);

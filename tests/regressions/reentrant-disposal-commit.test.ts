@@ -591,3 +591,178 @@ describe("KeepAlive first render that switches the key", () => {
     dispose(anchor);
   });
 });
+
+describe("each() teardown after a completed pass", () => {
+  it("does not reclaim a removed row now owned by another container", async () => {
+    const [rows, setRows] = signal([1]);
+    const row = span("reused elsewhere");
+    const anchor = each(rows, () => row, { key: (x) => x });
+    const host = div([anchor]);
+    document.body.append(host);
+    await tick();
+    setRows([]);
+    expect(row.parentNode).toBeNull();
+    const other = div([row]);
+    document.body.append(other);
+    let newOwnerCleanups = 0;
+    registerDisposer(row, () => newOwnerCleanups++);
+    dispose(anchor);
+    expect(other.textContent).toBe("reused elsewhere");
+    expect(row.parentNode).toBe(other);
+    expect(newOwnerCleanups).toBe(0);
+  });
+
+  it("still releases every committed row once", async () => {
+    const [rows, setRows] = signal([1, 2]);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0, cleanups: 0 };
+    const anchor = each(rows, (n) => tracked(String(n()), value, stats), { key: (x) => x });
+    const host = div([anchor]);
+    document.body.append(host);
+    await tick();
+    setRows([2, 3]);
+    await tick();
+    expect(stats.cleanups).toBe(1);
+    dispose(anchor);
+    expect(stats.cleanups).toBe(3);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+  });
+});
+
+describe("each() row render that throws", () => {
+  it("rolls back a row that disposed its outer KeepAlive and then threw", async () => {
+    setRuntimeErrorHandler(() => {});
+    const [key, setKey] = signal("a");
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0, cleanups: 0 };
+    const host = div();
+    document.body.append(host);
+    let anchor: Comment | undefined;
+    anchor = KeepAlive(key, {
+      a: () => div("a"),
+      b: () =>
+        each(
+          () => [1],
+          () => {
+            dispose(anchor as Comment);
+            tracked("row", value, stats);
+            throw new Error("disposed row failed");
+          },
+          { key: (x) => x },
+        ),
+    });
+    host.append(anchor);
+    await tick();
+    setKey("b");
+    await tick();
+    expect(host.textContent).toBe("");
+    expect(stats.cleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+  });
+
+  it("rolls back a throwing row and keeps the other rows live", async () => {
+    setRuntimeErrorHandler(() => {});
+    const [value, setValue] = signal(0);
+    const failed = { runs: 0, cleanups: 0 };
+    const kept = { runs: 0, cleanups: 0 };
+    const anchor = each(
+      () => [1, 2],
+      (n) => {
+        if (n() === 1) return tracked("ok", value, kept);
+        tracked("bad", value, failed);
+        throw new Error("row failed");
+      },
+      { key: (x) => x },
+    );
+    const host = div([anchor]);
+    document.body.append(host);
+    await tick();
+    expect(host.textContent).toBe("ok0");
+    expect(failed.cleanups).toBe(1);
+    const before = failed.runs;
+    setValue(1);
+    expect(failed.runs).toBe(before);
+    expect(host.textContent).toBe("ok1");
+    expect(kept.cleanups).toBe(0);
+    dispose(anchor);
+    expect(kept.cleanups).toBe(1);
+  });
+});
+
+describe("KeepAlive first render redirected back to the same key", () => {
+  /** `a` redirects to `b` on its first build; `b` always redirects back to `a`. */
+  function roundTrip(value: () => number, latest: Stats) {
+    let aBuilds = 0;
+    const cases = {
+      a: () => {
+        const build = ++aBuilds;
+        if (build === 1) {
+          setKeyRef("b");
+          return div("obsolete a");
+        }
+        return tracked("latest a", value, latest);
+      },
+      b: () => {
+        setKeyRef("a");
+        return div("b");
+      },
+    };
+    let setKeyRef: (k: string) => void = () => {};
+    return {
+      cases,
+      bind: (set: (k: string) => void) => {
+        setKeyRef = set;
+      },
+      builds: () => aBuilds,
+    };
+  }
+
+  it.each([1, 10])("keeps the newest case owned with max %i", async (max) => {
+    const [key, setKey] = signal("a");
+    const [value, setValue] = signal(0);
+    const latest = { runs: 0, cleanups: 0 };
+    const trip = roundTrip(value, latest);
+    trip.bind(setKey);
+    const host = div();
+    document.body.append(host);
+    const anchor = KeepAlive(key, trip.cases, { max });
+    host.append(anchor);
+    await tick();
+    expect(key()).toBe("a");
+    expect(host.textContent).toBe("latest a0");
+    dispose(anchor);
+    expect(host.textContent).toBe("");
+    expect(latest.cleanups).toBe(1);
+    const before = latest.runs;
+    setValue(1);
+    expect(latest.runs).toBe(before);
+  });
+
+  it("navigates the cached cases afterwards without rebuilding them", async () => {
+    const [key, setKey] = signal("a");
+    const [value] = signal(0);
+    const latest = { runs: 0, cleanups: 0 };
+    const trip = roundTrip(value, latest);
+    trip.bind(setKey);
+    const host = div();
+    document.body.append(host);
+    const anchor = KeepAlive(key, trip.cases);
+    host.append(anchor);
+    await tick();
+    expect(host.textContent).toBe("latest a0");
+    setKey("b");
+    await tick();
+    expect(host.textContent).toBe("b");
+    setKey("a");
+    await tick();
+    expect(host.textContent).toBe("latest a0");
+    expect(trip.builds()).toBe(2);
+    expect(latest.cleanups).toBe(0);
+    dispose(anchor);
+    expect(latest.cleanups).toBe(1);
+  });
+});
