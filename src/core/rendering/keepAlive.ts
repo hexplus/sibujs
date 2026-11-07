@@ -1,5 +1,5 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
-import { devWarn, isDev } from "../dev";
+import { DEV, devWarn } from "../dev";
 import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { collectRange, liveRange, queueFirstRender, rangeStarts, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
@@ -52,7 +52,7 @@ export function KeepAlive(
   const lruOrder: string[] = [];
   // Default to a bounded cache (10). Pass { max: 0 } explicitly for unbounded.
   const max = options?.max ?? 10;
-  if (max === 0 && isDev()) {
+  if (DEV && max === 0) {
     devWarn("KeepAlive: unbounded cache (max: 0). Cached subtrees will never be evicted — set `max` to bound memory.");
   }
 
@@ -107,13 +107,17 @@ export function KeepAlive(
       // (`a → b → a`): that one is shown and owned. When this call returned
       // that case's own root (a factory reusing one node), there is nothing to
       // adopt or release — adopting it would pull it out of the shown case.
-      const winner = cache.get(key);
-      if (winner?.source === node) return;
+      // Adoption runs application code too (moving a connected custom element
+      // runs its `disconnectedCallback`), which may start that newer switch:
+      // the cache is read again after it, never from before the move.
+      const reused = () => cache.get(key)?.source === node;
+      if (reused()) return;
       entry = cacheCase(node);
+      if (reused()) return;
       // Not cached, so released here: the factory disposed the anchor (the
       // case never reached the cache, so the teardown could not release it),
       // or it lost to that newer case.
-      if (disposed || winner) return releaseCase(entry);
+      if (disposed || cache.has(key)) return releaseCase(entry);
       cache.set(key, entry);
       // Superseded by a switch the factory started: cached, but least
       // recently used, so a bounded cache evicts it rather than the case

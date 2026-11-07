@@ -866,3 +866,85 @@ describe("KeepAlive same-key supersession reusing one root", () => {
     expect(stats.cleanups).toBe(1);
   });
 });
+
+describe("KeepAlive adoption whose disconnectedCallback redirects a→b→a", () => {
+  /**
+   * The first `a` build returns a custom element connected elsewhere; moving it
+   * into the case's park runs its `disconnectedCallback`, which selects `b`
+   * once, and `b` selects `a` again. `latest` builds the newer `a`.
+   */
+  function adoption(setKey: (k: string) => void, latest: () => Node) {
+    let redirected = false;
+    const tag = `f5-adopt-${++tagId}`;
+    customElements.define(
+      tag,
+      class extends HTMLElement {
+        disconnectedCallback() {
+          if (redirected) return;
+          redirected = true;
+          setKey("b");
+        }
+      },
+    );
+    const original = document.createElement(tag);
+    original.textContent = "obsolete a";
+    document.body.append(div([original]));
+    let aBuilds = 0;
+    const cases = {
+      a: () => (++aBuilds === 1 ? original : latest()),
+      b: () => {
+        setKey("a");
+        return div("b");
+      },
+    };
+    return { original, cases };
+  }
+
+  it.each([1, 10, undefined])("keeps the newer case owned with max %s", async (max) => {
+    const [key, setKey] = signal("a");
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0, cleanups: 0 };
+    const { original, cases } = adoption(setKey, () => tracked("latest a", value, stats));
+    let obsoleteCleanups = 0;
+    registerDisposer(original, () => obsoleteCleanups++);
+    const host = div();
+    document.body.append(host);
+    const anchor = KeepAlive(key, cases, max === undefined ? undefined : { max });
+    host.append(anchor);
+    await tick();
+    expect(key()).toBe("a");
+    expect(host.textContent).toBe("latest a0");
+    expect(obsoleteCleanups).toBe(1);
+    expect(original.isConnected).toBe(false);
+    dispose(anchor);
+    expect(host.textContent).toBe("");
+    expect(stats.cleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+    expect(obsoleteCleanups).toBe(1);
+  });
+
+  it.each([1, 10, undefined])("keeps the winner's root when the newer case reuses it, max %s", async (max) => {
+    const [key, setKey] = signal("a");
+    let shared: Node | undefined;
+    const { original, cases } = adoption(setKey, () => shared as Node);
+    shared = original;
+    let cleanups = 0;
+    registerDisposer(original, () => cleanups++);
+    const host = div();
+    document.body.append(host);
+    const anchor = KeepAlive(key, cases, max === undefined ? undefined : { max });
+    host.append(anchor);
+    await tick();
+    expect(key()).toBe("a");
+    expect(original.parentNode).toBe(host);
+    expect(host.textContent).toBe("obsolete a");
+    expect(cleanups).toBe(0);
+    dispose(anchor);
+    expect(host.textContent).toBe("");
+    expect(cleanups).toBe(1);
+    dispose(anchor);
+    expect(cleanups).toBe(1);
+  });
+});
