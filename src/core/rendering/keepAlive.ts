@@ -1,7 +1,7 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { queueFirstRender, registerNodesRange } from "./range";
+import { collectRange, queueFirstRender, rangeEnd, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -48,7 +48,7 @@ export function KeepAlive(
 ): Comment {
   requireDocument();
   const anchor = document.createComment("keep-alive");
-  const cache = new Map<string, Node>();
+  const cache = new Map<string, CachedCase>();
   const lruOrder: string[] = [];
   // Default to a bounded cache (10). Pass { max: 0 } explicitly for unbounded.
   const max = options?.max ?? 10;
@@ -57,7 +57,7 @@ export function KeepAlive(
   }
 
   let currentKey: string | undefined;
-  let currentNode: Node | null = null;
+  let current: CachedCase | null = null;
   let initialized = false;
   let disposed = false;
 
@@ -71,47 +71,31 @@ export function KeepAlive(
     // Skip if same key
     if (initialized && key === currentKey) return;
 
-    // Detach current node (WITHOUT disposing — keep reactive bindings alive)
-    if (currentNode?.parentNode) {
-      parent.removeChild(currentNode);
-    }
+    // Detach the shown case (WITHOUT disposing — keep reactive bindings alive)
+    if (current !== null) parkCase(current);
+    current = null;
 
     currentKey = key;
 
     // Retrieve from cache or create new
-    let node = cache.get(key);
-    if (!node) {
+    let entry = cache.get(key);
+    if (!entry) {
       const factory = cases[key];
       if (!factory) {
-        currentNode = null;
         initialized = true;
         return;
       }
-      node = factory();
-      // A DocumentFragment is emptied by insertBefore (its children move out),
-      // leaving an empty fragment with no parentNode — it could then never be
-      // detached or re-attached, breaking caching. Wrap multi-root/fragment
-      // content in a layout-transparent container so it moves as a unit.
-      // Detected by `nodeType`, not `instanceof DocumentFragment`: a fragment
-      // built in another realm (an iframe's document) failed that check, went
-      // in unwrapped, and was emptied on insertion.
-      if (node.nodeType === 11 /* DOCUMENT_FRAGMENT_NODE */) {
-        const wrapper = document.createElement("div");
-        wrapper.style.display = "contents";
-        wrapper.appendChild(node);
-        node = wrapper;
-      }
-      cache.set(key, node);
+      entry = cacheCase(factory());
+      cache.set(key, entry);
       lruOrder.push(key);
 
       // Evict oldest if over max
       if (max > 0 && lruOrder.length > max) {
         const evictKey = lruOrder.shift()!;
-        const evictNode = cache.get(evictKey);
-        if (evictNode) {
-          dispose(evictNode);
-          if (evictNode.parentNode) evictNode.parentNode.removeChild(evictNode);
+        const evicted = cache.get(evictKey);
+        if (evicted) {
           cache.delete(evictKey);
+          releaseCase(evicted);
         }
       }
     } else {
@@ -123,9 +107,13 @@ export function KeepAlive(
       }
     }
 
-    // Insert cached/new node after anchor
-    parent.insertBefore(node, anchor.nextSibling);
-    currentNode = node;
+    // Insert the case's complete range after the anchor: everything parked,
+    // including what its renderers added meanwhile (they render next to their
+    // anchor, in the park). Then a nested renderer whose first render found it
+    // unattached runs it.
+    parent.insertBefore(entry.park, anchor.nextSibling);
+    resumePending(entry.starts);
+    current = entry;
     initialized = true;
   };
 
@@ -139,8 +127,14 @@ export function KeepAlive(
   // keeping its pending work for the resume.
   const binding = structuralBinding(update, anchor);
   // The shown case sits after the anchor; an enclosing directive branch that
-  // holds this anchor takes it along.
-  registerNodesRange(anchor, () => [currentNode]);
+  // holds this anchor takes it along. The range ends at the last start still
+  // next to the anchor, or the range that start renders (`rangeEnd` follows
+  // it from there). Scanned from the end: a case can have many starts.
+  registerRange(anchor, () => {
+    const starts = current?.starts ?? [];
+    for (let i = starts.length; i--; ) if (starts[i].parentNode === anchor.parentNode) return starts[i];
+    return null;
+  });
   const untrack = binding.stop;
 
   if (!initialized) {
@@ -161,14 +155,66 @@ export function KeepAlive(
   registerDisposer(anchor, () => {
     disposed = true;
     untrack();
-    for (const node of cache.values()) {
-      dispose(node);
-      if (node.parentNode) node.parentNode.removeChild(node);
-    }
+    const entries = [...cache.values()];
     cache.clear();
     lruOrder.length = 0;
-    currentNode = null;
+    current = null;
+    for (const entry of entries) releaseCase(entry);
   });
 
   return anchor;
+}
+
+/**
+ * One cached case. Its content is a sibling RANGE, not a single node: a
+ * `when()` / `each()` / `match()` root is a comment whose visible content
+ * follows it as siblings, and a fragment contributes each of its children
+ * (some of which may be such anchors). Moving only the root node would leave
+ * that content behind on the page.
+ */
+interface CachedCase {
+  /** What the factory returned; a fragment keeps its own cleanups. */
+  source: Node;
+  /** The top-level nodes the case renders, each possibly the start of a range. */
+  starts: Node[];
+  /** Holds the complete range while the case is detached. */
+  park: DocumentFragment;
+}
+
+function cacheCase(node: Node): CachedCase {
+  const park = document.createDocumentFragment();
+  // A fragment is emptied when inserted: record its children first. Detected
+  // by `nodeType`, not `instanceof DocumentFragment`, so a fragment built in
+  // another realm (an iframe's document) is handled too. Only the canonical
+  // starts are recorded: a child inside an earlier child's range (the initial
+  // result of a reactive child, rendered after its placeholder) is that
+  // range's content, replaced by its renderer later, and must never come back.
+  const starts: Node[] = [];
+  if (node.nodeType === 11) for (let n = node.firstChild; n; n = rangeEnd(n).nextSibling) starts.push(n);
+  else starts.push(node);
+  // First adoption: a detached start is only itself; one already rendering
+  // its range elsewhere brings it along, read before the move (afterwards it
+  // is no longer the start's sibling). One node at a time: a spread is bounded
+  // by the engine's argument limit.
+  for (const start of starts) for (const n of start.parentNode ? collectRange([start]) : [start]) park.appendChild(n);
+  return { source: node, starts, park };
+}
+
+/**
+ * Detach the case's complete range into its park, keeping it alive. Read live
+ * from the starts (nested ranges included); a start removed since adoption is
+ * no longer the case's.
+ */
+function parkCase(entry: CachedCase): void {
+  for (const n of collectRange(entry.starts)) entry.park.appendChild(n);
+}
+
+/** Dispose the case's complete range (and the fragment's own cleanups) and remove it. */
+function releaseCase(entry: CachedCase): void {
+  for (const n of collectRange(entry.starts)) {
+    dispose(n);
+    n.parentNode?.removeChild(n);
+  }
+  // The fragment is empty by now, so this reaches only its own registrations.
+  if (entry.source.nodeType === 11) dispose(entry.source);
 }

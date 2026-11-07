@@ -39,17 +39,20 @@ describe("KeepAlive", () => {
     expect(root.querySelector("b")).toBeNull();
   });
 
-  it("wraps a DocumentFragment factory result in a display:contents container", async () => {
-    const [k] = signal("frag");
+  it("renders a DocumentFragment factory result as a sibling range, without a wrapper", async () => {
+    const [k, setK] = signal("frag");
     const anchor = KeepAlive(() => k(), {
       frag: () => Fragment([document.createElement("span"), document.createElement("span")]),
+      other: () => document.createElement("b"),
     });
     const root = mountAnchor(anchor);
     await Promise.resolve();
-    const wrapper = root.querySelector("div");
-    expect(wrapper).toBeTruthy();
-    expect((wrapper as HTMLElement).style.display).toBe("contents");
-    expect(wrapper?.querySelectorAll("span").length).toBe(2);
+    expect(root.querySelector("div")).toBeNull();
+    expect(Array.from(root.childNodes).map((n) => n.nodeName)).toEqual(["#comment", "SPAN", "SPAN"]);
+    setK("other");
+    expect(Array.from(root.childNodes).map((n) => n.nodeName)).toEqual(["#comment", "B"]);
+    setK("frag");
+    expect(Array.from(root.childNodes).map((n) => n.nodeName)).toEqual(["#comment", "SPAN", "SPAN"]);
   });
 
   it("preserves a cached subtree (no dispose) and re-shows it, with LRU + eviction", async () => {
