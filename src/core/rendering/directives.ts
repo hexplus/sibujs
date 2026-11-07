@@ -18,11 +18,13 @@ import {
   anyPending,
   collectRange,
   hasRange,
+  liveRange,
   loadingWithin,
   onLoaded,
   type Pending,
   pendingWithin,
   queueFirstRender,
+  rangeStarts,
   registerRange,
   resumePending,
   settledContent,
@@ -164,7 +166,7 @@ function isDirectiveOptions(value: unknown): value is DirectiveOptions {
 interface Branch {
   /** The node the branch resolved to: an element, a text node, or a fragment. */
   source: Node;
-  /** The nodes it was inserted as: the fragment's children, or `[source]`. */
+  /** The nodes it was inserted as: the fragment's starts (see `rangeStarts`), or `[source]`. */
   starts: Node[];
   /** Every node it occupies after the anchor, as of the last `refreshNodes`. */
   nodes: Node[];
@@ -200,10 +202,6 @@ interface Branch {
   inserting: boolean;
 }
 
-// A fragment's child nodes, recorded when it was first inserted: insertion
-// empties it, and a bare fragment (one handed in rather than built) is
-// re-attached through them.
-const fragmentStarts = new WeakMap<Node, Node[]>();
 // The nodes a bare branch occupies (its range, with whatever an `each()` or
 // nested directive in it rendered), as of its last refresh: taking back a bare
 // branch that is still leaving re-inserts all of them.
@@ -266,19 +264,10 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     );
   }
 
-  let starts: Node[];
-  if (node.nodeType === 11) {
-    // A fragment: record its children before inserting it empties it. A bare
-    // fragment re-attached later is already empty; put back what it held.
-    if (node.firstChild) {
-      starts = Array.from(node.childNodes);
-      fragmentStarts.set(node, starts);
-    } else {
-      starts = fragmentStarts.get(node) ?? [];
-    }
-  } else {
-    starts = [node];
-  }
+  // A fragment: its canonical starts, recorded before inserting it empties it.
+  // A bare fragment re-attached later is already empty; this puts back what it
+  // held (see `rangeStarts`).
+  const starts = rangeStarts(node);
   const park = owned ? undefined : parked.get(node);
   // Read live wherever the starts are: a bare branch still leaving (or
   // attached anywhere else) brings what its range renders NOW — a nested
@@ -287,8 +276,7 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
   // longer be read.
   const nodes = park?.firstChild
     ? Array.from(park.childNodes)
-    : (!owned && starts.every((start) => start.parentNode === null) && detachedRanges.get(node)) ||
-      attachedRanges(starts);
+    : (!owned && starts.every((start) => start.parentNode === null) && detachedRanges.get(node)) || liveRange(starts);
   // An empty fragment the directive built still has a lifetime: cleanup
   // registered on the fragment itself runs when the branch is released.
   if (nodes.length === 0 && !owned) return null;
@@ -305,18 +293,6 @@ function resolveBranch(branch: NodeChild, attachedOnce: WeakSet<Node>, where: st
     released: false,
     inserting: false,
   };
-}
-
-/**
- * The nodes `starts` bring along on their first attachment: a start that is
- * already rendering its range somewhere else (an `each()` built in another
- * parent, a nested directive that has rendered) moves with that range, read
- * BEFORE the move — once the anchor has left, its old range is no longer its
- * sibling and cannot be found.
- */
-function attachedRanges(starts: Node[]): Node[] {
-  if (!starts.some(hasRange)) return starts;
-  return [...new Set(starts.flatMap((start) => (start.parentNode === null ? [start] : collectRange([start]))))];
 }
 
 /**

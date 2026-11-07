@@ -336,6 +336,41 @@ export function rangeEnd(node: Node): Node {
   return cur;
 }
 
+// A fragment's starts, recorded when first read: insertion empties it, and a
+// renderer handed the same fragment again puts back what it held.
+const fragmentStarts = new WeakMap<Node, Node[]>();
+
+/**
+ * The top-level nodes `node` is inserted as, each possibly the start of a
+ * range: a fragment's children, else `[node]`. Read (and recorded) before
+ * insertion empties the fragment. Only canonical starts: a child inside an
+ * earlier child's range (what a reactive child first rendered after its
+ * placeholder) is that range's content, replaced by its renderer later, and
+ * must never come back. Detected by `nodeType`, not `instanceof
+ * DocumentFragment`, so a fragment from another realm counts too.
+ *
+ * @internal
+ */
+export function rangeStarts(node: Node): Node[] {
+  if (node.nodeType !== 11) return [node];
+  if (!node.firstChild) return fragmentStarts.get(node) ?? [];
+  const starts: Node[] = [];
+  for (let n: Node | null = node.firstChild; n; n = rangeEnd(n).nextSibling) starts.push(n);
+  fragmentStarts.set(node, starts);
+  return starts;
+}
+
+/**
+ * The nodes `starts` occupy now, in order, read before any of them moves: an
+ * attached start brings the range it renders (once it has left, that range is
+ * no longer its sibling and cannot be found); a detached one is only itself.
+ *
+ * @internal
+ */
+export function liveRange(starts: readonly Node[]): Node[] {
+  return starts.flatMap((start) => (start.parentNode && ends.has(start) ? collectRange([start]) : [start]));
+}
+
 /**
  * The nodes `starts` occupy now, in DOM order: each start that is still
  * attached followed by the range it renders. Detached starts are skipped (a

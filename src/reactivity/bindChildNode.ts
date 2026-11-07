@@ -3,7 +3,7 @@ import { reportError } from "../core/errors";
 import { captureScope, inScope } from "../core/rendering/adoptScope";
 import { dispose } from "../core/rendering/dispose";
 import { captureFocusWithin, restoreFocusWithin } from "../core/rendering/focusPreservation";
-import { registerRange } from "../core/rendering/range";
+import { liveRange, rangeStarts, registerRange } from "../core/rendering/range";
 import type { NodeChild } from "../core/rendering/types";
 import { reactiveBinding } from "./track";
 
@@ -26,7 +26,15 @@ export function bindChildNode(
   getter: () => NodeChild | NodeChild[],
   exposeNodes?: boolean,
 ): () => void {
+  // The STARTS the last run inserted, not just what it returned: a fragment
+  // empties itself on insertion, so it is recorded as its children, and a start
+  // may render a sibling range of its own (an `each()` / directive anchor, a
+  // `Fragment` function child) that grows after insertion. What the last run
+  // occupies is always read live from them (see `liveRange`).
   let lastNodes: Node[] = [];
+  // The fragments the last run resolved: emptied, but each is a lifetime of
+  // its own (cleanup registered on the fragment object), released with it.
+  let lastFragments: Node[] = [];
   // Every run builds its nodes in this child's own scope (adopting hydration).
   const scope = captureScope();
 
@@ -44,76 +52,68 @@ export function bindChildNode(
       return;
     }
 
+    // Everything the last run occupies NOW, read before anything is detached:
+    // what its starts' ranges render (rows an `each()` added, a nested
+    // directive's branch) is found only while they are siblings.
+    const old = liveRange(lastNodes);
+
     // Snapshot focus BEFORE anything is detached — once a node is removed,
     // `document.activeElement` has already fallen back to <body> and there is
     // nothing left to identify. Returns null unless a field inside the subtree
     // we are about to discard actually held focus.
-    const focused = captureFocusWithin(lastNodes);
+    const focused = captureFocusWithin(old);
 
-    if (result == null || typeof result === "boolean") {
-      // Remove and DISPOSE all previously inserted nodes. Once detached they
-      // are no longer reachable by an ancestor dispose-walk, so without
-      // disposing here their reactive bindings/listeners leak (every sibling
-      // helper — each/dynamic/directives — disposes on removal).
-      for (let i = 0; i < lastNodes.length; i++) {
-        const node = lastNodes[i];
-        dispose(node);
-        if (node.parentNode) node.parentNode.removeChild(node);
-      }
-      lastNodes.length = 0;
-      // Nothing was rendered in their place, so there is no counterpart to
-      // restore to — this reports the loss rather than repairing it.
-      restoreFocusWithin(focused, lastNodes, "bindChildNode");
-      return;
-    }
-
+    // Nothing to render (null / boolean) removes everything previously
+    // rendered, attached or not; something to render needs the parent.
+    const items = result == null || typeof result === "boolean" ? [] : Array.isArray(result) ? result : [result];
     const parent = placeholder.parentNode;
-    if (!parent) {
-      lastNodes.length = 0;
+    if (!parent && items.length > 0) {
+      lastNodes = [];
       return;
     }
 
-    // Build the new node list. Dedupe by reference so a getter returning
-    // `[sharedEl, sharedEl]` doesn't desync DOM (insertBefore moves the
-    // node, leaving only one in place but our list recording two).
-    let newNodes: Node[];
-    if (Array.isArray(result)) {
-      newNodes = [];
-      const seen = new Set<Node>();
-      for (let i = 0; i < result.length; i++) {
-        const item = result[i];
-        if (item == null || typeof item === "boolean") continue;
-        const node = item instanceof Node ? item : document.createTextNode(String(item));
-        if (seen.has(node)) {
+    // Build the new start list: a fragment contributes its starts, recorded
+    // before insertion empties it (see `rangeStarts`). Dedupe by reference so
+    // a getter returning `[sharedEl, sharedEl]` doesn't desync DOM
+    // (insertBefore moves the node, leaving only one in place but our list
+    // recording two).
+    const newNodes: Node[] = [];
+    const fragments: Node[] = [];
+    const seen = new Set<Node>();
+    for (const item of items) {
+      if (item == null || typeof item === "boolean") continue;
+      const node = item instanceof Node ? item : document.createTextNode(String(item));
+      if (node.nodeType === 11) fragments.push(node);
+      for (const start of rangeStarts(node)) {
+        if (seen.has(start)) {
           if (DEV) devWarn("bindChildNode: duplicate node reference in array — only the first occurrence is rendered.");
           continue;
         }
-        seen.add(node);
-        newNodes.push(node);
-      }
-    } else {
-      const node = result instanceof Node ? result : document.createTextNode(String(result));
-      newNodes = [node];
-    }
-
-    // Build a set of nodes that will be reused (present in both old and new lists).
-    // Use Set membership for O(n+m) instead of the previous O(n*m) nested scan.
-    let reused: Set<Node> | undefined;
-    if (lastNodes.length > 0 && newNodes.length > 0) {
-      const lastSet = new Set<Node>(lastNodes);
-      reused = new Set<Node>();
-      for (let i = 0; i < newNodes.length; i++) {
-        if (lastSet.has(newNodes[i])) reused.add(newNodes[i]);
+        seen.add(start);
+        newNodes.push(start);
       }
     }
 
-    // Remove (and dispose) old nodes that are NOT reused.
-    for (let i = 0; i < lastNodes.length; i++) {
-      const node = lastNodes[i];
-      if (reused?.has(node)) continue;
+    // Everything the new starts occupy, read before anything moves: a start
+    // rendered again keeps its live range, a fragment's starts bring what they
+    // render inside it, and a start already rendering elsewhere brings that.
+    const incoming = liveRange(newNodes);
+
+    // Remove and DISPOSE old nodes that are not rendered again (Set
+    // membership keeps this O(n+m)). Once detached they are no longer
+    // reachable by an ancestor dispose-walk, so without disposing here their
+    // reactive bindings/listeners leak (every sibling helper —
+    // each/dynamic/directives — disposes on removal).
+    const keep = new Set<Node>(incoming);
+    for (const node of old) {
+      if (keep.has(node)) continue;
       dispose(node);
-      if (node.parentNode) node.parentNode.removeChild(node);
+      node.parentNode?.removeChild(node);
     }
+    // Then the fragments not rendered again, once: emptied by now, so this
+    // reaches only their own registrations.
+    for (const frag of lastFragments) if (!fragments.includes(frag)) dispose(frag);
+    lastFragments = fragments;
 
     // Place new nodes in order using a moving cursor anchored at the
     // placeholder. Each node is positioned immediately after the previously
@@ -121,20 +121,20 @@ export function bindChildNode(
     // fixed `placeholder.nextSibling` anchor was WRONG: when nodes are reused
     // (already between the placeholder and the following sibling), inserting
     // every node before that fixed anchor reverses the tail ([A,B] -> [B,A]).
+    // Something is placed only when there is a parent (checked above).
     let prev: Node = placeholder;
-    for (let i = 0; i < newNodes.length; i++) {
-      const node = newNodes[i];
-      if (prev.nextSibling !== node) {
-        parent.insertBefore(node, prev.nextSibling);
-      }
+    for (const node of incoming) {
+      if (prev.nextSibling !== node) (parent as Node).insertBefore(node, prev.nextSibling);
       prev = node;
     }
 
     lastNodes = newNodes;
 
     // Placement is finished, so the rebuilt counterpart (if any) exists and can
-    // be focused. A no-op unless the focused node was actually discarded.
-    restoreFocusWithin(focused, newNodes, "bindChildNode");
+    // be focused. A no-op unless the focused node was actually discarded —
+    // and with nothing rendered in its place, this reports the loss rather
+    // than repairing it.
+    restoreFocusWithin(focused, incoming, "bindChildNode");
   }
 
   // Initial render and reactive subscription. `reactiveBinding` re-tracks
@@ -146,10 +146,19 @@ export function bindChildNode(
   // Structural, like `when`: the getter may replace the subtree it rendered,
   // and the subscribers that subtree created are owned by this binding.
   if (exposeNodes) {
+    // Ends at the last start still next to the placeholder, or the range that
+    // start renders (`rangeEnd` follows it from there).
     registerRange(placeholder, () => {
-      for (let i = lastNodes.length - 1; i >= 0; i--) if (lastNodes[i].parentNode !== null) return lastNodes[i];
+      for (let i = lastNodes.length; i--; ) if (lastNodes[i].parentNode === placeholder.parentNode) return lastNodes[i];
       return null;
     });
   }
-  return reactiveBinding(commit, placeholder, true);
+  const stop = reactiveBinding(commit, placeholder, true);
+  // Torn down with its owner, whose dispose-walk has reached the rendered
+  // nodes by now: the fragments rendered last end here too.
+  return () => {
+    stop();
+    for (const frag of lastFragments) dispose(frag);
+    lastFragments = [];
+  };
 }
