@@ -721,7 +721,7 @@ describe("KeepAlive first render redirected back to the same key", () => {
     };
   }
 
-  it.each([1, 10])("keeps the newest case owned with max %i", async (max) => {
+  it.each([1, 10, undefined])("keeps the newest case owned with max %s", async (max) => {
     const [key, setKey] = signal("a");
     const [value, setValue] = signal(0);
     const latest = { runs: 0, cleanups: 0 };
@@ -729,7 +729,7 @@ describe("KeepAlive first render redirected back to the same key", () => {
     trip.bind(setKey);
     const host = div();
     document.body.append(host);
-    const anchor = KeepAlive(key, trip.cases, { max });
+    const anchor = KeepAlive(key, trip.cases, max === undefined ? undefined : { max });
     host.append(anchor);
     await tick();
     expect(key()).toBe("a");
@@ -764,5 +764,105 @@ describe("KeepAlive first render redirected back to the same key", () => {
     expect(latest.cleanups).toBe(0);
     dispose(anchor);
     expect(latest.cleanups).toBe(1);
+  });
+});
+
+describe("each() row render returning a function", () => {
+  it("rolls back a function-valued row that throws, keeping its neighbours live", async () => {
+    setRuntimeErrorHandler(() => {});
+    const [value, setValue] = signal(0);
+    const failed = { runs: 0, cleanups: 0 };
+    const kept = { runs: 0, cleanups: 0 };
+    const anchor = each(
+      () => [1, 2],
+      (n) =>
+        n() === 1
+          ? tracked("ok", value, kept)
+          : () => {
+              tracked("bad", value, failed);
+              throw new Error("deferred row failed");
+            },
+      { key: (x) => x },
+    );
+    const host = div([anchor]);
+    document.body.append(host);
+    await tick();
+    expect(host.textContent).toBe("ok0");
+    expect(failed.cleanups).toBe(1);
+    const before = failed.runs;
+    setValue(1);
+    expect(failed.runs).toBe(before);
+    expect(host.textContent).toBe("ok1");
+    dispose(anchor);
+    expect(failed.cleanups).toBe(1);
+    expect(kept.cleanups).toBe(1);
+  });
+
+  it("rolls back a function-valued row that disposed its outer KeepAlive and threw", async () => {
+    setRuntimeErrorHandler(() => {});
+    const [key, setKey] = signal("a");
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0, cleanups: 0 };
+    const host = div();
+    document.body.append(host);
+    let anchor: Comment | undefined;
+    anchor = KeepAlive(key, {
+      a: () => div("a"),
+      b: () =>
+        each(
+          () => [1],
+          () => () => {
+            dispose(anchor as Comment);
+            tracked("row", value, stats);
+            throw new Error("deferred row failed after disposal");
+          },
+          { key: (x) => x },
+        ),
+    });
+    host.append(anchor);
+    await tick();
+    setKey("b");
+    await tick();
+    expect(host.textContent).toBe("");
+    expect(stats.cleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+  });
+});
+
+describe("KeepAlive same-key supersession reusing one root", () => {
+  it.each([1, 10, undefined])("keeps the reused root shown and live with max %s", async (max) => {
+    const [key, setKey] = signal("a");
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0, cleanups: 0 };
+    let aBuilds = 0;
+    const shared = tracked("shared", value, stats);
+    const host = div();
+    document.body.append(host);
+    const anchor = KeepAlive(
+      key,
+      {
+        a: () => {
+          if (++aBuilds === 1) setKey("b");
+          return shared;
+        },
+        b: () => {
+          setKey("a");
+          return div("b");
+        },
+      },
+      max === undefined ? undefined : { max },
+    );
+    host.append(anchor);
+    await tick();
+    expect(host.textContent).toBe("shared0");
+    expect(stats.cleanups).toBe(0);
+    setValue(1);
+    expect(host.textContent).toBe("shared1");
+    dispose(anchor);
+    expect(stats.cleanups).toBe(1);
+    dispose(anchor);
+    expect(stats.cleanups).toBe(1);
   });
 });

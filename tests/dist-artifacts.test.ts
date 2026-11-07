@@ -422,14 +422,15 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // own cleanup. Measured: raw ~112,250 B, gzip ~39,310 B (−~140 B raw,
     // +~60 B gzip).
     //
-    // Gzip baseline 38,610 B (raw unchanged) for disposal during a commit:
-    // `Portal`, `DynamicComponent` and `KeepAlive` factories run as rollback
-    // transactions, `Portal` and `KeepAlive` commit nothing after their factory
-    // disposed the anchor, a `KeepAlive` switch started by a factory (or by
-    // the insertion) supersedes the interrupted one instead of both showing,
-    // and an `each()` row render that disposes the list releases the rows its
-    // pass built. Measured: raw ~112,400 B, gzip ~39,375 B (+~150 B raw,
-    // +~65 B gzip).
+    // Gzip baseline 38,625 B (raw unchanged) for disposal during a commit:
+    // `Portal`, `DynamicComponent` and `KeepAlive` factories and `each()` row
+    // renders run as rollback transactions, `Portal` and `KeepAlive` commit
+    // nothing after their factory disposed the anchor, a `KeepAlive` switch
+    // started by a factory (or by the insertion) supersedes the interrupted
+    // one instead of both showing — without displacing a newer case for the
+    // same key — and an `each()` row render that disposes the list releases
+    // the rows its pass built. Measured: raw ~112,475 B, gzip ~39,395 B
+    // (+~220 B raw, +~80 B gzip).
     //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
@@ -439,7 +440,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_610 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_625 * 1.02));
   });
 });
 

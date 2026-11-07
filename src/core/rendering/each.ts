@@ -392,9 +392,11 @@ export function each<T>(
           try {
             // A transaction: a render that throws after allocating (a reactive
             // element, a cleanup) releases what it registered; only the inert
-            // placeholder below takes its place.
-            node = resolveNodeChild(
-              inScope(keyedScope(scope, key), () => withDisposerRollback(() => render(renderItem, renderIndex))),
+            // placeholder below takes its place. Resolving the result is part of
+            // it: a function-valued `NodeChild` is called right here, in the
+            // row's keyed scope, and may allocate and throw too.
+            node = inScope(keyedScope(scope, key), () =>
+              withDisposerRollback(() => resolveNodeChild(render(renderItem, renderIndex))),
             );
           } finally {
             resumeTracking();

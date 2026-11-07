@@ -102,12 +102,18 @@ export function KeepAlive(
       // A transaction: a factory that throws after allocating releases what
       // it registered, even when it disposed the anchor first (the teardown
       // could not reach a case that was never returned).
-      entry = cacheCase(withDisposerRollback(factory));
+      const node = withDisposerRollback(factory);
+      // A switch the factory started already cached a newer case for this key
+      // (`a → b → a`): that one is shown and owned. When this call returned
+      // that case's own root (a factory reusing one node), there is nothing to
+      // adopt or release — adopting it would pull it out of the shown case.
+      const winner = cache.get(key);
+      if (winner?.source === node) return;
+      entry = cacheCase(node);
       // Not cached, so released here: the factory disposed the anchor (the
       // case never reached the cache, so the teardown could not release it),
-      // or a switch it started already cached a newer case for this key
-      // (`a → b → a`), which is the one shown and owned.
-      if (disposed || cache.has(key)) return releaseCase(entry);
+      // or it lost to that newer case.
+      if (disposed || winner) return releaseCase(entry);
       cache.set(key, entry);
       // Superseded by a switch the factory started: cached, but least
       // recently used, so a bounded cache evicts it rather than the case
