@@ -74,6 +74,13 @@ export function KeepAlive(
     // Detach the shown case (WITHOUT disposing — keep reactive bindings alive)
     if (current !== null) parkCase(current);
     current = null;
+    // Parking (a custom element's `disconnectedCallback`) and the factory
+    // below run application code that may dispose the anchor: its teardown
+    // released what was cached by then, and nothing more is built or
+    // committed. Later steps need no check: the new case is cached by then,
+    // so the teardown releases it, and its nested renderers guard their own
+    // first render.
+    if (disposed) return;
 
     currentKey = key;
 
@@ -86,6 +93,9 @@ export function KeepAlive(
         return;
       }
       entry = cacheCase(factory());
+      // The factory disposed the anchor: the case never reached the cache, so
+      // the teardown could not release it.
+      if (disposed) return releaseCase(entry);
       cache.set(key, entry);
       lruOrder.push(key);
 
