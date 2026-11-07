@@ -417,6 +417,11 @@ export function each<T>(
             });
           });
         }
+        // The render disposed this list (an enclosing directive or KeepAlive
+        // released it): its teardown has run, so nothing of this pass is
+        // committed, and the row it returned — which no map holds yet — is
+        // released here.
+        if (rangeDisposed) return dispose(node);
         row = { node, item, setItem, index, setIndex, reads };
       }
       workMap.set(key, row);
@@ -606,9 +611,13 @@ export function each<T>(
     rangeDisposed = true;
     untrack();
 
-    for (const row of nodeMap.values()) {
-      dispose(row.node);
-      row.node.parentNode?.removeChild(row.node);
+    // The committed rows, and those a pass in progress already built (a
+    // render that disposed this list): the new ones are only in `workMap`.
+    for (const map of [nodeMap, workMap]) {
+      for (const row of map.values()) {
+        dispose(row.node);
+        row.node.parentNode?.removeChild(row.node);
+      }
     }
 
     if (end.parentNode) end.parentNode.removeChild(end);
