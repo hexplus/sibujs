@@ -11,7 +11,7 @@ import { DEV, devAssert, devWarn, devWarnLazy } from "../dev";
 import { reportError } from "../errors";
 import { type Accessor, signal } from "../signals/signal";
 import { captureScope, inScope, keyedScope } from "./adoptScope";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { isHydrating } from "./hydrationHooks";
 import { queueFirstRender, registerRange } from "./range";
 import { requireDocument } from "./requireDocument";
@@ -390,7 +390,14 @@ export function each<T>(
           outerRow = renderingRow;
           renderingRow = reads;
           try {
-            node = resolveNodeChild(inScope(keyedScope(scope, key), () => render(renderItem, renderIndex)));
+            // A transaction: a render that throws after allocating (a reactive
+            // element, a cleanup) releases what it registered; only the inert
+            // placeholder below takes its place. Resolving the result is part of
+            // it: a function-valued `NodeChild` is called right here, in the
+            // row's keyed scope, and may allocate and throw too.
+            node = inScope(keyedScope(scope, key), () =>
+              withDisposerRollback(() => resolveNodeChild(render(renderItem, renderIndex))),
+            );
           } finally {
             resumeTracking();
             renderingRow = outerRow;
@@ -417,6 +424,11 @@ export function each<T>(
             });
           });
         }
+        // The render disposed this list (an enclosing directive or KeepAlive
+        // released it): its teardown has run, so nothing of this pass is
+        // committed, and the row it returned — which no map holds yet — is
+        // released here.
+        if (rangeDisposed) return dispose(node);
         row = { node, item, setItem, index, setIndex, reads };
       }
       workMap.set(key, row);
@@ -439,6 +451,10 @@ export function each<T>(
       const tmp = nodeMap;
       nodeMap = workMap;
       workMap = tmp;
+      // Outside a pass the scratch map holds nothing: what it held were the
+      // previous pass's rows, some already released — a teardown must never
+      // reach them (it disposes `workMap` as the rows a pass in progress built).
+      workMap.clear();
       initialized = true;
       // No rows remain, so there is nothing queued — but keep the buffer clean
       // rather than leaving a stale count for the next pass.
@@ -509,6 +525,7 @@ export function each<T>(
     const tmp = nodeMap;
     nodeMap = workMap;
     workMap = tmp;
+    workMap.clear();
     initialized = true;
 
     flushRowCells();
@@ -606,9 +623,14 @@ export function each<T>(
     rangeDisposed = true;
     untrack();
 
-    for (const row of nodeMap.values()) {
-      dispose(row.node);
-      row.node.parentNode?.removeChild(row.node);
+    // The committed rows, and those a pass in progress already built (a
+    // render that disposed this list): the new ones are only in `workMap`,
+    // which is empty outside a pass.
+    for (const map of [nodeMap, workMap]) {
+      for (const row of map.values()) {
+        dispose(row.node);
+        row.node.parentNode?.removeChild(row.node);
+      }
     }
 
     if (end.parentNode) end.parentNode.removeChild(end);

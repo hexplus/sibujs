@@ -44,6 +44,11 @@ export function Portal(nodes: () => Element, target?: Element): Comment {
       // element, a listener) releases what it registered. Its half-built nodes
       // were never returned, so nothing else can reach them.
       portalContent = withDisposerRollback(nodes);
+      // The factory disposed the anchor: the teardown ran while there was no
+      // content to release, so nothing is committed and the result is
+      // released now. Recorded before the append below: a custom element's
+      // `connectedCallback` disposing the anchor then releases it too.
+      if (disposed) return teardown();
       container.appendChild(portalContent);
     } catch (err) {
       // Single path: `reportError` offers the error to an enclosing boundary
@@ -66,14 +71,15 @@ export function Portal(nodes: () => Element, target?: Element): Comment {
 
   // Primary cleanup: registerDisposer on the anchor so `dispose()`,
   // `when()`, `match()`, and `each()` all clean up portal content.
-  registerDisposer(anchor, () => {
+  const teardown = () => {
     disposed = true;
     if (portalContent) {
       dispose(portalContent);
       portalContent.remove();
       portalContent = null;
     }
-  });
+  };
+  registerDisposer(anchor, teardown);
 
   return anchor;
 }

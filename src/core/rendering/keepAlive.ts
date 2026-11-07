@@ -1,6 +1,6 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
-import { devWarn, isDev } from "../dev";
-import { dispose, registerDisposer } from "./dispose";
+import { DEV, devWarn } from "../dev";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { collectRange, liveRange, queueFirstRender, rangeStarts, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 
@@ -52,7 +52,7 @@ export function KeepAlive(
   const lruOrder: string[] = [];
   // Default to a bounded cache (10). Pass { max: 0 } explicitly for unbounded.
   const max = options?.max ?? 10;
-  if (max === 0 && isDev()) {
+  if (DEV && max === 0) {
     devWarn("KeepAlive: unbounded cache (max: 0). Cached subtrees will never be evicted — set `max` to bound memory.");
   }
 
@@ -60,6 +60,12 @@ export function KeepAlive(
   let current: CachedCase | null = null;
   let initialized = false;
   let disposed = false;
+  // Bumped by every switch. A factory (or a custom element reacting to the
+  // insertion) may write the key, and a write can start the next switch
+  // synchronously — the deferred first render runs outside the binding's
+  // reentrancy guard. The newer switch then shows its own case; the
+  // interrupted one must not commit over it.
+  let generation = 0;
 
   const update = () => {
     if (disposed) return;
@@ -70,10 +76,18 @@ export function KeepAlive(
 
     // Skip if same key
     if (initialized && key === currentKey) return;
+    const gen = ++generation;
 
     // Detach the shown case (WITHOUT disposing — keep reactive bindings alive)
     if (current !== null) parkCase(current);
     current = null;
+    // Parking (a custom element's `disconnectedCallback`) and the factory
+    // below run application code that may dispose the anchor: its teardown
+    // released what was cached by then, and nothing more is built or
+    // committed. Later steps need no check: the new case is cached by then,
+    // so the teardown releases it, and its nested renderers guard their own
+    // first render.
+    if (disposed) return;
 
     currentKey = key;
 
@@ -85,9 +99,31 @@ export function KeepAlive(
         initialized = true;
         return;
       }
-      entry = cacheCase(factory());
+      // A transaction: a factory that throws after allocating releases what
+      // it registered, even when it disposed the anchor first (the teardown
+      // could not reach a case that was never returned).
+      const node = withDisposerRollback(factory);
+      // A switch the factory started already cached a newer case for this key
+      // (`a → b → a`): that one is shown and owned. When this call returned
+      // that case's own root (a factory reusing one node), there is nothing to
+      // adopt or release — adopting it would pull it out of the shown case.
+      // Adoption runs application code too (moving a connected custom element
+      // runs its `disconnectedCallback`), which may start that newer switch:
+      // the cache is read again after it, never from before the move.
+      const reused = () => cache.get(key)?.source === node;
+      if (reused()) return;
+      entry = cacheCase(node);
+      if (reused()) return;
+      // Not cached, so released here: the factory disposed the anchor (the
+      // case never reached the cache, so the teardown could not release it),
+      // or it lost to that newer case.
+      if (disposed || cache.has(key)) return releaseCase(entry);
       cache.set(key, entry);
-      lruOrder.push(key);
+      // Superseded by a switch the factory started: cached, but least
+      // recently used, so a bounded cache evicts it rather than the case
+      // that newer switch shows.
+      if (gen !== generation) lruOrder.unshift(key);
+      else lruOrder.push(key);
 
       // Evict oldest if over max
       if (max > 0 && lruOrder.length > max) {
@@ -98,6 +134,7 @@ export function KeepAlive(
           releaseCase(evicted);
         }
       }
+      if (gen !== generation) return;
     } else {
       // Move to end of LRU (most recently used)
       const idx = lruOrder.indexOf(key);
@@ -109,12 +146,13 @@ export function KeepAlive(
 
     // Insert the case's complete range after the anchor: everything parked,
     // including what its renderers added meanwhile (they render next to their
-    // anchor, in the park). Then a nested renderer whose first render found it
-    // unattached runs it.
-    parent.insertBefore(entry.park, anchor.nextSibling);
-    resumePending(entry.starts);
+    // anchor, in the park). Shown BEFORE the insertion: a switch the insertion
+    // starts parks it. Then a nested renderer whose first render found it
+    // unattached runs it, unless a newer switch took over meanwhile.
     current = entry;
     initialized = true;
+    parent.insertBefore(entry.park, anchor.nextSibling);
+    if (gen === generation) resumePending(entry.starts);
   };
 
   // Structural: cached branches are owned by this binding, so a branch

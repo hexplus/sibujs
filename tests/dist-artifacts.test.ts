@@ -422,6 +422,17 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // own cleanup. Measured: raw ~112,250 B, gzip ~39,310 B (−~140 B raw,
     // +~60 B gzip).
     //
+    // Gzip baseline 38,630 B (raw unchanged) for disposal during a commit:
+    // `Portal`, `DynamicComponent` and `KeepAlive` factories and `each()` row
+    // renders run as rollback transactions, `Portal` and `KeepAlive` commit
+    // nothing after their factory disposed the anchor, a `KeepAlive` switch
+    // started by a factory (or by the insertion) supersedes the interrupted
+    // one instead of both showing — without displacing a newer case for the
+    // same key, even one started while adopting the case's root — and an
+    // `each()` row render that disposes the list releases the rows its pass
+    // built. Measured: raw ~112,480 B, gzip ~39,400 B (+~230 B raw, +~90 B
+    // gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -430,7 +441,7 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
     expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_550 * 1.02));
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_630 * 1.02));
   });
 });
 
