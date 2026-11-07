@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS enter readiness and nesting — browser test fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      @keyframes fade-rise { from { opacity: 0; transform: translateY(40px); } to { opacity: 1; transform: none; } }
+      @keyframes rise { from { transform: translateY(8px); } to { transform: none; } }
+      .fade-rise { animation: fade-rise 800ms linear; }
+      .row-in { animation: rise 300ms ease; }
+      .card { padding: 4px; }
+      .region { display: block; }
+      .content { display: block; height: 20px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="covered-host"></div>
+      <div id="late-host"></div>
+      <div id="nested-host"></div>
+    </main>
+    <script type="module">
+      import { div, Fragment, signal, span, when } from "../dist/index.js";
+      import { Suspense } from "../dist/plugins.js";
+
+      // ── A card entering with an opacity + transform animation; its content
+      // (a Suspense boundary inside a region of the card) is committed at
+      // `after` ms. The sample is taken `sampleAt` ms after the switch, in the
+      // page, with real timing.
+      const cardCase = (hostId, after, sampleAt) => {
+        const state = { shownAt: 0, committedAt: 0, sample: null };
+        const [on, setOn] = signal(false);
+        let region;
+        let open;
+        const gate = new Promise((r) => (open = r));
+        document.getElementById(hostId).appendChild(
+          when(
+            () => on(),
+            () => {
+              region = div({ class: "region" }, [
+                Suspense({ nodes: () => gate.then(() => span({ class: "content" }, "content")) }),
+              ]);
+              return div({ class: "card" }, [span("card"), region]);
+            },
+            { transition: { enterClass: "fade-rise", waitForContent: 3000 } },
+          ),
+        );
+        const show = () => {
+          state.shownAt = performance.now();
+          setOn(true);
+          setTimeout(() => {
+            state.committedAt = performance.now();
+            open();
+          }, after);
+          setTimeout(() => {
+            const card = document.querySelector(`#${hostId} .card`);
+            const content = document.querySelector(`#${hostId} .content`);
+            const cs = getComputedStyle(content);
+            const cardCs = getComputedStyle(card);
+            state.sample = {
+              at: performance.now() - state.shownAt,
+              contentAnimations: content.getAnimations().length,
+              contentClassed: content.classList.contains("fade-rise"),
+              contentOpacity: Number.parseFloat(cs.opacity),
+              contentTransform: cs.transform,
+              cardAnimations: card.getAnimations().length,
+              cardOpacity: Number.parseFloat(cardCs.opacity),
+              // The content's offset inside its region: its own transform, if
+              // it has one, moves it relative to the card.
+              offset: content.getBoundingClientRect().top - region.getBoundingClientRect().top,
+            };
+          }, sampleAt);
+        };
+        return { state, show };
+      };
+
+      const covered = cardCase("covered-host", 200, 350);
+      const late = cardCase("late-host", 1100, 1200);
+
+      // ── Nested Suspense: the outer content reveals an inner boundary.
+      const nested = { shownAt: 0, innerAt: 0, innerStart: 0, innerEnd: 0, enterEnd: 0, innerClassed: false };
+      let openOuter;
+      let openInner;
+      const outerGate = new Promise((r) => (openOuter = r));
+      const innerGate = new Promise((r) => (openInner = r));
+      const nestedHost = document.getElementById("nested-host");
+      nestedHost.addEventListener("animationstart", (e) => {
+        if (e.target.dataset?.inner !== undefined) nested.innerStart = performance.now();
+      }, true);
+      nestedHost.addEventListener("animationend", (e) => {
+        if (e.target.dataset?.inner !== undefined) nested.innerEnd = performance.now();
+      }, true);
+      new MutationObserver((records) => {
+        for (const r of records) {
+          const el = r.target;
+          if (el.dataset?.inner !== undefined && el.classList.contains("row-in")) nested.innerClassed = true;
+          if (el.dataset?.heading !== undefined && r.oldValue?.includes("row-in") && !el.classList.contains("row-in"))
+            nested.enterEnd ||= performance.now();
+        }
+      }).observe(nestedHost, { subtree: true, attributes: true, attributeFilter: ["class"], attributeOldValue: true });
+      const [nestedOn, setNestedOn] = signal(false);
+      nestedHost.appendChild(
+        when(
+          () => nestedOn(),
+          () =>
+            Fragment([
+              span({ "data-heading": "" }, "heading"),
+              Suspense({
+                nodes: () =>
+                  outerGate.then(() =>
+                    div({ "data-outer": "" }, [
+                      Suspense({ nodes: () => innerGate.then(() => div({ "data-inner": "" }, "inner")) }),
+                    ]),
+                  ),
+              }),
+            ]),
+          { transition: { enterClass: "row-in", waitForContent: 2000 } },
+        ),
+      );
+
+      window.__t = {
+        coveredShow: () => covered.show(),
+        coveredLog: () => ({ ...covered.state }),
+        lateShow: () => late.show(),
+        lateLog: () => ({ ...late.state }),
+        nestedShow: (outerAfter, innerAfter) => {
+          nested.shownAt = performance.now();
+          setNestedOn(true);
+          setTimeout(() => openOuter(), outerAfter);
+          setTimeout(() => {
+            nested.innerAt = performance.now();
+            openInner();
+          }, innerAfter);
+        },
+        nestedLog: () => ({ ...nested }),
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

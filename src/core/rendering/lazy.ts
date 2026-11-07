@@ -1,10 +1,20 @@
-import { bindOwnerScope } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
+import type { StructuralBinding } from "../../reactivity/track-core";
 import { reportError } from "../errors";
 import { trackPending } from "../ssr-context";
 import { captureScope, inAdoptScope, inScope } from "./adoptScope";
-import { dispose, registerDisposer, replaceChildrenSafely } from "./dispose";
+import {
+  dispose,
+  disposeNodeOwn,
+  registerDisposer,
+  replaceChildrenSafely,
+  stageReplaceChildren,
+  withDisposerRollback,
+} from "./dispose";
+import { type CommitSlot, commitWhenActive } from "./heldCommit";
 import { div, span } from "./html";
 import { isHydrating } from "./hydrationHooks";
+import { beginLoading } from "./range";
 import { currentBoundary, openBoundary } from "./streamBoundary";
 import type { Component } from "./types";
 
@@ -91,68 +101,286 @@ export function takePendingError(node: Element): Error | undefined {
  * @param importFn Dynamic import function returning `{ default: Component }`
  * @returns A component function that lazy-loads on first call
  */
+const NOOP = (): void => {};
+
+/**
+ * lazy() enables code-splitting by deferring the import of a component
+ * until it is first rendered. Returns a wrapper component that shows a
+ * loading state while the import resolves.
+ *
+ * @example
+ * ```ts
+ * const LazyDashboard = lazy(() => import("./Dashboard"));
+ *
+ * // Use inside Suspense for custom loading UI
+ * Suspense({
+ *   nodes: () => LazyDashboard(),
+ *   fallback: () => div("Loading dashboard..."),
+ * });
+ *
+ * // Or use standalone — shows default "Loading..." text
+ * LazyDashboard();
+ * ```
+ *
+ * The returned component renders either the loading container (a `div`) or,
+ * once loaded, the component's own root — its return type is the union, so an
+ * SVG component stays usable without a cast. A component returning a
+ * `DocumentFragment` is rendered in the container either way: a fragment is
+ * no root its instance could be disposed with. Cleanup registered on the
+ * fragment itself still runs, once, when the instance is disposed — after its
+ * children's.
+ *
+ * The loaded component belongs to the lifecycle the placeholder was rendered
+ * in (a `when()` branch, a route instance, a `Suspense`'s content): while that
+ * lifecycle is paused — a branch playing its leave, a
+ * `KeepAliveRoute({ suspendInactive: true })` page that is hidden — the module
+ * is kept and nothing is built or committed until it resumes; if it ends,
+ * nothing is. The loaded module is cached either way.
+ *
+ * Every instance has the same lifetime, whether its module was loaded already
+ * or not: the component is built under its own lifecycle, nested in the one
+ * it renders in. A `lifecycleScope()` it captures pauses with that one, and
+ * ends — its scoped effects and watches disposed — when the instance is
+ * disposed: the container, or the component's own root when a cached module
+ * renders it directly.
+ *
+ * A synchronous throw from `importFn` propagates to the caller; nothing is
+ * left registered for the container that was never returned. So does a throw
+ * from a cached component, rendered synchronously: what it registered is
+ * rolled back and its lifecycle ended.
+ *
+ * @param importFn Dynamic import function returning `{ default: Component }`
+ * @returns A component function that lazy-loads on first call
+ */
 export function lazy<R extends Node = HTMLElement>(
   importFn: () => Promise<{ default: Component<void, R> }>,
 ): Component<void, R | HTMLDivElement> {
   let cached: Component<void, R> | null = null;
+
+  /**
+   * Run `component` as a new instance's lifecycle, nested in the current
+   * one; nothing of it is kept if it throws. Returns the root and the
+   * instance's lifecycle, which the caller ties to what it disposes.
+   */
+  const instance = (component: () => R): [R, StructuralBinding] => {
+    const own = structuralBinding(NOOP);
+    try {
+      return [withDisposerRollback(() => own.run(component)), own];
+    } catch (err) {
+      own.stop();
+      throw err;
+    }
+  };
+
+  /**
+   * How an instance rendered in a container ends: its lifecycle, and — when
+   * its root is a `DocumentFragment` — the cleanup registered on the fragment
+   * itself. The fragment's children are moved into the container, so the
+   * container's disposal reaches them (descendants first) but no longer the
+   * emptied fragment object: its own teardowns run here, after them. Only the
+   * root the component returned is the instance's to dispose this way.
+   */
+  const ending = (root: Node, own: StructuralBinding): (() => void) =>
+    root.nodeType === 11
+      ? () => {
+          disposeNodeOwn(root);
+          own.stop();
+        }
+      : own.stop;
 
   return function LazyComponent(): R | HTMLDivElement {
     // If already loaded, render immediately — except when adoption markers are
     // in play, where the shape must not depend on whether this process (or
     // this page) has loaded the chunk before: always the container.
     if (cached && !inAdoptScope()) {
-      return cached();
+      const [root, own] = instance(cached);
+      const type = (root as Node | null)?.nodeType;
+      if (type === 11) {
+        const box = div({ class: "sibu-lazy" });
+        registerDisposer(box, ending(root, own));
+        box.appendChild(root);
+        return box;
+      }
+      if (typeof type === "number") registerDisposer(root, own.stop);
+      return root;
     }
 
     const container = div({ class: "sibu-lazy" });
     const scope = captureScope();
     // Created inside a streaming Suspense boundary: the chunk's render belongs to it.
     const boundary = currentBoundary();
-    let disposed = false;
     // A placeholder, built outside any adoption scope: it takes no id, so the
     // ids that follow do not depend on whether the chunk is already loaded.
     const loading = inScope(null, () => span("sibu-lazy-loading", "Loading..."));
     if (cached) {
       const loaded = cached;
-      replaceChildrenSafely(container, inScope(scope, () => loaded()) as Node);
+      let rendered: R;
+      try {
+        const [root, own] = instance(() => inScope(scope, () => loaded()));
+        registerDisposer(container, ending(root, own));
+        rendered = root;
+      } catch (err) {
+        dispose(container);
+        throw err;
+      }
+      replaceChildrenSafely(container, rendered);
       return container;
     }
 
-    // A server render waits for the chunk (and, through the settle loop, for
-    // whatever the loaded component starts).
-    trackPending(importFn(), "lazy")
-      .then(
-        // The component renders after the import resolves, in the owner scope
-        // of whoever rendered the placeholder.
-        bindOwnerScope((mod: { default: Component<void, R> }) => {
-          if (disposed) return;
-          cached = mod.default;
-          const component = cached;
-          const build = () => inScope(scope, () => component());
-          const rendered = boundary ? boundary.enter(build) : build();
-          replaceChildrenSafely(container, rendered);
-        }),
-      )
-      .catch((err) => {
-        if (disposed) return;
-        const errorObj = err instanceof Error ? err : new Error(String(err));
-        replaceChildrenSafely(
-          container,
-          div({ class: "sibu-lazy-error" }, `Failed to load component: ${errorObj.message}`),
-        );
-        dispatchPropagate(container, errorObj);
-      });
+    // The lifecycle the placeholder renders in, and its owner scope (a route
+    // instance's route): the component is built and committed in them, only
+    // while that lifecycle is active.
+    const held = captureFrozen();
+    const inOwner = bindOwnerScope((fn: () => void) => fn());
+    // Pending content until the chunk's component (or the error) is in the
+    // container, for an enter that waits for it (`waitForContent`).
+    const ready = beginLoading(container);
+    let disposed = false;
+    const live = (): boolean => !disposed;
+    // How the loaded component's instance ends (see `ending`), from the moment
+    // its insertion starts.
+    let owner: (() => void) | null = null;
+    const waiting: CommitSlot = { cancel: NOOP };
+
+    // Installed BEFORE any user code runs (`importFn` below): from here on,
+    // disposing the container releases the readiness registration, a commit
+    // in progress (and what it holds) and the component's lifecycle.
+    // Guards stale loads too: covers when/match/each/dispose paths.
+    registerDisposer(container, () => {
+      disposed = true;
+      waiting.cancel();
+      ready.cancel();
+      const end = owner;
+      owner = null;
+      end?.();
+    });
 
     // Show loading placeholder initially — unless this is an adopted container
     // still showing the server's loaded content until the chunk arrives.
     if (!(isHydrating() && container.firstChild)) container.appendChild(loading);
 
-    // Guard against stale loads if container is disposed before import resolves.
-    // Previously this monkey-patched container.remove — now we hook into
-    // the standard disposer chain, which covers when/match/each/dispose paths.
-    registerDisposer(container, () => {
-      disposed = true;
-    });
+    /**
+     * Swap the container's content for `view` once the lifecycle is active
+     * (see `commitWhenActive`). `release` disposes `view` and what it owns,
+     * once; `claim` makes that reachable from the container's cleanup, and
+     * runs BEFORE the insertion: inserting a custom element runs its
+     * `connectedCallback`, which may dispose the container. `shown` runs after
+     * it, unless that happened; `failed` if the insertion threw (`view` was
+     * released by then).
+     */
+    const show = (
+      view: Node,
+      release: () => void,
+      claim: () => void,
+      shown: () => void,
+      failed: (err: unknown) => void,
+    ): void => {
+      const swap = stageReplaceChildren(container, [view]);
+      commitWhenActive(waiting, {
+        held,
+        node: view,
+        owned: live,
+        teardown: swap.teardown,
+        insert: () => {
+          claim();
+          try {
+            swap.insert();
+          } catch (err) {
+            // Nothing was inserted (a DOM insertion fails before it mutates).
+            release();
+            failed(err);
+            return;
+          }
+          if (!disposed) shown();
+        },
+        discard: () => {
+          release();
+          ready.cancel();
+        },
+      });
+    };
+
+    /** Run `fn` in the owner scope once the lifecycle is active; never if it ends first. */
+    const later = (fn: () => void): void =>
+      commitWhenActive(waiting, { held, node: null, owned: live, insert: () => inOwner(fn), discard: ready.cancel });
+
+    const fail = (err: unknown): void => {
+      if (disposed) return;
+      const error = err instanceof Error ? err : new Error(String(err));
+      const view = div({ class: "sibu-lazy-error" }, `Failed to load component: ${error.message}`);
+      show(
+        view,
+        () => dispose(view),
+        NOOP,
+        () => {
+          ready.done();
+          dispatchPropagate(container, error);
+        },
+        (insertError) => {
+          ready.cancel();
+          reportError(insertError, { phase: "render", name: "lazy" });
+        },
+      );
+    };
+
+    const build = (component: Component<void, R>): void => {
+      if (disposed) return;
+      let rendered: R;
+      let own: StructuralBinding;
+      try {
+        const render = () => held.run(() => instance(() => inScope(scope, () => component())));
+        [rendered, own] = boundary ? boundary.enter(render) : render();
+      } catch (err) {
+        fail(err);
+        return;
+      }
+      // The component is user code: it may have disposed the container, or
+      // paused or ended the lifecycle — and so may the catch-up and the
+      // teardown before the commit. Each is checked (`commitWhenActive`).
+      // The instance's lifecycle is the container's to end from the moment
+      // the insertion starts: its `connectedCallback` may dispose the
+      // container. An insertion that throws shows the error view instead.
+      // Never inserted (cancelled, ended, held and then dropped, or a failed
+      // insertion): the root is disposed whole — a fragment still holds its
+      // children then, so they go first and its own cleanup after them.
+      const end = ending(rendered, own);
+      show(
+        rendered,
+        () => {
+          if (owner === end) owner = null;
+          own.stop();
+          dispose(rendered);
+        },
+        () => {
+          owner = end;
+        },
+        () => ready.done(),
+        fail,
+      );
+    };
+
+    let imported: Promise<{ default: Component<void, R> }>;
+    try {
+      imported = importFn();
+    } catch (err) {
+      // Never returned: release what was set up for it, then propagate.
+      dispose(container);
+      throw err;
+    }
+    // A server render waits for the chunk (and, through the settle loop, for
+    // whatever the loaded component starts).
+    trackPending(imported, "lazy").then(
+      (mod: { default: Component<void, R> }) => {
+        if (disposed) return;
+        // Cached whatever the lifecycle does: another instance may use it.
+        cached = mod.default;
+        const component = cached;
+        later(() => build(component));
+      },
+      (err: unknown) => {
+        if (!disposed) later(() => fail(err));
+      },
+    );
 
     return container;
   };
@@ -184,6 +412,15 @@ export interface SuspenseProps {
  * Render `fallback` until the async `nodes` factory resolves, then swap it for
  * the resolved content.
  *
+ * `fallback()` and `nodes()` each run under their own lifecycle, nested in the
+ * one the boundary renders in: a `lifecycleScope()` captured in the fallback
+ * ends — its scoped effects and watches disposed — when the content replaces
+ * the fallback, or with the boundary; one captured in the content ends with
+ * the boundary — or as soon as the content is abandoned: `nodes()` threw, or
+ * the content it built could not be inserted (the boundary and its fallback
+ * stay). A throwing `fallback()` propagates, with what it registered rolled
+ * back.
+ *
  * @param props `nodes` is the async content factory; `fallback` builds the
  * placeholder shown while it is pending.
  * @returns The live container element, already holding the fallback.
@@ -195,76 +432,189 @@ export interface SuspenseProps {
 export function Suspense({ nodes, fallback }: SuspenseProps): HTMLDivElement {
   const container = div({ class: "sibu-suspense" });
   const scope = captureScope();
+  // The lifecycle the boundary renders in, and its owner scope: the content
+  // is built (in a microtask) and committed in them, only while that
+  // lifecycle is active (see `lazy`).
+  const held = captureFrozen();
+  const inOwner = bindOwnerScope((fn: () => void) => fn());
   // A streaming server render streams this boundary's content on its own.
   const boundary = openBoundary(container);
-  const commit = (el: Element) => {
-    replaceChildrenSafely(container, el);
-    boundary?.done();
-  };
-
-  // Outside any adoption scope, like lazy()'s placeholder: a fallback the
-  // server replaced must not shift the ids of what follows.
-  const fallbackEl = inScope(null, fallback);
-  // An adopted boundary keeps the server's content on screen instead of
-  // flashing the fallback while its content builds.
-  if (isHydrating() && container.firstChild) dispose(fallbackEl);
-  else container.appendChild(fallbackEl);
-
+  // Pending content until the content is committed (or fails), for an enter
+  // that waits for it (`waitForContent`).
+  const ready = beginLoading(container);
   let suspenseDisposed = false;
+  const live = (): boolean => !suspenseDisposed;
   let observer: MutationObserver | null = null;
   // The child is created in a microtask and only attached to `container` once
   // loaded. If Suspense is disposed mid-load, the child is an orphan that the
   // container's dispose-walk never reaches, so its teardown (e.g. lazy()'s
   // load guard) would never run — a leak. Track it and dispose it explicitly.
   let childEl: Element | null = null;
+  // The content's lifecycle, nested in the boundary's: `nodes()` runs as it,
+  // so what it creates — a `lazy()` placeholder, a `lifecycleScope()` —
+  // pauses with the boundary's lifecycle and ends with the boundary.
+  let contentOwner: StructuralBinding | null = null;
+  /**
+   * End the content's lifecycle: with the boundary, or as soon as the content
+   * is abandoned for good — `nodes()` threw, or what it built was never
+   * inserted (the insertion failed, or the commit was dropped). What it
+   * registered through a captured `lifecycleScope()` is disposed then, once,
+   * and a registration still waiting for a paused lifecycle never starts.
+   * Cleared before it runs: a teardown it runs may dispose the boundary, which
+   * then finds nothing left to end.
+   */
+  const endContent = (): void => {
+    const own = contentOwner;
+    contentOwner = null;
+    own?.stop();
+  };
+  // The fallback's lifecycle, nested in the boundary's too and separate from
+  // the content's: it ends when the fallback is replaced, or with the boundary.
+  const fallbackOwn = structuralBinding(NOOP);
+  let fallbackOwner: StructuralBinding | null = fallbackOwn;
+  const endFallback = (): void => {
+    const own = fallbackOwner;
+    fallbackOwner = null;
+    own?.stop();
+  };
+  const waiting: CommitSlot = { cancel: NOOP };
 
+  // Installed BEFORE any user code runs (`fallback` below).
   registerDisposer(container, () => {
     suspenseDisposed = true;
+    waiting.cancel();
+    ready.cancel();
     if (observer) {
       observer.disconnect();
       observer = null;
     }
     if (childEl && !container.contains(childEl)) dispose(childEl);
+    endFallback();
+    endContent();
   });
 
-  const renderContent = bindOwnerScope(() => {
-    if (suspenseDisposed) return;
-    try {
-      const el = boundary ? boundary.enter(() => inScope(scope, nodes)) : inScope(scope, nodes);
-      childEl = el;
+  // Outside any adoption scope, like lazy()'s placeholder: a fallback the
+  // server replaced must not shift the ids of what follows.
+  let fallbackEl: Node;
+  try {
+    fallbackEl = inScope(null, () => withDisposerRollback(() => fallbackOwn.run(fallback)));
+  } catch (err) {
+    // Never returned: release what was set up for it (a streaming render
+    // must not wait for this boundary), then propagate.
+    boundary?.done();
+    dispose(container);
+    throw err;
+  }
+  // An adopted boundary keeps the server's content on screen instead of
+  // flashing the fallback while its content builds.
+  if (isHydrating() && container.firstChild) {
+    dispose(fallbackEl);
+    endFallback();
+  } else container.appendChild(fallbackEl);
 
-      // Committing swaps the fallback out for `el`. The fallback is
-      // user-authored and may hold reactive bindings, lifecycle hooks, and
-      // listeners, so it must be disposed as it is detached — a bare
-      // replaceChildren() would leave it re-rendering off-screen forever.
-      // `replaceChildrenSafely` never disposes the incoming `el`.
-      if (el.classList.contains("sibu-lazy")) {
-        // Already loaded synchronously — swap and skip the observer entirely.
-        if (!el.querySelector(".sibu-lazy-loading")) {
-          commit(el);
+  /** Swap the fallback for `el` once the lifecycle is active; dropped if it ends. */
+  const commit = (el: Element): void => {
+    // The fallback is user-authored and may hold reactive bindings, lifecycle
+    // hooks, and listeners, so it is disposed as it is detached — a bare
+    // replaceChildren() would leave it re-rendering off-screen forever — and
+    // its lifecycle ended. Both are application code, checked after
+    // (`commitWhenActive`). The incoming `el` is never disposed by the swap.
+    const swap = stageReplaceChildren(container, [el]);
+    commitWhenActive(waiting, {
+      held,
+      node: el,
+      owned: live,
+      teardown: () => {
+        if (swap.teardown()) return true;
+        if (fallbackOwner === null) return false;
+        endFallback();
+        return true;
+      },
+      // `el` is the container's content already (`childEl`): disposing the
+      // container from its `connectedCallback`, during the insertion,
+      // disposes it — in the container, or as the orphan `childEl` is.
+      insert: () => {
+        try {
+          swap.insert();
+        } catch (err) {
+          // Nothing was inserted: released here, its lifecycle ended, and
+          // reported like a throwing `nodes()`. The fallback is gone already.
+          if (childEl === el) childEl = null;
+          dispose(el);
+          endContent();
+          ready.cancel();
+          boundary?.done();
+          dispatchPropagate(container, err instanceof Error ? err : new Error(String(err)));
           return;
         }
-        observer = new MutationObserver(() => {
-          if (suspenseDisposed) return;
-          const loading = el.querySelector(".sibu-lazy-loading");
-          if (!loading) {
-            observer?.disconnect();
-            observer = null;
-            commit(el);
-          }
-        });
-        observer.observe(el, { childList: true, subtree: true });
-      } else {
-        commit(el);
-      }
+        boundary?.done();
+        ready.done();
+      },
+      discard: () => {
+        if (childEl === el) childEl = null;
+        dispose(el);
+        endContent();
+        ready.cancel();
+      },
+    });
+  };
+
+  const renderContent = (): void => {
+    if (suspenseDisposed) return;
+    const own = held.run(() => structuralBinding(NOOP));
+    contentOwner = own;
+    let el: Element;
+    try {
+      const build = () => withDisposerRollback(() => own.run(() => inScope(scope, nodes)));
+      el = boundary ? boundary.enter(build) : build();
     } catch (err) {
+      endContent();
       const errorObj = err instanceof Error ? err : new Error(String(err));
+      // No content and no error view: the readiness is released, nothing
+      // joins an enter for it. The fallback stays; the error goes to the
+      // nearest boundary.
+      ready.cancel();
       dispatchPropagate(container, errorObj);
+      return;
     }
-  });
+    childEl = el;
+    // `nodes()` is user code: it may have disposed the boundary.
+    if (suspenseDisposed) {
+      childEl = null;
+      dispose(el);
+      return;
+    }
+    if (el.classList.contains("sibu-lazy")) {
+      // Already loaded synchronously — swap and skip the observer entirely.
+      if (!el.querySelector(".sibu-lazy-loading")) {
+        commit(el);
+        return;
+      }
+      observer = new MutationObserver(() => {
+        if (suspenseDisposed) return;
+        const loading = el.querySelector(".sibu-lazy-loading");
+        if (!loading) {
+          observer?.disconnect();
+          observer = null;
+          commit(el);
+        }
+      });
+      observer.observe(el, { childList: true, subtree: true });
+    } else {
+      commit(el);
+    }
+  };
   // The content is built in a microtask, in the owner scope Suspense was
-  // created in.
-  queueMicrotask(renderContent);
+  // created in — once the lifecycle it was created in is active.
+  queueMicrotask(() => {
+    commitWhenActive(waiting, {
+      held,
+      node: null,
+      owned: live,
+      insert: () => inOwner(renderContent),
+      discard: ready.cancel,
+    });
+  });
 
   return container;
 }

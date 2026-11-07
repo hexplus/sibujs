@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS commits and custom-element reactions — browser test fixture</title>
+  </head>
+  <body>
+    <main id="host"></main>
+    <script type="module">
+      import {
+        div,
+        dispose,
+        Fragment,
+        lazy,
+        lifecycleScope,
+        match,
+        registerDisposer,
+        signal,
+        span,
+        Suspense,
+        when,
+      } from "../dist/index.js";
+      import {
+        createRouter,
+        destroyRouter,
+        KeepAliveRoute,
+        navigate,
+        Outlet,
+        Route,
+        Suspense as RouterSuspense,
+      } from "../dist/plugins.js";
+
+      const host = document.getElementById("host");
+      const flush = async (turns = 8) => {
+        for (let i = 0; i < turns; i++) await new Promise((r) => setTimeout(r, 0));
+      };
+
+      let tags = 0;
+      /** A fresh custom element type whose reactions call `hooks`, with reaction counts. */
+      function customElement(hooks) {
+        const tag = `x-commit-probe-${++tags}`;
+        const counts = { connected: 0, disconnected: 0 };
+        customElements.define(
+          tag,
+          class extends HTMLElement {
+            connectedCallback() {
+              counts.connected++;
+              hooks.connected?.(this);
+            }
+            disconnectedCallback() {
+              counts.disconnected++;
+              hooks.disconnected?.(this);
+            }
+          },
+        );
+        return { make: () => document.createElement(tag), counts };
+      }
+
+      /** User work captured in a lifecycle scope: an effect, a watch and an owned cleanup. */
+      function scopedWork() {
+        const [tick, setTick] = signal(0);
+        const rec = { scope: null, effectRuns: 0, watchRuns: 0, cleanups: 0 };
+        const capture = () => {
+          const scope = lifecycleScope();
+          rec.scope = scope;
+          scope.effect(() => {
+            tick();
+            rec.effectRuns++;
+          });
+          scope.watch(tick, () => {
+            rec.watchRuns++;
+          });
+          scope.own(() => () => rec.cleanups++);
+        };
+        /** Poke the signal; report whether anything reacted, and the scope's state. */
+        const report = async () => {
+          const effects = rec.effectRuns;
+          const watches = rec.watchRuns;
+          setTick((n) => n + 1);
+          await flush();
+          return {
+            state: rec.scope?.state() ?? null,
+            reacted: rec.effectRuns !== effects || rec.watchRuns !== watches,
+            cleanups: rec.cleanups,
+          };
+        };
+        return { rec, capture, report };
+      }
+
+      /** A route page: a custom element capturing scoped work, its root's disposals counted. */
+      function page(hooks) {
+        const ce = customElement(hooks);
+        const work = scopedWork();
+        const stats = { rootCleanups: 0 };
+        const component = () => {
+          work.capture();
+          const el = ce.make();
+          registerDisposer(el, () => stats.rootCleanups++);
+          return el;
+        };
+        return { component, work, stats, counts: ce.counts };
+      }
+
+      window.__t = {
+        async lazyConnectedDispose() {
+          const work = scopedWork();
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          let rootCleanups = 0;
+          const Lazy = lazy(() =>
+            Promise.resolve({
+              default: () => {
+                work.capture();
+                const el = ce.make();
+                registerDisposer(el, () => rootCleanups++);
+                return el;
+              },
+            }),
+          );
+          container = Lazy();
+          host.appendChild(container);
+          await flush();
+          const first = await work.report();
+          dispose(container);
+          return { ...first, rootCleanups, counts: ce.counts, cleanupsAfter: work.rec.cleanups };
+        },
+
+        async lazyRepeated() {
+          const work = scopedWork();
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          const Lazy = lazy(() =>
+            Promise.resolve({
+              default: () => {
+                work.capture();
+                return ce.make();
+              },
+            }),
+          );
+          const states = [];
+          for (let i = 0; i < 4; i++) {
+            container = Lazy();
+            host.appendChild(container);
+            await flush();
+            states.push(work.rec.scope?.state() ?? null);
+          }
+          return { states, cleanups: work.rec.cleanups, counts: ce.counts };
+        },
+
+        async suspenseSharedRoot() {
+          let container;
+          let fired = false;
+          const ce = customElement({
+            disconnected: () => {
+              if (fired) return;
+              fired = true;
+              dispose(container);
+            },
+          });
+          const shared = ce.make();
+          let rootCleanups = 0;
+          registerDisposer(shared, () => rootCleanups++);
+          const work = scopedWork();
+          container = Suspense({
+            nodes: () => shared,
+            fallback: () => {
+              work.capture();
+              return shared;
+            },
+          });
+          host.appendChild(container);
+          const initial = container.firstChild === shared;
+          await flush();
+          return {
+            initial,
+            children: container.childNodes.length,
+            connected: shared.isConnected,
+            rootCleanups,
+            counts: ce.counts,
+            ...(await work.report()),
+          };
+        },
+
+        async suspenseConnectedDispose() {
+          let container;
+          const ce = customElement({ connected: () => dispose(container) });
+          const work = scopedWork();
+          const fallback = scopedWork();
+          let rootCleanups = 0;
+          container = Suspense({
+            nodes: () => {
+              work.capture();
+              const el = ce.make();
+              registerDisposer(el, () => rootCleanups++);
+              return el;
+            },
+            fallback: () => {
+              fallback.capture();
+              return span("…");
+            },
+          });
+          host.appendChild(container);
+          await flush();
+          dispose(container);
+          return { rootCleanups, content: await work.report(), fallback: await fallback.report() };
+        },
+
+        async routeConnectedDispose() {
+          destroyRouter();
+          let anchor;
+          const p = page({ connected: () => dispose(anchor) });
+          createRouter([{ path: "/a", component: p.component }], { mode: "memory", url: "/a" });
+          const box = div();
+          host.appendChild(box);
+          anchor = Route();
+          box.appendChild(anchor);
+          await flush();
+          return { ...p.stats, counts: p.counts, children: box.childNodes.length, ...(await p.work.report()) };
+        },
+
+        async outletConnectedDispose() {
+          destroyRouter();
+          let outlet;
+          const child = page({ connected: () => dispose(outlet) });
+          createRouter(
+            [
+              {
+                path: "/p",
+                component: () => {
+                  outlet = Outlet();
+                  return div({ class: "layout" }, outlet);
+                },
+                children: [{ path: "/c", component: child.component }],
+              },
+            ],
+            { mode: "memory", url: "/p/c" },
+          );
+          const box = div();
+          host.appendChild(box);
+          box.appendChild(Route());
+          await flush();
+          return {
+            ...child.stats,
+            counts: child.counts,
+            layoutChildren: box.querySelector(".layout")?.childNodes.length ?? -1,
+            ...(await child.work.report()),
+          };
+        },
+
+        async keepAliveDisconnectDispose() {
+          destroyRouter();
+          let anchor;
+          let armed = false;
+          const p = page({ disconnected: () => armed && dispose(anchor) });
+          createRouter(
+            [
+              { path: "/a", name: "a", component: p.component },
+              { path: "/b", name: "b", component: () => div({ class: "b" }, "b") },
+            ],
+            { mode: "memory", url: "/a" },
+          );
+          const box = div();
+          host.appendChild(box);
+          anchor = KeepAliveRoute({ suspendInactive: true });
+          box.appendChild(anchor);
+          await flush();
+          armed = true;
+          await navigate("/b");
+          await flush();
+          return { ...p.stats, b: box.querySelector(".b") !== null, ...(await p.work.report()) };
+        },
+
+        async routerSuspenseConnectedDispose() {
+          let anchor;
+          const ce = customElement({ connected: () => dispose(anchor) });
+          let rootCleanups = 0;
+          const box = div();
+          host.appendChild(box);
+          anchor = RouterSuspense({
+            nodes: () =>
+              Promise.resolve().then(() => {
+                const el = ce.make();
+                registerDisposer(el, () => rootCleanups++);
+                return el;
+              }),
+            fallback: () => span({ class: "fb" }, "…"),
+          });
+          box.appendChild(anchor);
+          await flush();
+          return { rootCleanups, counts: ce.counts, children: box.childNodes.length };
+        },
+
+        /**
+         * A `when()` / `match()` whose incoming fragment starts with a custom
+         * element disposing the directive on connection, followed by a node
+         * with a reactive binding: both released once, the insertion stopped.
+         */
+        async directiveFragmentConnectedDispose(kind) {
+          let anchor;
+          const ce = customElement({ connected: () => dispose(anchor) });
+          const [n, setN] = signal(0);
+          const [on, setOn] = signal(false);
+          const stats = { headCleanups: 0, tailCleanups: 0, tailRuns: 0 };
+          const content = () => {
+            const head = ce.make();
+            registerDisposer(head, () => stats.headCleanups++);
+            const tail = div({ class: "tail" }, () => {
+              stats.tailRuns++;
+              return `tail-${n()}`;
+            });
+            registerDisposer(tail, () => stats.tailCleanups++);
+            return Fragment([head, tail]);
+          };
+          const box = div();
+          host.appendChild(box);
+          anchor = kind === "when" ? when(on, content) : match(() => (on() ? "on" : "off"), { on: content });
+          box.appendChild(anchor);
+          await flush();
+          setOn(true);
+          await flush();
+          const runs = stats.tailRuns;
+          setN(1);
+          await flush();
+          return {
+            ...stats,
+            counts: ce.counts,
+            elements: box.children.length,
+            reacted: stats.tailRuns !== runs,
+            text: box.textContent,
+          };
+        },
+
+        /**
+         * A leave callback disposing the `when()` (pending, or synchronous with
+         * `out-in`): no replacement is built, nothing is left.
+         */
+        async directiveLeaveDisposes(mode) {
+          let anchor;
+          const [visible, setVisible] = signal(true);
+          const stats = { replacements: 0, initialCleanups: 0 };
+          const box = div();
+          host.appendChild(box);
+          anchor = when(
+            visible,
+            () => {
+              const el = div({ class: "initial" }, "initial");
+              registerDisposer(el, () => stats.initialCleanups++);
+              return el;
+            },
+            () => {
+              stats.replacements++;
+              return div({ class: "replacement" }, "replacement");
+            },
+            {
+              transition: {
+                mode,
+                leave: () => {
+                  dispose(anchor);
+                  return mode === "out-in" ? undefined : new Promise(() => {});
+                },
+              },
+            },
+          );
+          box.appendChild(anchor);
+          await flush();
+          setVisible(false);
+          await flush();
+          return { ...stats, elements: box.children.length };
+        },
+
+        /**
+         * A caller-owned nested `when()` taken back while its outer branch
+         * leaves, after it emptied its range in the same task: no stale content.
+         */
+        async directiveReclaimEmptiedRange() {
+          const [outer, setOuter] = signal(true);
+          const [inner, setInner] = signal(true);
+          const box = div();
+          host.appendChild(box);
+          const nested = when(inner, () => div({ class: "inner" }, "inner"));
+          box.appendChild(when(outer, nested, { transition: { leave: () => new Promise(() => {}) } }));
+          await flush();
+          const before = box.querySelectorAll(".inner").length;
+          setOuter(false);
+          setInner(false);
+          setOuter(true);
+          await flush();
+          const after = box.querySelectorAll(".inner").length;
+          setInner(true);
+          await flush();
+          return { before, after, refilled: box.querySelectorAll(".inner").length, anchored: nested.parentNode === box };
+        },
+
+        /**
+         * `out-in`: B's build waits for A's leave; when it runs, B's factory
+         * selects nothing. B's result (a custom element) is obsolete: never
+         * connected, disposed once, nothing left on the page.
+         */
+        async directiveObsoleteBuild(kind) {
+          const probe = customElement({});
+          const [sel, setSel] = signal("a");
+          let releaseLeave;
+          let cleanups = 0;
+          const box = div();
+          host.appendChild(box);
+          const a = () => div({ class: "a" }, "A");
+          const b = () => {
+            setSel("none");
+            const el = probe.make();
+            registerDisposer(el, () => cleanups++);
+            return el;
+          };
+          const transition = { mode: "out-in", leave: () => new Promise((r) => (releaseLeave = r)) };
+          const falsy = { a: 0, b: "" };
+          box.appendChild(
+            kind === "when"
+              ? when(
+                  () => (sel() in falsy ? falsy[sel()] : null),
+                  () => null,
+                  () => (sel() === "a" ? a() : sel() === "b" ? b() : null),
+                  { transition },
+                )
+              : match(sel, { a, b }, { transition }),
+          );
+          await flush();
+          setSel("b");
+          await flush();
+          releaseLeave();
+          await flush();
+          return { connected: probe.counts.connected, cleanups, elements: box.children.length, text: box.textContent };
+        },
+
+        /**
+         * A's appear enter selects B synchronously and returns nothing; B's
+         * enter stays pending. `arg` is "<kind>:<mode>". Timers are tracked
+         * while the scenario runs, to see what disposal leaves behind.
+         */
+        async directiveEnterSwitches(arg) {
+          const [kind, mode] = arg.split(":");
+          const live = new Set();
+          const realSet = window.setTimeout;
+          const realClear = window.clearTimeout;
+          window.setTimeout = (fn, ms, ...rest) => {
+            const id = realSet(
+              (...args) => {
+                live.delete(id);
+                fn(...args);
+              },
+              ms,
+              ...rest,
+            );
+            live.add(id);
+            return id;
+          };
+          window.clearTimeout = (id) => {
+            live.delete(id);
+            realClear(id);
+          };
+          try {
+            const [sel, setSel] = signal("a");
+            const resolvers = { enter: {}, leave: {} };
+            const calls = { enter: [], leave: [] };
+            const which = (nodes) => nodes[0]?.className;
+            const enter = (nodes) => {
+              calls.enter.push(which(nodes));
+              if (which(nodes) === "a" && calls.enter.length === 1) {
+                setSel("b");
+                return undefined;
+              }
+              return new Promise((r) => (resolvers.enter[which(nodes)] = r));
+            };
+            const leave = (nodes) => {
+              calls.leave.push(which(nodes));
+              return new Promise((r) => (resolvers.leave[which(nodes)] = r));
+            };
+            const transition = { mode, appear: true, enter, leave };
+            const a = () => div({ class: "a" }, "A");
+            const b = () => div({ class: "b" }, "B");
+            const box = div();
+            host.appendChild(box);
+            const anchor =
+              kind === "when"
+                ? when(() => sel() === "a", a, b, { transition })
+                : match(sel, { a, b }, { transition });
+            // Directive phases only: fixture flushes use timers of their own.
+            const base = live.size;
+            box.appendChild(anchor);
+            await Promise.resolve();
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+            const leavesWhileBEnters = calls.leave.length;
+            const timersRunning = live.size - base;
+            resolvers.enter.b?.();
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+            const leavesAfterBEntered = calls.leave.length;
+            dispose(anchor);
+            const timersAfterDispose = live.size - base;
+            resolvers.leave.a?.();
+            for (let i = 0; i < 8; i++) await Promise.resolve();
+            return {
+              enters: calls.enter,
+              leavesWhileBEnters,
+              leavesAfterBEntered,
+              timersRunning,
+              timersAfterDispose,
+              leavesAtEnd: calls.leave.length,
+              elements: box.children.length,
+            };
+          } finally {
+            window.setTimeout = realSet;
+            window.clearTimeout = realClear;
+          }
+        },
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

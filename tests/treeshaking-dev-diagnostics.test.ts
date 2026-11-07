@@ -63,6 +63,7 @@ const CORE_MARKERS = {
   // exist only inside the warning callback.
   "contextual attribute refusal": "in this element's context",
   "contextual refusal explanation": "nothing can withdraw it when the state changes back",
+  "each() direct read that went stale": "directly while rendering",
 } as const;
 
 // NOTE: `[SibuJS]` is deliberately NOT a marker. `reportError` uses the same

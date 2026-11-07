@@ -1,8 +1,37 @@
+import { globalSingleton } from "../../utils/globalSingleton";
 import { DEV, devWarn } from "../dev";
 import { reportError } from "../errors";
 import { isHydrating } from "./hydrationHooks";
 
-const elementDisposers = new WeakMap<Node, Array<() => void>>();
+// ---------------------------------------------------------------------------
+// The disposer registry, shared by every copy of this module on the page: the
+// published entry points are bundled separately (each CommonJS entry point
+// carries its own copy), and a bundler can load a copy twice. A node a router
+// outlet registered its teardown on must still be torn down when a core
+// directive disposes it. So the state lives in one first-copy-wins object
+// (see `globalSingleton`), the way the reactive runtime is shared (see
+// reactivity/track.ts) — which also drives the render-transaction captures
+// below, from whichever copy runs it. Bump the key's version only on an
+// incompatible change to its shape; copies of the same version always share
+// it.
+// ---------------------------------------------------------------------------
+
+interface DisposerState {
+  /** Each node's registered teardowns. */
+  disposers: WeakMap<Node, Array<() => void>>;
+  /** Open render-transaction captures, innermost last (see `withDisposerRollback`). */
+  captures: (DisposerCapture | null)[];
+  /** Dev only: registered teardowns not run yet (see `checkLeaks`). */
+  bindings: { count: number };
+}
+
+const state = globalSingleton<DisposerState>(Symbol.for("sibujs.disposers.v1"), () => ({
+  disposers: new WeakMap(),
+  captures: [],
+  bindings: { count: 0 },
+}));
+
+const elementDisposers = state.disposers;
 
 /**
  * Safety ceiling on the **total number of teardowns a single drain may execute**.
@@ -42,7 +71,7 @@ export function reportDrainRunaway(label: string, executed: number, remaining: n
 }
 
 // Dev-mode only: track active bindings to detect orphans.
-let activeBindingCount = 0;
+const bindings = state.bindings;
 
 /**
  * One open render transaction's registration record. Frames are identities, not
@@ -72,7 +101,7 @@ function resolveCapture(capture: DisposerCapture | null | undefined): DisposerCa
 }
 
 // Open captures, innermost last. A `null` frame suppresses capturing entirely.
-const registrationCaptures: (DisposerCapture | null)[] = [];
+const registrationCaptures = state.captures;
 
 /** The capture a subscriber created right now belongs to. @internal */
 export function currentDisposerCapture(): DisposerCapture | null {
@@ -114,7 +143,7 @@ export function registerDisposer(node: Node, teardown: () => void): void {
     elementDisposers.set(node, disposers);
   }
   disposers.push(teardown);
-  if (DEV) activeBindingCount++;
+  if (DEV) bindings.count++;
   const capture = resolveCapture(registrationCaptures[registrationCaptures.length - 1]);
   if (capture) capture.entries.push([node, teardown]);
 }
@@ -211,7 +240,7 @@ export function unregisterDisposer(node: Node, teardown: () => void): boolean {
   const index = disposers.indexOf(teardown);
   if (index === -1) return false;
   disposers.splice(index, 1);
-  if (DEV) activeBindingCount--;
+  if (DEV) bindings.count--;
   if (disposers.length === 0) elementDisposers.delete(node);
   return true;
 }
@@ -276,7 +305,7 @@ export function disposeNodeOwn(node: Node): void {
     // re-run these or land in an infinite cycle.
     const snapshot = pending.slice();
     elementDisposers.delete(node);
-    if (DEV) activeBindingCount -= snapshot.length;
+    if (DEV) bindings.count -= snapshot.length;
 
     for (let i = 0; i < snapshot.length; i++) {
       if (executed >= MAX_DRAIN_TEARDOWNS) {
@@ -288,7 +317,7 @@ export function disposeNodeOwn(node: Node): void {
         const rest = snapshot.slice(i);
         const added = elementDisposers.get(node);
         elementDisposers.set(node, added ? rest.concat(added) : rest);
-        if (DEV) activeBindingCount += rest.length;
+        if (DEV) bindings.count += rest.length;
         reportDrainRunaway("dispose", executed, rest.length + (added?.length ?? 0));
         runaway = true;
         break;
@@ -363,6 +392,65 @@ export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void
 }
 
 /**
+ * {@link replaceChildrenSafely} in two stages, for a commit that must check
+ * again between the outgoing teardown — application code — and the
+ * insertion (see `commitWhenActive`). `teardown()` disposes the outgoing
+ * children not disposed yet (incoming nodes protected, and kept in place when
+ * hydration adopted them, exactly as there) and returns whether it disposed
+ * any; `insert()` then completes the replacement, reading `parent`'s children
+ * fresh. Nothing is disposed twice.
+ *
+ * Neither stage is free of application code, whatever `teardown()` returns:
+ * protecting the incoming nodes detaches them, and the removal and insertion
+ * of a custom element run its `disconnectedCallback` / `connectedCallback`
+ * synchronously. The caller checks again after every `teardown()` call, and
+ * makes the incoming nodes reachable from its cleanup before `insert()`.
+ *
+ * @internal
+ */
+export function stageReplaceChildren(
+  parent: ParentNode,
+  next: readonly Node[],
+): { teardown: () => boolean; insert: () => void } {
+  const done = new Set<Node>();
+  // Adopted by hydration: `next` already leads `parent`, contiguously.
+  const adopted = (): boolean => {
+    if (!isHydrating() || next.length === 0 || next[0] !== parent.firstChild) return false;
+    for (let i = 1; i < next.length; i++) if (next[i - 1].nextSibling !== next[i]) return false;
+    return true;
+  };
+  const outgoing = (): Node[] => {
+    if (adopted()) {
+      const out: Node[] = [];
+      for (let n = next[next.length - 1].nextSibling; n !== null; n = n.nextSibling) out.push(n);
+      return out;
+    }
+    for (let i = 0; i < next.length; i++) next[i].parentNode?.removeChild(next[i]);
+    return Array.from(parent.childNodes);
+  };
+  return {
+    teardown: () => {
+      let ran = false;
+      for (const node of outgoing()) {
+        if (done.has(node)) continue;
+        done.add(node);
+        ran = true;
+        dispose(node);
+      }
+      return ran;
+    },
+    insert: () => {
+      if (!adopted()) {
+        parent.replaceChildren(...next);
+        return;
+      }
+      const last = next[next.length - 1];
+      while (last.nextSibling) parent.removeChild(last.nextSibling);
+    },
+  };
+}
+
+/**
  * Check for potential binding leaks. Returns the number of active DOM bindings.
  * In dev mode, logs a warning if the count exceeds the threshold.
  * In production, DEV is false so the counter is always 0.
@@ -371,11 +459,11 @@ export function replaceChildrenSafely(parent: ParentNode, ...next: Node[]): void
  */
 export function checkLeaks(warnThreshold = 0): number {
   if (!DEV) return 0;
-  if (warnThreshold > 0 && activeBindingCount > warnThreshold) {
+  if (warnThreshold > 0 && bindings.count > warnThreshold) {
     devWarn(
-      `checkLeaks: ${activeBindingCount} active DOM bindings detected. ` +
+      `checkLeaks: ${bindings.count} active DOM bindings detected. ` +
         `Expected ≤${warnThreshold}. This may indicate a component was removed from the DOM without calling dispose().`,
     );
   }
-  return activeBindingCount;
+  return bindings.count;
 }

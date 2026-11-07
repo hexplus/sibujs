@@ -234,14 +234,13 @@ describe("Outlet ownership", () => {
     releaseLoad();
     await settle();
 
-    // The component loader validates a freshly-loaded module exactly once, by
-    // calling it and checking it returns an Element. That probe belongs to the
-    // loader's cache-fill, not to the outlet, and its node is disposed.
-    //
-    // What the outlet must *not* do is add a call of its own: ownership was
-    // already lost, so its stale pass never reaches `component()`. Before the
-    // fix this count was 3.
-    expect(factory).toHaveBeenCalledTimes(1);
+    // The outlet's pass lost ownership while the module loaded, so the
+    // module's factory is never called: every user-factory invocation —
+    // including one unwrapped from a module an async component returned —
+    // first checks that its pass is still current (4.15). The resolved module
+    // stays cached for the next mount. Before the original fix this count was
+    // 3; before 4.15 it was 1 (a validation probe whose node was disposed).
+    expect(factory).not.toHaveBeenCalled();
 
     // Nothing was inserted, and every node the factory produced is fully torn
     // down rather than merely dropped.

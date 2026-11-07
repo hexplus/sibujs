@@ -1,6 +1,7 @@
-import { bindOwnerScope, structuralBinding } from "../../reactivity/track";
+import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
+import { queueFirstRender, registerNodesRange } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -131,14 +132,26 @@ export function KeepAlive(
   // Structural: cached branches are owned by this binding, so a branch
   // evicted by a switch is disposed before its bindings can re-run in the same
   // flush. (A branch that is merely detached stays live by design.)
-  const binding = structuralBinding(update);
+  // Owner-stamped with the anchor, like the directives: a failure on a later
+  // run is located there (and reaches an enclosing ErrorBoundary), and a held
+  // detached subtree containing the anchor (`holdSubtree`, a Suspense result
+  // kept while its branch is paused) holds this binding with the rest of it,
+  // keeping its pending work for the resume.
+  const binding = structuralBinding(update, anchor);
+  // The shown case sits after the anchor; an enclosing directive branch that
+  // holds this anchor takes it along.
+  registerNodesRange(anchor, () => [currentNode]);
   const untrack = binding.stop;
 
   if (!initialized) {
-    queueMicrotask(
+    // Not in a subtree that froze before the first render could run.
+    const frozen = captureFrozen();
+    queueFirstRender(
+      anchor,
       bindOwnerScope(() => {
         if (!initialized && anchor.parentNode) binding.run(update);
       }),
+      frozen,
     );
   }
 
