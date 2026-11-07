@@ -16,7 +16,8 @@ import type { NodeChild, NodeChildren } from "./types";
  * fragment's nodes before inserting it (insertion empties a DocumentFragment)
  * and removes and disposes all of them on the next switch, including whatever
  * its reactive children have rendered since. Several sibling nodes need no
- * wrapper element (and no `display: contents` span).
+ * wrapper element (and no `display: contents` span). A reactive child
+ * (`div(() => …)`) that returns a fragment owns its nodes the same way.
  *
  * @example
  * ```ts

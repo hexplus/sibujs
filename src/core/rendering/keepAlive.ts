@@ -1,7 +1,7 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { collectRange, queueFirstRender, rangeEnd, registerRange, resumePending } from "./range";
+import { collectRange, liveRange, queueFirstRender, rangeStarts, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -183,20 +183,13 @@ interface CachedCase {
 
 function cacheCase(node: Node): CachedCase {
   const park = document.createDocumentFragment();
-  // A fragment is emptied when inserted: record its children first. Detected
-  // by `nodeType`, not `instanceof DocumentFragment`, so a fragment built in
-  // another realm (an iframe's document) is handled too. Only the canonical
-  // starts are recorded: a child inside an earlier child's range (the initial
-  // result of a reactive child, rendered after its placeholder) is that
-  // range's content, replaced by its renderer later, and must never come back.
-  const starts: Node[] = [];
-  if (node.nodeType === 11) for (let n = node.firstChild; n; n = rangeEnd(n).nextSibling) starts.push(n);
-  else starts.push(node);
-  // First adoption: a detached start is only itself; one already rendering
-  // its range elsewhere brings it along, read before the move (afterwards it
-  // is no longer the start's sibling). One node at a time: a spread is bounded
-  // by the engine's argument limit.
-  for (const start of starts) for (const n of start.parentNode ? collectRange([start]) : [start]) park.appendChild(n);
+  // A fragment is emptied when inserted: its canonical starts are recorded
+  // first (see `rangeStarts`).
+  const starts = rangeStarts(node);
+  // First adoption: a start already rendering its range elsewhere brings it
+  // along (see `liveRange`). One node at a time: a spread is bounded by the
+  // engine's argument limit.
+  for (const n of liveRange(starts)) park.appendChild(n);
   return { source: node, starts, park };
 }
 
