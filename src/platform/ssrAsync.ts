@@ -18,7 +18,7 @@
 
 import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
-import { dispose, withDisposerRollback } from "../core/rendering/dispose";
+import { beginDisposerCapture, dispose, endDisposerCapture, withDisposerRollback } from "../core/rendering/dispose";
 import { assertRequestIsolation, getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
 import { createServerAdoptScope } from "./hydrateAdopt";
@@ -393,7 +393,29 @@ function inRequest<T>(api: string, fn: () => Promise<T>): Promise<T> {
   } catch (err) {
     return Promise.reject(err);
   }
-  return getRequestStore() ? fn() : runInSSRContext(fn);
+  return ownRender(() => (getRequestStore() ? fn() : runInSSRContext(fn)));
+}
+
+/**
+ * Start a server render that owns its registrations. Rollback transactions
+ * share one synchronous stack, and a successful one hands its registrations
+ * to the transaction open below it. A render started synchronously inside
+ * another render's root factory must not join that root's transaction: the
+ * root failing would roll this render back (stop its bindings and deferred
+ * renderers, run its cleanups) before it settles. So no transaction is open
+ * for the synchronous part of the render, root build included; nested builds
+ * WITHIN the render still roll back into its own root. The asynchronous rest
+ * runs outside any transaction anyway.
+ *
+ * @internal
+ */
+export function ownRender<T>(start: () => T): T {
+  const isolated = beginDisposerCapture(null);
+  try {
+    return start();
+  } finally {
+    if (isolated) endDisposerCapture();
+  }
 }
 
 /**

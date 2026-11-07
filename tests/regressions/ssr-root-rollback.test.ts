@@ -1,11 +1,15 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { setRuntimeErrorHandler } from "../../src/core/errors";
-import { registerDisposer } from "../../src/core/rendering/dispose";
+import { when } from "../../src/core/rendering/directives";
+import { dispose, registerDisposer, withDisposerRollback } from "../../src/core/rendering/dispose";
+import { Fragment } from "../../src/core/rendering/fragment";
 import { div, span } from "../../src/core/rendering/html";
 import { signal } from "../../src/core/signals/signal";
+import { runInSSRContext } from "../../src/core/ssr-context";
 import { Head } from "../../src/platform/head";
 import { renderToReadableStream } from "../../src/platform/ssr";
 import { renderToStringAsync } from "../../src/platform/ssrAsync";
+import { registerTransferCollector } from "../../src/utils/transfer";
 
 // A server render owns the root it builds from the moment the factory starts:
 // a factory that throws after allocating releases what it registered, and a
@@ -13,6 +17,7 @@ import { renderToStringAsync } from "../../src/platform/ssrAsync";
 
 afterEach(() => {
   setRuntimeErrorHandler(null);
+  registerTransferCollector("rollback-test", () => undefined);
 });
 
 /** A root that allocates a reactive element and a cleanup, then throws. */
@@ -190,5 +195,193 @@ describe("streaming SSR root ownership", () => {
     const before = failed.runs;
     setValue(1);
     expect(failed.runs).toBe(before);
+  });
+});
+
+describe("SSR root ownership on other failure paths", () => {
+  it("releases the root when reading an option throws after construction", async () => {
+    let cleanups = 0;
+    await expect(
+      renderToStringAsync(
+        () => {
+          const root = div("ok");
+          registerDisposer(root, () => cleanups++);
+          return root;
+        },
+        {
+          get timeout(): number {
+            throw new Error("timeout read");
+          },
+        },
+      ),
+    ).rejects.toThrow("timeout read");
+    expect(cleanups).toBe(1);
+  });
+
+  it("releases the root when a transfer collector throws", async () => {
+    let cleanups = 0;
+    registerTransferCollector("rollback-test", () => {
+      throw new Error("collector");
+    });
+    await expect(
+      renderToStringAsync(() => {
+        const root = div("ok");
+        registerDisposer(root, () => cleanups++);
+        return root;
+      }),
+    ).rejects.toThrow("collector");
+    expect(cleanups).toBe(1);
+  });
+
+  it("releases a stream's root when its head getter throws", async () => {
+    let cleanups = 0;
+    await expect(
+      drain(
+        renderToReadableStream(
+          () => {
+            const root = div([
+              Head({
+                title: () => {
+                  throw new Error("head read");
+                },
+              }),
+              span("ok"),
+            ]);
+            registerDisposer(root, () => cleanups++);
+            return root;
+          },
+          { document: false },
+        ),
+      ),
+    ).rejects.toThrow("head read");
+    expect(cleanups).toBe(1);
+  });
+
+  it("rolls back nested builds within the render, fragment-own cleanup included, once", async () => {
+    const [value, setValue] = signal(0);
+    let runs = 0;
+    let cleanups = 0;
+    let frag: DocumentFragment | undefined;
+    await expect(
+      renderToStringAsync(() => {
+        frag = withDisposerRollback(() =>
+          Fragment([
+            span(() => {
+              runs++;
+              return String(value());
+            }),
+          ]),
+        );
+        registerDisposer(frag, () => cleanups++);
+        throw new Error("outer");
+      }),
+    ).rejects.toThrow("outer");
+    const before = runs;
+    setValue(1);
+    expect(runs).toBe(before);
+    expect(cleanups).toBe(1);
+    dispose(frag as DocumentFragment);
+    expect(cleanups).toBe(1);
+  });
+});
+
+describe("a failed root does not roll back a render it started", () => {
+  // A render started synchronously inside another root's factory owns its
+  // registrations: the outer root failing must not stop its deferred content
+  // or run its cleanup early.
+
+  /** A root with deferred content (a `when()` branch) and a cleanup. */
+  function independentRoot(text: string, stats: { cleanups: number }) {
+    return () => {
+      const root = div([
+        when(
+          () => true,
+          () => span(text),
+        ),
+      ]);
+      registerDisposer(root, () => stats.cleanups++);
+      return root;
+    };
+  }
+
+  type AsyncResult = ReturnType<typeof renderToStringAsync>;
+
+  it("async outer, stream inner", async () => {
+    const stats = { cleanups: 0 };
+    let inner: ReadableStream<string> | undefined;
+    await expect(
+      renderToStringAsync(() => {
+        inner = renderToReadableStream(independentRoot("independent stream", stats), { document: false });
+        throw new Error("outer render");
+      }),
+    ).rejects.toThrow("outer render");
+    expect(stats.cleanups).toBe(0);
+    expect(await drain(inner as ReadableStream<string>)).toContain("independent stream");
+    expect(stats.cleanups).toBe(1);
+  });
+
+  it("async outer, async inner in a fresh request", async () => {
+    const stats = { cleanups: 0 };
+    let inner: AsyncResult | undefined;
+    await expect(
+      renderToStringAsync(() => {
+        inner = runInSSRContext(() => renderToStringAsync(independentRoot("independent async", stats)));
+        throw new Error("outer render");
+      }),
+    ).rejects.toThrow("outer render");
+    expect(stats.cleanups).toBe(0);
+    expect((await (inner as AsyncResult)).html).toContain("independent async");
+    expect(stats.cleanups).toBe(1);
+  });
+
+  it("async outer, async inner in the same request", async () => {
+    const stats = { cleanups: 0 };
+    let inner: AsyncResult | undefined;
+    await expect(
+      renderToStringAsync(() => {
+        inner = renderToStringAsync(independentRoot("same request", stats));
+        throw new Error("outer render");
+      }),
+    ).rejects.toThrow("outer render");
+    expect((await (inner as AsyncResult)).html).toContain("same request");
+    expect(stats.cleanups).toBe(1);
+  });
+
+  it("stream outer, stream inner", async () => {
+    const stats = { cleanups: 0 };
+    let inner: ReadableStream<string> | undefined;
+    await expect(
+      drain(
+        renderToReadableStream(
+          () => {
+            inner = renderToReadableStream(independentRoot("independent stream", stats), { document: false });
+            throw new Error("outer stream");
+          },
+          { document: false },
+        ),
+      ),
+    ).rejects.toThrow("outer stream");
+    expect(stats.cleanups).toBe(0);
+    expect(await drain(inner as ReadableStream<string>)).toContain("independent stream");
+    expect(stats.cleanups).toBe(1);
+  });
+
+  it("stream outer, async inner in a fresh request", async () => {
+    const stats = { cleanups: 0 };
+    let inner: AsyncResult | undefined;
+    await expect(
+      drain(
+        renderToReadableStream(
+          () => {
+            inner = runInSSRContext(() => renderToStringAsync(independentRoot("independent async", stats)));
+            throw new Error("outer stream");
+          },
+          { document: false },
+        ),
+      ),
+    ).rejects.toThrow("outer stream");
+    expect(stats.cleanups).toBe(0);
+    expect((await (inner as AsyncResult)).html).toContain("independent async");
+    expect(stats.cleanups).toBe(1);
   });
 });

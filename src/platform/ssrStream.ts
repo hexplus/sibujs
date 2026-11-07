@@ -34,7 +34,7 @@ import { createServerAdoptScope } from "./hydrateAdopt";
 import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState, suspenseSwapScript } from "./ssr";
-import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, renderFailure } from "./ssrAsync";
+import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, ownRender, renderFailure } from "./ssrAsync";
 
 /** Options of the streaming `renderToReadableStream(() => App(), options)`. */
 export interface StreamRenderOptions extends AsyncRenderOptions {
@@ -216,7 +216,7 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
   const MARK_BODY = "<sibu-stream-body>";
   const MARK_END = "<sibu-stream-end>";
 
-  void runInSSRContext(async () => {
+  const render = async (): Promise<void> => {
     const store = getRequestStore();
     const state: StreamState = { boundaries: [], serialize: null };
     requestSlot("stream", () => state);
@@ -396,7 +396,9 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       if (store) store.errors = undefined;
       if (holder) for (const child of Array.from(holder.childNodes)) dispose(child);
     }
-  });
+  };
+  // Its own registrations: see `ownRender`.
+  ownRender(() => void runInSSRContext(render));
 
   return new ReadableStream<string>({
     async pull(controller) {
