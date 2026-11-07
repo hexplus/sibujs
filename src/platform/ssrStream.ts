@@ -20,7 +20,7 @@
 
 import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
-import { dispose } from "../core/rendering/dispose";
+import { dispose, withDisposerRollback } from "../core/rendering/dispose";
 import { runInBoundary, type StreamBoundary, setBoundaryHook } from "../core/rendering/streamBoundary";
 import {
   assertRequestIsolation,
@@ -240,14 +240,19 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       const scope = ids ? createServerAdoptScope(ids) : null;
       let root: Node;
       try {
-        root = inScope(scope, input);
+        // A transaction: a root that throws after allocating (a reactive
+        // element, a registered cleanup) releases what it registered. The
+        // `finally` below cannot: no tree reached the holder.
+        root = withDisposerRollback(() => inScope(scope, input));
       } catch (err) {
         throw explainServerError(err);
       }
-      const serialize = (node: Node) => renderToStringWith(node, { marker: options.marker ?? "root", ids });
-      state.serialize = serialize;
+      // In the holder at once: from here the `finally` releases the tree,
+      // however the stream ends.
       holder = document.createDocumentFragment();
       holder.appendChild(root);
+      const serialize = (node: Node) => renderToStringWith(node, { marker: options.marker ?? "root", ids });
+      state.serialize = serialize;
       const ready = (b: BoundaryRecord) => b.done && !pendingFor(store?.pending, b.api);
       // Serialize `node` with every not-ready boundary inside it showing its
       // fallback: its in-progress content is held aside for the duration.
