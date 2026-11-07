@@ -1,7 +1,7 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { collectRange, hasRange, queueFirstRender, registerNodesRange, resumePending } from "./range";
+import { collectRange, queueFirstRender, registerNodesRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -107,8 +107,12 @@ export function KeepAlive(
       }
     }
 
-    // Insert the cached/new case's complete range after the anchor
-    showCase(entry, anchor, parent);
+    // Insert the case's complete range after the anchor: everything parked,
+    // including what its renderers added meanwhile (they render next to their
+    // anchor, in the park). Then a nested renderer whose first render found it
+    // unattached runs it.
+    parent.insertBefore(entry.park, anchor.nextSibling);
+    resumePending(entry.starts);
     current = entry;
     initialized = true;
   };
@@ -176,41 +180,34 @@ function cacheCase(node: Node): CachedCase {
   // A fragment is emptied when inserted: record its children first. Detected
   // by `nodeType`, not `instanceof DocumentFragment`, so a fragment built in
   // another realm (an iframe's document) is handled too.
-  const starts = node.nodeType === 11 ? Array.from(node.childNodes) : [node];
-  const park = document.createDocumentFragment();
+  const entry = {
+    source: node,
+    starts: node.nodeType === 11 ? Array.from(node.childNodes) : [node],
+    park: document.createDocumentFragment(),
+  };
   // A start that already renders its range elsewhere brings it along, read
   // before the move (afterwards it is no longer the start's sibling).
-  for (const n of rangeOf(starts)) park.appendChild(n);
-  return { source: node, starts, park };
+  parkCase(entry);
+  return entry;
 }
 
 /**
  * The nodes the case occupies now, in DOM order: each start followed by the
- * range it renders (nested ranges included). A detached start is only itself.
+ * range it renders (nested ranges included), attached or parked. A detached
+ * start is only itself.
  */
 function rangeOf(starts: Node[]): Node[] {
-  if (!starts.some(hasRange)) return starts.slice();
-  return [...new Set(starts.flatMap((start) => (start.parentNode === null ? [start] : collectRange([start]))))];
-}
-
-/** Put the case's complete range, in order, right after the anchor. */
-function showCase(entry: CachedCase, anchor: Comment, parent: Node): void {
-  // Everything parked: the range as it was detached, plus whatever its
-  // renderers added meanwhile (they render next to their anchor, in the park).
-  parent.insertBefore(entry.park, anchor.nextSibling);
-  // A nested renderer whose first render found it unattached runs it now.
-  resumePending(entry.starts);
+  return [...new Set(starts.flatMap((start) => (start.parentNode ? collectRange([start]) : [start])))];
 }
 
 /** Detach the case's complete range into its park, keeping it alive. */
 function parkCase(entry: CachedCase): void {
-  for (const n of rangeOf(entry.starts)) entry.park.appendChild(n);
+  entry.park.append(...rangeOf(entry.starts));
 }
 
 /** Dispose the case's complete range (and the fragment's own cleanups) and remove it. */
 function releaseCase(entry: CachedCase): void {
-  const nodes = entry.park.firstChild ? Array.from(entry.park.childNodes) : rangeOf(entry.starts);
-  for (const n of nodes) {
+  for (const n of rangeOf(entry.starts)) {
     dispose(n);
     n.parentNode?.removeChild(n);
   }
