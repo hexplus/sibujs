@@ -4,6 +4,7 @@
  */
 
 import { dispose, replaceChildrenSafely } from "../core/rendering/dispose";
+import { styleKeyToProperty } from "../utils/styleKey";
 import { queryAllByAttribute, queryByAttribute } from "./queries";
 
 /**
@@ -159,9 +160,8 @@ export function createJestAdapter() {
       toHaveStyle(element: HTMLElement, style: Record<string, string>): { pass: boolean; message: () => string } {
         const mismatches: string[] = [];
         for (const [prop, expected] of Object.entries(style)) {
-          // Convert camelCase to kebab-case for getPropertyValue
-          const kebabProp = prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
-          const actual = element.style.getPropertyValue(kebabProp);
+          // The same key → property mapping the tag factories write with.
+          const actual = element.style.getPropertyValue(styleKeyToProperty(prop));
           if (actual !== expected) {
             mismatches.push(`${prop}: expected "${expected}" but got "${actual}"`);
           }

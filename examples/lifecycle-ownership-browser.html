@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>SibuJS lifecycle ownership and enter readiness — browser test fixture</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      @keyframes fade { from { opacity: 1; } to { opacity: 0; } }
+      @keyframes rise { from { transform: translateY(8px); } to { transform: none; } }
+      .row-in { animation: rise 300ms ease; }
+      .slow-out { animation: fade 4500ms linear forwards; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="route-host"></div>
+      <div id="ready-host"></div>
+      <div id="never-host"></div>
+    </main>
+    <script type="module">
+      import { Fragment, div, lifecycleScope, signal, span, when } from "../dist/index.js";
+      import { createRouter, lazy, Route, Suspense } from "../dist/plugins.js";
+
+      const HOME = "/examples/lifecycle-ownership-browser.html";
+
+      // ── A lazy route whose module resolves while its branch is paused: the
+      // factory may not run until the branch is active, through any number of
+      // reclaims that pause it again before the factory call could run.
+      const route = { factoryCalls: 0, bindingRuns: 0, effectRuns: 0, states: [] };
+      let openPage;
+      const moduleGate = new Promise((r) => (openPage = r));
+      const [label, setLabel] = signal("a");
+      const Page = async () => {
+        route.factoryCalls++;
+        const scope = lifecycleScope();
+        route.states.push(scope.state());
+        route.scope = scope;
+        await Promise.resolve();
+        // Registered after the await, owned by the page's lifecycle.
+        scope.effect(() => {
+          label();
+          route.effectRuns++;
+        });
+        return div({ "data-page": "" }, [
+          span(() => {
+            route.bindingRuns++;
+            return label();
+          }),
+        ]);
+      };
+      createRouter([{ path: HOME, component: lazy(() => moduleGate.then(() => ({ default: Page }))) }], {
+        mode: "history",
+      });
+      let routeShared = null;
+      const [routeOn, setRouteOn] = signal(true);
+      document.getElementById("route-host").appendChild(
+        when(
+          () => routeOn(),
+          () => (routeShared ??= div({ "data-route-branch": "" }, [Route()])),
+          () => span("off"),
+          { transition: { leaveClass: "slow-out" } },
+        ),
+      );
+
+      // ── Content that loads while its branch enters (`waitForContent`).
+      // Timestamps are taken in the page: when the branch was shown, when the
+      // content resolved, when its animation ended, when the enter ended (the
+      // heading's enter class came off).
+      const timeline = (host, heading) => {
+        const t = { shownAt: 0, resolvedAt: 0, contentStart: 0, contentEnd: 0, enterEnd: 0, contentClassed: false };
+        document.getElementById(host).addEventListener(
+          "animationstart",
+          (e) => {
+            if (e.target.dataset?.content !== undefined) t.contentStart = performance.now();
+          },
+          true,
+        );
+        document.getElementById(host).addEventListener(
+          "animationend",
+          (e) => {
+            if (e.target.dataset?.content !== undefined) t.contentEnd = performance.now();
+          },
+          true,
+        );
+        new MutationObserver((records) => {
+          for (const r of records) {
+            const el = r.target;
+            if (el.dataset?.content !== undefined && el.classList.contains("row-in")) t.contentClassed = true;
+            if (el.dataset?.[heading] !== undefined && r.oldValue?.includes("row-in") && !el.classList.contains("row-in"))
+              t.enterEnd ||= performance.now();
+          }
+        }).observe(document.getElementById(host), {
+          subtree: true,
+          attributes: true,
+          attributeFilter: ["class"],
+          attributeOldValue: true,
+        });
+        return t;
+      };
+
+      const ready = timeline("ready-host", "heading");
+      let resolveReady;
+      const [readyOn, setReadyOn] = signal(false);
+      document.getElementById("ready-host").appendChild(
+        when(
+          () => readyOn(),
+          () =>
+            Fragment([
+              span({ "data-heading": "" }, "heading"),
+              Suspense({ nodes: () => new Promise((r) => (resolveReady = r)) }),
+            ]),
+          { transition: { enterClass: "row-in", waitForContent: 2000 } },
+        ),
+      );
+
+      const never = timeline("never-host", "heading");
+      const [neverOn, setNeverOn] = signal(false);
+      document.getElementById("never-host").appendChild(
+        when(
+          () => neverOn(),
+          () =>
+            Fragment([span({ "data-heading": "" }, "heading"), Suspense({ nodes: () => new Promise(() => {}) })]),
+          { transition: { enterClass: "row-in", waitForContent: 600 } },
+        ),
+      );
+
+      window.__t = {
+        // Resume, then pause again before anything the resume woke can run.
+        routeHide: () => setRouteOn(false),
+        routeShow: () => setRouteOn(true),
+        routeReclaimThenPause: () => {
+          setRouteOn(true);
+          queueMicrotask(() => setRouteOn(false));
+        },
+        routeResolve: () => openPage(),
+        routeLabel: (v) => setLabel(v),
+        routeLog: () => ({
+          factoryCalls: route.factoryCalls,
+          bindingRuns: route.bindingRuns,
+          effectRuns: route.effectRuns,
+          states: route.states.slice(),
+          scope: route.scope ? route.scope.state() : null,
+          pages: document.querySelectorAll("[data-page]").length,
+          text: document.querySelector("[data-page]")?.textContent ?? null,
+        }),
+        // Show the branch, and resolve its content `after` ms into the enter.
+        readyShow: (after) => {
+          ready.shownAt = performance.now();
+          setReadyOn(true);
+          setTimeout(() => {
+            ready.resolvedAt = performance.now();
+            resolveReady(span({ "data-content": "" }, "content"));
+          }, after);
+        },
+        readyLog: () => ({ ...ready }),
+        neverShow: () => {
+          never.shownAt = performance.now();
+          setNeverOn(true);
+        },
+        neverLog: () => ({ ...never, contents: document.querySelectorAll("#never-host [data-content]").length }),
+      };
+      window.__ready = true;
+    </script>
+  </body>
+</html>

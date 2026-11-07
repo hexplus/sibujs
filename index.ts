@@ -58,6 +58,8 @@ export { lazy, Suspense, takePendingError } from "./src/core/rendering/lazy";
 export * from "./src/core/rendering/lifecycle";
 // Mounting & rendering
 export * from "./src/core/rendering/mount";
+// Readiness of content that arrives later, for `waitForContent`
+export { type PendingContent, pendingContent } from "./src/core/rendering/pendingContent";
 export * from "./src/core/rendering/portal";
 export * from "./src/core/rendering/slots";
 export type {
@@ -92,6 +94,7 @@ export * from "./src/core/signals/asyncDerived";
 export * from "./src/core/signals/deepSignal";
 export * from "./src/core/signals/derived";
 export * from "./src/core/signals/effect";
+export * from "./src/core/signals/lifecycleScope";
 export * from "./src/core/signals/ref";
 // Signals — state & reactivity. `signal.ts` also carries `external()`: reactive
 // integration with state SibuJS does not own (domain engines, media elements,

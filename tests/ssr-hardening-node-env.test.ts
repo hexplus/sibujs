@@ -25,7 +25,10 @@ describe("SSR in a bare Node environment", () => {
     expect(typeof mod.renderToString).toBe("function");
     expect(typeof mod.serializeState).toBe("function");
     expect(typeof mod.escapeScriptJson).toBe("function");
-  });
+    // The first import in this bare-Node worker transforms the whole SSR
+    // module graph on demand: ~1 s alone, but well past the default timeout
+    // when the full suite saturates every worker.
+  }, 60_000);
 
   it("imports the SSR context module and reports non-SSR by default", async () => {
     const { isSSR, runInSSRContext } = await import("../src/core/ssr-context");

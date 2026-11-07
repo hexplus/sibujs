@@ -304,6 +304,10 @@ type SubWithList = Subscriber & {
   // disposed before its bindings get a chance to observe the state that
   // replaces it.
   _owner?: OwnerToken | null;
+  // Set on a structural binding whose subtree is FROZEN: it stays in the DOM
+  // (a branch playing its leave transition) but must not react any more. Every
+  // subscriber it owns is skipped by the drain. See `StructuralBinding.freeze`.
+  _frozen?: boolean;
 };
 
 // Indirection between an owned subscriber and its owner. Children point at the
@@ -550,6 +554,340 @@ export function bindOwnerScope<A extends unknown[], R>(fn: (...args: A) => R): (
 
 let currentStructOwner: OwnerToken | null = null;
 
+// Number of live frozen structural bindings. While it is zero, which is always
+// unless a directive is playing a leave transition, the drain's frozen check is
+// a single compare.
+let frozenOwners = 0;
+
+// ---------- Paused subtrees -------------------------------------------------
+//
+// A structural owner is ACTIVE, PAUSED (frozen: its branch is playing a leave,
+// and may still be taken back) or ENDED (disposed: its branch was released).
+// Pausing keeps a subtree as it is: its subscribers are skipped, and deferred
+// work done on its behalf waits. Resuming (`thaw`) re-runs what was skipped and
+// releases the waiting work; ending releases the waiting work as ended.
+//
+// A held ROOT is the same thing for a detached DOM subtree that no structural
+// owner reaches (a `Suspense` result that resolved while its boundary was
+// paused, built in an async continuation): bindings whose node lies inside it
+// are skipped until it is released.
+
+/** Lifecycle of a captured owner: 0 active, 1 paused, 2 ended. @internal */
+export type OwnerState = 0 | 1 | 2;
+const ACTIVE: OwnerState = 0;
+const PAUSED: OwnerState = 1;
+const ENDED: OwnerState = 2;
+const NOOP = (): void => {};
+
+/**
+ * A check on the structural owner that was current when it was captured.
+ * `()` is true while that owner (or one above it) is paused or ended — the
+ * work it guards must not run. @internal
+ */
+export interface HeldCheck {
+  (): boolean;
+  /** The owner's state now. */
+  state(): OwnerState;
+  /**
+   * Call `onActive` once the owner is active again, or `onEnd` once it has
+   * ended — whichever comes first, exactly once — without polling: both are
+   * driven by `thaw` and disposal. Returns a function that drops the wait.
+   */
+  wait(onActive: () => void, onEnd: () => void): () => void;
+  /**
+   * Call `onEnd` once the owner has ended (whatever its state now), exactly
+   * once. Returns a function that drops the watch. Unlike `wait`, it is called
+   * SYNCHRONOUSLY, inside the disposal that ended the owner: by the time any
+   * other subscriber can run, what it tears down is gone.
+   */
+  onEnd(onEnd: () => void): () => void;
+  /**
+   * Run `fn` with the captured owner as the structural owner, so what it
+   * creates (an effect, a binding) is owned by it: skipped while it is
+   * paused, re-run when it resumes.
+   */
+  run<T>(fn: () => T): T;
+  /**
+   * Call `listener` with the owner's new state whenever it switches between
+   * active and paused, a microtask after the switch (a pause and resume in
+   * the same task are coalesced: nothing is delivered). Never called once it
+   * ended; the listener is dropped then. Returns a function that drops it.
+   */
+  onChange(listener: (state: OwnerState) => void): () => void;
+  /** Whether the captured owner is `owner`, or lies below it. */
+  within(owner: StructuralBinding): boolean;
+}
+
+interface Waiter {
+  check: HeldCheck;
+  onActive: () => void;
+  onEnd: () => void;
+}
+
+// Subscribers skipped while their subtree was held; re-queued when it resumes.
+const skippedWhileHeld = new Set<SubWithList>();
+const waiters = new Set<Waiter>();
+const heldRoots = new Set<{ contains(node: unknown): boolean }>();
+
+function ownerState(tok: OwnerToken): OwnerState {
+  let state = ACTIVE;
+  for (let t: OwnerToken | null = tok; t !== null; ) {
+    const o: SubWithList | null = t.sub;
+    // A disposed owner anywhere up the chain: its subtree was released.
+    if (o === null) return ENDED;
+    if (o._frozen === true) state = PAUSED;
+    t = o._owner ?? null;
+  }
+  return state;
+}
+
+const endWatchers = new Set<Waiter>();
+
+interface StateWatcher {
+  check: HeldCheck;
+  last: OwnerState;
+  listener: (state: OwnerState) => void;
+}
+const stateWatchers = new Set<StateWatcher>();
+let stateCheckQueued = false;
+
+/** After a freeze, thaw or end: deliver state changes a microtask later. */
+function queueStateCheck(): void {
+  if (stateCheckQueued || stateWatchers.size === 0) return;
+  stateCheckQueued = true;
+  queueMicrotask(() => {
+    stateCheckQueued = false;
+    for (const watcher of [...stateWatchers]) {
+      if (!stateWatchers.has(watcher)) continue;
+      const state = watcher.check.state();
+      if (state === ENDED) stateWatchers.delete(watcher);
+      if (state === ENDED || state === watcher.last) continue;
+      watcher.last = state;
+      try {
+        watcher.listener(state);
+      } catch (err) {
+        reportError(err, { phase: "effect" });
+      }
+    }
+  });
+}
+
+const ALWAYS_ACTIVE: HeldCheck = Object.assign(() => false, {
+  state: () => ACTIVE,
+  wait: (onActive: () => void) => {
+    onActive();
+    return NOOP;
+  },
+  onEnd: () => NOOP,
+  run: <T>(fn: () => T): T => fn(),
+  onChange: () => NOOP,
+  within: () => false,
+});
+
+/**
+ * Capture the structural owner in effect now (see {@link HeldCheck}). Deferred
+ * work scheduled on a subtree's behalf — a first render queued in a microtask,
+ * an async continuation — which the drain's frozen check never sees, consults
+ * it before it reads state or builds DOM, and can wait for the owner to
+ * resume. @internal
+ */
+export function captureFrozen(): HeldCheck {
+  const tok = currentStructOwner;
+  if (tok === null) return ALWAYS_ACTIVE;
+  const state = (): OwnerState => ownerState(tok);
+  const check = Object.assign(() => state() !== ACTIVE, {
+    state,
+    wait: (onActive: () => void, onEnd: () => void): (() => void) => {
+      const now = state();
+      if (now !== PAUSED) {
+        (now === ACTIVE ? onActive : onEnd)();
+        return NOOP;
+      }
+      const waiter: Waiter = { check, onActive, onEnd };
+      waiters.add(waiter);
+      return () => {
+        waiters.delete(waiter);
+      };
+    },
+    onEnd: (onEnd: () => void): (() => void) => {
+      if (state() === ENDED) {
+        onEnd();
+        return NOOP;
+      }
+      const watcher: Waiter = { check, onActive: NOOP, onEnd };
+      endWatchers.add(watcher);
+      return () => {
+        endWatchers.delete(watcher);
+      };
+    },
+    run: <T>(fn: () => T): T => {
+      const prev = currentStructOwner;
+      currentStructOwner = tok.sub === null ? null : tok;
+      try {
+        return fn();
+      } finally {
+        currentStructOwner = prev;
+      }
+    },
+    onChange: (listener: (state: OwnerState) => void): (() => void) => {
+      const last = state();
+      if (last === ENDED) return NOOP;
+      const watcher: StateWatcher = { check, last, listener };
+      stateWatchers.add(watcher);
+      return () => {
+        stateWatchers.delete(watcher);
+      };
+    },
+    within: (owner: StructuralBinding): boolean => {
+      // The binding's token is what it installs as the structural owner.
+      const target = owner.run(() => currentStructOwner);
+      if (target === null) return false;
+      for (let t: OwnerToken | null = tok; t !== null; ) {
+        if (t === target) return true;
+        const o: SubWithList | null = t.sub;
+        if (o === null) return false;
+        t = o._owner ?? null;
+      }
+      return false;
+    },
+  }) as HeldCheck;
+  return check;
+}
+
+/**
+ * Hold a detached DOM subtree: bindings whose node lies inside it are skipped
+ * (and re-run once released), as for a paused owner. Returns the release.
+ * @internal
+ */
+export function holdSubtree(root: { contains(node: unknown): boolean }): () => void {
+  heldRoots.add(root);
+  return () => {
+    if (heldRoots.delete(root)) settleHeld();
+  };
+}
+
+function isHeld(sub: SubWithList): boolean {
+  if (frozenOwners !== 0 && hasFrozenOwner(sub)) return true;
+  if (heldRoots.size !== 0) {
+    const node = sub._errorNode;
+    if (node != null) for (const root of heldRoots) if (root.contains(node)) return true;
+  }
+  return false;
+}
+
+/**
+ * An owner ended: call, synchronously, every end watcher whose owner chain is
+ * now ended. Runs before `settleHeld` re-queues what the owner skipped, so work
+ * torn down here (a `lifecycleScope()` effect) is disposed before the drain
+ * could run it. Each callback is contained: one failing teardown does not
+ * strand the others.
+ */
+function notifyEnded(): void {
+  for (const watcher of stateWatchers) if (watcher.check.state() === ENDED) stateWatchers.delete(watcher);
+  let ended: Waiter[] | null = null;
+  for (const watcher of endWatchers) {
+    if (watcher.check.state() !== ENDED) continue;
+    endWatchers.delete(watcher);
+    (ended ??= []).push(watcher);
+  }
+  if (ended === null) return;
+  for (const watcher of ended) {
+    try {
+      watcher.onEnd();
+    } catch (err) {
+      reportError(err, { phase: "cleanup" });
+    }
+  }
+}
+
+/**
+ * Drop the skipped subscribers that were disposed since they were skipped:
+ * a disposed binding, or a subscriber whose edges were torn down (a disposed
+ * effect). A live one cannot have lost its edges — it was skipped because one
+ * of them notified it, and it has not run since — so nothing that is still
+ * owed a catch-up run is dropped.
+ */
+function dropReleasedSkipped(): void {
+  for (const sub of skippedWhileHeld) {
+    if ((sub as { _disposed?: boolean })._disposed === true || sub.depsHead == null) skippedWhileHeld.delete(sub);
+  }
+}
+
+/** Number of subscribers skipped while held and kept for a resume, for leak tests. @internal */
+export function heldSkippedCount(): number {
+  return skippedWhileHeld.size;
+}
+
+/** Number of pending lifecycle waits and end watches, for leak tests. @internal */
+export function heldListenerCount(): number {
+  return waiters.size + endWatchers.size + stateWatchers.size;
+}
+
+/** Number of detached subtrees currently held (`holdSubtree`), for leak tests. @internal */
+export function heldRootCount(): number {
+  return heldRoots.size;
+}
+
+/**
+ * After a resume, an end or a released root: re-queue the subscribers that are
+ * no longer held, settle the waiters, and run what was queued.
+ */
+function settleHeld(): void {
+  for (const sub of skippedWhileHeld) {
+    if ((sub as { _disposed?: boolean })._disposed === true) skippedWhileHeld.delete(sub);
+    else if (!isHeld(sub)) {
+      skippedWhileHeld.delete(sub);
+      if (!pendingSet.has(sub)) {
+        pendingSet.add(sub);
+        pendingQueue.push(sub);
+      }
+    }
+  }
+  // Nothing can be held any more: whatever is left belonged to a released
+  // subtree, and must not be retained.
+  if (frozenOwners === 0 && heldRoots.size === 0) skippedWhileHeld.clear();
+  // Waiters are settled a microtask later, not in the middle of whatever
+  // resumed them (a directive taking a branch back is mid-rebuild, under its
+  // own structural owner): by then the skipped subscribers have re-run, and
+  // the state is read again — a branch paused again meanwhile keeps waiting.
+  let ready: Waiter[] | null = null;
+  for (const waiter of waiters) {
+    if (waiter.check.state() === PAUSED) continue;
+    waiters.delete(waiter);
+    (ready ??= []).push(waiter);
+  }
+  if (ready !== null) {
+    const settle = ready;
+    queueMicrotask(() => {
+      // Each contained: one failing continuation (a deferred registration
+      // that throws) does not strand the others.
+      for (const waiter of settle) {
+        const state = waiter.check.state();
+        if (state === PAUSED) waiters.add(waiter);
+        else
+          try {
+            (state === ACTIVE ? waiter.onActive : waiter.onEnd)();
+          } catch (err) {
+            reportError(err, { phase: "effect" });
+          }
+      }
+    });
+  }
+  if (pendingQueue.length > 0) drainNotificationQueue();
+}
+
+/** Whether any owner up `sub`'s ownership chain is frozen. */
+function hasFrozenOwner(sub: SubWithList): boolean {
+  for (let t = sub._owner ?? null; t !== null; ) {
+    const o = t.sub;
+    // A disposed owner ends the chain, as in `runPendingOwners`.
+    if (o === null) return false;
+    if (o._frozen === true) return true;
+    t = o._owner ?? null;
+  }
+  return false;
+}
+
 // ---------- Epoch counter for retrack-based pruning -----------------------
 
 let subscriberEpochCounter = 0;
@@ -765,6 +1103,22 @@ export interface StructuralBinding {
    * render), so what it builds is owned exactly as a later rebuild would be.
    */
   run: <T>(fn: () => T) => T;
+  /**
+   * Stop every subscriber created under this binding (through `run`, or while
+   * it ran) from running again, without disposing anything. Their DOM stays
+   * as it is and their disposers stay registered, so a subtree can keep
+   * showing its last state, and keep its lifecycle alive, until it is removed.
+   * Disposing the binding lifts the freeze. Absent on a structural binding
+   * provided by an older copy of the runtime.
+   */
+  freeze?: () => void;
+  /**
+   * Resume a frozen binding (its branch was taken back before it finished
+   * leaving): the subscribers it skipped re-run, and deferred work waiting on
+   * it continues. Unlike `stop`, the subtree stays alive. Absent on an older
+   * runtime copy.
+   */
+  thaw?: () => void;
 }
 
 /**
@@ -786,6 +1140,20 @@ export function structuralBinding(commit: () => void, ownerNode?: unknown): Stru
       } finally {
         currentStructOwner = prev;
       }
+    },
+    freeze: () => {
+      const s = sub as SubWithList & { _disposed?: boolean };
+      if (s._disposed || s._frozen) return;
+      s._frozen = true;
+      frozenOwners++;
+      queueStateCheck();
+    },
+    thaw: () => {
+      if (!sub._frozen) return;
+      sub._frozen = false;
+      frozenOwners--;
+      queueStateCheck();
+      settleHeld();
     },
   };
 }
@@ -827,6 +1195,7 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
   subscriber._errorNode = ownerNode;
   subscriber._tok = null;
   subscriber._owner = null;
+  subscriber._frozen = false;
   if (structural) subscriber._tok = { sub: subscriber };
 
   // Initial run establishes the first dependency set (guarded, see above).
@@ -853,18 +1222,37 @@ function createBinding(commit: () => void, ownerNode: unknown, structural: boole
   } catch (err) {
     subscriber._disposed = true;
     subscriber._errorNode = undefined;
-    if (subscriber._tok != null) subscriber._tok.sub = null;
+    if (subscriber._tok != null) {
+      subscriber._tok.sub = null;
+      // Its run may have captured the lifecycle (`lifecycleScope()`) first.
+      if (endWatchers.size !== 0 || stateWatchers.size !== 0) notifyEnded();
+    }
     cleanup(subscriber);
     throw err;
   }
 
   subscriber._dispose = () => {
     (subscriber as { _disposed?: boolean })._disposed = true;
+    const wasFrozen = subscriber._frozen === true;
+    if (wasFrozen) {
+      subscriber._frozen = false;
+      frozenOwners--;
+    }
     // Drop the DOM reference so a disposed binding cannot keep a detached
     // subtree alive through the subscriber object.
     subscriber._errorNode = undefined;
     // Release every subscriber this one owned (see `OwnerToken`).
-    if (subscriber._tok != null) subscriber._tok.sub = null;
+    if (subscriber._tok != null) {
+      subscriber._tok.sub = null;
+      // Work bound to this subtree's lifetime is torn down now, before
+      // anything it skipped is re-queued; work waiting on it to resume
+      // learns that it ended.
+      if (endWatchers.size !== 0 || stateWatchers.size !== 0) notifyEnded();
+      // What that teardown disposed while it was skipped (a paused branch's
+      // `lifecycleScope()` effect) is dropped now, not kept for a resume.
+      if (skippedWhileHeld.size !== 0) dropReleasedSkipped();
+      if (wasFrozen || waiters.size !== 0) settleHeld();
+    }
     cleanup(subscriber);
   };
   return subscriber;
@@ -1101,6 +1489,13 @@ function runPendingOwners(sub: SubWithList): void {
 
 /** Run one dequeued subscriber through the drain's gates. */
 function runQueued(sub: Subscriber): void {
+  // Owned by a frozen subtree (a branch playing its leave transition): it keeps
+  // its last output and does not run. Its dependency edges stay until the
+  // subtree is disposed, so a later write just lands here again.
+  if ((frozenOwners !== 0 || heldRoots.size !== 0) && isHeld(sub as SubWithList)) {
+    skippedWhileHeld.add(sub as SubWithList);
+    return;
+  }
   // An offender identified earlier in THIS drain stays parked. Skipping only
   // the offender is what breaks the cycle — a quarantined subscriber stops
   // writing, so its partner stops being re-enqueued.

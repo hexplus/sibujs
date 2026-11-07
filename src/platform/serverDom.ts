@@ -31,6 +31,7 @@
 
 import { DEV } from "../core/dev";
 import { requestSlot } from "../core/ssr-context";
+import { styleKeyToProperty } from "../utils/styleKey";
 
 const HTML_NS = "http://www.w3.org/1999/xhtml";
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -805,14 +806,6 @@ function splitDeclarations(text: string): string[] {
   return out;
 }
 
-const CAMEL_EXCEPTIONS: Record<string, string> = { cssFloat: "float" };
-
-function toKebab(prop: string): string {
-  if (prop.startsWith("--")) return prop;
-  if (Object.hasOwn(CAMEL_EXCEPTIONS, prop)) return CAMEL_EXCEPTIONS[prop];
-  return prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`).replace(/^(webkit|moz|ms)-/, "-$1-");
-}
-
 /**
  * `CSSStyleDeclaration` as a declaration map. Values are kept as written
  * (trimmed), not normalized: a full CSSOM rewrites some values (jsdom turns
@@ -917,13 +910,13 @@ function styleProxy(style: ServerStyle): ServerStyle {
     get(target, key, receiver) {
       if (typeof key === "string" && !(key in target)) {
         if (/^\d+$/.test(key)) return target.item(Number(key));
-        return target.getPropertyValue(toKebab(key));
+        return target.getPropertyValue(styleKeyToProperty(key));
       }
       return Reflect.get(target, key, receiver);
     },
     set(target, key, value, receiver) {
       if (typeof key === "string" && !(key in target)) {
-        target.setProperty(toKebab(key), value == null ? "" : String(value));
+        target.setProperty(styleKeyToProperty(key), value == null ? "" : String(value));
         return true;
       }
       return Reflect.set(target, key, value, receiver);

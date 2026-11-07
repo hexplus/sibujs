@@ -5,6 +5,7 @@ import { reactiveBinding } from "../../reactivity/track";
 import { isBlockedElement } from "../../utils/elementPolicy";
 import { isEventHandlerAttr, sanitizeCSSDeclaration, sanitizeStyleAttribute } from "../../utils/sanitize";
 import { setSafeAttribute } from "../../utils/setSafeAttribute";
+import { styleKeyToProperty } from "../../utils/styleKey";
 import { createScopedElement } from "./adoptScope";
 import { registerDisposer } from "./dispose";
 import { noDocument } from "./requireDocument";
@@ -39,6 +40,13 @@ export function setProp(el: Element, key: string, val: unknown): void {
 /**
  * A style declaration map: camelCase or kebab-case property names to values.
  * Each value may be a getter, which binds that one property reactively.
+ *
+ * Keys map to CSS properties the same way on the client and in a server
+ * render: camelCase becomes kebab-case (`backgroundColor`), a vendor prefix
+ * gets its leading dash however it is capitalized (`msTransform`,
+ * `WebkitLineClamp`), `cssFloat` is `float`, and a custom property passes
+ * through untouched — custom property names are case-sensitive, so
+ * `{ "--brandColor": c }` sets `--brandColor`, not `--brand-color`.
  */
 export type StyleMap = Record<string, string | number | (() => string | number)>;
 
@@ -104,17 +112,6 @@ const MAX_WARNED_LONE_STRINGS = 100;
 // than merely stop remembering.
 let loneStringCapAnnounced = false;
 
-// Cache for camelCase → kebab-case conversions
-const kebabCache = new Map<string, string>();
-
-function toKebab(prop: string): string {
-  let cached = kebabCache.get(prop);
-  if (cached !== undefined) return cached;
-  cached = prop.replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
-  kebabCache.set(prop, cached);
-  return cached;
-}
-
 // Reactive class/style getters are DOM bindings, so they are registered with
 // `reactiveBinding(commit, el)` rather than a bare `track(commit)`. Both create
 // the same self-retracking subscriber — `track(commit)` delegates straight to
@@ -162,7 +159,7 @@ function applyStyle(el: Element, style: TagProps["style"]) {
         if (!Object.hasOwn(value, prop)) continue;
         const val = value[prop];
         if (val == null) continue;
-        const name = toKebab(prop);
+        const name = styleKeyToProperty(prop);
         next.push(name);
         decl.setProperty(name, sanitizeCSSDeclaration(name, String(val), { element: el }));
       }
@@ -184,7 +181,7 @@ function applyStyle(el: Element, style: TagProps["style"]) {
   for (const prop in style as StyleMap) {
     if (!Object.hasOwn(style as StyleMap, prop)) continue;
     const val = (style as StyleMap)[prop];
-    const name = toKebab(prop);
+    const name = styleKeyToProperty(prop);
     if (typeof val === "function") {
       const getter = val as () => string | number;
       const teardown = reactiveBinding(() => {

@@ -6,6 +6,338 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.15.0] — 2026-11-05
+
+### Upgrade notes
+
+Every new option is opt-in and every default renders what 4.14 rendered, with
+one exception: style-map keys that 4.14 turned into the wrong CSS property now
+set the right one (below). If a stylesheet or script relied on the wrong name
+(reading `--foo-bar` for a `--fooBar` key), switch it to the key's real name.
+
+### Fixed — style-map keys name the same CSS property on the client and the server
+
+The tag factories kebab-cased every capital letter of a `style` key, so a
+custom property (whose name is case-sensitive) became a different one
+(`{ "--fooBar": 1 }` set `--foo-bar`), and `cssFloat`, `msTransform` and
+`webkitLineClamp` became `css-float`, `ms-transform` and `webkit-line-clamp`:
+invalid names a browser drops and the server DOM wrote into the markup
+verbatim. The server DOM's `el.style.fooBar` access used a second, different
+copy of the rule. One mapping now serves the static style map, per-property
+getters, whole-`style` getters (including removing a property a later run no
+longer lists, under the same name it was set with), the server DOM's
+`style` property access and the `toHaveStyle` test matcher:
+
+- a key starting with `--` passes through untouched;
+- `cssFloat` is `float`;
+- camelCase becomes kebab-case;
+- a vendor prefix (`webkit`, `moz`, `ms`, `o`) gets its leading dash however
+  it is capitalized: `msTransform` and `MsTransform` are both `-ms-transform`;
+- a key that is already a property name (`background-color`,
+  `-webkit-line-clamp`) is unchanged.
+
+### Fixed — a `Fragment` (or any `DocumentFragment`) as a `when()` / `match()` branch
+
+A fragment empties itself when it is inserted, and the directives kept only the
+fragment: on the next switch they had nothing to remove, so the old branch's
+nodes stayed on the page, with live bindings, next to the new ones. The
+directives now record a fragment's nodes before inserting it and treat the
+branch as the range those nodes render: rows an `each()` at its top level adds
+later, a nested `when()` / `match()` branch, a `KeepAlive` case, a router
+outlet's page and what a reactive child renders now are made inert, animated,
+removed and re-attached with it. Nodes such a range gains while the branch is
+leaving are made inert and join the running leave (the branch waits for their
+animation too, within the original deadline). A bare branch hidden by a switch
+is parked off the page and keeps reconciling, so it comes back current. An
+anchor whose range has already rendered elsewhere (an `each()` built in another
+parent) moves with its whole range when it first becomes a branch, and one that
+had no parent for its first render renders once a directive attaches it. Cleanup
+registered on a fragment the branch factory built (`onCleanup(fn, fragment)`)
+runs when the branch is released, after its nodes, even if the fragment was
+empty. Several sibling nodes are a supported branch, and need no wrapper
+element:
+
+```ts
+when(() => confirming(), () => Fragment([button("Yes"), button("No")]));
+```
+
+A bare fragment handed in instead of a factory is re-attached, like a bare
+element.
+
+### Fixed — directives from `sibujs` and router components from `sibujs/plugins` in CommonJS
+
+Each CommonJS entry point is bundled on its own, so `require("sibujs")` and
+`require("sibujs/plugins")` each carried a private copy of the bookkeeping for
+the sibling ranges a renderer draws after its anchor, for pending content, and
+for the teardowns registered on nodes. A core `when()` or `match()` therefore
+did not see what a router outlet or a plugin `Suspense` rendered or was still
+loading: switching the branch away left the page on screen, without running the
+outlet's teardown, and an enter with `waitForContent` ran before the content
+arrived. That bookkeeping is now shared by every copy of the same version on
+the page, the way the reactive runtime already is, so a directive finds the
+range, waits for the pending content, and runs the teardown — once — whichever
+entry point rendered it. A `lifecycleScope()` is recognised the same way: one
+captured through one copy and passed to `pendingContent()` from another still
+holds the enter of the branch it was captured in. The ES module entry points
+share their chunks and were not affected. Copies of different versions on one
+page are not guaranteed to coordinate.
+
+### Added — exit and enter transitions for `when()` and `match()`
+
+```ts
+match(() => screen(), { attract: () => Attract(), draw: () => Draw(), done: () => Done() }, {
+  transition: { enterClass: "screen-in", leaveClass: "screen-out", mode: "out-in" },
+});
+```
+
+`DirectiveOptions.transition` takes `enterClass` / `leaveClass` (the option
+names of `transition()` in `sibujs/motion`), custom `enter` / `leave`
+callbacks that receive the branch's nodes and may return a promise (Web
+Animations), `mode` (`"both"`, the default; `"out-in"`; `"in-out"`),
+`maxDuration` and `appear`. At a switch, the outgoing branch:
+
+- is frozen: its bindings and effects stop, so it shows its last state instead
+  of reacting to the state the new branch owns;
+- gets `inert` and `aria-hidden="true"`, and focus inside it follows the
+  directive's `focus` policy as on any rebuild;
+- is removed and disposed when its leave ends: once every animation and
+  transition its elements actually started has finished (`getAnimations()`,
+  so a listed property that does not change is not waited for; where that API
+  is missing, one `animationend` / `transitionend` — or `animationcancel` /
+  `transitioncancel` — per `animation-name` / `transition-property` entry, or
+  the element's own computed end + 50 ms if an event never arrives), when the
+  custom `leave` settles, or at a
+  timeout computed from its styles (CSS list matching: delay + duration x
+  iterations, + 50 ms), capped by `maxDuration` and never more than 5 s. Nothing animating
+  (zero durations, a reduced-motion stylesheet, `display: none`) removes it
+  synchronously.
+
+Its `onUnmount` and `registerDisposer` teardowns run at that removal, so a
+canvas or a `requestAnimationFrame` loop can run until it has faded out.
+Several branches may be leaving at once; switching back to a bare element that
+is still leaving cancels its leave. The first render enters only with
+`appear: true`; an enter waits for the first render of a top-level `each()` (or
+nested directive), so its rows enter with the branch, and rows such a range adds
+while a class-based enter runs join it. Disposing the directive removes leaving
+branches at once. Server renders ignore transitions. Without `transition`, a
+switch removes and disposes the old branch at once, as before.
+
+A switch runs application code — the branch factory, a `leave` or `enter`
+callback, the outgoing branch's cleanups, a `blur` handler, a custom element's
+`connectedCallback` — and any of it may dispose the directive. That disposal is
+final: every branch the directive holds is released once, including one being
+inserted (what is inserted and what is not yet, its lifecycle ended, the
+insertion stopped there), and no replacement is built, no `out-in` build waits,
+no focus is restored and no enter or leave starts. A phase whose own callback
+disposed the directive is cancelled as it returns, so no timer is left, and a
+promise settling later restarts nothing. A bare branch taken back while it
+leaves brings what its range renders at that moment, read from the DOM: a
+caller-owned nested directive that removed its content meanwhile comes back
+with only its anchor, never with what it disposed.
+
+A switch that application code superseded does nothing more. A branch factory
+that selects another value, including one that renders nothing, makes its own
+result obsolete: that result is disposed once and never inserted, and an
+`out-in` build that waited for the leaves is held to the switch that deferred
+it. An enter whose callback switched the directive is obsolete too. Its
+completion, synchronous or later, starts no `in-out` leave while the newer
+enter runs and never clears the leave the branch plays by then, so disposing
+the directive still cancels every running phase.
+
+`waitForContent` (ms, opt-in) lets content that arrives later enter with the
+branch, if it is committed within that time (counted from the switch, at most
+5 s): the pending content anywhere in the entering branch — the initial content
+(or error view) of `Suspense` boundaries (the router's and the core one),
+`lazy()` components and route outlets, and what the application registers with
+`pendingContent()` (below). An outlet's initial content is pending until its
+current navigation commits a page, an error view or a terminal empty outcome; a
+pass that only returns (superseded, waiting for its anchor to be attached,
+cancelled) settles nothing. A router's placeholder route (held until its first
+navigation resolves) is no outcome either, unless every navigation that could
+replace it has completed without doing so (a guard cancelled it): the outlets
+that render nothing for it settle then, never while a navigation is still in
+flight. A class-based enter starts at once and stays open: each piece joins
+when it is committed, and content that reveals more pending content (an outer
+boundary whose result holds an inner one, a layout holding an `Outlet`) keeps
+it open for that too, under the same deadline. What is pending is taken again
+from the branch whenever a registration begins or settles and whenever a node
+moves into or out of the branch (observed on the branch only, while the enter
+waits): a pending node removed from the branch no longer holds the enter, and
+one attached to it does. Settled content joins only if it is inside the branch
+then, and only when it was committed: a registration that was cancelled — or
+dropped with its location — enrolls nothing, not even the loading placeholder
+it still shows. A custom `enter` is called once all of it has settled, or when
+the budget runs out. The budget ends when its own timer fires (a wall clock
+moved back cannot strand the wait) and nothing extends it; while an enclosing
+branch is paused the enter still waits for the resume, and runs no user code
+before it. Content committed later appears without an enter; an enter never
+replays, and nothing is loaded again for it. With `"in-out"`, the outgoing
+branch leaves when that enter ends.
+
+What joins a running class-based enter is content committed for a pending
+registration and elements a top-level range adds, except inside an element of
+the enter whose own animation is still running: that content already moves with
+its ancestor, and a second copy of the animation would compound (twice the
+offset, the opacity squared). Content arriving after the ancestor's animation
+finished enters on its own. Where `getAnimations()` is missing, an ancestor
+counts as finished at its end or cancel events, or at its computed end + 50 ms
+(an estimate) when they never arrive; an infinite animation keeps it animating
+until the enter's cap. A nested directive's own `transition` is not affected.
+
+A leaving branch is paused, not ended: inside it nothing starts — no queued
+first render, no pending enter, no route factory call (cached modules included)
+— and async work that settles (`Suspense` content, a lazy route module) is not
+committed; the fallback or page on screen stays, and a result is held, bindings
+and lists included, so it does not react meanwhile. Its DOM is held too, so a
+binding an async continuation created in it after the build is paused as well.
+Every wait re-checks the branch when it is notified, so a branch paused again
+before the waiting work runs keeps it waiting. A commit re-checks again after
+each of its steps that runs application code — the held result catching up,
+then the outgoing content's teardown — and reads its destination right before
+the insertion: a binding or disposer that pauses the branch again keeps the
+result waiting (the steps already done are not repeated); one that ends it,
+disposes the outlet or boundary, or supersedes its pass gets the result
+disposed once, nothing inserted and no readiness settled as committed. Removing
+and inserting a custom element run its `disconnectedCallback` /
+`connectedCallback` synchronously, so they count as such steps too: a teardown
+that only detached the incoming content is checked after just the same, and
+what is inserted is already the outlet's or boundary's content when its
+`connectedCallback` runs — disposing the outlet, boundary or `lazy()`
+container from there releases it, and ends its lifecycle, once. An insertion
+that throws releases what it was inserting. A route
+failure is still reported
+when it happens; only its error view waits. Taken back before its leave ends,
+the branch resumes: what it skipped re-runs once against the current state, an
+enter it kept from starting plays, a `Suspense` adopts the result it held (its
+`nodes()` still runs once) and a lazy route instantiates from the cached
+module, unless a navigation made meanwhile superseded it. Released instead, it
+ends: held results are disposed, once, without running their pending work, and
+nothing renders. `router.instantiateComponent()` waits rather than rejects
+while its scope is paused, and rejects with an `AbortError` only when the scope
+ends or its pass is superseded.
+
+The core `lazy()` and `Suspense()` follow the same rules for the lifecycle they
+were rendered in. A module that resolves (or rejects) while it is paused is kept
+— and cached — but its component is not called and nothing is committed until
+it resumes, re-checked at every notification and again after the component
+ran; if it ends, nothing is. `Suspense` builds its `nodes()` only while it is
+active. The component, `nodes()` and `fallback()` each run in their own
+lifecycle, nested in that one, so a `lifecycleScope()` captured in them pauses
+with the page. The component's ends when its instance is disposed — the
+container, or the root a cached module renders directly: every instance has
+the same lifetime whether or not its module was loaded before. A component
+returning a `DocumentFragment` is rendered in the container, and cleanup
+registered on the fragment itself runs with the instance, after its
+children's, once. The content's
+ends with the boundary; the fallback's when the content replaces it, when
+hydration discards it, or with the boundary. Content that is abandoned ends at
+once, in both `Suspense` components: a `nodes()` that throws or rejects, or
+content whose insertion fails, has what it registered through a captured
+`lifecycleScope()` disposed then — once, even while its page is paused, so
+nothing is caught up when it resumes — while the boundary keeps its fallback or
+error view. A `lazy()` whose `importFn`
+throws synchronously, a cached component that throws, or a `Suspense` whose
+`fallback` throws, still propagates the error, with what it registered rolled
+back and nothing left registered for a container it never returned.
+
+### Added — `lifecycleScope()`: work created after an `await`
+
+```ts
+const scope = lifecycleScope();      // during render
+await load();
+scope.effect(() => { … });           // owned by that render's lifecycle
+scope.watch(() => user.online(), (online) => notify(online));
+```
+
+An `effect()` or `watch()` created after an `await` belongs to no lifecycle, and
+registering its disposer on a node gives teardown, not ownership: it keeps
+running while its component's branch is paused for a leave. `lifecycleScope()`
+captures the lifecycle synchronously. What is created through it — `effect()`,
+`watch()`, or anything `own(register)` creates — waits while the lifecycle is
+paused (a new registration is created on resume), catches up once on resume
+against the current state (`watch` keeps its `(value, previous)` contract, so
+the values in between are not delivered), and is disposed, cleanups once, in
+the disposal that ends the lifecycle: nothing it owns runs after that, not even
+in the same task. `scope.state()` reports `"active"`, `"paused"` or `"ended"`.
+
+The lifecycle is the branch's in a `when()` / `match()` branch the directive
+built — with or without a `transition`: without one it ends at the switch, with
+one it pauses for the leave and ends when the branch is released — the route
+instance's in a route component (paused with the branch holding the outlet,
+ended when the instance is replaced), and the boundary's in `Suspense`'s
+`nodes()` and `fallback()`. Nothing is installed globally across the `await`,
+and ownership is never inferred from what rendered last, so concurrent work
+never inherits another's lifecycle. Captured outside any render, a scope is
+always active. Work created after an `await` without the scope stays unowned:
+`registerDisposer(node, stop)` gives it teardown with that node, not pause and
+resume.
+
+A registration whose `register` (or whose effect's or watch's first run) throws
+keeps nothing: its lifecycle listeners are dropped and the error is rethrown; one
+deferred to a resume is reported instead, and the other waiting registrations
+still start. What `register` acquired before throwing is its own to release.
+`scope.onPause(fn)` / `scope.onResume(fn)` are called as the lifecycle pauses and
+resumes (a microtask later; a pause and resume in the same task deliver nothing),
+for what does not pause on its own: timers, sockets, media, requests. They run in
+the context the scope captured: `route()` there is the pausing page's own route,
+and what they create belongs to the scope's lifecycle.
+
+### Added — `pendingContent()`: readiness for application content
+
+```ts
+const list = ul(li("Loading…"));
+const pending = pendingContent(list);
+const rows = await fetchRows();
+list.replaceChildren(...rows.map((r) => li(r.title)));
+pending.done();                       // committed: an enter waiting for it proceeds
+```
+
+Content the application loads itself takes part in `waitForContent` only when
+registered: nothing becomes pending on its own. A registration is located at a
+node or range anchor (it counts for an enter while that node is inside the
+entering branch; disposing the node cancels it) or at a captured
+`lifecycleScope()` (it counts when that lifecycle lies inside the branch; its
+end cancels it) — the form to use when the content is pending before the node it
+renders into exists. Each call is independent — several at one location stay
+pending until each settles, and settling one never settles another — and
+`done(committed?)` / `cancel()` are idempotent, the first call winning. Call
+`done()` after the content (or an error view) is in the DOM; `cancel()` settles
+without content, so nothing joins the enter for it. A registration made while an
+enter waits is picked up, under the enter's original deadline. On the server it
+registers nothing and returns a settled handle.
+
+### Added — `KeepAliveRoute({ suspendInactive: true })`
+
+A cached page is paused while it is hidden, instead of staying live (still the
+default): its DOM, local state, form values and route context are kept; its
+bindings, effects and `lifecycleScope()` work do not run, and catch up once
+when it is shown again, against the current state and the route it is shown
+for; async work it owns (a `Suspense` result, a nested outlet's page) is held
+until then. Shown inside a branch that is itself paused, it resumes only with
+that branch. Eviction and outlet disposal end what a suspended page owns — its
+DOM bindings, `lifecycleScope()` work, and effects whose stop is tied to the page
+— without a catch-up run. A plain `effect()` the page created pauses with it but
+is owned by nothing: after eviction it runs one catch-up and stays subscribed,
+as it would without `suspendInactive`; create it with `scope.effect()` (or
+register its stop on one of the page's nodes) when eviction must end it. Timers,
+sockets and requests do not pause by themselves: stop them in `scope.onPause()`
+and restart them in `scope.onResume()`.
+
+### Added — `each()`: a dev warning when a direct `item()` read goes stale, and `item.peek()`
+
+`render` runs once per key, untracked, so `img({ src: p().url })` keeps the
+first url when the key later receives a replacement item. In development, a
+row whose `render` read `item()` (or `index()`) directly now warns at the
+moment that read goes stale, once per render call site, naming the key and the
+call site; a read in a binding (`src: () => p().url`) or an effect, and a list
+whose items are never replaced, never warn. `item.peek()` and `index.peek()`
+read the current value without subscribing and are never reported: the
+explicit form of an intentional one-time read. The check is compiled out of
+production builds. The getters are typed `EachItem<T>` / `EachIndex`; existing
+render callbacks typed `(item: () => T)` still type-check.
+
+---
+
 ## [4.14.1] — 2026-10-30
 
 ### Fixed — writing form-control defaults on the server DOM

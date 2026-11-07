@@ -299,6 +299,119 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // never share a scope (`adoptScope.ts`). Measured: raw ~92,320 B, gzip
     // ~31,790 B (+~480 B raw, +~220 B gzip).
     //
+    // Raw 97,800 B, gzip baseline 33,300 B in 4.15 for `when()` / `match()`
+    // transitions and multi-node branches: the enter/leave engine (computed
+    // timings, end events, the 5 s cap, custom JS phases;
+    // `core/rendering/branchTransition.ts`), leaving-branch bookkeeping and the
+    // `out-in` / `in-out` sequencing in the directives, fragment branches whose
+    // reactive children keep rendering after insertion, the frozen-owner check
+    // in the scheduler, the shared style-key mapping and `each` rows' `peek()`.
+    // The transition engine cannot be shaken out: `transition` is a plain
+    // options object, so every `when` / `match` references it. Measured: raw
+    // ~97,480 B, gzip ~33,875 B (+~5,160 B raw, +~2,090 B gzip; about 4,400 B
+    // raw of it the transitions).
+    //
+    // Raw 98,700 B, gzip baseline 33,550 B for the 4.15 review fixes, which are
+    // correctness, not features: a branch is tracked as the RANGE its starts
+    // render (`core/rendering/range.ts` — `each()` rows, nested directive
+    // branches, fragment function children, so they are made inert, animated,
+    // removed and re-attached with the branch), an owned fragment's own
+    // cleanup runs on release, and leave timing follows CSS list matching
+    // (`transition-property` / `animation-name` decide how many transitions and
+    // animations run; one end event per entry). Measured: raw ~98,320 B, gzip
+    // ~34,190 B (+~840 B raw, +~310 B gzip).
+    //
+    // Raw 99,600 B, gzip baseline 33,850 B for the follow-ups that close the
+    // documented limits of those fixes: a leave waits for what
+    // `getAnimations()` says actually started (a listed property that does not
+    // change no longer holds the branch until the fallback), a range that grows
+    // while its branch leaves (a caller-owned `each()`) is watched so late nodes
+    // turn inert too, and `KeepAlive` registers its range (the router outlets
+    // do as well, in `sibujs/plugins`). Measured: raw ~99,230 B, gzip
+    // ~34,490 B (+~910 B raw, +~300 B gzip).
+    //
+    // Raw 100,700 B, gzip baseline 34,250 B for the third review round's
+    // correctness fixes: deferred first renders (`each`, `when` / `match`,
+    // `KeepAlive`, `out-in` builds) check the captured structural owner and do
+    // not run inside a branch that froze (`captureFrozen`); rows that join a
+    // leaving range are enrolled in the running phase under its absolute
+    // deadline; a hidden caller-owned range is parked in a detached fragment so
+    // it keeps reconciling; an enter waits (a bounded number of microtask
+    // turns) for nested first renders. Measured: raw ~100,290 B, gzip
+    // ~34,850 B (+~1,060 B raw, +~365 B gzip).
+    //
+    // Gzip baseline 34,300 B (raw cap unchanged) for the fourth round: a
+    // renderer's first render waits for its anchor to be attached when it had
+    // none (`queueFirstRender` / `resumePending`), an already-rendered anchor
+    // moves with its whole range on first attachment, and a deferred enter does
+    // not start inside a frozen ancestor. Measured: raw ~100,510 B, gzip
+    // ~34,945 B (+~220 B raw, +~90 B gzip).
+    //
+    // Raw 102,200 B, gzip baseline 34,800 B for paused-vs-ended ownership: a
+    // frozen branch can be taken back, so the scheduler records the
+    // subscribers it skipped and re-runs them on `thaw`, deferred work waits on
+    // resume / end notifications instead of being dropped (`captureFrozen` →
+    // `HeldCheck.wait`), and a detached result can be held (`holdSubtree`).
+    // Measured: raw ~101,780 B, gzip ~35,425 B (+~1,270 B raw, +~480 B gzip).
+    //
+    // Raw 102,900 B, gzip baseline 35,100 B for the suspension follow-ups: the
+    // public `lifecycleScope()` (effects created after an `await` owned by the
+    // render's lifecycle), end watches and owner-scoped runs on `HeldCheck`,
+    // anchored `each` / `KeepAlive` bindings, and the replay of an enter a
+    // paused ancestor kept from starting. Measured: raw ~102,520 B, gzip
+    // ~35,720 B (+~740 B raw, +~300 B gzip).
+    //
+    // Raw 104,700 B, gzip baseline 35,800 B for lifecycle ownership: the
+    // synchronous end of scoped work, `lifecycleScope().watch()` / `.own()`,
+    // a leaving branch holding its DOM, and `waitForContent` (initial async
+    // content joining a branch enter, with the enter's open window and
+    // late-element enrolment). Measured: raw ~104,430 B, gzip ~36,440 B
+    // (+~1,910 B raw, +~720 B gzip).
+    //
+    // Raw 106,800 B, gzip baseline 36,500 B for the readiness and lifecycle
+    // follow-ups: counted readiness registrations and the public
+    // `pendingContent()`, dependencies re-taken as content reveals more,
+    // no compounded enter on content inside an element still animating,
+    // core `Suspense` / `lazy()` readiness, a lifecycle for every owned
+    // branch, `onPause()` / `onResume()`, exception-safe registration.
+    // Measured: raw ~106,540 B, gzip ~37,120 B (+~2,100 B raw, +~690 B gzip).
+    //
+    // Raw 109,200 B, gzip baseline 37,300 B for the second round: cancelled
+    // readiness kept apart from committed content, branch-local membership
+    // observation while an enter waits, a timer-driven readiness budget, the
+    // lifecycle gates of core `lazy()` / `Suspense()`, hooks delivered in the
+    // captured context, the router's bootstrap outcome, and the per-element
+    // animation fallback. Measured: raw ~108,950 B, gzip ~37,960 B
+    // (+~2,410 B raw, +~840 B gzip).
+    //
+    // Raw 110,600 B, gzip baseline 37,750 B for the third round: commits that
+    // re-check after every step running application code (the held result's
+    // catch-up, the outgoing teardown), a staged replacement for them, a
+    // lifecycle for every `lazy()` instance (cached ones included) and for the
+    // core `Suspense` fallback. Measured: raw ~110,270 B, gzip ~38,410 B
+    // (+~1,330 B raw, +~450 B gzip).
+    //
+    // Raw 111,200 B, gzip baseline 37,950 B for the fourth round: commits that
+    // re-check after every teardown call and record what they insert before a
+    // custom element's reactions can run, the range / readiness / disposer
+    // bookkeeping shared between separately bundled entry points, and the
+    // cleanup of a `lazy()` component's fragment root. Measured: raw ~110,910
+    // B, gzip ~38,650 B (+~640 B raw, +~240 B gzip).
+    //
+    // Raw 112,500 B, gzip baseline 38,400 B for the fifth round: `when()` /
+    // `match()` publish the incoming branch (and its lifecycle) before its
+    // first insertion and re-check liveness between insertions, a disposal
+    // from any transition callback, cleanup, blur or factory is terminal (a
+    // phase that comes back after it is cancelled through a placeholder), and
+    // a leaving bare branch is taken back from its live range. Measured: raw
+    // ~112,130 B, gzip ~39,100 B (+~1,220 B raw, +~450 B gzip).
+    //
+    // Gzip baseline 38,500 B for the sixth round (raw unchanged): a switch's
+    // build publishes only while that switch is the latest one, and each
+    // enter / leave runs under a handle of its own that its completion checks
+    // before touching the branch. Measured: raw ~112,230 B, gzip ~39,200 B
+    // (+~100 B raw, +~105 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -306,8 +419,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(92_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(31_200 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_500 * 1.02));
   });
 });
 

@@ -12,6 +12,12 @@ import type { NodeChild, NodeChildren } from "./types";
  * change. The binding is owned by that placeholder, so disposing the parent the
  * fragment was appended to (or unmounting a mounted fragment) stops it.
  *
+ * A fragment is a valid `when()` / `match()` branch: the directive records the
+ * fragment's nodes before inserting it (insertion empties a DocumentFragment)
+ * and removes and disposes all of them on the next switch, including whatever
+ * its reactive children have rendered since. Several sibling nodes need no
+ * wrapper element (and no `display: contents` span).
+ *
  * @example
  * ```ts
  * div([
@@ -20,6 +26,8 @@ import type { NodeChild, NodeChildren } from "./types";
  *     () => `Count: ${count()}`,
  *   ])
  * ]);
+ *
+ * when(() => editing(), () => Fragment([button("Save"), button("Cancel")]));
  * ```
  *
  * @param nodes Array of child nodes to include in the fragment
@@ -53,7 +61,10 @@ function appendChild(frag: DocumentFragment, child: NodeChildren): void {
   if (typeof child === "function") {
     const placeholder = document.createComment("");
     frag.appendChild(placeholder);
-    registerDisposer(placeholder, bindChildNode(placeholder, child as () => NodeChild));
+    // The rendered nodes are the placeholder's siblings, and a re-render puts
+    // new ones in the live DOM, outside what was ever in the fragment. Exposed
+    // so a directive releasing this fragment as a branch can find them.
+    registerDisposer(placeholder, bindChildNode(placeholder, child as () => NodeChild, true));
     return;
   }
   frag.appendChild(document.createTextNode(String(child)));
