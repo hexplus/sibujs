@@ -385,6 +385,79 @@ describe("reactive child disposed while it commits", () => {
     expect(stats.runs).toBe(before);
   });
 
+  it("releases the result of a getter whose host teardown also detached the placeholder", () => {
+    const [show, setShow] = signal(true);
+    const [value, setValue] = signal(0);
+    const stats = { runs: 0 };
+    let cleanups = 0;
+    const host: HTMLElement = mount(
+      div(() => {
+        if (show()) return span("A");
+        dispose(host);
+        const frag = Fragment([live(value, stats)]);
+        registerDisposer(frag, () => cleanups++);
+        return frag;
+      }),
+    );
+    registerDisposer(host, () => host.replaceChildren());
+    setShow(false);
+    expect(host.textContent).toBe("");
+    expect(cleanups).toBe(1);
+    const before = stats.runs;
+    setValue(1);
+    expect(stats.runs).toBe(before);
+    dispose(host);
+    expect(cleanups).toBe(1);
+  });
+
+  it("keeps a fragment returned repeatedly and disposes it once", () => {
+    const [rev, setRev] = signal(0);
+    let cleanups = 0;
+    let fragmentCleanups = 0;
+    const child = span("A");
+    registerDisposer(child, () => cleanups++);
+    const frag = Fragment([child]);
+    registerDisposer(frag, () => fragmentCleanups++);
+    const host = mount(
+      div(() => {
+        rev();
+        return frag;
+      }),
+    );
+    setRev(1);
+    setRev(2);
+    expect(host.textContent).toBe("A");
+    expect(cleanups).toBe(0);
+    dispose(host);
+    dispose(host);
+    expect({ cleanups, fragmentCleanups }).toEqual({ cleanups: 1, fragmentCleanups: 1 });
+  });
+
+  it("releases an in-flight candidate once when its child teardown disposes the host again", () => {
+    const [show, setShow] = signal(true);
+    let cleanups = 0;
+    const host: HTMLElement = mount(
+      div(() => {
+        if (show()) {
+          const frag = Fragment([span("A")]);
+          registerDisposer(frag, () => dispose(host));
+          return frag;
+        }
+        const child = span("B");
+        registerDisposer(child, () => {
+          cleanups++;
+          dispose(host);
+        });
+        return Fragment([child]);
+      }),
+    );
+    setShow(false);
+    expect(host.textContent).toBe("");
+    expect(cleanups).toBe(1);
+    dispose(host);
+    expect(cleanups).toBe(1);
+  });
+
   it("stops inserting when an inserted custom element disposes the host", () => {
     const [show, setShow] = signal(true);
     const [value, setValue] = signal(0);

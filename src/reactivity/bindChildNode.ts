@@ -69,14 +69,7 @@ export function bindChildNode(
     // we are about to discard actually held focus.
     const focused = captureFocusWithin(old);
 
-    // Nothing to render (null / boolean) removes everything previously
-    // rendered, attached or not; something to render needs the parent.
     const items = result == null || typeof result === "boolean" ? [] : Array.isArray(result) ? result : [result];
-    const parent = placeholder.parentNode;
-    if (!parent && items.length > 0) {
-      lastNodes = [];
-      return;
-    }
 
     // Build the new start list: a fragment contributes its starts, recorded
     // before insertion empties it (see `rangeStarts`). Dedupe by reference so
@@ -100,12 +93,23 @@ export function bindChildNode(
       }
     }
 
+    // The getter disposed this binding: nothing is adopted, and the result is
+    // released. Checked before anything else can return: the teardown may also
+    // have detached the placeholder (an owner clearing its children).
+    if (stopped) return release(newNodes, fragments);
+
+    // Nothing to render (null / boolean) removes everything previously
+    // rendered, attached or not; something to render needs the parent.
+    const parent = placeholder.parentNode;
+    if (!parent && items.length > 0) {
+      lastNodes = [];
+      return;
+    }
+
     // Everything the new starts occupy, read before anything moves: a start
     // rendered again keeps its live range, a fragment's starts bring what they
     // render inside it, and a start already rendering elsewhere brings that.
     const incoming = liveRange(newNodes);
-    // The getter disposed this binding: nothing is adopted.
-    if (stopped) return release(newNodes, fragments);
     const oldFragments = lastFragments;
     lastNodes = newNodes;
     lastFragments = fragments;
