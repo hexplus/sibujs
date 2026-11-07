@@ -20,7 +20,7 @@
 
 import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
-import { dispose } from "../core/rendering/dispose";
+import { dispose, withDisposerRollback } from "../core/rendering/dispose";
 import { runInBoundary, type StreamBoundary, setBoundaryHook } from "../core/rendering/streamBoundary";
 import {
   assertRequestIsolation,
@@ -34,7 +34,7 @@ import { createServerAdoptScope } from "./hydrateAdopt";
 import { ensureServerDom, explainServerError, watchBrowserApis } from "./serverDom";
 import { collectServerHead } from "./serverHead";
 import { assembleDocument, type DocumentOptions, renderToStringWith, serializeState, suspenseSwapScript } from "./ssr";
-import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, renderFailure } from "./ssrAsync";
+import { type AsyncRenderOptions, DEFAULT_TRANSFER_MAX_BYTES, ownRender, renderFailure } from "./ssrAsync";
 
 /** Options of the streaming `renderToReadableStream(() => App(), options)`. */
 export interface StreamRenderOptions extends AsyncRenderOptions {
@@ -216,7 +216,7 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
   const MARK_BODY = "<sibu-stream-body>";
   const MARK_END = "<sibu-stream-end>";
 
-  void runInSSRContext(async () => {
+  const render = async (): Promise<void> => {
     const store = getRequestStore();
     const state: StreamState = { boundaries: [], serialize: null };
     requestSlot("stream", () => state);
@@ -240,14 +240,19 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       const scope = ids ? createServerAdoptScope(ids) : null;
       let root: Node;
       try {
-        root = inScope(scope, input);
+        // A transaction: a root that throws after allocating (a reactive
+        // element, a registered cleanup) releases what it registered. The
+        // `finally` below cannot: no tree reached the holder.
+        root = withDisposerRollback(() => inScope(scope, input));
       } catch (err) {
         throw explainServerError(err);
       }
-      const serialize = (node: Node) => renderToStringWith(node, { marker: options.marker ?? "root", ids });
-      state.serialize = serialize;
+      // In the holder at once: from here the `finally` releases the tree,
+      // however the stream ends.
       holder = document.createDocumentFragment();
       holder.appendChild(root);
+      const serialize = (node: Node) => renderToStringWith(node, { marker: options.marker ?? "root", ids });
+      state.serialize = serialize;
       const ready = (b: BoundaryRecord) => b.done && !pendingFor(store?.pending, b.api);
       // Serialize `node` with every not-ready boundary inside it showing its
       // fallback: its in-progress content is held aside for the duration.
@@ -391,7 +396,9 @@ export function streamPage(input: () => Node, options: StreamRenderOptions = {})
       if (store) store.errors = undefined;
       if (holder) for (const child of Array.from(holder.childNodes)) dispose(child);
     }
-  });
+  };
+  // Its own registrations: see `ownRender`.
+  ownRender(() => void runInSSRContext(render));
 
   return new ReadableStream<string>({
     async pull(controller) {

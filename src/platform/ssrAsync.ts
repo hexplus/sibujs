@@ -18,7 +18,7 @@
 
 import { DEV } from "../core/dev";
 import { inScope } from "../core/rendering/adoptScope";
-import { dispose } from "../core/rendering/dispose";
+import { beginDisposerCapture, dispose, endDisposerCapture, withDisposerRollback } from "../core/rendering/dispose";
 import { assertRequestIsolation, getRequestStore, type PendingWork, runInSSRContext } from "../core/ssr-context";
 import { collectTransfer } from "../utils/transfer";
 import { createServerAdoptScope } from "./hydrateAdopt";
@@ -316,7 +316,10 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
 
   let root: Node;
   try {
-    root = typeof input === "function" ? inScope(scope, input) : input;
+    // A transaction: a root that throws after allocating (a reactive element,
+    // a registered cleanup) releases what it registered. Nothing else can — no
+    // tree was returned to dispose.
+    root = typeof input === "function" ? withDisposerRollback(() => inScope(scope, input)) : input;
   } catch (err) {
     if (store) store.errors = undefined;
     throw explainServerError(err);
@@ -326,69 +329,61 @@ async function renderCore(input: Node | (() => Node), options: AsyncRenderOption
   const holder = document.createDocumentFragment();
   holder.appendChild(root);
 
-  const settle = await settled(holder, { timeout: options.timeout });
-  if (store) store.errors = undefined;
-
-  const releaseTree = () => {
-    for (const child of Array.from(holder.childNodes)) dispose(child);
-  };
-
-  if (errors.length > 0) {
-    releaseTree();
-    throw renderFailure(errors[0]);
-  }
-
-  if (settle.timedOut && DEV) {
-    console.warn(
-      `[SibuJS SSR] render did not settle within ${options.timeout ?? DEFAULT_SETTLE_TIMEOUT} ms; serialized with fallbacks for: ${settle.pending.join(", ")}`,
-    );
-  }
-
-  const content = renderToStringWith(holder, { marker: options.marker ?? "root", ids });
-  // The head resolves its getters against the settled tree, so it is
-  // collected before the tree is released — and a getter that throws still
-  // releases it.
-  let head: string;
+  // From here the tree exists, and it is released exactly once however the
+  // render ends: settled, failed in the tree, or failed while serializing,
+  // collecting the head or transferring state.
   try {
-    head = collectServerHead();
-  } catch (err) {
-    releaseTree();
-    throw err;
-  }
+    const settle = await settled(holder, { timeout: options.timeout });
+    if (store) store.errors = undefined;
 
-  let state = "";
-  let stateData: Record<string, unknown> | null = null;
-  let stateBytes = 0;
-  let largestState: Array<{ key: string; bytes: number }> = [];
-  let droppedState: string[] = [];
-  if (options.transfer !== false) {
-    const collected = collectTransfer();
-    if (collected) {
-      const built = buildTransfer(collected, options.maxStateBytes ?? DEFAULT_TRANSFER_MAX_BYTES, options.nonce);
-      state = built.script;
-      stateData = built.data;
-      stateBytes = built.bytes;
-      largestState = built.largest;
-      droppedState = built.dropped;
+    if (errors.length > 0) throw renderFailure(errors[0]);
+
+    if (settle.timedOut && DEV) {
+      console.warn(
+        `[SibuJS SSR] render did not settle within ${options.timeout ?? DEFAULT_SETTLE_TIMEOUT} ms; serialized with fallbacks for: ${settle.pending.join(", ")}`,
+      );
     }
-  }
 
-  releaseTree();
+    const content = renderToStringWith(holder, { marker: options.marker ?? "root", ids });
+    // The head resolves its getters against the settled tree, so it is
+    // collected before the tree is released.
+    const head = collectServerHead();
 
-  const browserApis = Array.from((store?.slots?.get("browserApis") as Set<string> | undefined) ?? []);
-  const diagnostics: RenderDiagnostics = {
-    timedOut: settle.timedOut,
-    pending: settle.pending,
-    browserApis,
-    stateBytes,
-    largestState,
-    droppedState,
-    durationMs: Date.now() - started,
-  };
-  if (DEV && options.log) {
-    console.info(formatRenderDiagnostics(diagnostics, typeof options.log === "string" ? options.log : undefined));
+    let state = "";
+    let stateData: Record<string, unknown> | null = null;
+    let stateBytes = 0;
+    let largestState: Array<{ key: string; bytes: number }> = [];
+    let droppedState: string[] = [];
+    if (options.transfer !== false) {
+      const collected = collectTransfer();
+      if (collected) {
+        const built = buildTransfer(collected, options.maxStateBytes ?? DEFAULT_TRANSFER_MAX_BYTES, options.nonce);
+        state = built.script;
+        stateData = built.data;
+        stateBytes = built.bytes;
+        largestState = built.largest;
+        droppedState = built.dropped;
+      }
+    }
+
+    const browserApis = Array.from((store?.slots?.get("browserApis") as Set<string> | undefined) ?? []);
+    const diagnostics: RenderDiagnostics = {
+      timedOut: settle.timedOut,
+      pending: settle.pending,
+      browserApis,
+      stateBytes,
+      largestState,
+      droppedState,
+      durationMs: Date.now() - started,
+    };
+    if (DEV && options.log) {
+      console.info(formatRenderDiagnostics(diagnostics, typeof options.log === "string" ? options.log : undefined));
+    }
+    return { content, result: { head, state, stateData, status: 200, diagnostics } };
+  } finally {
+    if (store) store.errors = undefined;
+    for (const child of Array.from(holder.childNodes)) dispose(child);
   }
-  return { content, result: { head, state, stateData, status: 200, diagnostics } };
 }
 
 /** Run `fn` in the current request scope, or in a fresh one when there is none. */
@@ -398,7 +393,29 @@ function inRequest<T>(api: string, fn: () => Promise<T>): Promise<T> {
   } catch (err) {
     return Promise.reject(err);
   }
-  return getRequestStore() ? fn() : runInSSRContext(fn);
+  return ownRender(() => (getRequestStore() ? fn() : runInSSRContext(fn)));
+}
+
+/**
+ * Start a server render that owns its registrations. Rollback transactions
+ * share one synchronous stack, and a successful one hands its registrations
+ * to the transaction open below it. A render started synchronously inside
+ * another render's root factory must not join that root's transaction: the
+ * root failing would roll this render back (stop its bindings and deferred
+ * renderers, run its cleanups) before it settles. So no transaction is open
+ * for the synchronous part of the render, root build included; nested builds
+ * WITHIN the render still roll back into its own root. The asynchronous rest
+ * runs outside any transaction anyway.
+ *
+ * @internal
+ */
+export function ownRender<T>(start: () => T): T {
+  const isolated = beginDisposerCapture(null);
+  try {
+    return start();
+  } finally {
+    if (isolated) endDisposerCapture();
+  }
 }
 
 /**
