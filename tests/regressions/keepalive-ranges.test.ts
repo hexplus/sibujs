@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { when } from "../../src/core/rendering/directives";
+import { setRuntimeErrorHandler } from "../../src/core/errors";
+import { match, when } from "../../src/core/rendering/directives";
 import { dispose, registerDisposer } from "../../src/core/rendering/dispose";
 import { each } from "../../src/core/rendering/each";
 import { Fragment } from "../../src/core/rendering/fragment";
 import { div, span } from "../../src/core/rendering/html";
 import { KeepAlive } from "../../src/core/rendering/keepAlive";
 import { onCleanup } from "../../src/core/rendering/lifecycle";
+import { rangeEnd } from "../../src/core/rendering/range";
 import { signal } from "../../src/core/signals/signal";
 
 // KeepAlive caches a case's COMPLETE rendered range, not just its root node: a
@@ -18,6 +20,7 @@ const tick = async () => {
 
 afterEach(() => {
   document.body.replaceChildren();
+  setRuntimeErrorHandler(null);
 });
 
 function mount(anchor: Comment): HTMLElement {
@@ -194,4 +197,240 @@ describe("KeepAlive caches complete ranges", () => {
     expect(rows).toBe(1);
     expect(host.textContent).toBe("");
   });
+
+  it("updates a parked root directive and returns only its latest branch", async () => {
+    const [key, setKey] = signal("a");
+    const [view, setView] = signal("one");
+    const anchor = KeepAlive(key, {
+      a: () => match(view, { one: () => Fragment([span("1"), span("2")]), two: () => span("3") }),
+      b: () => span("B"),
+    });
+    const host = mount(anchor);
+    await tick();
+    setKey("b");
+    setView("two");
+    await tick();
+    expect(host.textContent).toBe("B");
+    setKey("a");
+    expect(host.textContent).toBe("3");
+    dispose(anchor);
+  });
+
+  it("lets a nested KeepAlive switch while the outer case is parked", async () => {
+    const [key, setKey] = signal("a");
+    const [inner, setInner] = signal("one");
+    const anchor = KeepAlive(key, {
+      a: () =>
+        KeepAlive(inner, {
+          one: () =>
+            when(
+              () => true,
+              () => span("1"),
+            ),
+          two: () => Fragment([span("2"), span("3")]),
+        }),
+      b: () => span("B"),
+    });
+    const host = mount(anchor);
+    await tick();
+    setKey("b");
+    setInner("two");
+    await tick();
+    expect(host.textContent).toBe("B");
+    setKey("a");
+    expect(host.textContent).toBe("23");
+    expect(rangeEnd(anchor).textContent).toBe("3");
+    dispose(anchor);
+    expect(host.textContent).toBe("");
+  });
+
+  it("is removed with its complete active range by an enclosing when()", async () => {
+    const [show, setShow] = signal(true);
+    const [key, setKey] = signal("a");
+    const root = when(show, () =>
+      KeepAlive(key, {
+        a: () =>
+          each(
+            () => [1, 2],
+            (n) => span(() => String(n())),
+            { key: (n) => n },
+          ),
+        b: () => span("B"),
+      }),
+    );
+    const host = mount(root);
+    await tick();
+    expect(host.textContent).toBe("12");
+    setKey("b");
+    setShow(false);
+    await tick();
+    expect(host.textContent).toBe("");
+    dispose(root);
+  });
+
+  it("adopts a directive root that rendered before it was handed over", async () => {
+    const content = when(
+      () => true,
+      () => span("A"),
+    );
+    await tick();
+    const [key, setKey] = signal("a");
+    const anchor = KeepAlive(key, { a: () => content, b: () => span("B") });
+    const host = mount(anchor);
+    await tick();
+    expect(host.textContent).toBe("A");
+    setKey("b");
+    expect(host.textContent).toBe("B");
+    setKey("a");
+    expect(host.textContent).toBe("A");
+    dispose(anchor);
+  });
+
+  it("runs an empty fragment's own cleanup once on eviction", async () => {
+    let cleanups = 0;
+    const [key, setKey] = signal("a");
+    const anchor = KeepAlive(
+      key,
+      {
+        a: () => {
+          const frag = Fragment([]);
+          registerDisposer(frag, () => cleanups++);
+          return frag;
+        },
+        b: () => span("B"),
+      },
+      { max: 1 },
+    );
+    const host = mount(anchor);
+    await tick();
+    setKey("b");
+    expect(host.textContent).toBe("B");
+    expect(cleanups).toBe(1);
+    dispose(anchor);
+    expect(cleanups).toBe(1);
+  });
+
+  it("switches away from a case whose nested range is playing its leave", async () => {
+    let end!: () => void;
+    const [key, setKey] = signal("a");
+    const [on, setOn] = signal(true);
+    const anchor = KeepAlive(key, {
+      a: () =>
+        when(
+          on,
+          () => span("A"),
+          () => span("C"),
+          { transition: { leave: () => new Promise<void>((r) => (end = r)), maxDuration: 1000 } },
+        ),
+      b: () => span("B"),
+    });
+    const host = mount(anchor);
+    await tick();
+    setOn(false);
+    setKey("b");
+    await tick();
+    expect(host.textContent).toBe("B");
+    end();
+    await tick();
+    setKey("a");
+    expect(host.textContent).toBe("C");
+    dispose(anchor);
+  });
+
+  it("never resurrects a reactive fragment child replaced while the case is shown", async () => {
+    const [key, setKey] = signal("a");
+    const [text, setText] = signal("A");
+    let cleanups = 0;
+    const built: Node[] = [];
+    const anchor = KeepAlive(key, {
+      a: () =>
+        Fragment([
+          () => {
+            const el = span(text());
+            registerDisposer(el, () => cleanups++);
+            built.push(el);
+            return el;
+          },
+        ]),
+      b: () => span("X"),
+    });
+    const host = mount(anchor);
+    await tick();
+    expect(host.textContent).toBe("A");
+    setText("B");
+    expect(host.textContent).toBe("B");
+    expect(cleanups).toBe(1);
+    for (let round = 0; round < 3; round++) {
+      setKey("b");
+      expect(host.textContent).toBe("X");
+      setKey("a");
+      expect(host.textContent).toBe("B");
+      expect(built[0].parentNode).toBeNull();
+    }
+    dispose(anchor);
+    expect(cleanups).toBe(2);
+  });
+
+  it("never resurrects a reactive fragment child replaced while the case is parked", async () => {
+    const [key, setKey] = signal("a");
+    const [text, setText] = signal("A");
+    const built: Node[] = [];
+    const anchor = KeepAlive(key, {
+      a: () =>
+        Fragment([
+          () => {
+            const el = span(text());
+            built.push(el);
+            return el;
+          },
+        ]),
+      b: () => span("X"),
+    });
+    const host = mount(anchor);
+    await tick();
+    setKey("b");
+    setText("B");
+    await tick();
+    expect(host.textContent).toBe("X");
+    for (let round = 0; round < 3; round++) {
+      setKey("a");
+      expect(host.textContent).toBe("B");
+      expect(built[0].parentNode).toBeNull();
+      setKey("b");
+      expect(host.textContent).toBe("X");
+    }
+    dispose(anchor);
+  });
+
+  it("parks and re-shows a large fragment without hitting the engine's argument limit", async () => {
+    const [key, setKey] = signal("b");
+    const errors: unknown[] = [];
+    setRuntimeErrorHandler((e) => {
+      errors.push(e);
+    });
+    let first: Node | null = null;
+    let last: Node | null = null;
+    const anchor = KeepAlive(key, {
+      a: () => {
+        const frag = document.createDocumentFragment();
+        for (let i = 0; i < 130_000; i++) frag.appendChild(document.createTextNode("x"));
+        first = frag.firstChild;
+        last = frag.lastChild;
+        return frag;
+      },
+      b: () => span("B"),
+    });
+    const host = mount(anchor);
+    await tick();
+    setKey("a");
+    expect(errors).toEqual([]);
+    expect(host.textContent?.length).toBe(130_000);
+    setKey("b");
+    expect(host.textContent).toBe("B");
+    setKey("a");
+    expect(errors).toEqual([]);
+    expect(anchor.nextSibling).toBe(first);
+    expect(host.lastChild).toBe(last);
+    dispose(anchor);
+  }, 30_000);
 });

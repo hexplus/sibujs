@@ -1,7 +1,7 @@
 import { bindOwnerScope, captureFrozen, structuralBinding } from "../../reactivity/track";
 import { devWarn, isDev } from "../dev";
 import { dispose, registerDisposer } from "./dispose";
-import { collectRange, queueFirstRender, registerNodesRange, resumePending } from "./range";
+import { collectRange, queueFirstRender, rangeEnd, registerRange, resumePending } from "./range";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -127,9 +127,14 @@ export function KeepAlive(
   // keeping its pending work for the resume.
   const binding = structuralBinding(update, anchor);
   // The shown case sits after the anchor; an enclosing directive branch that
-  // holds this anchor takes it along. Its last start may render a range of its
-  // own, which `rangeEnd` follows from there.
-  registerNodesRange(anchor, () => (current === null ? [] : current.starts));
+  // holds this anchor takes it along. The range ends at the last start still
+  // next to the anchor, or the range that start renders (`rangeEnd` follows
+  // it from there). Scanned from the end: a case can have many starts.
+  registerRange(anchor, () => {
+    const starts = current?.starts ?? [];
+    for (let i = starts.length; i--; ) if (starts[i].parentNode === anchor.parentNode) return starts[i];
+    return null;
+  });
   const untrack = binding.stop;
 
   if (!initialized) {
@@ -177,37 +182,36 @@ interface CachedCase {
 }
 
 function cacheCase(node: Node): CachedCase {
+  const park = document.createDocumentFragment();
   // A fragment is emptied when inserted: record its children first. Detected
   // by `nodeType`, not `instanceof DocumentFragment`, so a fragment built in
-  // another realm (an iframe's document) is handled too.
-  const entry = {
-    source: node,
-    starts: node.nodeType === 11 ? Array.from(node.childNodes) : [node],
-    park: document.createDocumentFragment(),
-  };
-  // A start that already renders its range elsewhere brings it along, read
-  // before the move (afterwards it is no longer the start's sibling).
-  parkCase(entry);
-  return entry;
+  // another realm (an iframe's document) is handled too. Only the canonical
+  // starts are recorded: a child inside an earlier child's range (the initial
+  // result of a reactive child, rendered after its placeholder) is that
+  // range's content, replaced by its renderer later, and must never come back.
+  const starts: Node[] = [];
+  if (node.nodeType === 11) for (let n = node.firstChild; n; n = rangeEnd(n).nextSibling) starts.push(n);
+  else starts.push(node);
+  // First adoption: a detached start is only itself; one already rendering
+  // its range elsewhere brings it along, read before the move (afterwards it
+  // is no longer the start's sibling). One node at a time: a spread is bounded
+  // by the engine's argument limit.
+  for (const start of starts) for (const n of start.parentNode ? collectRange([start]) : [start]) park.appendChild(n);
+  return { source: node, starts, park };
 }
 
 /**
- * The nodes the case occupies now, in DOM order: each start followed by the
- * range it renders (nested ranges included), attached or parked. A detached
- * start is only itself.
+ * Detach the case's complete range into its park, keeping it alive. Read live
+ * from the starts (nested ranges included); a start removed since adoption is
+ * no longer the case's.
  */
-function rangeOf(starts: Node[]): Node[] {
-  return [...new Set(starts.flatMap((start) => (start.parentNode ? collectRange([start]) : [start])))];
-}
-
-/** Detach the case's complete range into its park, keeping it alive. */
 function parkCase(entry: CachedCase): void {
-  entry.park.append(...rangeOf(entry.starts));
+  for (const n of collectRange(entry.starts)) entry.park.appendChild(n);
 }
 
 /** Dispose the case's complete range (and the fragment's own cleanups) and remove it. */
 function releaseCase(entry: CachedCase): void {
-  for (const n of rangeOf(entry.starts)) {
+  for (const n of collectRange(entry.starts)) {
     dispose(n);
     n.parentNode?.removeChild(n);
   }
