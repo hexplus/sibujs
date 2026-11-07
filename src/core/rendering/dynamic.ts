@@ -1,7 +1,7 @@
 import { reactiveBinding, untracked } from "../../reactivity/track";
 import { globalSingleton } from "../../utils/globalSingleton";
 import { signal } from "../signals/signal";
-import { registerDisposer, replaceChildrenSafely } from "./dispose";
+import { registerDisposer, replaceChildrenSafely, withDisposerRollback } from "./dispose";
 import { div } from "./html";
 import type { Component } from "./types";
 
@@ -123,7 +123,13 @@ export function DynamicComponent(is: () => string | Component): HTMLDivElement {
     // The component body runs untracked: a signal it reads eagerly while
     // building belongs to the component, not to this switch. Tracked, every
     // write to such a signal re-ran the effect and remounted the component.
-    const el: Element = untracked(() => (component ? component() : div(`[Component "${target as string}" not found]`)));
+    // And as a transaction: a component that throws after allocating (a
+    // reactive element, a listener) releases what it registered, and the
+    // current view stays. Its half-built nodes were never returned, so
+    // disposing the container could not reach them.
+    const el: Element = untracked(() =>
+      withDisposerRollback(() => (component ? component() : div(`[Component "${target as string}" not found]`))),
+    );
     // Recorded only once the build succeeded, so a component that threw is
     // built again on the next run instead of being skipped as already shown.
     shown = next;

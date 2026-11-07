@@ -1,6 +1,6 @@
 import { bindOwnerScope } from "../../reactivity/track";
 import { reportError } from "../errors";
-import { dispose, registerDisposer } from "./dispose";
+import { dispose, registerDisposer, withDisposerRollback } from "./dispose";
 import { requireDocument } from "./requireDocument";
 
 /**
@@ -40,7 +40,10 @@ export function Portal(nodes: () => Element, target?: Element): Comment {
     // entirely — otherwise portalContent leaks into the target DOM.
     if (disposed) return;
     try {
-      portalContent = nodes();
+      // A transaction: a factory that throws after allocating (a reactive
+      // element, a listener) releases what it registered. Its half-built nodes
+      // were never returned, so nothing else can reach them.
+      portalContent = withDisposerRollback(nodes);
       container.appendChild(portalContent);
     } catch (err) {
       // Single path: `reportError` offers the error to an enclosing boundary
