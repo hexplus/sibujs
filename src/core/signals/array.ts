@@ -229,8 +229,9 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
   /**
    * Replace every item with `transform`'s result, all or nothing: a callback
    * that throws leaves `data` untouched. Iterates a stable copy because `data`
-   * mutates in place if a callback writes to this array; as in `array()`, the
-   * finished result then replaces that write.
+   * mutates in place if a callback writes to this array. When some item
+   * changed, the finished result replaces that write, as in `array()`. When
+   * none did, nothing is committed and the write stands.
    */
   function commitMapped(transform: (item: T, index: number) => T): void {
     const source: readonly T[] = snapshot ?? data.slice();

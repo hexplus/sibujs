@@ -211,4 +211,35 @@ describe("reactiveArray transforms during reentrant writes (audit F9)", () => {
     expect(visited).toEqual([1, 2]);
     expect(items()).toEqual([10, 20]);
   });
+
+  it.each([false, true])("keeps a write made during a no-op map (snapshot cached: %s)", (readFirst) => {
+    const [items, actions] = reactiveArray([1, 2, 3]);
+    if (readFirst) items();
+
+    actions.map((value, index) => {
+      if (index === 0) actions.pop();
+      return value;
+    });
+
+    expect(items()).toEqual([1, 2]);
+  });
+
+  it.each([false, true])("keeps a write made during a no-op updateWhere (snapshot cached: %s)", (readFirst) => {
+    const [items, actions] = reactiveArray([1, 2, 3]);
+    if (readFirst) items();
+    let first = true;
+
+    actions.updateWhere(
+      () => true,
+      (value) => {
+        if (first) {
+          first = false;
+          actions.pop();
+        }
+        return value;
+      },
+    );
+
+    expect(items()).toEqual([1, 2]);
+  });
 });
