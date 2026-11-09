@@ -109,8 +109,7 @@ export function store<T extends object>(
 
   // Actions
   const setState = (patch: Partial<T> | ((state: T) => T)) => {
-    const current = getSnapshot();
-    const nextState = typeof patch === "function" ? patch(current) : patch;
+    const nextState = typeof patch === "function" ? patch(getSnapshot()) : patch;
     batch(() => {
       Object.entries(nextState).forEach(([key, value]) => {
         // Own keys only — `key in signals` would match inherited keys like
