@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { effect } from "../../src/core/signals/effect";
 import { signal } from "../../src/core/signals/signal";
 import { resource } from "../../src/data/resource";
 
@@ -300,6 +301,35 @@ describe("resource.abort() with nothing to cancel (audit F10)", () => {
     r.dispose();
     r.abort();
 
+    expect(callbacks.onSettled).not.toHaveBeenCalled();
+  });
+});
+
+describe("resource disposed synchronously during abort() (audit F10)", () => {
+  it("skips onSettled when an abort listener disposes the resource", () => {
+    const { calls, fetcher } = ignoringFetcher<string>();
+    const callbacks = spies();
+    const r = resource(fetcher, { retry: noRetry, ...callbacks });
+    calls[0].signal.addEventListener("abort", () => r.dispose());
+
+    r.abort();
+
+    expect(calls[0].signal.aborted).toBe(true);
+    expect(callbacks.onSettled).not.toHaveBeenCalled();
+  });
+
+  it("skips onSettled but still aborts the transport when a loading observer disposes", () => {
+    const { calls, fetcher } = ignoringFetcher<string>();
+    const callbacks = spies();
+    const r = resource(fetcher, { retry: noRetry, ...callbacks });
+    const stop = effect(() => {
+      if (!r.loading()) r.dispose();
+    });
+
+    r.abort();
+    stop();
+
+    expect(calls[0].signal.aborted).toBe(true);
     expect(callbacks.onSettled).not.toHaveBeenCalled();
   });
 });

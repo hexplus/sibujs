@@ -304,7 +304,8 @@ export function resource<T, S = void>(
       fetchVersion++;
       setLoading(false);
       controller.abort();
-      runCallback("resource onSettled", () => options.onSettled?.());
+      // A loading observer or abort listener may have disposed this resource.
+      if (!disposed) runCallback("resource onSettled", () => options.onSettled?.());
     },
     dispose: () => {
       disposed = true;
