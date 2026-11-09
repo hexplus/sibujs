@@ -24,7 +24,8 @@ export function bindTextNode(textNode: Text, getter: () => string | number): () 
       reportError(err, { phase: "binding", name: "bindTextNode", node: textNode });
       return;
     }
-    textNode.textContent = String(value);
+    const text = String(value);
+    if (textNode.textContent !== text) textNode.textContent = text;
   }
 
   // Initial render and reactive subscription. Re-tracks deps every run so a

@@ -433,6 +433,11 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // built. Measured: raw ~112,480 B, gzip ~39,400 B (+~230 B raw, +~90 B
     // gzip).
     //
+    // Raw 112,600 B, gzip baseline 38,700 B for scalar reactive children: a
+    // string or number after a string or number keeps its Text node and writes
+    // only a changed value, instead of replacing the node on every run.
+    // Measured: raw ~112,580 B, gzip ~39,460 B (+~100 B raw, +~60 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -440,8 +445,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_500);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_630 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_600);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_700 * 1.02));
   });
 });
 

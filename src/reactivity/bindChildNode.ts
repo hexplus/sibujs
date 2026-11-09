@@ -35,6 +35,9 @@ export function bindChildNode(
   // The fragments the current run resolved: emptied, but each is a lifetime of
   // its own (cleanup registered on the fragment object), released with it.
   let lastFragments: Node[] = [];
+  // The Text node the current run built for a string or number, reused by the
+  // next one. Null whenever the current run rendered anything else.
+  let scalarText: Text | null = null;
   // A run is current from the moment it is built, BEFORE any outgoing cleanup
   // (or a custom element's reaction to an insertion) can run application code
   // that disposes this binding: the teardown then releases it, not yet placed.
@@ -57,6 +60,17 @@ export function bindChildNode(
       reportError(err, { phase: "binding", name: "bindChildNode", node: placeholder });
       return;
     }
+
+    // A scalar after a scalar keeps its Text node and writes only a changed
+    // value. The node must still follow the placeholder: if anything moved or
+    // removed either one, the general path below puts the text back in place.
+    const isScalar = typeof result === "string" || typeof result === "number";
+    if (isScalar && scalarText && placeholder.nextSibling === scalarText) {
+      const data = String(result);
+      if (scalarText.data !== data) scalarText.data = data;
+      return;
+    }
+    scalarText = null;
 
     // Everything the last run occupies NOW, read before anything is detached:
     // what its starts' ranges render (rows an `each()` added, a nested
@@ -113,6 +127,7 @@ export function bindChildNode(
     const oldFragments = lastFragments;
     lastNodes = newNodes;
     lastFragments = fragments;
+    if (isScalar) scalarText = newNodes[0] as Text;
     committing = true;
 
     // Remove and DISPOSE old nodes that are not rendered again (Set
@@ -182,6 +197,7 @@ export function bindChildNode(
   return () => {
     if (stopped) return;
     stopped = true;
+    scalarText = null;
     stop();
     release(exposeNodes || committing ? lastNodes : [], lastFragments);
     lastNodes = lastFragments = [];
