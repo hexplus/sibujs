@@ -6,6 +6,20 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.15.2] — 2026-11-08
+
+### Fixed — `sibujs/devtools` reports the names you gave your signals
+
+`initDevTools()` ignored the `name` passed to `signal()` and `derived()` and
+guessed one from the call stack, so explicit names never reached the inspector.
+When the runtime and the app shared one bundled file, the guess returned the
+name of the guessing function itself, and every row read `inferName`. A given
+name is now used as is. Without one, the guess starts past the framework's own
+frames, names a constructor rather than the word `new`, and no longer reads an
+anonymous caller's `http` URL as a name.
+
+---
+
 ## [4.15.1] — 2026-11-08
 
 ### Upgrade notes
