@@ -58,7 +58,7 @@ export function store<T extends object>(
   // every entry is DEFINED, so a state key such as "__proto__" (valid in JSON)
   // becomes an own entry instead of replacing the registry's prototype.
   const signals = Object.create(null) as {
-    [K in keyof T]: [() => T[K], (value: T[K]) => void];
+    [K in keyof T]: [() => T[K], (next: () => T[K]) => void];
   };
 
   // Initialize signals
@@ -116,20 +116,15 @@ export function store<T extends object>(
         // "toString"/"constructor" and then crash invoking a non-tuple, and
         // also opens a prototype-pollution-shaped surface for patch objects.
         if (Object.hasOwn(signals, key)) {
-          signals[key as keyof T][1](value as T[keyof T]);
+          // A signal setter calls a function argument as an updater, so the
+          // value is wrapped in one: a function-valued field is stored, not run.
+          signals[key as keyof T][1](() => value as T[keyof T]);
         }
       });
     });
   };
 
-  const reset = () => {
-    batch(() => {
-      (Object.keys(initialState) as Array<keyof T>).forEach((key) => {
-        const setter = signals[key][1];
-        setter(initialState[key]);
-      });
-    });
-  };
+  const reset = () => setState(initialState);
 
   // Subscribe to all state changes (skips initial invocation)
   const subscribe = (callback: StoreSubscriber<T>): (() => void) => {
