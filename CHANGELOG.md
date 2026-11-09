@@ -6,6 +6,100 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.15.1] — 2026-11-08
+
+### Upgrade notes
+
+Bug fixes only, with no new API. Four of them can be visible to code that
+relied on the old behavior:
+
+- `store`: `getSnapshot()` no longer subscribes its caller. An effect or
+  `derived` that used it to re-run should read `state.key` instead.
+- `store`: a function inside a `setState()` patch is now stored as the value.
+  In plain JavaScript, `setState({ count: (c) => c + 1 })` used to run that
+  function; use `setState((s) => ({ ...s, count: s.count + 1 }))` instead.
+  TypeScript already rejected the old form.
+- `reactiveArray`: a write made from inside a `map()` or `updateWhere()`
+  callback is replaced by the finished result when any item changed, as
+  `array()` already does.
+- `resource`: `onSettled` now runs at `abort()`, once, rather than when the
+  aborted fetch eventually settles.
+
+### Fixed — `KeepAlive` moves a case's complete rendered content
+
+A case whose root is a `when()` or `each()` renders its content as siblings of
+an anchor, but `KeepAlive` cached and moved only that anchor. Switching away
+left the content on the page, so the visible text was `BA` or `B12` instead of
+`B`. Each case is now cached and moved as a whole range, keeps its identity
+while cached, and has everything it owns disposed on eviction.
+
+### Fixed — a reactive child replacing a returned `Fragment`
+
+`div(() => (show() ? Fragment([a, b]) : c))` kept no record of the fragment's
+children, because inserting a fragment empties it. Replacing it left the old
+children in the DOM (`CAB` instead of `C`) and running until an ancestor was
+disposed. A reactive child now owns a returned fragment's children and the
+ranges they render, and removes and disposes them once when replaced.
+
+### Fixed — a failed server render releases what its root built
+
+When the root component threw during an async or streaming render after
+creating bindings or registering cleanups, those registrations were never
+rolled back. On a long-lived server each failed request left bindings
+subscribed. A throwing root now rolls back everything it registered, a root
+that did build is released exactly once, and each render has its own rollback
+boundary, so a failing root cannot affect another render.
+
+### Fixed — a throwing `Portal` or `DynamicComponent` factory
+
+A factory that created reactive nodes and then threw left them subscribed,
+even after the owner was disposed, because the half-built nodes were never
+returned to anything that could release them. Registrations from a failed
+build are now rolled back, and a later valid replacement still works.
+
+### Fixed — disposal during a render commits nothing afterwards
+
+A `Portal` or `KeepAlive` factory that disposed its own anchor still had its
+result inserted, leaving an orphan overlay or case on the page. Both now commit
+nothing after disposal and release the abandoned result. `KeepAlive` factories
+roll back when they throw, and a switch started during another switch replaces
+it instead of both showing. `each()` releases the rows a pass built when one
+row's render disposes the list, and rolls back a row render that throws.
+
+### Fixed — `store`: `getSnapshot()` is non-reactive, as documented
+
+`getSnapshot()` read every key through its tracked accessor, so an effect or
+`derived` calling it subscribed to the whole store. `setState()` used the same
+reader, so writing to a store from a computation could subscribe that
+computation too. Only `subscribe()` tracks every key now.
+
+### Fixed — `store`: function-valued fields stay functions
+
+Patches and `reset()` handed values straight to a signal setter, which treats a
+function as an updater. A stored callback was invoked and replaced by its return
+value. Patches, whole-state updaters and `reset()` now keep a function's
+identity and never call it.
+
+### Fixed — `reactiveArray`: `map()` and `updateWhere()` are all-or-nothing
+
+Both wrote item by item and notified only at the end. A callback that threw
+partway left earlier writes in place with no notification, and a later change
+exposed them: a failed `map` on `[1, 2]` followed by `push(3)` produced
+`[11, 2, 3]`. The whole result is now built first and committed only if every
+callback succeeds, so a throw leaves the array, its snapshot and its subscribers
+untouched.
+
+### Fixed — `resource`: `abort()` discards the aborted run's outcome
+
+`abort()` only signalled the fetcher, so a fetcher that ignored the signal could
+still commit its result or error and run its callbacks. `abort()` now cancels
+the run itself: `loading` clears immediately, `onSettled` runs once, and
+anything the fetcher settles with afterwards is discarded. Data already held is
+kept, a later `refetch()` or source change works normally, and calling `abort()`
+with nothing in flight does nothing.
+
+---
+
 ## [4.15.0] — 2026-11-05
 
 ### Upgrade notes
