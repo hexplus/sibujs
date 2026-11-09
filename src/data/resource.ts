@@ -64,7 +64,7 @@ export interface ResourceOptions<T> {
   onSuccess?: (data: T) => void;
   /** Called on fetch error */
   onError?: (error: Error) => void;
-  /** Called on fetch settle (success or error) */
+  /** Called once a fetch is over: on success, on error, or at `abort()` */
   onSettled?: () => void;
   /**
    * Keep data referentially stable across refetches. Default: `true`.
@@ -110,7 +110,11 @@ export interface Resource<T> {
   refetch: () => Promise<void>;
   /** Mutate the cached data without refetching */
   mutate: (value: T | ((prev: T | undefined) => T)) => void;
-  /** Abort the current in-flight request */
+  /**
+   * Cancel the in-flight request: its signal aborts, `loading` clears at once
+   * and `onSettled` runs. Whatever the fetcher settles with afterwards is
+   * discarded, even if it ignored the signal. No effect when nothing is in flight.
+   */
   abort: () => void;
   /** Cleanup all subscriptions and abort pending requests */
   dispose: () => void;
@@ -251,8 +255,9 @@ export function resource<T, S = void>(
       // `dispose()` aborts but does not bump `fetchVersion`, so the version check
       // alone would still run onSettled when the aborted (or abort-ignoring)
       // request settles — application code against a torn-down owner.
-      if (!disposed && version === fetchVersion) {
-        runCallback("resource onSettled", () => options.onSettled?.());
+      if (version === fetchVersion) {
+        abortController = null;
+        if (!disposed) runCallback("resource onSettled", () => options.onSettled?.());
       }
     }
   }
@@ -290,7 +295,17 @@ export function resource<T, S = void>(
       const newValue = typeof value === "function" ? (value as (prev: T | undefined) => T)(currentData) : value;
       commitData(newValue, true);
     },
-    abort: () => abortController?.abort(),
+    abort: () => {
+      const controller = abortController;
+      if (disposed || !controller) return;
+      // Invalidate first, so a fetcher that ignores the signal cannot commit
+      // later and a refetch started by an abort listener stays current.
+      abortController = null;
+      fetchVersion++;
+      setLoading(false);
+      controller.abort();
+      runCallback("resource onSettled", () => options.onSettled?.());
+    },
     dispose: () => {
       disposed = true;
       abortController?.abort();
