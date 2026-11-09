@@ -29,7 +29,7 @@ import { JSDOM } from "jsdom";
 
 const dom = new JSDOM("<!DOCTYPE html><html><body></body></html>");
 
-const BENCH_GLOBAL_KEYS = ["document", "HTMLElement", "Element", "Node", "Comment"];
+const BENCH_GLOBAL_KEYS = ["document", "HTMLElement", "Element", "Node", "Comment", "DocumentFragment"];
 const _savedGlobals = {};
 
 export function installBenchGlobals() {

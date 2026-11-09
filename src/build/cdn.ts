@@ -3,8 +3,9 @@
  * Supports UMD builds for script tag usage and CDN delivery.
  */
 
-// Re-import all major exports for global registration
-import * as SibuExports from "../../index";
+// Re-import all major exports for global registration. Through a dedicated
+// module, never `../../index` directly: see rootNamespace.ts.
+import * as SibuExports from "./rootNamespace";
 
 /**
  * The package name used in CDN URLs and UMD builds.

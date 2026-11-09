@@ -90,7 +90,7 @@ const NOOP = (): void => {};
 // one shared reactive runtime (see reactivity/track.ts), so any copy can use
 // them. Weak on both sides: neither a scope nor what its owner check reaches
 // is kept alive by being registered here.
-const scopeOwners = globalSingleton(
+const scopeOwners = /* @__PURE__ */ globalSingleton(
   Symbol.for("sibujs.lifecycleScope.owners.v1"),
   () => new WeakMap<LifecycleScope, HeldCheck>(),
 );

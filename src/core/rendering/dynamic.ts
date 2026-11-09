@@ -14,7 +14,7 @@ import type { Component } from "./types";
  * made a component registered through one copy unresolvable through another. A
  * future incompatible layout must use a new symbol version.
  */
-const componentRegistry = globalSingleton(
+const componentRegistry = /* @__PURE__ */ globalSingleton(
   Symbol.for("sibujs.components.registry.v1"),
   () => new Map<string, Component>(),
 );
@@ -25,7 +25,9 @@ const componentRegistry = globalSingleton(
  * not tell it, so a name registered late stayed "not found" for good. Shared
  * like the registry it versions.
  */
-const registryVersion = globalSingleton(Symbol.for("sibujs.components.registryVersion.v1"), () => signal(0));
+const registryVersion = /* @__PURE__ */ globalSingleton(Symbol.for("sibujs.components.registryVersion.v1"), () =>
+  signal(0),
+);
 
 function bumpRegistry(): void {
   const [read, write] = registryVersion;
