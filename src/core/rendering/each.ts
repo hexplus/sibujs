@@ -251,8 +251,14 @@ export function each<T>(
   const pendingItems: T[] = [];
   const pendingIndices: number[] = [];
   let pendingCount = 0;
-  // Reusable arrays — grow as needed, never shrink
-  let newNodes: Node[] = [];
+  // Set while a pass may hold rows in the scratch storage below, so a pass that
+  // threw partway is noticed by the next one.
+  let passInFlight = false;
+  // Reusable arrays — grow as needed, never shrink. `newNodes` holds rows only
+  // during a pass: placement empties each slot, because a stale slot would keep
+  // a removed row (and whatever it references) reachable up to the longest
+  // length the list has ever had.
+  let newNodes: (Node | undefined)[] = [];
   let newKeysBuf: (string | number)[] = [];
   let isStableBuf: Uint8Array = new Uint8Array(0);
   const oldKeyIndex = new Map<string | number, number>();
@@ -297,6 +303,9 @@ export function each<T>(
       newKeysBuf[i] = keyFn(arr[i]);
     }
     const newKeys = newKeysBuf;
+
+    if (passInFlight) releaseScratch();
+    passInFlight = true;
 
     // Ensure node array is large enough
     if (newNodes.length < newLen) {
@@ -459,6 +468,7 @@ export function each<T>(
       // No rows remain, so there is nothing queued — but keep the buffer clean
       // rather than leaving a stale count for the next pass.
       pendingCount = 0;
+      passInFlight = false;
       return;
     }
 
@@ -503,7 +513,9 @@ export function each<T>(
     let nextRef: Node | null = end;
 
     for (let i = newLen - 1; i >= 0; i--) {
-      const node = newNodes[i];
+      const node = newNodes[i] as Node;
+      // The committed row map owns live rows from here on.
+      newNodes[i] = undefined;
 
       if (isStableBuf[i]) {
         nextRef = node;
@@ -529,7 +541,17 @@ export function each<T>(
     initialized = true;
 
     flushRowCells();
+    passInFlight = false;
   };
+
+  /** Drop every row reference the scratch storage holds. */
+  function releaseScratch(): void {
+    newNodes = [];
+    pendingRows.length = 0;
+    pendingItems.length = 0;
+    pendingIndices.length = 0;
+    pendingCount = 0;
+  }
 
   /**
    * Publish the item/index each reused row must now report.
@@ -641,11 +663,8 @@ export function each<T>(
     keyIndexMap.clear();
     oldKeyIndex.clear();
     oldLen = 0;
-    // Release queued rows so a teardown mid-reconciliation cannot retain them.
-    pendingRows.length = 0;
-    pendingItems.length = 0;
-    pendingIndices.length = 0;
-    pendingCount = 0;
+    // A teardown mid-reconciliation must not retain the rows of that pass.
+    releaseScratch();
   };
   registerDisposer(anchor, disposeRange);
   // The rows are siblings ending at the `each:end` sentinel, so a directive
