@@ -267,9 +267,9 @@ export function initDevTools(config?: DevToolsConfig) {
   // ─── Listen to framework events ──────────────────────────────────────────
 
   hook.on("signal:create", (payload: unknown) => {
-    const p = payload as { signal: object; getter: () => unknown; initial: unknown };
+    const p = payload as { signal: object; name?: string; getter: () => unknown; initial: unknown };
     _dt.nextNodeId++;
-    const name = inferName();
+    const name = p.name || inferName();
     const node: DevNode = {
       id: _dt.nextNodeId,
       type: "signal",
@@ -300,9 +300,9 @@ export function initDevTools(config?: DevToolsConfig) {
   });
 
   hook.on("computed:create", (payload: unknown) => {
-    const p = payload as { signal: object; getter: () => unknown };
+    const p = payload as { signal: object; name?: string; getter: () => unknown };
     _dt.nextNodeId++;
-    const name = inferName();
+    const name = p.name || inferName();
     const node: DevNode = {
       id: _dt.nextNodeId,
       type: "computed",
@@ -854,8 +854,10 @@ export function initDevTools(config?: DevToolsConfig) {
 function inferName(): string {
   if (!_dt.inferNameArmed || !isDev()) return "anonymous";
   try {
-    const stack = new Error().stack || "";
-    for (const line of stack.split("\n")) {
+    const lines = (new Error().stack || "").split("\n");
+    // Frames above the hook's `emit` are this function and its listener. In a
+    // single-file bundle their paths hold no word the filter below skips.
+    for (const line of lines.slice(lines.findIndex((l) => l.includes("emit")) + 1)) {
       const t = line.trim();
       if (
         t.includes("signal") ||
@@ -868,7 +870,8 @@ function inferName(): string {
         t.includes("getOrCreateHook")
       )
         continue;
-      const m = t.match(/at\s+(\w+)/);
+      // Named frames only: `at http://…` is an anonymous caller, not "http".
+      const m = t.match(/^at\s+(?:async\s+)?(?:new\s+)?([\w$]+)[\w$.]*\s+\(/);
       if (m && m[1] !== "Object" && m[1] !== "Module" && m[1] !== "anonymous") return m[1];
       const f = t.match(/\/([^/]+?)\.(?:ts|js|tsx|jsx)/);
       if (f) return f[1];
