@@ -226,6 +226,26 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
     return snapshot;
   }
 
+  /**
+   * Replace every item with `transform`'s result, all or nothing: a callback
+   * that throws leaves `data` untouched. Iterates a stable copy because `data`
+   * mutates in place if a callback writes to this array; as in `array()`, the
+   * finished result then replaces that write.
+   */
+  function commitMapped(transform: (item: T, index: number) => T): void {
+    const source: readonly T[] = snapshot ?? data.slice();
+    let changed = false;
+    const next = source.map((item, index) => {
+      const mapped = transform(item, index);
+      if (!Object.is(item, mapped)) changed = true;
+      return mapped;
+    });
+    if (changed) {
+      data = next;
+      notify();
+    }
+  }
+
   const actions: ArrayActions<T> = {
     push(...items: T[]) {
       if (items.length === 0) return;
@@ -287,17 +307,7 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
     },
 
     updateWhere(predicate: (item: T) => boolean, updater: (item: T) => T) {
-      let changed = false;
-      for (let i = 0; i < data.length; i++) {
-        if (predicate(data[i])) {
-          const updated = updater(data[i]);
-          if (!Object.is(data[i], updated)) {
-            data[i] = updated;
-            changed = true;
-          }
-        }
-      }
-      if (changed) notify();
+      commitMapped((item) => (predicate(item) ? updater(item) : item));
     },
 
     sort(compareFn?: (a: T, b: T) => number) {
@@ -320,15 +330,7 @@ export function reactiveArray<T>(initial: T[] = []): [Accessor<readonly T[]>, Ar
     },
 
     map(transform: (item: T, index: number) => T) {
-      let changed = false;
-      for (let i = 0; i < data.length; i++) {
-        const transformed = transform(data[i], i);
-        if (!Object.is(data[i], transformed)) {
-          data[i] = transformed;
-          changed = true;
-        }
-      }
-      if (changed) notify();
+      commitMapped(transform);
     },
 
     clear() {
