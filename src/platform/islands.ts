@@ -63,7 +63,10 @@ const LAZY = Symbol.for("sibujs.islands.lazy");
 
 // Shared across duplicate runtime copies so islands registered through one copy
 // are mountable by mountIslands() called through another.
-const registry = globalSingleton(Symbol.for("sibujs.islands.registry.v1"), () => new Map<string, IslandRegistration>());
+const registry = /* @__PURE__ */ globalSingleton(
+  Symbol.for("sibujs.islands.registry.v1"),
+  () => new Map<string, IslandRegistration>(),
+);
 
 /**
  * Mark a loader as lazy island code — its module is fetched only when the island

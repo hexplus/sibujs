@@ -1,9 +1,9 @@
 {
-  "recordedAt": "2026-08-26T00:00:00.000Z",
-  "commit": "40043d7 + uncommitted correctness/release-hardening pass",
-  "node": "v24.19.0",
-  "npm": "11.17.0",
-  "os": "win32 10.0.26200 x64",
+  "recordedAt": "2026-11-08T00:00:00.000Z",
+  "commit": "2a235b4 (4.15.2) + bench.mjs exposing DocumentFragment",
+  "node": "v24.22.1",
+  "npm": "11.19.1",
+  "os": "win32 10.0.26300 x64",
   "cpu": "12th Gen Intel(R) Core(TM) i7-12650H",
   "cpuCount": 16,
   "totalMemGB": 31.6,
@@ -12,7 +12,9 @@
   "hostKind": "shared developer laptop (not a dedicated benchmark host)",
   "gateStatus": "INFORMATIONAL ONLY — see docs/hardening/final-pre-rc-findings.md BENCH-001",
   "notes": [
-    "Re-recorded after the computed-stabilization change. The previous baseline was recorded against an engine that notified downstream effects on every upstream write, so comparing the current engine against it reported differences that are the FIX, not a regression.",
+    "Re-recorded on 4.15.2. The previous baseline dated from the 4.0 release candidate and flagged 7 reactive-core benchmarks. Interleaved same-window medians (3 rounds, 41 benchmarks) put 4.15.2 level with recent releases: median ratio 0.99 against 4.15.0 and 4.14.1, 1.00 against 4.10.1. Against 4.0.0 the median ratio is 1.02, but the reactive core is measurably slower: deep computed chain +36%, effect creation +35%, diamond +23%, effect trigger +22%, wide diamond +21%. That cost built up over 4.x and is the accepted price of its correctness work; this baseline does not erase it.",
+    "Right after this was recorded, bench:check on the identical code flagged 10 and then 12 of 41 benchmarks on an idle machine, and different ones each run. Host speed drifts by more than the 20% threshold, so judge a change only by interleaved same-window runs.",
+    "Earlier: re-recorded after the computed-stabilization change. The previous baseline was recorded against an engine that notified downstream effects on every upstream write, so comparing the current engine against it reported differences that are the FIX, not a regression.",
     "Section 11 (Computed Stabilization) is new. Its value is the reported downstream effect-run counts, not the timings: those counts went from ~60,000 to 0 on stabilizing workloads while the control stayed at 59,999.",
     "Cross-run deltas on this host routinely reach +/-20% on benchmarks the change never touched, so a single run's Regression Check line is not evidence on its own. Interleaved same-window A/B medians put the cost of stabilization at roughly +16% on always-changing computed graphs (diamond, wide diamond) and slightly NEGATIVE on stabilizing graphs."
   ]
