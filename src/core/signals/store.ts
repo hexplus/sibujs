@@ -1,5 +1,5 @@
 import { batch } from "../../reactivity/batch";
-import { resumeTracking, suspendTracking } from "../../reactivity/track";
+import { resumeTracking, suspendTracking, untracked } from "../../reactivity/track";
 import { devAssert } from "../dev";
 import { effect } from "./effect";
 import { signal } from "./signal";
@@ -90,8 +90,10 @@ export function store<T extends object>(
     },
   });
 
-  // Get non-reactive snapshot of current state
-  const getSnapshot = (): T => {
+  // Read every key through its signal accessor, so the running computation
+  // subscribes to all of them. Only subscribe() wants that; everything else
+  // goes through getSnapshot().
+  const readAll = (): T => {
     // A plain object for callers, but filled by definition so an own
     // "__proto__" key is kept rather than dropped.
     const snapshot: Partial<T> = {};
@@ -101,10 +103,13 @@ export function store<T extends object>(
     return snapshot as T;
   };
 
+  // Non-reactive snapshot of the current state. setState() uses it too, so
+  // writing to the store from a computation does not subscribe that computation.
+  const getSnapshot = (): T => untracked(readAll);
+
   // Actions
   const setState = (patch: Partial<T> | ((state: T) => T)) => {
-    const current = getSnapshot();
-    const nextState = typeof patch === "function" ? patch(current) : patch;
+    const nextState = typeof patch === "function" ? patch(getSnapshot()) : patch;
     batch(() => {
       Object.entries(nextState).forEach(([key, value]) => {
         // Own keys only — `key in signals` would match inherited keys like
@@ -131,7 +136,7 @@ export function store<T extends object>(
     let first = true;
     return effect(() => {
       // Read all signals to register dependencies
-      const snapshot = getSnapshot();
+      const snapshot = readAll();
       if (first) {
         first = false;
         return;
