@@ -6,6 +6,41 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [Unreleased]
+
+### Upgrade notes
+
+- No runtime or API changes. Everything below is tooling and tests.
+
+### Changed — development toolchain
+
+The development dependencies were upgraded: Biome 2.6, Vitest 5, Vite 8,
+tsup 9, jsdom 31, Playwright 1.65 and `@types/node` 26. TypeScript moves to
+6.0, not 7: tsup 9 generates the type declarations through the TypeScript
+compiler API, which TypeScript 7 does not provide. The Biome configuration was
+migrated to the 2.6 schema (`preset` replaces `recommended`), and
+`tsconfig.json` now uses `moduleResolution: "bundler"` in place of the removed
+`node` resolution and lists the Node types explicitly, since they are no
+longer loaded by default. esbuild's install script, which fetches its native
+binary, is approved in `allowScripts`.
+
+The Vitest pool (`forks`) and per-file isolation are now set explicitly. A
+`vmThreads` pool loses Node globals such as `ReadableStream` and breaks
+cross-realm `instanceof` checks the suite relies on, and sharing workers
+across files would carry module-level state from one test file into the next.
+
+### Tests — adapted to jsdom 31
+
+jsdom 31 reads styles the way browsers do: a string `style` comes back as
+longhands (`padding: 2px` as four `padding-*` declarations), colors serialize
+as `rgb()`, quotes are dropped from `font-family`, a `progid:` filter is
+discarded by the parser, and `document` can no longer be reassigned. The
+style-sanitizer parity, CSS-policy, server-DOM byte-identity, devtools and
+a11y tests now compare longhands or read values back through the CSSOM. What
+each test proves is unchanged.
+
+---
+
 ## [4.15.3] — 2026-11-19
 
 ### Upgrade notes
