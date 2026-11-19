@@ -369,9 +369,9 @@ function foreignAttrName(attr: Attr): string {
 //     app itself wrote.
 //   - `<textarea>`: its value becomes its text.
 //   - `<option>` in a `<select>`: `selected` follows the selection. A
-//     drop-down's implicit default (an option the DOM reports as `selected`
-//     with no attribute, see `isImplicitDefaultCandidate`) is not ADDED, since
-//     the parser picks it anyway; an existing attribute is kept.
+//     drop-down's implicit default (the option the parser selects when none
+//     is marked, see `parsedImplicitDefault`) is not ADDED, since omission
+//     rebuilds the same selection; an existing attribute is kept.
 
 /** `<input>` types whose `value` is free text the markup can carry. */
 const TEXT_VALUE_TYPES = new Set([
@@ -422,27 +422,25 @@ function snapshotSelection(select: HTMLSelectElement): SelectionSnapshot {
     if (listbox) marked.add(o);
     else chosen = o;
   }
-  if (chosen && (chosen.hasAttribute("selected") || !isImplicitDefaultCandidate(options, chosen))) marked.add(chosen);
+  if (chosen && (chosen.hasAttribute("selected") || chosen !== parsedImplicitDefault(options))) marked.add(chosen);
   return marked;
 }
 
 /**
- * Could the parser pick `option` for a drop-down whose markup marks nothing
- * `selected`? Engines disagree on that implicit default — the spec takes the
- * first option not disabled, its optgroup's `disabled` included; WebKit
- * ignores the optgroup's; with every option disabled some take the first
- * option — so any of the three counts. An option the live selection chose
- * among them is NOT given a `selected` it does not have: the parser picks it
- * anyway in the engine that reported it, and an attribute the client does not
- * write is one an adopting hydration removes, which would change the
- * selection on takeover.
+ * The option the HTML parser selects in a drop-down whose markup marks none
+ * `selected`: the first option that is not disabled, itself or through its
+ * `<optgroup>` (the spec's selectedness setting algorithm), or none.
+ *
+ * `selected` is omitted ONLY for the option this rule reconstructs, because
+ * only then does omission rebuild the same selection. Any other chosen option
+ * gets the attribute — a disabled first option or an option in a disabled
+ * optgroup chosen on purpose included, even where some engine might also pick
+ * it on its own. Rebuilding exactly what was serialized is the contract; an
+ * engine that deviates from the parse rule still receives an explicit
+ * selection it honours.
  */
-function isImplicitDefaultCandidate(options: Element[], option: Element): boolean {
-  return (
-    option === options[0] ||
-    option === options.find((o) => !o.hasAttribute("disabled")) ||
-    option === options.find((o) => !isDisabledOption(o))
-  );
+function parsedImplicitDefault(options: Element[]): Element | undefined {
+  return options.find((o) => !isDisabledOption(o));
 }
 
 /**

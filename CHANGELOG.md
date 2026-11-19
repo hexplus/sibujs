@@ -41,7 +41,8 @@ emitted only when written through props. A leading newline in `<textarea>`,
 `textarea({ value: "…" })` and `select({ value: "…" })` wrote a `value`
 attribute, which neither element has, so the field stayed empty and the first
 option showed, in the browser and on the server. A textarea's value now sets
-its text, and a select's value selects the matching option. In `html`
+its text, and a select's value selects the matching option; both are the
+default a form reset restores, also after an adopting hydration. In `html`
 templates, `<select value=${x}>` set the value before its options existed; a
 runtime `value` on a select or textarea is now applied after the children.
 

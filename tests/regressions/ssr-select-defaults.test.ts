@@ -272,30 +272,6 @@ describe("the serializer's selection snapshot belongs to one serialization", () 
     expect(sourceState(el)).toEqual(before);
   });
 
-  it("adds no `selected` to an option some engine picks as the implicit default", () => {
-    // WebKit reports the first option selected even inside a disabled optgroup,
-    // and with every option disabled: emulated here. An attribute the client
-    // never writes would be removed by an adopting hydration, changing the
-    // selection on takeover, so none is added.
-    const grouped = select([
-      optgroup({ label: "G", disabled: true }, [option({ value: "a" }, "A")]),
-      option({ value: "b", disabled: true }, "B"),
-    ]) as HTMLSelectElement;
-    grouped.selectedIndex = 0;
-    expect(markedIn(renderToString(grouped), ["a", "b"])).toEqual([false, false]);
-
-    // A choice no engine makes on its own still reaches the markup.
-    const plain = select([
-      option({ value: "a", disabled: true }, "A"),
-      option({ value: "b" }, "B"),
-      option({ value: "c" }, "C"),
-    ]) as HTMLSelectElement;
-    plain.value = "c";
-    expect(markedIn(renderToString(plain), ["a", "b", "c"])).toEqual([false, false, true]);
-    plain.value = "b";
-    expect(markedIn(renderToString(plain), ["a", "b", "c"])).toEqual([false, false, false]);
-  });
-
   it("streams from the live selection, and two streams do not share a snapshot", async () => {
     const el = select([option({ value: "a" }, "A"), option({ value: "b" }, "B"), option({ value: "c" }, "C")]);
     const sel = el as HTMLSelectElement;
@@ -315,5 +291,163 @@ describe("the serializer's selection snapshot belongs to one serialization", () 
     let rest = head;
     for await (const chunk of first) rest += chunk;
     expect(parsedSelection(rest)).toEqual(["b"]);
+  });
+});
+
+// ─── Selections the parse rule would not reconstruct ────────────────────────
+
+type Pick = "value" | "option.selected" | "selectedIndex";
+
+/** Select `index` of `el` the way `how` names, as application code would. */
+function pick(el: HTMLSelectElement, index: number, how: Pick): void {
+  if (how === "value") el.value = el.options[index].value;
+  else if (how === "option.selected") el.options[index].selected = true;
+  else el.selectedIndex = index;
+}
+
+/** Drop-downs whose chosen option is NOT the one the parser selects when none is marked. */
+const INTENTIONAL: Array<{ name: string; build: () => Element[]; index: number; values: string[] }> = [
+  {
+    name: "a disabled first option",
+    build: () => [option({ value: "a", disabled: true }, "A"), option({ value: "b" }, "B")],
+    index: 0,
+    values: ["a", "b"],
+  },
+  {
+    name: "the first option of a disabled optgroup",
+    build: () => [optgroup({ label: "G", disabled: true }, [option({ value: "a" }, "A")]), option({ value: "b" }, "B")],
+    index: 0,
+    values: ["a", "b"],
+  },
+  {
+    name: "a disabled placeholder with an empty value",
+    build: () => [option({ value: "", disabled: true }, "Choose…"), option({ value: "b" }, "B")],
+    index: 0,
+    values: ["", "b"],
+  },
+];
+
+/** Parse `markup` (one `<select>`) and report its selection. */
+function parsed(markup: string): { value: string; index: number } {
+  const host = document.createElement("div");
+  host.innerHTML = markup;
+  const el = host.querySelector("select") as HTMLSelectElement;
+  return { value: el.value, index: el.selectedIndex };
+}
+
+describe("an intentional selection the parse rule would not reconstruct keeps its `selected`", () => {
+  for (const c of INTENTIONAL) {
+    for (const how of ["value", "option.selected", "selectedIndex"] as const) {
+      const App = () =>
+        select(
+          {
+            onElement: (el) => {
+              pick(el, c.index, how);
+            },
+          },
+          c.build(),
+        );
+      const expected = { value: c.values[c.index], index: c.index };
+      const marks = c.values.map((_, i) => i === c.index);
+
+      it(`${c.name}, chosen through ${how}: sync, async and streaming output parse back to it`, async () => {
+        const el = App() as HTMLSelectElement;
+        expect({ value: el.value, index: el.selectedIndex }).toEqual(expected);
+        const before = sourceState(el);
+
+        const sync = renderToString(el);
+        const streamed = await collectStream(renderToStream(el));
+        const { html: async } = await renderToStringAsync(App);
+        for (const markup of [sync, streamed, async]) {
+          expect(markedIn(markup, c.values)).toEqual(marks);
+          expect(parsed(markup)).toEqual(expected);
+        }
+        expect(sourceState(el)).toEqual(before);
+      });
+    }
+
+    it(`${c.name}: keeps the selection through an adopting hydration`, async () => {
+      const App = () =>
+        select(
+          {
+            onElement: (el) => {
+              el.selectedIndex = c.index;
+            },
+          },
+          c.build(),
+        );
+      const container = await serverMarkup(App);
+      const el = container.querySelector("select") as HTMLSelectElement;
+      expect(el.selectedIndex).toBe(c.index);
+
+      const result = await hydrate(App, container, { strategy: "adopt" });
+      expect(result?.mismatches ?? []).toEqual([]);
+      expect(container.querySelector("select")).toBe(el);
+      expect({ value: el.value, index: el.selectedIndex }).toEqual({ value: c.values[c.index], index: c.index });
+    });
+  }
+
+  it("keeps a server selection the client never writes through takeover", async () => {
+    // The server's render selected A on its own (an engine's implicit default,
+    // or code that only runs there); the client writes no selection. Removing
+    // the server's `selected` from A at the end of the session must not make
+    // the engine re-pick.
+    const options = () => [option({ value: "a", disabled: true }, "A"), option({ value: "b" }, "B")];
+    const Server = () =>
+      select(
+        {
+          onElement: (el) => {
+            el.value = "a";
+          },
+        },
+        options(),
+      );
+    const Client = () => select(options());
+    const container = await serverMarkup(Server);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(el.value).toBe("a");
+
+    await hydrate(Client, container, { strategy: "adopt" });
+    expect(container.querySelector("select")).toBe(el);
+    expect(el.value).toBe("a");
+    expect(el.options[0].hasAttribute("selected")).toBe(false);
+  });
+
+  it("omits `selected` for a genuine untouched implicit default, and round-trips it", async () => {
+    const cases = [
+      () => [option({ value: "a", disabled: true }, "A"), option({ value: "b" }, "B")],
+      () => [optgroup({ label: "G", disabled: true }, [option({ value: "a" }, "A")]), option({ value: "b" }, "B")],
+      () => [option({ value: "a" }, "A"), option({ value: "b" }, "B")],
+    ];
+    for (const build of cases) {
+      const el = select(build()) as HTMLSelectElement;
+      const live = { value: el.value, index: el.selectedIndex };
+      const before = sourceState(el);
+      for (const markup of [renderToString(el), await collectStream(renderToStream(el))]) {
+        expect(markup).not.toMatch(/selected/);
+        expect(parsed(markup)).toEqual(live);
+      }
+      expect(sourceState(el)).toEqual(before);
+    }
+  });
+
+  it("round-trips a drop-down whose options are all disabled, untouched or chosen", async () => {
+    const build = () => [
+      optgroup({ label: "G", disabled: true }, [option({ value: "a" }, "A")]),
+      option({ value: "b", disabled: true }, "B"),
+    ];
+    // Untouched: whatever this DOM selected on its own parses back.
+    const untouched = select(build()) as HTMLSelectElement;
+    expect(parsed(renderToString(untouched)).index).toBe(untouched.selectedIndex);
+
+    // Chosen — as WebKit's implicit default, or by code — it is serialized.
+    for (const index of [0, 1]) {
+      const chosen = select(build()) as HTMLSelectElement;
+      chosen.selectedIndex = index;
+      const markup = await collectStream(renderToStream(chosen));
+      expect(markedIn(markup, ["a", "b"])).toEqual([index === 0, index === 1]);
+      expect(parsed(markup).index).toBe(index);
+      expect(parsed(renderToString(chosen)).index).toBe(index);
+    }
   });
 });
