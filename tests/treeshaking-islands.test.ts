@@ -129,8 +129,12 @@ describe("island / enhancement entry points stay tree-shakeable", () => {
     // about 550 bytes more; then to 27 KB for lifecycle state notifications —
     // `lifecycleScope().onPause()` / `onResume()`, `HeldCheck.within()` for
     // lifecycle-located `pendingContent()`, and contained deferred
-    // registrations — about 700 bytes more.)
-    expect(withEach.length).toBeLessThan(27 * 1024);
+    // registrations — about 700 bytes more; then to 28 KB for form-control
+    // state in server HTML — the attribute writer mirrors `checked`,
+    // `selected` and `value` into the markup under `isServer()`, which has to
+    // live in the shared writer because the pre-renderer runs the client
+    // bundle — about 800 bytes more.)
+    expect(withEach.length).toBeLessThan(28 * 1024);
     expect(subsystemsIn(withEach)).toEqual([]);
   });
 

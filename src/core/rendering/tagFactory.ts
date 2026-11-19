@@ -329,6 +329,28 @@ export function appendChildren(el: Element, nodes: NodeChildren) {
   }
 }
 
+/** Apply one prop that becomes an attribute: bound when it is a getter, committed once otherwise. */
+function applyAttributeProp(el: Element, key: string, value: unknown): void {
+  if (value == null) return;
+  // Block on* event-handler attributes (shared guard). The `on` props object is
+  // the supported way to attach listeners.
+  if (isEventHandlerAttr(key)) return;
+  if (typeof value === "function") {
+    registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
+  } else {
+    // Shared commit primitive — same policy as the reactive bindAttribute path
+    // and as bindAttrs/svgElement.
+    //
+    // `syncValueProperty: false` preserves this path's deliberate difference
+    // from a live update: on FIRST render the content attribute is the correct
+    // sink for `value`, since it seeds the control's default and survives a
+    // form reset. A reactive update must use the IDL property instead, because
+    // after the user types the content attribute no longer reflects the
+    // current state.
+    setSafeAttribute(el, key, value, { syncValueProperty: false, label: "tagFactory" });
+  }
+}
+
 /**
  * Factory for creating HTML or SVG elements with reactive props and nodes.
  *
@@ -384,6 +406,7 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
   // since <script> exists in SVG too). A tag factory's name may be a runtime
   // value (`customElement(tagName)`), so it gets the runtime verdict.
   const blocked = isBlockedElement(tag);
+  const isSelect = ns === undefined && tag.toLowerCase() === "select";
   return (first?: TagProps<Element> | NodeChildren, second?: NodeChildren): Element => {
     if (blocked) {
       throw new Error(`tagFactory: refusing to create <${tag}> — tag is blocked for security reasons.`);
@@ -527,6 +550,17 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
     // instead of
     //   div({ class: "x", nodes: [ h1({ class: "t", nodes: "Hi" }) ] })
     const pNodes = second !== undefined ? second : props.nodes;
+    // A select's `multiple` and `size` decide what inserting an option does to
+    // the selection: a drop-down keeps a single selected option (the last one,
+    // or its first option when none is), a list box keeps each option's own.
+    // Applied with the other props AFTER the children, they came too late:
+    // `select({ multiple: true }, [a, b])` with both selected kept only `b`,
+    // and with neither selected came out with `a` selected.
+    const early = isSelect && pNodes != null;
+    if (early) {
+      if (Object.hasOwn(props, "multiple")) applyAttributeProp(el, "multiple", props.multiple);
+      if (Object.hasOwn(props, "size")) applyAttributeProp(el, "size", props.size);
+    }
     if (pNodes != null) appendChildren(el, pNodes);
 
     const pOn = props.on;
@@ -569,25 +603,8 @@ export function tagFactory(tag: string, ns?: string): TagFunction<Element> {
           // text. The attribute policy still filters the values, but which
           // attributes an element carries is not the prototype's to decide.
           if (!Object.hasOwn(props, key)) continue;
-          const value = props[key];
-          if (value == null) continue;
-          // Block on* event-handler attributes (shared guard). The `on` props
-          // object is the supported way to attach listeners.
-          if (isEventHandlerAttr(key)) continue;
-          if (typeof value === "function") {
-            registerDisposer(el, bindAttribute(el as HTMLElement, key, value as () => unknown));
-          } else {
-            // Shared commit primitive — same policy as the reactive
-            // bindAttribute path and as bindAttrs/svgElement.
-            //
-            // `syncValueProperty: false` preserves this path's deliberate
-            // difference from a live update: on FIRST render the content
-            // attribute is the correct sink for `value`, since it seeds the
-            // control's default and survives a form reset. A reactive update
-            // must use the IDL property instead, because after the user types
-            // the content attribute no longer reflects the current state.
-            setSafeAttribute(el, key, value, { syncValueProperty: false, label: "tagFactory" });
-          }
+          if (early && (key === "multiple" || key === "size")) continue; // applied before the children
+          applyAttributeProp(el, key, props[key]);
         }
       }
     }

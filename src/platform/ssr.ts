@@ -347,6 +347,105 @@ function foreignAttrName(attr: Attr): string {
   return attr.name;
 }
 
+// ─── Live form-control state ────────────────────────────────────────────────
+//
+// A form control's CURRENT state lives on its IDL properties (`checked`,
+// `value`, `selected`), which a markup serializer does not see: the content
+// attributes are only the defaults. The attribute writer mirrors state it
+// writes on the server into the markup (`reflectFormState` in
+// utils/setSafeAttribute), but state set any other way (`el.checked = true` in
+// `onElement`, a ref, a third-party widget) would still be lost, and the page
+// would arrive showing a different control than the one rendered. So the
+// serializer reads the state itself and emits the markup that parses back to
+// it.
+//
+// Each read is limited to what parses back unambiguously and the same in every
+// DOM implementation:
+//   - `<input>` value: only types whose value is free text. `range` and
+//     `color` are skipped (a DOM invents a value for them, the midpoint or
+//     `#000000`, that the markup never said), `file` and the button-like types
+//     carry no state in `value`, and `password` is skipped so a typed password
+//     never reaches a serialized string. The writer still mirrors a value the
+//     app itself wrote.
+//   - `<textarea>`: its value becomes its text.
+//   - `<option>` in a `<select>`: `selected` follows the selection. A
+//     drop-down's implicit default (its first enabled option, which some DOMs
+//     report as `selected` with no attribute) is not ADDED, since the parser
+//     picks it anyway; an existing attribute is kept.
+
+/** `<input>` types whose `value` is free text the markup can carry. */
+const TEXT_VALUE_TYPES = new Set([
+  "text",
+  "search",
+  "url",
+  "tel",
+  "email",
+  "number",
+  "date",
+  "month",
+  "week",
+  "time",
+  "datetime-local",
+]);
+
+/**
+ * The options each `<select>` serialized so far marks `selected`. Filled when
+ * the select's open tag is serialized, which always precedes its options, so
+ * it is current for every render; a WeakMap, so it holds nothing alive.
+ */
+const selectionBySelect = new WeakMap<Element, Set<Element>>();
+
+/** An option disabled itself or through its `<optgroup>`. */
+function isDisabledOption(option: Element): boolean {
+  const parent = option.parentNode as Element | null;
+  return option.hasAttribute("disabled") || (parent?.localName === "optgroup" && parent.hasAttribute("disabled"));
+}
+
+function recordSelection(select: HTMLSelectElement): void {
+  const options = Array.from(select.options ?? []) as Element[];
+  const marked = new Set<Element>();
+  const listbox = select.hasAttribute("multiple") || Number(getAttributeOf(select, "size")) > 1;
+  let chosen: Element | undefined;
+  for (const o of options) {
+    if ((o as HTMLOptionElement).selected !== true) continue;
+    if (listbox) marked.add(o);
+    else chosen = o;
+  }
+  if (chosen && (chosen.hasAttribute("selected") || chosen !== options.find((o) => !isDisabledOption(o)))) {
+    marked.add(chosen);
+  }
+  selectionBySelect.set(select, marked);
+}
+
+/**
+ * The attributes whose serialized value comes from the element's live state
+ * instead of its content attribute: name → value, or `null` to omit.
+ */
+function liveStateAttributes(element: Element, tag: string): Record<string, string | null> | null {
+  if (tag === "input") {
+    const input = element as HTMLInputElement;
+    const type = typeof input.type === "string" ? input.type.toLowerCase() : "text";
+    if (type === "checkbox" || type === "radio") {
+      return typeof input.checked === "boolean" ? { checked: input.checked ? "" : null } : null;
+    }
+    if (!TEXT_VALUE_TYPES.has(type) || typeof input.value !== "string") return null;
+    return { value: input.value === "" && !element.hasAttribute("value") ? null : input.value };
+  }
+  if (tag === "option") {
+    const parent = element.parentNode as Element | null;
+    const select = parent?.localName === "optgroup" ? parent.parentNode : parent;
+    const marked = select ? selectionBySelect.get(select as Element) : undefined;
+    return marked ? { selected: marked.has(element) ? "" : null } : null;
+  }
+  return null;
+}
+
+/**
+ * Elements whose first newline the HTML parser drops: a leading newline in
+ * their content must be doubled to survive the round trip.
+ */
+const LEADING_NEWLINE_DROPPED = new Set(["textarea", "pre", "listing"]);
+
 /**
  * Serialize an element's open tag — `<tag attr="…" …` without the closing `>`
  * — or return `null` when the element must not be emitted at all.
@@ -406,6 +505,11 @@ function serializeOpenTag(
     ? { sandbox: false, referrer: false, title: false, fullscreen: false }
     : null;
 
+  if (!foreign && tag === "select") recordSelection(element as HTMLSelectElement);
+  // Live form-control state replaces the attribute it corresponds to; what is
+  // left in `live` after the loop had no attribute and is appended.
+  const live = foreign ? null : liveStateAttributes(element, tag);
+
   const attrs = attributesOf(element);
   for (let i = 0; i < attrs.length; i++) {
     const attr = attrs[i];
@@ -416,7 +520,14 @@ function serializeOpenTag(
 
     // The shared "commit or omit" authority — `null` drops the attribute.
     const lowerName = rawName.toLowerCase();
-    let value = resolveAttributeValue(lowerName, attr.value);
+    let raw = attr.value;
+    if (live && Object.hasOwn(live, lowerName)) {
+      const state = live[lowerName];
+      delete live[lowerName];
+      if (state === null) continue;
+      raw = state;
+    }
+    let value = resolveAttributeValue(lowerName, raw);
     if (value === null) continue;
     if (foreign && isRefusedAnimationAttribute(element, rawName, value)) continue;
     if (embed && embedSeen) {
@@ -426,6 +537,13 @@ function serializeOpenTag(
 
     meta?.set(rawName, value);
     html += ` ${rawName}="${escapeAttr(value)}"`;
+  }
+
+  if (live) {
+    for (const name in live) {
+      const value = live[name];
+      if (value !== null) html += ` ${name}="${escapeAttr(value)}"`;
+    }
   }
 
   if (meta && isForbiddenMetaSnapshot(meta)) return null;
@@ -517,8 +635,22 @@ function serializeNode(
 
   const children = childNodesOf(element);
   if (foreign ? children.length === 0 : VOID_ELEMENTS.has(tag)) return `${openTag} />`;
+
+  // A textarea's content is its live value (see "Live form-control state"),
+  // emitted whole: it is escapable raw text, never markup to walk.
+  if (!foreign && tag === "textarea") {
+    const value = (element as HTMLTextAreaElement).value;
+    const text = typeof value === "string" ? value : element.textContent || "";
+    return `${openTag}>${text.startsWith("\n") ? "\n" : ""}${escapeHtml(text)}</textarea>`;
+  }
+
+  const first = children[0];
+  const lead =
+    !foreign && LEADING_NEWLINE_DROPPED.has(tag) && first?.nodeType === 3 && (first.textContent || "").startsWith("\n")
+      ? "\n"
+      : "";
   return {
-    open: `${openTag}>`,
+    open: `${openTag}>${lead}`,
     close: `</${tag}>`,
     children: Array.from(children),
     context: childParseContext(ns, lowerName, element),

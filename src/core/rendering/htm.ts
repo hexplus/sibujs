@@ -395,65 +395,21 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
   // Create element directly — avoids allocating a props object + passing through tagFactory
   const el = createScopedElement(tmpl.tag, tmpl.svg ? SVG_NS : undefined);
 
+  // A runtime `value` on a `<select>` or `<textarea>` waits for the children:
+  // a select's value picks among its options, which do not exist yet, and a
+  // textarea's value replaces its text. (The tag factory gets this for free,
+  // since it appends children before applying props.)
+  const deferValue = !tmpl.svg && (tmpl.tag.toLowerCase() === "select" || tmpl.tag.toLowerCase() === "textarea");
+  let deferred: TmplAttr[] | null = null;
+
   // Replay attributes directly on the element
   for (let i = 0; i < tmpl.attrs.length; i++) {
     const attr = tmpl.attrs[i];
-    switch (attr.t) {
-      case 0: // static — developer-authored, but still subject to the contextual policy
-        setTrustedAttribute(el, attr.name, attr.value);
-        break;
-      case 1: {
-        // expr — runtime data, so it goes through the SHARED commit primitive.
-        //
-        // This path used to carry its own copy of the policy (srcset, then URL
-        // attributes, then "just write it"). That copy was the shared list
-        // minus `style`, so a dynamic `style=${…}` never reached the
-        // declaration-list sanitizer — and it would have missed `srcdoc` too.
-        // A duplicated policy is a policy that drifts; there is now one.
-        const name = attr.name;
-        const val = values[attr.idx];
-        if (typeof val === "function") {
-          registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));
-        } else {
-          // `syncValueProperty: false` matches the tag factory: on FIRST render
-          // the content attribute is the correct sink for `value`, since it
-          // seeds the control's default and survives a form reset.
-          setSafeAttribute(el, name, val, { syncValueProperty: false, label: "html" });
-        }
-        break;
-      }
-      case 2: {
-        // mixed — concatenate statics + expressions, then sanitize the whole
-        // string for URL attributes so attacks like `href="java${x}:..."`
-        // still get caught.
-        let val = attr.statics[0];
-        for (let j = 0; j < attr.exprs.length; j++) {
-          const ev = values[attr.exprs[j]];
-          val += (ev == null ? "" : String(ev)) + attr.statics[j + 1];
-        }
-        // Assembled from at least one expression, so the whole result is
-        // runtime data and commits through the same primitive. Sanitizing the
-        // ASSEMBLED string is what catches attacks split across the boundary,
-        // like `href="java${x}:…"`.
-        setSafeAttribute(el, attr.name, val, { syncValueProperty: false, label: "html" });
-        break;
-      }
-      case 3: {
-        // event — must be a function
-        const fn = values[attr.idx];
-        if (typeof fn === "function") {
-          el.addEventListener(attr.name, fn as EventListener);
-        } else if (DEV) {
-          devWarn(
-            `html: on:${attr.name} handler is not a function (got ${typeof fn}). Event listener was not attached.`,
-          );
-        }
-        break;
-      }
-      case 4: // boolean — static source, as above
-        setTrustedAttribute(el, attr.name, "");
-        break;
+    if (deferValue && (attr.t === 1 || attr.t === 2) && attr.name.toLowerCase() === "value") {
+      (deferred ??= []).push(attr);
+      continue;
     }
+    applyAttribute(el, attr, values);
   }
 
   // Replay children directly
@@ -492,7 +448,67 @@ function executeElement(tmpl: TmplElement, values: unknown[]): Element {
     }
   }
 
+  if (deferred) for (const attr of deferred) applyAttribute(el, attr, values);
+
   return el;
+}
+
+/** Replay one cached attribute on `el` with this call's values. */
+function applyAttribute(el: Element, attr: TmplAttr, values: unknown[]): void {
+  switch (attr.t) {
+    case 0: // static — developer-authored, but still subject to the contextual policy
+      setTrustedAttribute(el, attr.name, attr.value);
+      break;
+    case 1: {
+      // expr — runtime data, so it goes through the SHARED commit primitive.
+      //
+      // This path used to carry its own copy of the policy (srcset, then URL
+      // attributes, then "just write it"). That copy was the shared list
+      // minus `style`, so a dynamic `style=${…}` never reached the
+      // declaration-list sanitizer — and it would have missed `srcdoc` too.
+      // A duplicated policy is a policy that drifts; there is now one.
+      const name = attr.name;
+      const val = values[attr.idx];
+      if (typeof val === "function") {
+        registerDisposer(el, bindAttribute(el as HTMLElement, name, val as () => unknown));
+      } else {
+        // `syncValueProperty: false` matches the tag factory: on FIRST render
+        // the content attribute is the correct sink for `value`, since it
+        // seeds the control's default and survives a form reset.
+        setSafeAttribute(el, name, val, { syncValueProperty: false, label: "html" });
+      }
+      break;
+    }
+    case 2: {
+      // mixed — concatenate statics + expressions, then sanitize the whole
+      // string for URL attributes so attacks like `href="java${x}:..."`
+      // still get caught.
+      let val = attr.statics[0];
+      for (let j = 0; j < attr.exprs.length; j++) {
+        const ev = values[attr.exprs[j]];
+        val += (ev == null ? "" : String(ev)) + attr.statics[j + 1];
+      }
+      // Assembled from at least one expression, so the whole result is
+      // runtime data and commits through the same primitive. Sanitizing the
+      // ASSEMBLED string is what catches attacks split across the boundary,
+      // like `href="java${x}:…"`.
+      setSafeAttribute(el, attr.name, val, { syncValueProperty: false, label: "html" });
+      break;
+    }
+    case 3: {
+      // event — must be a function
+      const fn = values[attr.idx];
+      if (typeof fn === "function") {
+        el.addEventListener(attr.name, fn as EventListener);
+      } else if (DEV) {
+        devWarn(`html: on:${attr.name} handler is not a function (got ${typeof fn}). Event listener was not attached.`);
+      }
+      break;
+    }
+    case 4: // boolean — static source, as above
+      setTrustedAttribute(el, attr.name, "");
+      break;
+  }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────

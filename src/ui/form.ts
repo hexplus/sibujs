@@ -2,8 +2,11 @@ import { reportError } from "../core/errors";
 import { registerDisposer } from "../core/rendering/dispose";
 import { type DerivedAccessor, derived } from "../core/signals/derived";
 import { signal } from "../core/signals/signal";
+import { isSSR } from "../core/ssr-context";
 import { domBinding } from "../reactivity/domBinding";
+import { untracked } from "../reactivity/track";
 import { adoptThenable } from "../utils/adoptThenable";
+import { setSafeAttribute } from "../utils/setSafeAttribute";
 
 // ============================================================================
 // TYPES
@@ -214,6 +217,8 @@ export interface BoundFieldProps<T = unknown> {
  * Bind a FormField to an input element, eliminating the value/input/blur boilerplate.
  *
  * Works with text inputs (`input` event) and selects/checkboxes (`change` event).
+ * A field whose value is a boolean binds `checked` (a checkbox); a field bound
+ * to a `<select multiple>` drives each option's `selected` from its array.
  *
  * @param field A FormField from form().fields
  * @param extras Additional props to merge (placeholder, class, disabled, etc.)
@@ -267,25 +272,27 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
   // Write-back: a `<select multiple>` can't be driven by the plain `value` prop
   // (assigning an array to `el.value` clears the selection), so reflect the
   // field's array value onto each option's `selected` flag via a reactive
-  // binding owned by the element. Every other control type is handled correctly
-  // by the `value` prop alone, so this only engages for multi-selects.
+  // binding owned by the element. The write goes through the shared attribute
+  // writer, which mirrors it into the markup on the server; and since a DOM
+  // binding is inert during SSR, the server applies it once, directly.
   const onElement = (el: HTMLElement): void => {
     if (el instanceof HTMLSelectElement && el.multiple) {
-      const stop = domBinding(() => {
+      const commit = () => {
         const v = field.value() as unknown;
         const selected = Array.isArray(v) ? v.map(String) : [];
         for (const opt of Array.from(el.options)) {
-          opt.selected = selected.includes(opt.value);
+          setSafeAttribute(opt, "selected", selected.includes(opt.value), { label: "bindField", reactive: true });
         }
-      }, el);
-      registerDisposer(el, stop);
+      };
+      if (isSSR()) commit();
+      else registerDisposer(el, domBinding(commit, el));
     }
     if (typeof extraOnElement === "function") {
       (extraOnElement as (el: HTMLElement) => void)(el);
     }
   };
 
-  return {
+  const props: BoundFieldProps<T> = {
     // The field's own getter, no longer widened to `unknown` — that widening is
     // what forced every consumer to cast. (TYPE-010)
     value: field.value,
@@ -293,6 +300,23 @@ export function bindField<T>(field: FormField<T>, extras?: Record<string, unknow
     onElement,
     ...restExtras,
   };
+
+  // A boolean field is a checkbox: its state is `checked`. Bound as `value`,
+  // the tag factory wrote the boolean into the `value` attribute (`value=""`
+  // when true) and never checked the box — on the client and in server HTML.
+  // `value` stays readable (`props.value()`) but is not enumerable, so neither a
+  // tag factory nor a spread applies it.
+  if (typeof untracked(field.value) === "boolean") {
+    props.checked = field.value;
+    Object.defineProperty(props, "value", {
+      value: field.value,
+      enumerable: false,
+      configurable: true,
+      writable: true,
+    });
+  }
+
+  return props;
 }
 
 // ============================================================================
