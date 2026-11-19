@@ -438,6 +438,14 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // only a changed value, instead of replacing the node on every run.
     // Measured: raw ~112,580 B, gzip ~39,460 B (+~100 B raw, +~60 B gzip).
     //
+    // Raw 113,800 B, gzip baseline 39,200 B for form-control state: on the
+    // server the attribute writer mirrors `checked` / `selected` / `value` into
+    // the markup (~690 B raw, ~220 B gzip), the tag factory applies a select's
+    // `multiple` / `size` before its options (~210 B raw, ~70 B gzip), and an
+    // `html` template applies a select's or textarea's runtime `value` after
+    // its children (~230 B raw, ~180 B gzip). Measured: raw ~113,710 B, gzip
+    // ~39,940 B (+~1,130 B raw, +~480 B gzip).
+    //
     // GZIP IS THE ONE THAT MATTERS, and it is not implied by the raw number:
     // bytes that compress badly can push the transfer size up while the file
     // on disk stays flat or shrinks. Level 9 keeps this deterministic, and the
@@ -445,8 +453,8 @@ describe.skipIf(!built && !onCI)("the default CDN global", () => {
     // growth — it is far tighter than the 13% regression this guards against.
     const raw = statSync(PROD_CDN).size;
     const gzip = gzipSync(readFileSync(PROD_CDN), { level: 9 }).length;
-    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(112_600);
-    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(38_700 * 1.02));
+    expect(raw, `raw ${raw} B`).toBeLessThanOrEqual(113_800);
+    expect(gzip, `gzip ${gzip} B`).toBeLessThanOrEqual(Math.round(39_200 * 1.02));
   });
 });
 

@@ -23,6 +23,12 @@ async function setup(page: Page): Promise<void> {
       const el = e.target as HTMLSelectElement;
       w.__seen[name] = [...(w.__seen[name] ?? []), el.multiple ? el.selectedOptions.length : el.selectedIndex];
     };
+    const grouped = (pickC: boolean) =>
+      m.select({ on: { change: seen("grouped") } }, [
+        m.optgroup({ label: "Unavailable", disabled: true }, [m.option({ value: "a" }, "A")]),
+        m.option({ value: "b" }, "B"),
+        m.option({ value: "c", selected: pickC }, "C"),
+      ]);
     const apps: Record<string, () => Node> = {
       duplicate: () =>
         m.select({ on: { change: seen("duplicate") } }, [
@@ -34,25 +40,35 @@ async function setup(page: Page): Promise<void> {
           m.option({ value: "a" }, "A"),
           m.option({ value: "b" }, "B"),
         ]),
-      // A inside a disabled optgroup; the client initializes C. The markup
-      // has no `selected`, so the engine picks its own implicit default.
-      grouped: () =>
-        m.select({ on: { change: seen("grouped") } }, [
-          m.optgroup({ label: "Unavailable", disabled: true }, [m.option({ value: "a" }, "A")]),
-          m.option({ value: "b" }, "B"),
-          m.option({ value: "c", selected: true }, "C"),
-        ]),
+      // A inside a disabled optgroup; the client initializes C. The server
+      // renders no selection, so the markup has no `selected` and the engine
+      // picks its own implicit default.
+      grouped: () => grouped(true),
+      groupedServer: () => grouped(false),
       allDisabled: () =>
         m.select({ on: { change: seen("allDisabled") } }, [
           m.optgroup({ label: "Group", disabled: true }, [m.option({ value: "a" }, "A")]),
           m.option({ value: "b", disabled: true }, "B"),
         ]),
+      // A disabled first option chosen on purpose: not the option the parser
+      // picks when none is marked, so the markup must say `selected`.
+      disabledChosen: () =>
+        m.select(
+          {
+            on: { change: seen("disabledChosen") },
+            onElement: (el: HTMLSelectElement) => {
+              el.value = "a";
+            },
+          },
+          [m.option({ value: "a", disabled: true }, "A"), m.option({ value: "b" }, "B")],
+        ),
     };
     w.__sibu = {
       async render(name) {
         const host = document.createElement("div");
         host.id = name;
-        let { html } = await s.renderToStringAsync(apps[name], { hydration: "adopt" });
+        // A `<name>Server` app, where there is one, is what the server rendered.
+        let { html } = await s.renderToStringAsync(apps[`${name}Server`] ?? apps[name], { hydration: "adopt" });
         // A multiple select's server-side selection, as delivered markup.
         if (name === "cleared") html = html.replace('<option value="a"', '<option value="a" selected');
         host.innerHTML = html;
@@ -134,4 +150,26 @@ test("leaves an untouched drop-down whose options are all disabled as the engine
   await expect(page.locator("#allDisabled")).toHaveAttribute("data-sibu-hydrated", "adopt");
   expect(await sel.evaluate((el: HTMLSelectElement) => el.selectedIndex)).toBe(initial);
   expect(await page.evaluate(() => (window as unknown as Win).__seen.allDisabled)).toBeUndefined();
+});
+
+test("serializes an intentionally chosen disabled option, and keeps it through takeover", async ({ page }) => {
+  await setup(page);
+  await page.evaluate(() => (window as unknown as Win).__sibu.render("disabledChosen"));
+  const sel = page.locator("#disabledChosen select");
+  // The engine parsed the server markup back to the chosen option.
+  expect(await sel.evaluate((el: HTMLSelectElement) => [el.value, el.selectedIndex])).toEqual(["a", 0]);
+  expect(await page.locator('#disabledChosen option[value="a"]').getAttribute("selected")).toBe("");
+  await page.evaluate(() => {
+    (window as unknown as { __a: Element }).__a = document.querySelectorAll("#disabledChosen option")[0];
+  });
+  await page.evaluate(() => (window as unknown as Win).__sibu.take("disabledChosen"));
+  await expect(page.locator("#disabledChosen")).toHaveAttribute("data-sibu-hydrated", "adopt");
+  expect(
+    await page.evaluate(() => {
+      const el = document.querySelector("#disabledChosen select") as HTMLSelectElement;
+      const a = (window as unknown as { __a: Element }).__a;
+      return { value: el.value, index: el.selectedIndex, same: el.selectedOptions[0] === a };
+    }),
+  ).toEqual({ value: "a", index: 0, same: true });
+  expect(await page.evaluate(() => (window as unknown as Win).__seen.disabledChosen)).toBeUndefined();
 });

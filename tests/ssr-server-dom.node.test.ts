@@ -170,9 +170,12 @@ describe("server DOM", () => {
       const el = input({ type: "checkbox", value: "x" }) as HTMLInputElement;
       el.checked = true;
       el.value = "typed";
-      // State, not markup: neither write reflects (dirty value / checkedness).
-      expect(renderToString(el)).toBe('<input type="checkbox" value="x" data-sibu-ssr="true" />');
+      // Neither write reflects to the attribute (dirty value / checkedness)...
+      expect(el.hasAttribute("checked")).toBe(false);
       expect(el.value).toBe("typed");
+      // ...but the serializer emits the live checkedness. It reads no live
+      // `value` off a checkbox, so the attribute's `value="x"` stays.
+      expect(renderToString(el)).toBe('<input type="checkbox" value="x" checked="" data-sibu-ssr="true" />');
       const b = button("x") as HTMLButtonElement;
       b.disabled = true;
       expect(b.getAttribute("disabled")).toBe("");
@@ -242,7 +245,13 @@ describe("server DOM", () => {
     const server = await withServerDom(script);
     const reference = await withJsdom(script);
     expect(server).toEqual(reference);
-    expect(server.html).toContain('<option value="c" selected="" data-sibu-ssr="true">C</option>');
+    // The markup carries the live state: `b` was selected last (its write
+    // deselected `c`), and `touched` was unchecked over its attribute.
+    expect(server.html).toContain('<option value="b" label="Bee" selected="" data-sibu-ssr="true">B</option>');
+    expect(server.html).toContain('<option value="c" data-sibu-ssr="true">C</option>');
+    expect(server.html).toContain(
+      '<input type="checkbox" checked="" data-sibu-ssr="true" /><input type="checkbox" data-sibu-ssr="true" />',
+    );
     expect(server.reads.slice(0, 3)).toEqual([true, true, false]);
   });
 

@@ -618,9 +618,26 @@ class AdoptSession implements AdoptSink {
     };
     sweep(this.root);
     // Sticky attributes the client never wrote or read are not its markup.
+    //
+    // An option's `selected` goes too, but its removal may not change what is
+    // SELECTED: the server markup states the selection the render produced
+    // (an imperative `select.value`, or the engine's own implicit default), and
+    // on an option the client did not write, dropping the attribute would make
+    // the engine re-pick — WebKit then selects nothing, others the first
+    // enabled option. So each affected select's live selection is taken before
+    // the sweep and put back after it when the sweep changed it. A selection
+    // the client wrote (an option it marked `selected`, a `value` it set)
+    // already is the live one, and a user's choice is restored by `reselect`.
+    const affected = new Map<HTMLSelectElement, HTMLOptionElement[]>();
+    for (const [el, record] of this.claimed) {
+      if (el.localName !== "option" || !record.sticky.has("selected")) continue;
+      const select = selectOf(el as HTMLOptionElement);
+      if (select && !affected.has(select)) affected.set(select, selectedOptions(select));
+    }
     for (const [el, record] of this.claimed) {
       for (const name of record.sticky) el.removeAttribute(name);
     }
+    for (const [select, chosen] of affected) restoreSelection(select, chosen);
     reselect(this);
     // Input made before takeover: tell the app's handlers about it.
     for (const el of this.touched) {
@@ -628,6 +645,24 @@ class AdoptSession implements AdoptSink {
       el.dispatchEvent(new Event("change", { bubbles: true }));
     }
   }
+}
+
+/** The `<select>` that lists `option`, directly or through an `<optgroup>`. */
+function selectOf(option: HTMLOptionElement): HTMLSelectElement | null {
+  let parent = option.parentElement;
+  if (parent?.localName === "optgroup") parent = parent.parentElement;
+  return parent?.localName === "select" ? (parent as HTMLSelectElement) : null;
+}
+
+const selectedOptions = (select: HTMLSelectElement) => Array.from(select.options).filter((o) => o.selected);
+
+/** Give `select` exactly the selection `chosen` again, when it no longer has it. */
+function restoreSelection(select: HTMLSelectElement, chosen: HTMLOptionElement[]): void {
+  const now = selectedOptions(select);
+  if (now.length === chosen.length && now.every((o, i) => o === chosen[i])) return;
+  if (select.multiple) for (const o of Array.from(select.options)) o.selected = chosen.includes(o);
+  else if (chosen.length > 0) chosen[0].selected = true;
+  else select.selectedIndex = -1;
 }
 
 /**

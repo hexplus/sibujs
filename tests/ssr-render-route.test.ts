@@ -51,7 +51,9 @@ describe("renderRoute — the fixture app", () => {
     expect(r.status).toBe(200);
     expect(r.route?.query).toEqual({ servicio: "bordado" });
     expect(r.html).toContain("Servicio: bordado");
-    expect(r.html).toContain('<option value="bordado">Bordado</option>');
+    // The query preselects the service, and the server HTML says so.
+    expect(r.html).toContain('<option value="bordado" selected="">Bordado</option>');
+    expect(r.html).not.toContain('<option value="dtf" selected');
     expect(r.head).toContain('<meta name="description" content="Cotización de bordado" data-sibu-head="" />');
   });
 

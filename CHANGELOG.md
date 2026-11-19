@@ -6,6 +6,80 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [4.15.3] — 2026-11-19
+
+### Upgrade notes
+
+Bug fixes only, with no new API. Some of them change output that code may
+have relied on:
+
+- Server HTML now carries form-control state: `checked`, `selected`, an
+  input's `value` and a textarea's text appear where they were missing before.
+  Snapshot tests of server output may need updating.
+- `bindField()` on a boolean field binds `checked` instead of `value`.
+  `props.value()` still returns the field's value, but `value` is no longer an
+  enumerable prop, so spreading the props does not copy it.
+- `select({ multiple: true }, …)` keeps every option marked `selected`, and
+  selects nothing when none is marked. It used to keep only the last marked
+  option, or select the first one.
+
+### Fixed — form-control state in server HTML
+
+A rendered page lost the current state of its form controls: radios and
+checkboxes arrived unchecked, options unselected and reactive fields empty,
+even for a static `checked: true`. Without JavaScript the form looked cleared,
+and with adopting hydration each control visibly changed when the client took
+over. On the server, a `checked`, `selected` or `value` write is now mirrored
+into the markup, and the serializer also emits state set directly
+(`el.checked = true` in `onElement`, a ref, a third-party widget). Typed
+`password` values are never serialized, and `range` and `color` values are
+emitted only when written through props. A leading newline in `<textarea>`,
+`<pre>` and `<listing>` content now survives parsing.
+
+### Fixed — `value` on `<textarea>` and `<select>`
+
+`textarea({ value: "…" })` and `select({ value: "…" })` wrote a `value`
+attribute, which neither element has, so the field stayed empty and the first
+option showed, in the browser and on the server. A textarea's value now sets
+its text, and a select's value selects the matching option; both are the
+default a form reset restores, also after an adopting hydration. In `html`
+templates, `<select value=${x}>` set the value before its options existed; a
+runtime `value` on a select or textarea is now applied after the children.
+
+### Fixed — `select({ multiple: true })` keeps its selection
+
+`multiple` and `size` were applied after the options were appended, while the
+select still behaved as a drop-down. They are now applied first.
+
+### Fixed — `bindField()` on checkboxes and multiple selects
+
+On a checkbox, `bindField()` wrote the field's boolean into `value` and never
+checked the box. A boolean field now binds `checked`. On a `<select multiple>`,
+the selection now also reaches server HTML.
+
+### Fixed — minimal imports tree-shake from the published build
+
+The `window.Sibu` namespace object landed in a chunk every import shares, and
+no bundler can remove it from there, so an app importing a few functions
+bundled the whole root surface: a `signal`, `div`, `mount` app came to about
+40 KB gzip instead of under 15 KB. The namespace now lives only in the
+`sibujs/build` entry that needs it, and the tag factories are marked pure.
+
+### Fixed — `each()` releases removed rows
+
+`each()` kept removed rows in its reusable scratch storage, holding them and
+everything they referenced in memory up to the longest length the list had
+ever had. The storage is now emptied after every pass, including a pass that
+threw.
+
+### Fixed — scalar reactive children update in place
+
+`div(() => count())` replaced its text node on every change. A string or number
+after a string or number now keeps its text node and writes only a changed
+value.
+
+---
+
 ## [4.15.2] — 2026-11-08
 
 ### Fixed — `sibujs/devtools` reports the names you gave your signals

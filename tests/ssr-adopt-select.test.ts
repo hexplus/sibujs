@@ -113,12 +113,14 @@ describe("adopting hydration preserves a <select> the user changed", () => {
   });
 
   it("lets the client initialize a select the user did not touch", async () => {
-    // The server DOM keeps `value` as state, so the server markup carries no
-    // `selected` attribute: the parser selects the first option. That default
-    // is not a user change, and the client's `value` must apply.
-    const [choice] = signal("b");
+    // The server renders no value, so its markup carries no `selected`
+    // attribute: the parser selects the first option. That default is not a
+    // user change, and the client's `value` must apply.
+    const [choice, setChoice] = signal("");
     const App = () => select({ value: () => choice() }, [option({ value: "a" }, "A"), option({ value: "b" }, "B")]);
     container.innerHTML = await serverRender(App);
+    expect(container.innerHTML).not.toContain("selected");
+    setChoice("b");
     const el = container.querySelector("select") as HTMLSelectElement;
     const change = vi.fn();
     el.addEventListener("change", change);
@@ -228,18 +230,6 @@ describe("adopting hydration preserves a <select> the user changed", () => {
 /** The selected option NODES of `el`, in document order. */
 const selectedNodes = (el: HTMLSelectElement) => Array.from(el.options).filter((o) => o.selected);
 
-/**
- * Server markup in which the options with `values` carry the `selected`
- * attribute. The server DOM keeps `selected: true` as state, not as an
- * attribute, so a multiple select's server-side selection is written into the
- * markup here, as a static page or another server would deliver it.
- */
-async function serverRenderSelected(app: () => Node, ...values: string[]): Promise<string> {
-  let html = await serverRender(app);
-  for (const v of values) html = html.replace(`<option value="${v}"`, `<option value="${v}" selected`);
-  return html;
-}
-
 /** Strip the adoption ids from the server's options, so the client cannot claim them and builds fresh ones. */
 function unclaimableOptions(root: Element): void {
   for (const o of Array.from(root.querySelectorAll("option"))) o.removeAttribute("data-sibu-h");
@@ -256,7 +246,7 @@ describe("adopting hydration keeps an intentionally EMPTY selection", () => {
         },
         [option({ value: "a", selected: true }, "A"), option({ value: "b" }, "B")],
       );
-    container.innerHTML = await serverRenderSelected(App, "a");
+    container.innerHTML = await serverRender(App);
     const el = container.querySelector("select") as HTMLSelectElement;
     expect(selectedNodes(el)).toEqual([el.options[0]]);
     el.options[0].selected = false;
@@ -275,7 +265,7 @@ describe("adopting hydration keeps an intentionally EMPTY selection", () => {
         option({ value: "b" }, "B"),
         option({ value: "c", selected: true }, "C"),
       ]);
-    container.innerHTML = await serverRenderSelected(App, "a", "c");
+    container.innerHTML = await serverRender(App);
     const el = container.querySelector("select") as HTMLSelectElement;
     expect(selectedNodes(el).map((o) => o.value)).toEqual(["a", "c"]);
     for (const o of Array.from(el.options)) o.selected = false;
@@ -305,7 +295,7 @@ describe("adopting hydration keeps an intentionally EMPTY selection", () => {
     const change = vi.fn();
     const App = () =>
       select({ multiple: true }, [option({ value: "a", selected: true }, "A"), option({ value: "b" }, "B")]);
-    container.innerHTML = await serverRenderSelected(App, "a");
+    container.innerHTML = await serverRender(App);
     const el = container.querySelector("select") as HTMLSelectElement;
     el.addEventListener("change", change);
 
@@ -509,35 +499,37 @@ function replays(el: HTMLSelectElement): () => string[] {
 }
 
 describe("adopting hydration computes the markup's default selection as the browser does", () => {
-  // A: disabled through its optgroup; B, C: enabled. No `selected` attribute in
-  // the server markup (the server DOM keeps `selected: true` as state), so the
-  // parser selects B — the first option that is not disabled.
-  const Grouped = () =>
+  // A: disabled through its optgroup; B, C: enabled. The server renders no
+  // selection, so its markup carries no `selected` attribute and the parser
+  // selects B — the first option that is not disabled. The client selects C.
+  const Grouped = (pick?: string) =>
     select({ id: "g" }, [
       optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a" }, "A")]),
       option({ value: "b" }, "B"),
-      option({ value: "c", selected: true }, "C"),
+      option({ value: "c", selected: pick === "c" }, "C"),
     ]);
+  const GroupedServer = () => Grouped();
+  const GroupedClient = () => Grouped("c");
 
   it("treats an untouched select after a disabled optgroup as untouched: the client's C stands", async () => {
-    container.innerHTML = await serverRender(Grouped);
+    container.innerHTML = await serverRender(GroupedServer);
     const el = container.querySelector("select") as HTMLSelectElement;
     expect(el.querySelector("optgroup")?.hasAttribute("disabled")).toBe(true);
     expect(el.selectedIndex).toBe(1);
     const c = el.options[2];
 
-    await hydrate(Grouped, container, { strategy: "adopt" });
+    await hydrate(GroupedClient, container, { strategy: "adopt" });
     expect(container.querySelector("select")).toBe(el);
     expect(el.selectedIndex).toBe(2);
     expect(selectedNodes(el)).toEqual([c]);
   });
 
   it("replays no input/change event for that untouched select", async () => {
-    container.innerHTML = await serverRender(Grouped);
+    container.innerHTML = await serverRender(GroupedServer);
     const el = container.querySelector("select") as HTMLSelectElement;
     const seen = replays(el);
 
-    await hydrate(Grouped, container, { strategy: "adopt" });
+    await hydrate(GroupedClient, container, { strategy: "adopt" });
     expect(seen()).toEqual([]);
   });
 
@@ -561,18 +553,19 @@ describe("adopting hydration computes the markup's default selection as the brow
   });
 
   it("skips an individually disabled first option for the implicit default", async () => {
-    const App = () =>
+    // The server renders no selection (implicit default: B); the client selects C.
+    const App = (pickC: boolean) => () =>
       select([
         option({ value: "a", disabled: true }, "A"),
         option({ value: "b" }, "B"),
-        option({ value: "c", selected: true }, "C"),
+        option({ value: "c", selected: pickC }, "C"),
       ]);
-    container.innerHTML = await serverRender(App);
+    container.innerHTML = await serverRender(App(false));
     const el = container.querySelector("select") as HTMLSelectElement;
     expect(el.selectedIndex).toBe(1);
     const seen = replays(el);
 
-    await hydrate(App, container, { strategy: "adopt" });
+    await hydrate(App(true), container, { strategy: "adopt" });
     expect(selectedNodes(el)).toEqual([el.options[2]]);
     expect(seen()).toEqual([]);
   });
@@ -587,7 +580,7 @@ describe("adopting hydration computes the markup's default selection as the brow
           option({ value: "b" }, "B"),
           option({ value: "c", disabled: true, selected: value === "c" }, "C"),
         ]);
-      container.innerHTML = await serverRenderSelected(App, value);
+      container.innerHTML = await serverRender(App);
       const el = container.querySelector("select") as HTMLSelectElement;
       const explicit = el.querySelector(`option[value="${value}"]`) as HTMLOptionElement;
       // What the DOM does with it: the explicit selection holds, disabled or not.
@@ -619,20 +612,21 @@ describe("adopting hydration computes the markup's default selection as the brow
   });
 
   it("keeps multiple selects and listboxes on their default: nothing selected without `selected`", async () => {
+    // The server renders no selection; the client selects C.
     for (const props of [{ multiple: true }, { size: 3 }]) {
-      const App = () =>
+      const App = (pickC: boolean) => () =>
         select(props, [
           optgroup({ label: "Unavailable", disabled: true }, [option({ value: "a" }, "A")]),
           option({ value: "b" }, "B"),
-          option({ value: "c", selected: true }, "C"),
+          option({ value: "c", selected: pickC }, "C"),
         ]);
-      container.innerHTML = await serverRender(App);
+      container.innerHTML = await serverRender(App(false));
       const el = container.querySelector("select") as HTMLSelectElement;
       expect(selectedNodes(el)).toEqual([]);
       const c = el.options[2];
       const seen = replays(el);
 
-      await hydrate(App, container, { strategy: "adopt" });
+      await hydrate(App(true), container, { strategy: "adopt" });
       expect(seen()).toEqual([]);
       expect(selectedNodes(el)).toEqual([c]);
       container.innerHTML = "";

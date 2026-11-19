@@ -26,6 +26,7 @@
  */
 
 import { DEV, devWarn, devWarnLazy } from "../core/dev";
+import { isServer } from "../core/ssr-context";
 import { ContextualRefusal, contextualAttributeRefusal, settleAttributeProvenance } from "./elementPolicy";
 import { isEventHandlerAttr, isHtmlContentAttribute, resolveAttributeValue } from "./sanitize";
 
@@ -112,6 +113,66 @@ function setProp(el: Element, key: string, val: unknown): void {
   (el as unknown as Record<string, unknown>)[key] = val;
 }
 
+/** Add or remove a presence-based (boolean) content attribute. */
+function setPresence(el: Element, name: string, on: boolean): void {
+  if (on) el.setAttribute(name, "");
+  else el.removeAttribute(name);
+}
+
+/** Put `selected` on `chosen` alone among `select`'s options. */
+function markSelected(select: Element, chosen: Element | undefined): void {
+  for (const o of Array.from((select as HTMLSelectElement).options)) setPresence(o, "selected", o === chosen);
+}
+
+/**
+ * Mirror a form control's live state into its markup. SERVER ONLY (the
+ * caller checks `isServer()`).
+ *
+ * `checked`, `selected` and a control's `value` are committed to the IDL
+ * property, the only sink that updates a live control (see
+ * `BOOLEAN_IDL_ATTRS` and `syncValueProperty`). A serializer emits content
+ * attributes and text, never IDL state, so on the server that state never
+ * reached the HTML: radios, options and fields arrived blank, a no-JS form
+ * looked cleared, and an adopted island visibly changed the moment the client
+ * wrote the property it should already have shown.
+ *
+ * Nobody interacts with a server DOM, so the reason the property is the only
+ * sink in a browser (once the user touches a control, its attribute is a stale
+ * default) does not apply there. The markup is written as well, and says what
+ * the property says:
+ *
+ *   - `<input>` `checked` → the `checked` attribute; `value` → the `value`
+ *     attribute;
+ *   - `<option>` `selected` → the `selected` attribute, taken off the other
+ *     options of a select without `multiple`, so the parser does not pick a
+ *     stale one;
+ *   - `<textarea>` `value` → its text, which is its default value;
+ *   - `<select>` `value` → `selected` on the first option with that value (the
+ *     one the property selects), and off every other option.
+ *
+ * State set imperatively (`el.checked = true` in `onElement`) does not pass
+ * through here and is not mirrored.
+ */
+function reflectFormState(el: Element, name: string, value: string | boolean): void {
+  const tag = el.localName;
+  if (tag === "input") {
+    if (name === "value") el.setAttribute(name, value as string);
+    else if (name === "checked") setPresence(el, name, value as boolean);
+  } else if (tag === "textarea") {
+    el.textContent = value as string;
+  } else if (tag === "select") {
+    markSelected(
+      el,
+      Array.from((el as HTMLSelectElement).options).find((o) => o.value === value),
+    );
+  } else if (tag === "option" && name === "selected") {
+    setPresence(el, name, value as boolean);
+    const parent = el.parentNode as Element | null;
+    const select = (parent?.localName === "optgroup" ? parent.parentNode : parent) as HTMLSelectElement | null;
+    if (value && select?.localName === "select" && !select.multiple) markSelected(select, el);
+  }
+}
+
 /**
  * Resolve the namespace a prefixed attribute must be written in.
  *
@@ -146,7 +207,12 @@ function namespaceFor(el: Element, name: string): string | null {
  *     enumerated tokens, so absence and `false` mean different things).
  *   - other booleans — HTML boolean-attribute semantics, via the IDL property
  *     for `checked`/`disabled`/`selected` where that is the live state.
+ *   - `value` on `<textarea>`/`<select>` — neither has a `value` content
+ *     attribute: a textarea's first render seeds its text, otherwise the IDL
+ *     property is written.
  *   - `value`/`checked` strings — IDL property when `syncValueProperty`.
+ *   - on the server, every IDL write above is mirrored into the markup
+ *     (`reflectFormState`), since a serializer never reads IDL state.
  *   - contextual rules (`utils/elementPolicy`) — REFUSED, and the slot
  *     cleared, when the element's attributes after the write would form a
  *     forbidden meta refresh, a runtime `<script>` source, or an SVG animation
@@ -268,6 +334,7 @@ function commitSafeAttribute(el: Element, name: string, value: unknown, options:
     }
     if (html && BOOLEAN_IDL_ATTRS.has(idlName) && idlName in el) {
       setProp(el, idlName, value);
+      if (idlName !== "disabled" && isServer()) reflectFormState(el, idlName, value);
     } else if (value) {
       if (ns) el.setAttributeNS(ns, name, "");
       else el.setAttribute(name, "");
@@ -281,8 +348,42 @@ function commitSafeAttribute(el: Element, name: string, value: unknown, options:
 
   const str = String(value);
 
+  // `<textarea>` and `<select>` have no `value` CONTENT attribute: writing one
+  // is inert, in a browser and on the server alike, so a first-render
+  // `textarea({ value })` showed an empty field and `select({ value })` its
+  // first option. The first render seeds each one's DEFAULT, which a form
+  // reset restores, as it restores an input's `value` attribute: a textarea's
+  // text, and the `selected` attributes of a select's options. A later
+  // (reactive) write changes only the current state, below.
+  const tag = el.localName;
+  if (html && idlName === "value" && options.syncValueProperty === false) {
+    if (tag === "textarea") {
+      // Written even when equal: an adopting hydration claims the server's text
+      // node through this write (its `textContent` override keeps an equal
+      // node), and sweeps the node as unclaimed when no write comes.
+      el.textContent = str;
+      return true;
+    }
+    if (tag === "select") {
+      // `selected` on the option the `value` setter picks (the first with that
+      // value) and off the others, as the setter deselects them. Written
+      // through `setAttribute` / `removeAttribute` — an adopting hydration
+      // learns from those calls that the client owns the server's `selected`
+      // attributes, and keeps them. Then the current selection, since an
+      // option already written `selected` no longer follows its attribute.
+      markSelected(
+        el,
+        Array.from((el as HTMLSelectElement).options).find((o) => o.value === str),
+      );
+      setProp(el, idlName, str);
+      return true;
+    }
+  }
+
   if (options.syncValueProperty !== false && html && (idlName === "value" || idlName === "checked") && idlName in el) {
-    setProp(el, idlName, idlName === "checked" ? Boolean(value) : str);
+    const live = idlName === "checked" ? Boolean(value) : str;
+    setProp(el, idlName, live);
+    if (isServer()) reflectFormState(el, idlName, live);
     return true;
   }
 
