@@ -122,37 +122,57 @@ jobs:
             # are actually supported.
             fail-fast: false
             matrix:
-                # Must stay in lockstep with `package.json.engines.node`.
+                # `node` must stay in lockstep with `package.json.engines.node`.
                 #
                 # `22.3.0` is the DECLARED MINIMUM and is pinned exactly — testing
                 # "22 latest" does not verify the floor, and an unverified floor is
                 # the gap this matrix exists to close. `22` and `24` track the
                 # current release lines.
                 #
-                # The test toolchain must install and start on the floor too.
-                # `vite` is a direct devDependency held at ^6 for that reason:
-                # Vitest 4 accepts Vite 6, 7 or 8, but Vite 7 and 8 (and Vite 8's
-                # rolldown) require Node ^20.19.0 || >=22.12.0, and on 22.3.0
-                # Vitest failed at startup looking for a rolldown native binding.
-                node: ["22.3.0", 22, 24]
+                # `toolchain` is the Node that installs, builds and tests the
+                # repository. The dev toolchain has its own, higher floor (tsup 9,
+                # Vitest 5 and jsdom 31 need Node >= 22.22.2), so the floor job
+                # builds on 22 and then runs only the packed-package gates on
+                # 22.3.0. `engines` promises consumers a runtime, and consumers run
+                # the published tarball, not this repository's build.
+                include:
+                    - node: "22.3.0"
+                      toolchain: "22"
+                    - node: "22"
+                      toolchain: "22"
+                    - node: "24"
+                      toolchain: "24"
         steps:
             - uses: actions/checkout@v4
             - uses: actions/setup-node@v4
               with:
-                  node-version: ${{ matrix.node }}
+                  node-version: ${{ matrix.toolchain }}
                   cache: npm
 
             - run: npm ci --no-audit --no-fund
             - run: npm run build
-            - run: npm run typecheck
-            - run: npm run typecheck:tests
-            - run: npx vitest run --reporter=dot
+
+            # Already covered on the same toolchain by the `22` job.
+            - if: matrix.node == matrix.toolchain
+              run: npm run typecheck
+            - if: matrix.node == matrix.toolchain
+              run: npm run typecheck:tests
+            - if: matrix.node == matrix.toolchain
+              run: npx vitest run --reporter=dot
+
+            # Switch to the runtime under test for the floor job.
+            - if: matrix.node != matrix.toolchain
+              uses: actions/setup-node@v4
+              with:
+                  node-version: ${{ matrix.node }}
 
             # Packed-package gates: install the real tarball into a throwaway
             # consumer and exercise every declared subpath, plus the three RC
             # regressions that are Node-specific (DOM-less router construction,
             # query-cache clean exit, promise-returning route components) and the
-            # SSR request-isolation contract.
+            # SSR request-isolation contract. Below the toolchain floor the
+            # script reports the repository gates N/A and packs the `dist/`
+            # built above.
             #
             # `--versions` is pinned to this job's Node so the runner tests the
             # version it was given rather than searching for others.

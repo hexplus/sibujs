@@ -29,6 +29,16 @@ The Vitest pool (`forks`) and per-file isolation are now set explicitly. A
 cross-realm `instanceof` checks the suite relies on, and sharing workers
 across files would carry module-level state from one test file into the next.
 
+### Changed — the Node floor is certified on the packed package
+
+The supported runtime is still Node `>=22.3.0`. The development toolchain now
+needs Node 22.22.2 or newer, so the CI floor job builds the package on Node 22
+and then runs the packed-package gates on 22.3.0: ESM and CJS import of every
+subpath, the DOM-less router, the query cache's clean exit, SSR request
+isolation and streaming, and the runtime-compat probe. The repository gates
+(install, build, typecheck, unit suite) are reported N/A there, and the
+consumer project uses jsdom 26, the newest line that runs on 22.3.0.
+
 ### Tests — adapted to jsdom 31
 
 jsdom 31 reads styles the way browsers do: a string `style` comes back as
