@@ -161,58 +161,58 @@ describe.each<Kind>(["when", "match"])("%s(): a connectedCallback that disposes 
     expect(host.children.length).toBe(0);
   });
 
-  it.each([
-    "both",
-    "out-in",
-    "in-out",
-  ] as const)("with a transition (mode %s): no enter, no timer, and the leaving branch is released once", async (mode) => {
-    let anchor!: Comment;
-    let armed = false;
-    const ce = probe(() => {
-      if (armed) dispose(anchor);
-    });
-    const enter = vi.fn();
-    let release!: () => void;
-    const leave = vi.fn(() => new Promise<void>((r) => (release = r)));
-    const [on, setOn] = signal("a");
-    const before = trailing("before");
-    const tail = trailing("tail");
-    const options: DirectiveOptions = { transition: { mode, enter, leave } };
-    const branches = {
-      a: () => before.make(),
-      b: () => Fragment([ce.make(), tail.make()]),
-    };
-    anchor = kind === "when" ? when(() => on() === "a", branches.a, branches.b, options) : match(on, branches, options);
-    host.append(anchor);
-    await flush();
-    const base = vi.getTimerCount();
-    armed = true;
-    setOn("b");
-    if (mode === "out-in") {
-      release();
+  it.each(["both", "out-in", "in-out"] as const)(
+    "with a transition (mode %s): no enter, no timer, and the leaving branch is released once",
+    async (mode) => {
+      let anchor!: Comment;
+      let armed = false;
+      const ce = probe(() => {
+        if (armed) dispose(anchor);
+      });
+      const enter = vi.fn();
+      let release!: () => void;
+      const leave = vi.fn(() => new Promise<void>((r) => (release = r)));
+      const [on, setOn] = signal("a");
+      const before = trailing("before");
+      const tail = trailing("tail");
+      const options: DirectiveOptions = { transition: { mode, enter, leave } };
+      const branches = {
+        a: () => before.make(),
+        b: () => Fragment([ce.make(), tail.make()]),
+      };
+      anchor =
+        kind === "when" ? when(() => on() === "a", branches.a, branches.b, options) : match(on, branches, options);
+      host.append(anchor);
       await flush();
-    }
-    await flush();
-    expect(ce.connected()).toBe(1);
-    expect(enter).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(base);
-    expect(host.children.length).toBe(0);
-    expect(before.rec.cleanup).toHaveBeenCalledTimes(1);
-    expect(tail.rec.cleanup).toHaveBeenCalledTimes(1);
-    // A leave completing afterwards resurrects nothing.
-    release?.();
-    await flush();
-    vi.runAllTimers();
-    await flush();
-    expect(host.children.length).toBe(0);
-    expect(enter).not.toHaveBeenCalled();
-    expect(before.rec.cleanup).toHaveBeenCalledTimes(1);
-    expect(tail.rec.cleanup).toHaveBeenCalledTimes(1);
-    const runs = tail.rec.runs;
-    tail.setN(5);
-    await flush();
-    expect(tail.rec.runs).toBe(runs);
-  });
+      const base = vi.getTimerCount();
+      armed = true;
+      setOn("b");
+      if (mode === "out-in") {
+        release();
+        await flush();
+      }
+      await flush();
+      expect(ce.connected()).toBe(1);
+      expect(enter).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(base);
+      expect(host.children.length).toBe(0);
+      expect(before.rec.cleanup).toHaveBeenCalledTimes(1);
+      expect(tail.rec.cleanup).toHaveBeenCalledTimes(1);
+      // A leave completing afterwards resurrects nothing.
+      release?.();
+      await flush();
+      vi.runAllTimers();
+      await flush();
+      expect(host.children.length).toBe(0);
+      expect(enter).not.toHaveBeenCalled();
+      expect(before.rec.cleanup).toHaveBeenCalledTimes(1);
+      expect(tail.rec.cleanup).toHaveBeenCalledTimes(1);
+      const runs = tail.rec.runs;
+      tail.setN(5);
+      await flush();
+      expect(tail.rec.runs).toBe(runs);
+    },
+  );
 
   it("a bare (caller-owned) fragment is detached, never disposed: its bindings keep running", async () => {
     let anchor!: Comment;

@@ -104,130 +104,130 @@ function stale(target: string) {
   return { factory, setN, rec };
 }
 
-describe.each<Kind>([
-  "when",
-  "match",
-])("%s(): a factory that selects another value supersedes its own switch", (kind) => {
-  describe.each(MODES)("transition mode: %s", (mode) => {
-    it("selecting an empty outcome: nothing is inserted, the obsolete node is disposed once", async () => {
+describe.each<Kind>(["when", "match"])(
+  "%s(): a factory that selects another value supersedes its own switch",
+  (kind) => {
+    describe.each(MODES)("transition mode: %s", (mode) => {
+      it("selecting an empty outcome: nothing is inserted, the obsolete node is disposed once", async () => {
+        const b = stale("none");
+        const t = setup(kind, mode, b.factory);
+        await flush();
+        expect(host.textContent).toBe("A");
+        t.setSel("b");
+        await settle(t.release);
+        expect(b.rec.built).toBe(1);
+        expect(host.querySelector(".stale")).toBeNull();
+        expect(host.textContent).toBe("");
+        expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
+        // Its lifecycle ended: its binding never runs again.
+        const runs = b.rec.runs;
+        b.setN(1);
+        await flush();
+        expect(b.rec.runs).toBe(runs);
+        // The directive itself keeps switching.
+        t.setSel("c");
+        await settle(t.release);
+        expect(host.textContent).toBe("C");
+        expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
+      });
+
+      it("control — selecting a nonempty outcome: that branch is shown, the obsolete node disposed once", async () => {
+        const b = stale("c");
+        const t = setup(kind, mode, b.factory);
+        await flush();
+        t.setSel("b");
+        await settle(t.release);
+        expect(host.querySelector(".stale")).toBeNull();
+        expect(host.textContent).toBe("C");
+        expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
+        const runs = b.rec.runs;
+        b.setN(1);
+        await flush();
+        expect(b.rec.runs).toBe(runs);
+      });
+
+      it("a bare element the newer switch shows is the caller's: attached, never disposed", async () => {
+        const [label, setLabel] = signal("bare");
+        const bare = div({ class: "c" }, () => label());
+        const bareCleanup = vi.fn();
+        registerDisposer(bare, bareCleanup);
+        const b = stale("c");
+        const t = setup(kind, mode, b.factory, bare);
+        await flush();
+        t.setSel("b");
+        await settle(t.release);
+        expect(bare.parentNode).toBe(host);
+        expect(host.textContent).toBe("bare");
+        expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
+        // Detached again by the next switch, its bindings still running.
+        t.setSel("none");
+        await settle(t.release);
+        expect(bare.parentNode).not.toBe(host);
+        expect(bareCleanup).not.toHaveBeenCalled();
+        setLabel("still live");
+        await flush();
+        expect(bare.textContent).toBe("still live");
+        dispose(bare);
+      });
+    });
+
+    it("out-in: a build deferred behind a leave is held to the switch that deferred it", async () => {
+      // A's leave is pending when B is selected; B's build waits for it. When
+      // the leave ends, B's factory selects nothing — that newer switch has
+      // nothing left to wait for and renders nothing; B's result is obsolete.
       const b = stale("none");
-      const t = setup(kind, mode, b.factory);
+      const t = setup(kind, "out-in", b.factory);
       await flush();
-      expect(host.textContent).toBe("A");
       t.setSel("b");
-      await settle(t.release);
+      await flush();
+      expect(b.rec.built).toBe(0);
+      expect(t.release.length).toBe(1);
+      t.release.shift()?.();
+      await flush();
       expect(b.rec.built).toBe(1);
-      expect(host.querySelector(".stale")).toBeNull();
       expect(host.textContent).toBe("");
       expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
-      // Its lifecycle ended: its binding never runs again.
-      const runs = b.rec.runs;
-      b.setN(1);
+      // No enter was started for the obsolete branch.
+      expect(t.release.length).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("out-in: the obsolete result is never inserted — a custom element in it is never connected", async () => {
+      const tag = `x-generation-probe-${kind}`;
+      let connected = 0;
+      customElements.define(
+        tag,
+        class extends HTMLElement {
+          connectedCallback() {
+            connected++;
+          }
+        },
+      );
+      const cleanup = vi.fn();
+      const t = setup(kind, "out-in", (setSel) => {
+        setSel("none");
+        const el = document.createElement(tag);
+        registerDisposer(el, cleanup);
+        return el;
+      });
       await flush();
-      expect(b.rec.runs).toBe(runs);
-      // The directive itself keeps switching.
+      t.setSel("b");
+      await settle(t.release);
+      expect(connected).toBe(0);
+      expect(cleanup).toHaveBeenCalledTimes(1);
+      expect(host.textContent).toBe("");
+    });
+
+    it("out-in: a newer switch while the build waits replaces it — only the latest selection builds", async () => {
+      const b = stale("none");
+      const t = setup(kind, "out-in", b.factory);
+      await flush();
+      t.setSel("b");
+      await flush();
       t.setSel("c");
       await settle(t.release);
+      expect(b.rec.built).toBe(0);
       expect(host.textContent).toBe("C");
-      expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
     });
-
-    it("control — selecting a nonempty outcome: that branch is shown, the obsolete node disposed once", async () => {
-      const b = stale("c");
-      const t = setup(kind, mode, b.factory);
-      await flush();
-      t.setSel("b");
-      await settle(t.release);
-      expect(host.querySelector(".stale")).toBeNull();
-      expect(host.textContent).toBe("C");
-      expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
-      const runs = b.rec.runs;
-      b.setN(1);
-      await flush();
-      expect(b.rec.runs).toBe(runs);
-    });
-
-    it("a bare element the newer switch shows is the caller's: attached, never disposed", async () => {
-      const [label, setLabel] = signal("bare");
-      const bare = div({ class: "c" }, () => label());
-      const bareCleanup = vi.fn();
-      registerDisposer(bare, bareCleanup);
-      const b = stale("c");
-      const t = setup(kind, mode, b.factory, bare);
-      await flush();
-      t.setSel("b");
-      await settle(t.release);
-      expect(bare.parentNode).toBe(host);
-      expect(host.textContent).toBe("bare");
-      expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
-      // Detached again by the next switch, its bindings still running.
-      t.setSel("none");
-      await settle(t.release);
-      expect(bare.parentNode).not.toBe(host);
-      expect(bareCleanup).not.toHaveBeenCalled();
-      setLabel("still live");
-      await flush();
-      expect(bare.textContent).toBe("still live");
-      dispose(bare);
-    });
-  });
-
-  it("out-in: a build deferred behind a leave is held to the switch that deferred it", async () => {
-    // A's leave is pending when B is selected; B's build waits for it. When
-    // the leave ends, B's factory selects nothing — that newer switch has
-    // nothing left to wait for and renders nothing; B's result is obsolete.
-    const b = stale("none");
-    const t = setup(kind, "out-in", b.factory);
-    await flush();
-    t.setSel("b");
-    await flush();
-    expect(b.rec.built).toBe(0);
-    expect(t.release.length).toBe(1);
-    t.release.shift()?.();
-    await flush();
-    expect(b.rec.built).toBe(1);
-    expect(host.textContent).toBe("");
-    expect(b.rec.cleanup).toHaveBeenCalledTimes(1);
-    // No enter was started for the obsolete branch.
-    expect(t.release.length).toBe(0);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
-  it("out-in: the obsolete result is never inserted — a custom element in it is never connected", async () => {
-    const tag = `x-generation-probe-${kind}`;
-    let connected = 0;
-    customElements.define(
-      tag,
-      class extends HTMLElement {
-        connectedCallback() {
-          connected++;
-        }
-      },
-    );
-    const cleanup = vi.fn();
-    const t = setup(kind, "out-in", (setSel) => {
-      setSel("none");
-      const el = document.createElement(tag);
-      registerDisposer(el, cleanup);
-      return el;
-    });
-    await flush();
-    t.setSel("b");
-    await settle(t.release);
-    expect(connected).toBe(0);
-    expect(cleanup).toHaveBeenCalledTimes(1);
-    expect(host.textContent).toBe("");
-  });
-
-  it("out-in: a newer switch while the build waits replaces it — only the latest selection builds", async () => {
-    const b = stale("none");
-    const t = setup(kind, "out-in", b.factory);
-    await flush();
-    t.setSel("b");
-    await flush();
-    t.setSel("c");
-    await settle(t.release);
-    expect(b.rec.built).toBe(0);
-    expect(host.textContent).toBe("C");
-  });
-});
+  },
+);

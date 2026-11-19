@@ -483,7 +483,7 @@ export function optimisticList<T>(initialValue: T[]): {
   /** Take a row off screen. Keeps `visible` and `order` in lockstep. */
   function hide(id: number): boolean {
     const row = records.get(id);
-    if (!row || !row.visible) return false;
+    if (!row?.visible) return false;
     row.visible = false;
     order = order.filter((x) => x !== id);
     return true;

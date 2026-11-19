@@ -29,6 +29,7 @@ describe("normalize treats schema names and ids as literal data", () => {
 
     expect(({} as Record<string, unknown>).owned).toBeUndefined();
     expect(Object.hasOwn(entities, "__proto__")).toBe(true);
+    // biome-ignore lint/suspicious/noProto: reads the own "__proto__" key normalize() stored, not the prototype
     expect(Object.hasOwn(entities.__proto__, "owned")).toBe(true);
   });
 
@@ -39,6 +40,7 @@ describe("normalize treats schema names and ids as literal data", () => {
     );
 
     expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    // biome-ignore lint/suspicious/noProto: reads the own "__proto__" key normalize() stored, not the prototype
     expect(Object.hasOwn(entities.__proto__, "polluted")).toBe(true);
   });
 

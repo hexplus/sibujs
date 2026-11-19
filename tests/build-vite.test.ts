@@ -97,7 +97,7 @@ describe("sibuVitePlugin", () => {
       expect(result?.code).toContain("__SIBU_DEV__ = true");
       expect(result?.code).toContain("SibuJS Dev Mode");
       // Plain JavaScript: the prologue must parse in a .js module.
-      expect(() => new Function((result?.code as string).replace(/import[^;]*;/g, ""))).not.toThrow();
+      expect(() => new Function((result?.code ?? "").replace(/import[^;]*;/g, ""))).not.toThrow();
     });
 
     it("does not inject dev helpers when the file does not import sibu", () => {

@@ -479,7 +479,7 @@ export function initDevTools(config?: DevToolsConfig) {
 
     const entry = hook.components.get(name);
     const el = entry?.element;
-    if (!el || !el.isConnected) return;
+    if (!el?.isConnected) return;
 
     // Save originals (inline style only — computed style isn't safe to restore)
     el.dataset.sibuHighlightPrevOutline = el.style.outline || "";

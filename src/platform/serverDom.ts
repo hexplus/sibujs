@@ -2061,7 +2061,7 @@ function inServerRender(): boolean {
 
 function watchProperty(target: object, key: string, api: string): void {
   const desc = Object.getOwnPropertyDescriptor(target, key);
-  if (!desc || !desc.configurable) return;
+  if (!desc?.configurable) return;
   const read = desc.get ? () => desc.get?.call(target) : () => desc.value;
   let value = desc.value;
   Object.defineProperty(target, key, {

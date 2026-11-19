@@ -6,13 +6,14 @@
       "declaration": true,
       "emitDeclarationOnly": true,
       "outDir": "dist",
-      "moduleResolution": "node",
+      "moduleResolution": "bundler",
       "esModuleInterop": true,
       "strict": true,
       "noUnusedLocals": true,
       "noUnusedParameters": true,
       "noFallthroughCasesInSwitch": true,
-      "skipLibCheck": true
+      "skipLibCheck": true,
+      "types": ["node"]
     },
     "include": ["src", "index.ts"]
   }

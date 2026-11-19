@@ -174,7 +174,11 @@ describe("CSS policy — property-qualified rules compare the EXACT property nam
   for (const [property, value] of ORDINARY) {
     it(`keeps ${property}: ${value} on every form`, () => {
       expect(sanitizeCSSDeclaration(property, value)).toBe(value);
-      expect(sanitizeStyleAttribute(`${property}: ${value}`)).toContain(`${property}: ${value}`);
+      // Read back through the CSSOM: a shorthand may come back as its longhands
+      // (`overscroll-behavior` -> `-x` / `-y`), which recompose to the same value.
+      const probe = document.createElement("div");
+      probe.style.cssText = sanitizeStyleAttribute(`${property}: ${value}`);
+      expect(probe.style.getPropertyValue(property)).toBe(value);
       expect(div({ style: { [property]: value } }).getAttribute("style")).toContain(`${property}: ${value}`);
       const [live] = signal(value);
       expect(div({ style: { [property]: () => live() } }).getAttribute("style")).toContain(`${property}: ${value}`);

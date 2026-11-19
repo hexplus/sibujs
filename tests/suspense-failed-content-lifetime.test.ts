@@ -173,63 +173,66 @@ describe("router Suspense", () => {
   it.each([
     ["", false],
     [" (with a registration waiting for the resume)", true],
-  ])("a rejection while the branch is paused ends the content at once: nothing runs on the resume%s", async (_, waiting) => {
-    const work = scopedWork();
-    const gate = deferred<HTMLElement>();
-    const owner = structuralBinding(() => {});
-    let late = 0;
-    const anchor = owner.run(() =>
-      RouterSuspense({
-        fallback: () => div({ class: "fallback" }, "…"),
-        nodes: () => {
-          work.capture();
-          return gate.promise;
-        },
-      }),
-    );
-    host.appendChild(anchor);
-    await flush();
-    const runs = work.rec.effectRuns;
-    owner.freeze?.();
-    expect(work.rec.scope?.state()).toBe("paused");
-    // Skipped while paused, owed a catch-up run on the resume.
-    work.setTick(1);
-    await flush();
-    expect(work.rec.effectRuns).toBe(runs);
-    expect(heldSkippedCount()).toBeGreaterThan(skippedBase);
-    // A registration made while paused waits for the resume.
-    if (waiting)
+  ])(
+    "a rejection while the branch is paused ends the content at once: nothing runs on the resume%s",
+    async (_, waiting) => {
+      const work = scopedWork();
+      const gate = deferred<HTMLElement>();
+      const owner = structuralBinding(() => {});
+      let late = 0;
+      const anchor = owner.run(() =>
+        RouterSuspense({
+          fallback: () => div({ class: "fallback" }, "…"),
+          nodes: () => {
+            work.capture();
+            return gate.promise;
+          },
+        }),
+      );
+      host.appendChild(anchor);
+      await flush();
+      const runs = work.rec.effectRuns;
+      owner.freeze?.();
+      expect(work.rec.scope?.state()).toBe("paused");
+      // Skipped while paused, owed a catch-up run on the resume.
+      work.setTick(1);
+      await flush();
+      expect(work.rec.effectRuns).toBe(runs);
+      expect(heldSkippedCount()).toBeGreaterThan(skippedBase);
+      // A registration made while paused waits for the resume.
+      if (waiting)
+        work.rec.scope?.effect(() => {
+          late++;
+        });
+      expect(late).toBe(0);
+      gate.reject(new Error("rejected while paused"));
+      await flush();
+      // Ended now, not when the error view is shown on the resume.
+      expect(work.rec.scope?.state()).toBe("ended");
+      expect(work.rec.cleanup).toHaveBeenCalledTimes(1);
+      expect(heldSkippedCount()).toBe(skippedBase);
+      // The outcome itself waits for the resume.
+      expect(host.querySelector(".suspense-error")).toBeNull();
+      expect(host.querySelector(".fallback")).not.toBeNull();
+      owner.thaw?.();
+      await flush();
+      expect(host.querySelector(".suspense-error")?.textContent).toBe("rejected while paused");
+      expect(work.rec.effectRuns).toBe(runs);
+      expect(late).toBe(0);
+      expect(work.rec.resumed).not.toHaveBeenCalled();
+      // A registration after the end never starts.
       work.rec.scope?.effect(() => {
         late++;
       });
-    expect(late).toBe(0);
-    gate.reject(new Error("rejected while paused"));
-    await flush();
-    // Ended now, not when the error view is shown on the resume.
-    expect(work.rec.scope?.state()).toBe("ended");
-    expect(work.rec.cleanup).toHaveBeenCalledTimes(1);
-    expect(heldSkippedCount()).toBe(skippedBase);
-    // The outcome itself waits for the resume.
-    expect(host.querySelector(".suspense-error")).toBeNull();
-    expect(host.querySelector(".fallback")).not.toBeNull();
-    owner.thaw?.();
-    await flush();
-    expect(host.querySelector(".suspense-error")?.textContent).toBe("rejected while paused");
-    expect(work.rec.effectRuns).toBe(runs);
-    expect(late).toBe(0);
-    expect(work.rec.resumed).not.toHaveBeenCalled();
-    // A registration after the end never starts.
-    work.rec.scope?.effect(() => {
-      late++;
-    });
-    expect(late).toBe(0);
-    await work.expectEnded();
-    expectNothingRetained();
-    dispose(anchor);
-    owner.stop();
-    expect(work.rec.cleanup).toHaveBeenCalledTimes(1);
-    expectNothingRetained();
-  });
+      expect(late).toBe(0);
+      await work.expectEnded();
+      expectNothingRetained();
+      dispose(anchor);
+      owner.stop();
+      expect(work.rec.cleanup).toHaveBeenCalledTimes(1);
+      expectNothingRetained();
+    },
+  );
 
   it("content whose insertion fails is released and its lifecycle ended; the error view is shown", async () => {
     const work = scopedWork();
