@@ -10,7 +10,17 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ### Upgrade notes
 
-- No runtime or API changes. Everything below is tooling and tests.
+- No API changes. One adoption fix for disabled options; everything else is
+  tooling and tests.
+
+### Fixed — adopting hydration no longer re-selects disabled options
+
+Adopting hydration took `disabled` off each server `<option>` and `<optgroup>`
+and let the client write it back. For that moment the option was enabled, and
+an engine that leaves a drop-down whose options are all disabled with nothing
+selected (Chromium 159+) selected it, keeping it selected after `disabled`
+returned. `disabled` now stays on the server node through adoption, like
+`selected`, and is removed afterwards only when the client does not set it.
 
 ### Changed — development toolchain
 
