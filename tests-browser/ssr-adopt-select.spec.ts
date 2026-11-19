@@ -23,6 +23,12 @@ async function setup(page: Page): Promise<void> {
       const el = e.target as HTMLSelectElement;
       w.__seen[name] = [...(w.__seen[name] ?? []), el.multiple ? el.selectedOptions.length : el.selectedIndex];
     };
+    const grouped = (pickC: boolean) =>
+      m.select({ on: { change: seen("grouped") } }, [
+        m.optgroup({ label: "Unavailable", disabled: true }, [m.option({ value: "a" }, "A")]),
+        m.option({ value: "b" }, "B"),
+        m.option({ value: "c", selected: pickC }, "C"),
+      ]);
     const apps: Record<string, () => Node> = {
       duplicate: () =>
         m.select({ on: { change: seen("duplicate") } }, [
@@ -34,14 +40,11 @@ async function setup(page: Page): Promise<void> {
           m.option({ value: "a" }, "A"),
           m.option({ value: "b" }, "B"),
         ]),
-      // A inside a disabled optgroup; the client initializes C. The markup
-      // has no `selected`, so the engine picks its own implicit default.
-      grouped: () =>
-        m.select({ on: { change: seen("grouped") } }, [
-          m.optgroup({ label: "Unavailable", disabled: true }, [m.option({ value: "a" }, "A")]),
-          m.option({ value: "b" }, "B"),
-          m.option({ value: "c", selected: true }, "C"),
-        ]),
+      // A inside a disabled optgroup; the client initializes C. The server
+      // renders no selection, so the markup has no `selected` and the engine
+      // picks its own implicit default.
+      grouped: () => grouped(true),
+      groupedServer: () => grouped(false),
       allDisabled: () =>
         m.select({ on: { change: seen("allDisabled") } }, [
           m.optgroup({ label: "Group", disabled: true }, [m.option({ value: "a" }, "A")]),
@@ -52,7 +55,8 @@ async function setup(page: Page): Promise<void> {
       async render(name) {
         const host = document.createElement("div");
         host.id = name;
-        let { html } = await s.renderToStringAsync(apps[name], { hydration: "adopt" });
+        // A `<name>Server` app, where there is one, is what the server rendered.
+        let { html } = await s.renderToStringAsync(apps[`${name}Server`] ?? apps[name], { hydration: "adopt" });
         // A multiple select's server-side selection, as delivered markup.
         if (name === "cleared") html = html.replace('<option value="a"', '<option value="a" selected');
         host.innerHTML = html;

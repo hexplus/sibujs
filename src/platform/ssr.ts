@@ -369,9 +369,9 @@ function foreignAttrName(attr: Attr): string {
 //     app itself wrote.
 //   - `<textarea>`: its value becomes its text.
 //   - `<option>` in a `<select>`: `selected` follows the selection. A
-//     drop-down's implicit default (its first enabled option, which some DOMs
-//     report as `selected` with no attribute) is not ADDED, since the parser
-//     picks it anyway; an existing attribute is kept.
+//     drop-down's implicit default (an option the DOM reports as `selected`
+//     with no attribute, see `isImplicitDefaultCandidate`) is not ADDED, since
+//     the parser picks it anyway; an existing attribute is kept.
 
 /** `<input>` types whose `value` is free text the markup can carry. */
 const TEXT_VALUE_TYPES = new Set([
@@ -389,11 +389,14 @@ const TEXT_VALUE_TYPES = new Set([
 ]);
 
 /**
- * The options each `<select>` serialized so far marks `selected`. Filled when
- * the select's open tag is serialized, which always precedes its options, so
- * it is current for every render; a WeakMap, so it holds nothing alive.
+ * The options of a `<select>` whose serialized markup carries `selected`.
+ *
+ * A SNAPSHOT of the live selection, taken by the traversal itself and handed
+ * down to the select's options (see `serializeNode`'s `selection`): it lives
+ * exactly as long as one serialization of that select's subtree, so a later
+ * render — or a concurrent stream — never reads a selection another one took.
  */
-const selectionBySelect = new WeakMap<Element, Set<Element>>();
+type SelectionSnapshot = ReadonlySet<Element>;
 
 /** An option disabled itself or through its `<optgroup>`. */
 function isDisabledOption(option: Element): boolean {
@@ -401,7 +404,15 @@ function isDisabledOption(option: Element): boolean {
   return option.hasAttribute("disabled") || (parent?.localName === "optgroup" && parent.hasAttribute("disabled"));
 }
 
-function recordSelection(select: HTMLSelectElement): void {
+/** The `<select>` that lists `node` (an option or optgroup), directly or through an `<optgroup>`. */
+function owningSelect(node: Element): HTMLSelectElement | null {
+  let parent = node.parentNode as Element | null;
+  if (node.localName === "option" && parent?.localName === "optgroup") parent = parent.parentNode as Element | null;
+  return parent?.localName === "select" ? (parent as HTMLSelectElement) : null;
+}
+
+/** Read `select`'s live selection now. Reads only; the DOM is not touched. */
+function snapshotSelection(select: HTMLSelectElement): SelectionSnapshot {
   const options = Array.from(select.options ?? []) as Element[];
   const marked = new Set<Element>();
   const listbox = select.hasAttribute("multiple") || Number(getAttributeOf(select, "size")) > 1;
@@ -411,17 +422,50 @@ function recordSelection(select: HTMLSelectElement): void {
     if (listbox) marked.add(o);
     else chosen = o;
   }
-  if (chosen && (chosen.hasAttribute("selected") || chosen !== options.find((o) => !isDisabledOption(o)))) {
-    marked.add(chosen);
-  }
-  selectionBySelect.set(select, marked);
+  if (chosen && (chosen.hasAttribute("selected") || !isImplicitDefaultCandidate(options, chosen))) marked.add(chosen);
+  return marked;
+}
+
+/**
+ * Could the parser pick `option` for a drop-down whose markup marks nothing
+ * `selected`? Engines disagree on that implicit default — the spec takes the
+ * first option not disabled, its optgroup's `disabled` included; WebKit
+ * ignores the optgroup's; with every option disabled some take the first
+ * option — so any of the three counts. An option the live selection chose
+ * among them is NOT given a `selected` it does not have: the parser picks it
+ * anyway in the engine that reported it, and an attribute the client does not
+ * write is one an adopting hydration removes, which would change the
+ * selection on takeover.
+ */
+function isImplicitDefaultCandidate(options: Element[], option: Element): boolean {
+  return (
+    option === options[0] ||
+    option === options.find((o) => !o.hasAttribute("disabled")) ||
+    option === options.find((o) => !isDisabledOption(o))
+  );
+}
+
+/**
+ * The selection an option or optgroup serializes against: the snapshot its
+ * select's frame handed down, or — when the select is outside the serialized
+ * subtree — a fresh one of the owning select, or `undefined` when there is
+ * none (a `<datalist>` option keeps its attributes).
+ */
+function selectionFor(node: Element, inherited: SelectionSnapshot | undefined): SelectionSnapshot | undefined {
+  if (inherited) return inherited;
+  const select = owningSelect(node);
+  return select ? snapshotSelection(select) : undefined;
 }
 
 /**
  * The attributes whose serialized value comes from the element's live state
  * instead of its content attribute: name → value, or `null` to omit.
  */
-function liveStateAttributes(element: Element, tag: string): Record<string, string | null> | null {
+function liveStateAttributes(
+  element: Element,
+  tag: string,
+  selection: SelectionSnapshot | undefined,
+): Record<string, string | null> | null {
   if (tag === "input") {
     const input = element as HTMLInputElement;
     const type = typeof input.type === "string" ? input.type.toLowerCase() : "text";
@@ -432,9 +476,7 @@ function liveStateAttributes(element: Element, tag: string): Record<string, stri
     return { value: input.value === "" && !element.hasAttribute("value") ? null : input.value };
   }
   if (tag === "option") {
-    const parent = element.parentNode as Element | null;
-    const select = parent?.localName === "optgroup" ? parent.parentNode : parent;
-    const marked = select ? selectionBySelect.get(select as Element) : undefined;
+    const marked = selectionFor(element, selection);
     return marked ? { selected: marked.has(element) ? "" : null } : null;
   }
   return null;
@@ -495,6 +537,7 @@ function serializeOpenTag(
   foreign: boolean,
   opts: SerializeOptions,
   depth: number,
+  selection: SelectionSnapshot | undefined,
 ): string | null {
   let html = `<${tag}`;
   // Collected only for `<meta>`, and keyed by the emitted RAW names so the
@@ -505,10 +548,9 @@ function serializeOpenTag(
     ? { sandbox: false, referrer: false, title: false, fullscreen: false }
     : null;
 
-  if (!foreign && tag === "select") recordSelection(element as HTMLSelectElement);
   // Live form-control state replaces the attribute it corresponds to; what is
   // left in `live` after the loop had no attribute and is appended.
-  const live = foreign ? null : liveStateAttributes(element, tag);
+  const live = foreign ? null : liveStateAttributes(element, tag, selection);
 
   const attrs = attributesOf(element);
   for (let i = 0; i < attrs.length; i++) {
@@ -576,6 +618,8 @@ interface ElementFrame {
   close: string;
   children: ChildNode[];
   context: ParseContext;
+  /** The selection snapshot the children serialize against (a select's or optgroup's options). */
+  selection: SelectionSnapshot | undefined;
 }
 
 /**
@@ -594,12 +638,18 @@ interface ElementFrame {
  *
  * An element the parser would rebuild in another namespace in `context` is
  * stripped with its subtree (see {@link fitsParseContext}).
+ *
+ * `selection` is the snapshot of the enclosing `<select>`, handed down by the
+ * caller from the parent's frame: a select's frame takes a fresh one for its
+ * options, an optgroup's frame passes it on (or takes one of its owning select
+ * when serialized without it), and every other frame drops it.
  */
 function serializeNode(
   node: Node,
   context: ParseContext,
   opts: SerializeOptions = LEGACY_SERIALIZE,
   depth = 0,
+  selection?: SelectionSnapshot,
 ): string | ElementFrame {
   if (node.nodeType === 3) return escapeHtml(node.textContent || "");
   // Comment node — escape every comment-terminator form.
@@ -630,7 +680,7 @@ function serializeNode(
   const lowerName = tag.toLowerCase();
   if (!fitsParseContext(ns, lowerName, element, context)) return DEV ? `<!--ssr:${tag}-misplaced-->` : "";
 
-  const openTag = serializeOpenTag(element, tag, foreign, opts, depth);
+  const openTag = serializeOpenTag(element, tag, foreign, opts, depth, selection);
   if (openTag === null) return DEV ? `<!--ssr:${tag}-stripped-->` : "";
 
   const children = childNodesOf(element);
@@ -654,6 +704,13 @@ function serializeNode(
     close: `</${tag}>`,
     children: Array.from(children),
     context: childParseContext(ns, lowerName, element),
+    selection: foreign
+      ? undefined
+      : tag === "select"
+        ? snapshotSelection(element as HTMLSelectElement)
+        : tag === "optgroup"
+          ? selectionFor(element, selection)
+          : undefined,
   };
 }
 
@@ -682,7 +739,13 @@ export function renderToStringWith(element: Node, opts: SerializeOptions): strin
   return renderNodeToString(element, ParseContext.Html, opts, 0);
 }
 
-function renderNodeToString(element: Node, context: ParseContext, opts: SerializeOptions, depth: number): string {
+function renderNodeToString(
+  element: Node,
+  context: ParseContext,
+  opts: SerializeOptions,
+  depth: number,
+  selection?: SelectionSnapshot,
+): string {
   if (element instanceof DocumentFragment) {
     let prevText = false;
     return Array.from(element.childNodes)
@@ -691,7 +754,7 @@ function renderNodeToString(element: Node, context: ParseContext, opts: Serializ
         const sep = opts.ids && isText && prevText ? "<!--|-->" : "";
         prevText = isText;
         try {
-          return sep + renderNodeToString(child, context, opts, depth);
+          return sep + renderNodeToString(child, context, opts, depth, selection);
         } catch (err) {
           return ssrErrorComment(err);
         }
@@ -699,7 +762,7 @@ function renderNodeToString(element: Node, context: ParseContext, opts: Serializ
       .join("");
   }
 
-  const frame = serializeNode(element, context, opts, depth);
+  const frame = serializeNode(element, context, opts, depth, selection);
   if (typeof frame === "string") return frame;
 
   let html = frame.open;
@@ -711,7 +774,7 @@ function renderNodeToString(element: Node, context: ParseContext, opts: Serializ
     if (opts.ids && isText && prevText) html += "<!--|-->";
     prevText = isText;
     try {
-      html += renderNodeToString(child, frame.context, opts, depth + 1);
+      html += renderNodeToString(child, frame.context, opts, depth + 1, frame.selection);
     } catch (err) {
       html += ssrErrorComment(err);
     }
@@ -1149,11 +1212,15 @@ export function renderToStream(element: HTMLElement | DocumentFragment | Node): 
   return streamNode(element, ParseContext.Html);
 }
 
-async function* streamNode(element: Node, context: ParseContext): AsyncGenerator<string> {
+async function* streamNode(
+  element: Node,
+  context: ParseContext,
+  selection?: SelectionSnapshot,
+): AsyncGenerator<string> {
   if (element instanceof DocumentFragment) {
     for (const child of Array.from(element.childNodes)) {
       try {
-        yield* streamNode(child, context);
+        yield* streamNode(child, context, selection);
       } catch (err) {
         yield ssrErrorComment(err);
       }
@@ -1167,7 +1234,7 @@ async function* streamNode(element: Node, context: ParseContext): AsyncGenerator
   // logic, which is the shape that lets them drift; someone streaming in
   // production while snapshotting with renderToString in tests would never see
   // the difference.
-  const frame = serializeNode(element, context);
+  const frame = serializeNode(element, context, LEGACY_SERIALIZE, 0, selection);
   if (typeof frame === "string") {
     if (frame) yield frame;
     return;
@@ -1177,7 +1244,7 @@ async function* streamNode(element: Node, context: ParseContext): AsyncGenerator
 
   for (const child of frame.children) {
     try {
-      yield* streamNode(child, frame.context);
+      yield* streamNode(child, frame.context, frame.selection);
     } catch (err) {
       yield ssrErrorComment(err);
     }

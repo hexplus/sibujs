@@ -351,25 +351,36 @@ function commitSafeAttribute(el: Element, name: string, value: unknown, options:
   // `<textarea>` and `<select>` have no `value` CONTENT attribute: writing one
   // is inert, in a browser and on the server alike, so a first-render
   // `textarea({ value })` showed an empty field and `select({ value })` its
-  // first option. A textarea's default value is its text, which the first
-  // render seeds (it survives a form reset, as an input's `value` attribute
-  // does); a select's state is its options' selectedness, set by the property
-  // on every render.
+  // first option. The first render seeds each one's DEFAULT, which a form
+  // reset restores, as it restores an input's `value` attribute: a textarea's
+  // text, and the `selected` attributes of a select's options. A later
+  // (reactive) write changes only the current state, below.
   const tag = el.localName;
-  if (html && idlName === "value" && tag === "textarea" && options.syncValueProperty === false) {
-    // Written even when equal: an adopting hydration claims the server's text
-    // node through this write (its `textContent` override keeps an equal
-    // node), and sweeps the node as unclaimed when no write comes.
-    el.textContent = str;
-    return true;
+  if (html && idlName === "value" && options.syncValueProperty === false) {
+    if (tag === "textarea") {
+      // Written even when equal: an adopting hydration claims the server's text
+      // node through this write (its `textContent` override keeps an equal
+      // node), and sweeps the node as unclaimed when no write comes.
+      el.textContent = str;
+      return true;
+    }
+    if (tag === "select") {
+      // `selected` on the option the `value` setter picks (the first with that
+      // value) and off the others, as the setter deselects them. Written
+      // through `setAttribute` / `removeAttribute` — an adopting hydration
+      // learns from those calls that the client owns the server's `selected`
+      // attributes, and keeps them. Then the current selection, since an
+      // option already written `selected` no longer follows its attribute.
+      markSelected(
+        el,
+        Array.from((el as HTMLSelectElement).options).find((o) => o.value === str),
+      );
+      setProp(el, idlName, str);
+      return true;
+    }
   }
 
-  if (
-    (options.syncValueProperty !== false || tag === "select") &&
-    html &&
-    (idlName === "value" || idlName === "checked") &&
-    idlName in el
-  ) {
+  if (options.syncValueProperty !== false && html && (idlName === "value" || idlName === "checked") && idlName in el) {
     const live = idlName === "checked" ? Boolean(value) : str;
     setProp(el, idlName, live);
     if (isServer()) reflectFormState(el, idlName, live);
