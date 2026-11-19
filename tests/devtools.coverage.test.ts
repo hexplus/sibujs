@@ -216,7 +216,8 @@ describe("devtools highlightElement / getElementHTML", () => {
 
       dt.highlightElement("Card");
       expect(el.getAttribute("data-sibu-highlight")).toBe("true");
-      expect(el.style.outline).toBe("2px solid #89b4fa");
+      // jsdom 31+ normalizes the color to rgb(), as browsers do.
+      expect(el.style.outline).toMatch(/^2px solid (#89b4fa|rgb\(137, 180, 250\))$/);
 
       vi.runAllTimers();
       // Original inline outline restored

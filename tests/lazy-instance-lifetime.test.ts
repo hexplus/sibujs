@@ -167,26 +167,26 @@ describe.each<Mode>(["cold", "cached", "adopted"])("a %s instance", (mode) => {
 });
 
 describe("a cached factory that throws", () => {
-  it.each<Mode>([
-    "cached",
-    "adopted",
-  ])("%s: propagates; its scope ends and its registrations are rolled back", async (mode) => {
-    const { Lazy, setTick, record } = await warmed();
-    record.fail = true;
-    const parent = structuralBinding(() => {});
-    for (let i = 0; i < 3; i++) {
-      expect(() => parent.run(() => (mode === "adopted" ? inScope(adopting(), () => Lazy()) : Lazy()))).toThrow(
-        "page failed",
-      );
-    }
-    expect(record.scopes.every((s) => s.state() === "ended")).toBe(true);
-    const runs = record.effectRuns;
-    setTick(1);
-    await flush();
-    expect(record.effectRuns).toBe(runs);
-    expect(heldListenerCount()).toBeLessThanOrEqual(listeners);
-    expect(pendingCount() - base).toBe(0);
-  });
+  it.each<Mode>(["cached", "adopted"])(
+    "%s: propagates; its scope ends and its registrations are rolled back",
+    async (mode) => {
+      const { Lazy, setTick, record } = await warmed();
+      record.fail = true;
+      const parent = structuralBinding(() => {});
+      for (let i = 0; i < 3; i++) {
+        expect(() => parent.run(() => (mode === "adopted" ? inScope(adopting(), () => Lazy()) : Lazy()))).toThrow(
+          "page failed",
+        );
+      }
+      expect(record.scopes.every((s) => s.state() === "ended")).toBe(true);
+      const runs = record.effectRuns;
+      setTick(1);
+      await flush();
+      expect(record.effectRuns).toBe(runs);
+      expect(heldListenerCount()).toBeLessThanOrEqual(listeners);
+      expect(pendingCount() - base).toBe(0);
+    },
+  );
 
   it("cold: shows the error view; the instance's scope ends at once", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});

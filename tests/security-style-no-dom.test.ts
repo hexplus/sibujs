@@ -22,20 +22,24 @@ function kept(out: string): string[] {
     .filter(Boolean);
 }
 
+// Longhands only. The DOM path reads the CSSOM by index, which — in browsers
+// and in jsdom 31+ — yields longhands: `margin: 1rem` comes back as four
+// `margin-*` declarations, and a blocked `background` shorthand leaves its
+// other longhands behind. Shorthand expansion is the engine's, not a verdict.
 const PARITY: string[] = [
-  "color: red; margin: 1rem",
-  "color:red;background-image:url(javascript:alert(1));margin:1rem",
-  "color: red; background: url('a;b.png'); margin: 1rem",
+  "color: red; margin-top: 1rem",
+  "color:red;background-image:url(javascript:alert(1));margin-top:1rem",
+  "color: red; background-image: url('a;b.png'); margin-top: 1rem",
   'content: "a;b"; color: blue',
-  "color: red !important; background: url(https://x.example/a) ; padding: 2px",
+  "color: red !important; background-image: url(https://x.example/a) ; padding-top: 2px",
   "width: calc(100% - 2rem); height: expression(alert(1))",
   "--brand: #f06; color: var(--brand)",
   "--leak: url(https://x.example/a); color: green",
   "scroll-behavior: smooth; behavior: url(x.htc)",
   "background-image: image-set('https://x.example/a.png' 1x); opacity: 0.5",
-  "COLOR: Red; Margin: 0",
-  "/* note */ color: red; /* url(https://x.example) */ margin: 0",
-  "background: u\\rl(https://x.example/a); color: red",
+  "COLOR: Red; Margin-Top: 0",
+  "/* note */ color: red; /* url(https://x.example) */ margin-top: 0",
+  "background-image: u\\rl(https://x.example/a); color: red",
   "filter: progid:DXImageTransform.Microsoft.Alpha(opacity=50); color: red",
 ];
 

@@ -111,7 +111,12 @@ const STICKY: Record<string, readonly string[]> = {
   input: ["value", "checked", "type"],
   textarea: [],
   select: [],
-  option: ["value", "selected"],
+  // `disabled` on an option or optgroup is sticky too: stripping it for the
+  // client to write back enables the option for a moment, and an engine that
+  // leaves an all-disabled drop-down with no selection (Chromium 159+) then
+  // selects it — and keeps it selected once `disabled` returns.
+  option: ["value", "selected", "disabled"],
+  optgroup: ["disabled"],
   details: ["open"],
   dialog: ["open"],
 };
@@ -437,6 +442,25 @@ class AdoptSession implements AdoptSink {
         note(name);
         return removeAttribute.call(this, name);
       };
+      // An option's or optgroup's `disabled` is written through the IDL
+      // property (see `BOOLEAN_IDL_ATTRS`), which reflects to the attribute
+      // without passing `setAttribute`: note that write as well, or the sticky
+      // attribute the client asked for would be removed when the session ends.
+      if (parent.localName === "option" || parent.localName === "optgroup") {
+        const desc = findDescriptor(Object.getPrototypeOf(parent), "disabled");
+        if (desc?.get && desc.set) {
+          Object.defineProperty(parent, "disabled", {
+            configurable: true,
+            get() {
+              return desc.get?.call(this);
+            },
+            set(value: boolean) {
+              note("disabled");
+              desc.set?.call(this, value);
+            },
+          });
+        }
+      }
       // A select is not overridden: its options' writes reach its selection
       // anyway, so the session puts the snapshot back when it ends (`reselect`).
       if (this.touched.has(parent) && parent.localName !== "select") {
@@ -582,6 +606,7 @@ class AdoptSession implements AdoptSink {
         "removeAttribute",
         "value",
         "checked",
+        "disabled",
       ]) {
         if (Object.hasOwn(own, key)) delete own[key];
       }

@@ -199,7 +199,9 @@ describe("renderToString sanitizes the style attribute", () => {
   it("still HTML-escapes quotes in a surviving style value", () => {
     // Sanitization must run BEFORE escaping: a sanitizer that re-serializes
     // after `escapeAttr` would emit raw `"` back into the attribute.
-    const html = renderToString(styled('font-family: "My Font", serif'));
+    // `content` keeps its quotes through every CSSOM; `font-family` does not
+    // (jsdom 31 serializes `"My Font"` as `My Font`).
+    const html = renderToString(styled('content: "My Font"'));
     const style = html.match(/style="([^"]*)"/)?.[1] ?? "";
     expect(style).toContain("&quot;");
     expect(style).toContain("My Font");

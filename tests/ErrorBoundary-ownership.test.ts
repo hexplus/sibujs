@@ -133,7 +133,7 @@ describe("two boundaries sharing one fallback function", () => {
 
     const forB = calls.find((c) => (c.error as Error & { errorId?: string }).errorId === "custom");
     expect(forB?.error).toBeInstanceOf(LoadError);
-    expect((forB?.error as LoadError).code).toBe("LOAD_FAILED");
+    expect((forB?.error as LoadError | undefined)?.code).toBe("LOAD_FAILED");
   });
 
   it("each fallback receives its OWN retry callback", async () => {

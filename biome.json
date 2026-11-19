@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.7/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
   "vcs": {
     "enabled": false,
     "clientKind": "git",
@@ -26,21 +26,22 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
+      "preset": "recommended",
       "correctness": {
-        "recommended": true,
+        "preset": "recommended",
         "noUnusedImports": "error",
         "noUnusedVariables": "error",
-        "noUnusedFunctionParameters": "error"
+        "noUnusedFunctionParameters": "error",
+        "usePlaywrightValidDescribeCallback": "off"
       },
       "suspicious": {
-        "recommended": true,
+        "preset": "recommended",
         "noExplicitAny": "off",
         "noAssignInExpressions": "off",
         "noTemplateCurlyInString": "off"
       },
       "style": {
-        "recommended": true,
+        "preset": "recommended",
         "noNonNullAssertion": "off",
         "useNodejsImportProtocol": "off",
         "noParameterAssign": "off",
@@ -52,19 +53,19 @@
         "useImportType": "error"
       },
       "complexity": {
-        "recommended": true,
+        "preset": "recommended",
         "noExcessiveCognitiveComplexity": "off",
         "noForEach": "off",
         "useLiteralKeys": "off"
       },
       "performance": {
-        "recommended": true
+        "preset": "recommended"
       },
       "security": {
-        "recommended": true
+        "preset": "recommended"
       },
       "a11y": {
-        "recommended": true
+        "preset": "recommended"
       }
     }
   },

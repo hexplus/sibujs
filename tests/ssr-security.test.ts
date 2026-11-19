@@ -317,6 +317,7 @@ describe("routerSSR / parseURL — prototype pollution guard", () => {
     const { route } = resolveServerRoute("/?__proto__=injected&ok=yes", routes);
     expect((Object.prototype as unknown as Record<string, unknown>).injected).toBeUndefined();
     expect(route.query.ok).toBe("yes");
+    // biome-ignore lint/suspicious/noProto: asserts the null-prototype query has no own "__proto__" key
     expect(route.query.__proto__).toBeUndefined();
   });
 

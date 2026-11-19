@@ -143,15 +143,15 @@ describe("server DOM", () => {
   });
 
   it("produces byte-identical output to jsdom and happy-dom", async () => {
-    const server = await withServerDom(() => renderToStringAsync(() => KitchenSink()));
-    const reference = await withJsdom(() => renderToStringAsync(() => KitchenSink()));
+    // jsdom (31+) and happy-dom expand shorthands in a string `style`
+    // (`padding: 2px` becomes four longhands; the server DOM keeps it):
+    // shorthand serialization is CSSOM-specific in every DOM. With longhands,
+    // the output is identical.
+    const server = await withServerDom(() => renderToStringAsync(() => KitchenSink({ cssShorthand: false })));
+    const reference = await withJsdom(() => renderToStringAsync(() => KitchenSink({ cssShorthand: false })));
     expect(server.html).toBe(reference.html);
-    // happy-dom's CSSOM expands shorthands in a string `style` (`padding: 2px`
-    // becomes four longhands; jsdom keeps it): shorthand serialization is
-    // CSSOM-specific in every DOM. With longhands, the output is identical.
-    const plainServer = await withServerDom(() => renderToStringAsync(() => KitchenSink({ cssShorthand: false })));
     const happy = await withHappyDom(() => renderToStringAsync(() => KitchenSink({ cssShorthand: false })));
-    expect(plainServer.html).toBe(happy.html);
+    expect(server.html).toBe(happy.html);
     expect(server.stateData).toEqual(
       expect.objectContaining({ q: { catalog: expect.objectContaining({ d: { title: "Catálogo & más" } }) } }),
     );

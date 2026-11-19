@@ -98,7 +98,7 @@ export function setEmbedPolicy(policy: EmbedPolicy): void {
     } catch {
       url = null;
     }
-    if (!url || url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    if (url?.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
       throw new TypeError(
         `setEmbedPolicy: "${entry}" is not an allowed embed origin. Use an absolute https: URL, optionally with a ` +
           "path prefix, and no credentials, query or fragment.",

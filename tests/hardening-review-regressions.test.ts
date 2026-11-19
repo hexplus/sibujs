@@ -222,7 +222,12 @@ describe("focus restoration never guesses", () => {
 
 describe("style sanitizer warns exactly once per dropped declaration", () => {
   it("warns once for a property-qualified block (filter: progid)", () => {
-    sanitizeStyleAttribute("filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#fff')");
+    // jsdom's CSS parser (31+), like every current browser's, discards a
+    // `progid:` filter before the sanitizer sees it, so the declaration is
+    // judged through the declaration primitive directly.
+    expect(sanitizeCSSDeclaration("filter", "progid:DXImageTransform.Microsoft.gradient(startColorstr='#fff')")).toBe(
+      "",
+    );
     const drops = warn.mock.calls
       .map((c) => String(c[0]))
       .filter((m) => m.includes("was dropped by the style sanitizer"));
@@ -238,7 +243,9 @@ describe("style sanitizer warns exactly once per dropped declaration", () => {
     const out = sanitizeStyleAttribute("--behavior: red; scroll-behavior: smooth; overscroll-behavior: contain");
     expect(out).toContain("--behavior: red");
     expect(out).toContain("scroll-behavior: smooth");
-    expect(out).toContain("overscroll-behavior: contain");
+    // The CSSOM hands the shorthand back as its two longhands.
+    expect(out).toContain("overscroll-behavior-x: contain");
+    expect(out).toContain("overscroll-behavior-y: contain");
     expect(sanitizeCSSDeclaration("behavior", "url(#x)")).toBe("");
     const drops = warn.mock.calls
       .map((c) => String(c[0]))

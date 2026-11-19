@@ -194,7 +194,8 @@ export function socket(
 
   function send(msg: string | ArrayBufferLike | Blob): void {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
+      // TS 7's DOM lib types send() as BufferSource, which excludes SharedArrayBuffer.
+      ws.send(msg as string | Blob | BufferSource);
     }
   }
 

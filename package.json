@@ -170,19 +170,22 @@
     }
   },
   "devDependencies": {
-    "@biomejs/biome": "2.4.7",
-    "@playwright/test": "^1.61.1",
-    "@types/node": "^22.20.1",
-    "@vitest/coverage-v8": "^4.1.11",
-    "@vitest/ui": "^4.1.11",
+    "@biomejs/biome": "2.6.8",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
+    "@vitest/coverage-v8": "^5.1.1",
+    "@vitest/ui": "^5.1.1",
     "chess.js": "^1.4.0",
     "esbuild": "^0.28.2",
-    "fake-indexeddb": "^6.2.5",
+    "fake-indexeddb": "^6.2.8",
     "happy-dom": "^21.0.4",
-    "jsdom": "^26.1.0",
-    "tsup": "^8.5.1",
-    "typescript": "^5.8.3",
-    "vite": "^6.4.3",
-    "vitest": "^4.1.11"
+    "jsdom": "^31.0.1",
+    "tsup": "^9.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  },
+  "allowScripts": {
+    "esbuild": true
   }
 }

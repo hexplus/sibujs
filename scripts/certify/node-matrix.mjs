@@ -44,6 +44,26 @@ const versionArg = argv.find((a) => a.startsWith("--versions="))?.split("=")[1];
 // The default therefore pins the exact floor alongside the two current lines.
 const WANT = (versionArg ?? "22.3.0,22,24").split(",").map((s) => s.trim());
 
+// The repository toolchain has its own, higher floor: tsup 9, Vitest 5 and
+// jsdom 31 need Node >= 22.22.2 (jsdom's is the strictest). On an older target
+// only the PACKED-PACKAGE gates run — the tarball is built by a newer Node and
+// then imported, required and probed by the target. That is the promise
+// `engines.node` makes: consumers run the published package, not this
+// repository's build, and a dev dependency must not dictate the runtime floor.
+const TOOLCHAIN_FLOOR = "22.22.2";
+const REPO_GATES = ["install", "build", "source typecheck", "test typecheck", "unit suite"];
+// The consumer project's DOM on such a target: jsdom 26 is the newest line that
+// still runs on Node 22.3.0 (27+ need ^22.12.0, 30+ need ^22.22.2).
+const RUNTIME_ONLY_JSDOM = "jsdom@^26.1.0";
+
+/** `a >= b` for plain `x.y.z` versions. */
+function atLeast(a, b) {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (pa[i] !== pb[i]) return pa[i] > pb[i];
+  return true;
+}
+
 // Extra interpreter roots, e.g. hand-extracted official builds for a version no
 // local version manager has. Colon/semicolon separated, matching PATH.
 const EXTRA_ROOTS = (process.env.SIBUJS_NODE_ROOTS ?? "")
@@ -156,8 +176,16 @@ const stripAnsi = (s) => String(s).replace(ANSI, "");
 // ---------------------------------------------------------------------------
 const report = [];
 
-for (const target of WANT) {
-  const found = discover(target);
+// Runtime-only targets pack the `dist/` a toolchain target built, so they run
+// last: a single invocation over "22.3.0,22,24" builds on 22 before 22.3.0
+// packs. Invoked for a runtime-only target alone (CI), `dist/` must already
+// have been built by an earlier step.
+const isRuntimeOnly = (found) => found != null && !atLeast(found.label.slice(1), TOOLCHAIN_FLOOR);
+const ordered = WANT.map((target) => ({ target, found: discover(target) })).sort(
+  (a, b) => Number(isRuntimeOnly(a.found)) - Number(isRuntimeOnly(b.found)),
+);
+
+for (const { target, found } of ordered) {
   const gates = [];
   const add = (name, status, detail = "") => gates.push({ name, status, detail });
 
@@ -195,22 +223,33 @@ for (const target of WANT) {
   };
 
   // --- repository gates ----------------------------------------------------
-  gate("install", NPM, ["install", "--no-audit", "--no-fund"]);
-  gate("build", NPM, ["run", "build"]);
-  gate("source typecheck", NODE, ["node_modules/typescript/bin/tsc", "--noEmit"]);
-  gate("test typecheck", NODE, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.test.json"], {}, (out) => {
-    const n = out.split("\n").filter((l) => /error TS/.test(l)).length;
-    return n ? `${n} errors` : "0 errors";
-  });
-  gate("unit suite", NODE, ["node_modules/vitest/vitest.mjs", "run", "--reporter=dot"], {}, (out) => {
-    const m = out.match(/Tests\s+(\d+)\s+passed(?:\s*\|\s*(\d+)\s+skipped)?/);
-    return m ? `${m[1]} tests${m[2] ? ` (+${m[2]} skipped)` : ""}` : "";
-  });
+  const runtimeOnly = isRuntimeOnly(found);
+  if (runtimeOnly) {
+    const why = `toolchain needs Node >= ${TOOLCHAIN_FLOOR}`;
+    for (const g of REPO_GATES) add(g, "N/A", why);
+    console.log(`  repository gates ... N/A (${why}; packed-package gates only)`);
+  } else {
+    gate("install", NPM, ["install", "--no-audit", "--no-fund"]);
+    gate("build", NPM, ["run", "build"]);
+    gate("source typecheck", NODE, ["node_modules/typescript/bin/tsc", "--noEmit"]);
+    gate("test typecheck", NODE, ["node_modules/typescript/bin/tsc", "-p", "tsconfig.test.json"], {}, (out) => {
+      const n = out.split("\n").filter((l) => /error TS/.test(l)).length;
+      return n ? `${n} errors` : "0 errors";
+    });
+    gate("unit suite", NODE, ["node_modules/vitest/vitest.mjs", "run", "--reporter=dot"], {}, (out) => {
+      const m = out.match(/Tests\s+(\d+)\s+passed(?:\s*\|\s*(\d+)\s+skipped)?/);
+      return m ? `${m[1]} tests${m[2] ? ` (+${m[2]} skipped)` : ""}` : "";
+    });
+  }
 
   // --- packed-package gates ------------------------------------------------
   let consumer = null;
-  const packed = run(NPM, ["pack", "--pack-destination", work], inRepo);
-  if (packed.status !== 0) {
+  const hasDist = existsSync(join(REPO, "dist", "index.js"));
+  const packed = hasDist ? run(NPM, ["pack", "--pack-destination", work], inRepo) : null;
+  if (!hasDist) {
+    add("npm pack", "FAIL", "no dist/ — build on a toolchain Node first");
+    console.log("  npm pack ... FAIL (no dist/; build on a toolchain Node first)");
+  } else if (packed.status !== 0) {
     add("npm pack", "FAIL", "");
     console.log("  npm pack ... FAIL");
   } else {
@@ -231,8 +270,12 @@ for (const target of WANT) {
     // needs Node >= 22.12, and the probe then failed on Node 22.3.0 — reporting
     // the framework as broken at its own declared floor when the incompatibility
     // was entirely in the test harness's DOM. A tooling dependency must never
-    // dictate the published runtime floor.
-    const jsdomSpec = `jsdom@${JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).devDependencies.jsdom}`;
+    // dictate the published runtime floor. Below the toolchain floor the
+    // repository's own jsdom cannot run either, so the newest line that does
+    // stands in for it.
+    const jsdomSpec = runtimeOnly
+      ? RUNTIME_ONLY_JSDOM
+      : `jsdom@${JSON.parse(readFileSync(join(REPO, "package.json"), "utf8")).devDependencies.jsdom}`;
     const inst = run(NPM, ["install", join(work, tgz), jsdomSpec, "--no-audit", "--no-fund"], {
       cwd: consumer,
       env,
@@ -388,7 +431,14 @@ console.log(`\n${"=".repeat(100)}\nNODE SUPPORT MATRIX\n${"=".repeat(100)}`);
 for (const v of report) {
   const fails = v.gates.filter((g) => g.status === "FAIL");
   const untested = v.gates.filter((g) => g.status === "NOT TESTED");
-  const verdict = fails.length ? "FAIL" : untested.length ? "INCOMPLETE" : "PASS";
+  const runtimeOnly = v.gates.some((g) => g.status === "N/A");
+  const verdict = fails.length
+    ? "FAIL"
+    : untested.length
+      ? "INCOMPLETE"
+      : runtimeOnly
+        ? "PASS (runtime gates; toolchain N/A)"
+        : "PASS";
   console.log(`\nNode ${v.target} ${v.label ? `(${v.label}, npm ${v.npm})` : "(not installed)"} — ${verdict}`);
   for (const g of v.gates) console.log(`  ${pad(g.status, 12)}${pad(g.name, 44)}${g.detail}`);
 }

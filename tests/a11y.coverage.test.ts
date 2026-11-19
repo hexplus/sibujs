@@ -269,10 +269,13 @@ describe("announce queue draining", () => {
 
 describe("announce SSR guard", () => {
   it("no-ops when document is undefined", () => {
-    const originalDoc = globalThis.document;
-    // @ts-expect-error simulate SSR
-    globalThis.document = undefined;
-    expect(() => announce("x")).not.toThrow();
-    globalThis.document = originalDoc;
+    // jsdom 31 exposes `document` as a getter-only global: stub it instead of
+    // assigning over it.
+    vi.stubGlobal("document", undefined);
+    try {
+      expect(() => announce("x")).not.toThrow();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -160,28 +160,27 @@ describe.each<Kind>(["when", "match"])("%s(): an enter that switches the directi
     expect(vi.getTimerCount()).toBe(base);
   });
 
-  it.each<Mode>([
-    "both",
-    "in-out",
-    "out-in",
-  ])("%s: an enter that switched and returned a promise is cancelled — its settlement changes nothing", async (mode) => {
-    let settleA!: () => void;
-    const p = interrupting(mode, () => new Promise<void>((r) => (settleA = r)));
-    const t = setup(kind, p.transition);
-    p.bind(t.setSel);
-    const base = vi.getTimerCount();
-    host.append(t.anchor);
-    await flush();
-    const leaves = p.leave.mock.calls.length;
-    const enters = p.enter.mock.calls.length;
-    settleA();
-    await flush();
-    expect(p.leave).toHaveBeenCalledTimes(leaves);
-    expect(p.enter).toHaveBeenCalledTimes(enters);
-    // Whatever runs is still cancellable: disposal clears every timer.
-    dispose(t.anchor);
-    expect(vi.getTimerCount()).toBe(base);
-  });
+  it.each<Mode>(["both", "in-out", "out-in"])(
+    "%s: an enter that switched and returned a promise is cancelled — its settlement changes nothing",
+    async (mode) => {
+      let settleA!: () => void;
+      const p = interrupting(mode, () => new Promise<void>((r) => (settleA = r)));
+      const t = setup(kind, p.transition);
+      p.bind(t.setSel);
+      const base = vi.getTimerCount();
+      host.append(t.anchor);
+      await flush();
+      const leaves = p.leave.mock.calls.length;
+      const enters = p.enter.mock.calls.length;
+      settleA();
+      await flush();
+      expect(p.leave).toHaveBeenCalledTimes(leaves);
+      expect(p.enter).toHaveBeenCalledTimes(enters);
+      // Whatever runs is still cancellable: disposal clears every timer.
+      dispose(t.anchor);
+      expect(vi.getTimerCount()).toBe(base);
+    },
+  );
 });
 
 describe.each<Kind>(["when", "match"])("%s(): valid completions are unchanged", (kind) => {

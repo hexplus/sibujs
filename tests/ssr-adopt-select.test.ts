@@ -45,6 +45,7 @@ function ownOverrides(root: Element): string[] {
     "removeAttribute",
     "value",
     "checked",
+    "disabled",
   ];
   const found: string[] = [];
   for (const el of [root, ...Array.from(root.querySelectorAll("*"))]) {
@@ -632,5 +633,62 @@ describe("adopting hydration computes the markup's default selection as the brow
       container.innerHTML = "";
       __resetIdCounter();
     }
+  });
+});
+
+describe("adopting hydration keeps `disabled` on options and optgroups in place", () => {
+  /**
+   * The elements under `root` whose `disabled` attribute was written back after
+   * being absent while `run` executes — i.e. taken off and put back. Records
+   * are delivered after the fact, so a removal shows as the later write whose
+   * old value is `null`.
+   */
+  async function readded(root: Element, run: () => Promise<unknown>): Promise<string[]> {
+    const found: string[] = [];
+    const collect = (records: MutationRecord[]) => {
+      for (const r of records) if (r.oldValue === null) found.push((r.target as Element).localName);
+    };
+    const observer = new MutationObserver(collect);
+    observer.observe(root, { subtree: true, attributeFilter: ["disabled"], attributeOldValue: true });
+    await run();
+    collect(observer.takeRecords());
+    observer.disconnect();
+    return found;
+  }
+
+  it("never takes `disabled` off a server option or optgroup the client also disables", async () => {
+    // Removing it, even for a moment, enables the option, and an engine that
+    // leaves an all-disabled drop-down unselected (Chromium 159+) selects it.
+    const App = () =>
+      select([
+        optgroup({ label: "Group", disabled: true }, [option({ value: "a" }, "A")]),
+        option({ value: "b", disabled: true }, "B"),
+      ]);
+    container.innerHTML = await serverRender(App);
+    const el = container.querySelector("select") as HTMLSelectElement;
+    const before = el.selectedIndex;
+
+    expect(await readded(container, () => hydrate(App, container, { strategy: "adopt" }))).toEqual([]);
+    expect(el.querySelector("optgroup")?.hasAttribute("disabled")).toBe(true);
+    expect(el.options[1].hasAttribute("disabled")).toBe(true);
+    expect(el.selectedIndex).toBe(before);
+    expect(ownOverrides(container)).toEqual([]);
+  });
+
+  it("drops a server `disabled` the client does not ask for, and honours `disabled: false`", async () => {
+    const App = (server: boolean) => () =>
+      select([
+        optgroup({ label: "Group", disabled: server ? true : undefined }, [option({ value: "a" }, "A")]),
+        option({ value: "b", disabled: server }, "B"),
+      ]);
+    container.innerHTML = await serverRender(App(true));
+    const el = container.querySelector("select") as HTMLSelectElement;
+    expect(el.querySelector("optgroup")?.hasAttribute("disabled")).toBe(true);
+
+    await hydrate(App(false), container, { strategy: "adopt" });
+    expect(el.querySelector("optgroup")?.hasAttribute("disabled")).toBe(false);
+    expect(el.options[1].hasAttribute("disabled")).toBe(false);
+    expect(el.options[1].disabled).toBe(false);
+    expect(ownOverrides(container)).toEqual([]);
   });
 });

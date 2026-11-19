@@ -503,7 +503,7 @@ export function collectImports(code: string, tokens: Token[]): ImportDecl[] | nu
     }
     if (!isIdent(j, "from")) return null;
     const srcTok = at(j + 1);
-    if (!srcTok || srcTok.type !== "string") return null;
+    if (srcTok?.type !== "string") return null;
     const source = stringTokenValue(code, srcTok);
     if (source === null) return null;
     let end = srcTok.end;
