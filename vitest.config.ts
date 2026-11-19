@@ -19,6 +19,14 @@ export default defineConfig({
     // in `tests-browser/` (run via `npm run test:browser`) and must not be
     // picked up here — they use @playwright/test's incompatible `test`/`expect`.
     include: ["tests/**/*.test.ts"],
+    // Deliberately `forks` + `isolate: true` (vitest's defaults), named
+    // explicitly so vitest stops suggesting cheaper setups. Neither works here:
+    // `vmThreads` breaks ~380 tests (Node globals such as `ReadableStream` go
+    // missing, cross-realm `instanceof` fails, the bundler rejects plugins built
+    // in another realm), and `isolate: false` would leak module-level state —
+    // signals, devtools hooks, router state — from one test file into the next.
+    pool: "forks",
+    isolate: true,
     // The suite contains DOM stress cases that build and reconcile 10 000-item
     // lists. Their timeouts are a watchdog, not an assertion — nothing here
     // measures throughput — and vitest's 5 s default makes them fail on a loaded
